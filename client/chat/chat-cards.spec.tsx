@@ -74,6 +74,7 @@ describe('折叠行：对齐宿主通用工具行，只换摘要', () => {
     expect(rowSummary(result('memory_search', { query: '数据库' }, '没有匹配的记忆。'))).toBe('没有搜到「数据库」')
     expect(rowSummary(result('memory_forget', { ids: ['mem_9'], reason: 'x' }, '以下记忆不存在：mem_9'))).toBe('没有可删除的记忆')
     expect(rowSummary(result('memory_scan', {}, 'ok'))).toBe('体检本项目')
+    expect(rowSummary(result('memory_confirm', { action: 'accept-subagent', memoryId: 'mem_1' }, '已接受'))).toBe('接受子 agent 存的记忆 mem_1')
   })
 
   it('标题、图标位、运行中与失败照宿主：还在跑时摘要按参数，失败时摘要是结果首行', () => {

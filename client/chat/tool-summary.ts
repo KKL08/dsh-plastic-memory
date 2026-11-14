@@ -135,9 +135,8 @@ export function toolSummary(toolName: MemoryToolName, args: Args | undefined, re
     case 'memory_source':
       return { key: 'chat.tool.source', params: { id: str(args.memoryId) } }
     case 'memory_confirm':
-      return args.action === 'resolve'
-        ? { key: 'chat.tool.confirm.resolve', params: { id: str(args.decisionId) } }
-        : { key: 'chat.tool.confirm.refresh', params: { id: str(args.memoryId) } }
+      if (args.action === 'resolve') return { key: 'chat.tool.confirm.resolve', params: { id: str(args.decisionId) } }
+      return { key: args.action === 'accept-subagent' ? 'chat.tool.confirm.acceptSubagent' : 'chat.tool.confirm.refresh', params: { id: str(args.memoryId) } }
     case 'memory_scan':
       return { key: 'chat.tool.scan', scope: scopeSummary(args) }
     case 'memory_health':
