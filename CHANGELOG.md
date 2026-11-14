@@ -95,7 +95,8 @@ All notable changes to this project are documented here. The format follows
   and `decision`, and your custom types. General (`template: custom`) stays
   fixed; Coding and Office can be edited or removed, and `scenes` holds up to
   five scenes besides General, each with 1 to 8 types. Memories of every type
-  stay injected and searchable whichever scene is current.
+  stay injected and searchable whichever scene is current. The default scene
+  is now General; pick Coding on the settings page to keep `procedure`.
 - Custom types now apply only in scenes that include them, and no config is
   migrated: after upgrading, tick your `customTypes` into a scene on the
   settings page. With `template: custom`, create a new scene, since General is

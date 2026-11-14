@@ -12,9 +12,9 @@ const term: CustomType = { label: '术语', description: 'd', whenToSave: 'w', r
 const base = (patch: Partial<SettingsFields> = {}): SettingsFields => ({ ...fieldsOf({}), ...patch })
 
 describe('场景字段', () => {
-  it('配置里没有 scenes 时用出厂的编码、办公；当前场景默认编码', () => {
+  it('配置里没有 scenes 时用出厂的编码、办公；当前场景默认通用', () => {
     const fields = fieldsOf({})
-    expect(fields.template).toBe('coding')
+    expect(fields.template).toBe('custom')
     expect(fields.scenes).toEqual(PRESET_SCENES)
   })
 

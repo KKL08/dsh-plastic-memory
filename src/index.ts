@@ -93,7 +93,7 @@ export const Config = z.object({
   snapshotTokenBudget: z.number().default(4000).volatile(),
   snapshotOverflow: z.union(OVERFLOW_MODES).default('relax').volatile(),
   evidenceLookup: z.union(['off', 'strict', 'active'] as const).default('strict').volatile(),
-  template: z.string().default('coding').volatile(),
+  template: z.string().default('custom').volatile(),
   customTypes: z.dict(z.object({
     label: z.string().required(),
     description: z.string().required(),
