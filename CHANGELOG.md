@@ -78,8 +78,9 @@ All notable changes to this project are documented here. The format follows
 - Memories are read from their files on demand; the plugin keeps no copy of
   the library in memory and no longer loads it at start-up.
   `pnpm bench:storage` measures storage timings on your machine.
-- Each scope directory gains `.archive/` (forgotten and superseded memories,
-  kept 14 days, hidden from DeepSeek Harness's grep tool), and the root gains
+- Each scope directory gains `.archive/` (forgotten memories, kept 14 days,
+  and superseded ones, kept with the memory that replaced them; hidden from
+  DeepSeek Harness's grep tool), and the root gains
   `.state/` (snapshots, pending decisions, scan cache, recall statistics,
   checkup settings and records). Memory files are used in place. Snapshots
   and pending decisions are imported once from DeepSeek Harness's KV store
@@ -93,8 +94,10 @@ All notable changes to this project are documented here. The format follows
 - `validFrom` / `validTo` are local `YYYY-MM-DD HH:mm`, or a date alone, both
   in memory files (UTC ISO timestamps before) and in `memory_save` (epoch
   milliseconds before); impossible dates and passed deadlines are rejected.
-  Existing files are converted at the next write, rounded so nothing expires
-  earlier. Versions before 0.2.0 cannot read files in the new form.
+  Existing files are converted the first time you send a message or save in
+  that scope, rounded so nothing expires earlier. Versions before 0.2.0
+  cannot read memories with a validity period in the new form, so profiles
+  that share a memory folder should upgrade together.
 - Scenes replace the three fixed templates: a scene is the set of types the
   model can add, picked from the five built-in types, the presets `procedure`
   and `decision`, and your custom types. General (`template: custom`) stays
@@ -169,7 +172,8 @@ All notable changes to this project are documented here. The format follows
 ### Fixed
 - Two memory files with the same id: the older one was deleted when the
   library loaded. Both are now kept and `memory_health` reports the
-  duplicate.
+  duplicate; the next save, edit or deletion of that memory keeps only the
+  copy it writes.
 - A vendor-format key (`sk-`, `ghp_`, AWS, PEM private key) typed into a
   memory file was injected as is. It is now masked as `[已隐藏]` in the
   snapshot, search results, checkups and the interface.
@@ -181,8 +185,9 @@ All notable changes to this project are documented here. The format follows
 - A suspected secret such as `password: …` or `api_key=…` kept the health
   check red with no way to clear it. Only vendor-format keys do now.
 - A conflict settled by keeping both memories came back at the next scan. The
-  verdict is now remembered until either side changes, conflicts carried over
-  from 0.1.x included, and a conflict is listed only once.
+  verdict is now remembered until either side changes, and a conflict is
+  listed only once. Conflicts settled as keep-both or false positive under
+  0.1.x were not recorded and may be reported once more after upgrading.
 - Checkup findings named memories by internal ids such as `mem_xxx`.
 
 ### Removed

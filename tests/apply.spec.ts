@@ -1058,7 +1058,8 @@ describe('注入链接线', () => {
     const sessionView = (sessionId: string) => vi.waitFor(async () =>
       sessionViewSchema.parse(JSON.parse(await readFile(join(memoryRoot, GUI_VIEW_DIR, sessionViewFile(sessionId)), 'utf8'))))
     const listens = (name: string) => ctx.listeners.has(name)
-    return { memoryRoot, errors, preStep, step, failRequest, compact, addMemory, search, recallStats, sessionView, listens }
+    const tool = (name: string) => defs.get(name)!
+    return { memoryRoot, errors, preStep, step, failRequest, compact, addMemory, search, recallStats, sessionView, listens, tool }
   }
 
   it('新会话第一步：快照放在 decision 最前返回，pre-step 里不直接写会话；宿主先写系统提示词再写 decision，快照落在系统提示词之后', async () => {
@@ -1385,6 +1386,27 @@ describe('注入链接线', () => {
     const next: Decision = { kind: 'enter', messages: [userSaid('继续')] }
     expect(await second.step(resumed, 1, { decision: next, turn: 3 })).toBe(next)
     await vi.waitFor(async () => expect(await second.sessionView('sess-1')).toMatchObject({ origin: 'resumed' }))
+  })
+
+  it('同一记忆目录上的两个插件实例（两个进程）：一边 memory_save 存下的记忆，另一边新开的会话第一步就带入、能搜到', async () => {
+    const a = await boot()
+    const b = await boot({ memoryRoot: a.memoryRoot })
+    const cwd = await realpath(await makeTmpRoot())
+    // b 先跑过一个会话：读过一遍记忆目录
+    const earlier = hostSession('sess-b1', { cwd })
+    await b.step(earlier, 1, { messages: [userSaid('你好')] })
+    expect(visibleSnapshots(earlier).join('')).not.toContain('kiwi')
+
+    const writer = hostSession('sess-a1', { cwd })
+    const saved = await a.tool('memory_save').execute(
+      { action: 'create', scope: 'workspace', type: 'preference', name: '代码评审', content: '代码评审先看测试 kiwi', summary: '评审先看测试', sourceMode: 'user-explicit' },
+      fakeExec({ agent: { session: writer, options: {} } } as never)) as { kind: string; record?: { id: string } }
+    expect(saved.kind).toBe('saved')
+
+    const fresh = hostSession('sess-b2', { cwd })
+    await b.step(fresh, 1, { messages: [userSaid('开始')] })
+    expect(visibleSnapshots(fresh)).toEqual([expect.stringContaining('代码评审先看测试 kiwi')])
+    expect((await b.search(hostSession('sess-b3', { cwd }), 'kiwi')).hits.map(h => h.id)).toEqual([saved.record!.id])
   })
 
   it('投影读不到（服务缺席或读取抛错）按对话开始时', async () => {
@@ -1965,6 +1987,80 @@ describe('配置热生效（loader/volatile-update）', () => {
     expect(await t.assembleOnce()).toContain('## 可复用流程（procedure）\n- [mem_proc] 发版流程（发版步骤）')
     await t.update({ template: 'coding', removedPresetTypes: [] })
     expect(t.tool('memory_save').parameters.properties.type!.enum).toContain('procedure')
+  })
+
+  /** 按 query（可带 types）检索，回命中的 id、类型和陈旧说明。 */
+  const searchHits = async (t: Awaited<ReturnType<typeof setup>>, args: { query: string; types?: string[] }) =>
+    ((await t.tool('memory_search').execute(args, fakeExec())) as { hits: Array<{ id: string; type: string; stalenessNote: string }> })
+      .hits.map(h => ({ id: h.id, type: h.type, stalenessNote: h.stalenessNote }))
+  const DAY_MS = 24 * 60 * 60 * 1000
+
+  it('切场景后旧场景独有类型的记忆：不能再新增，照常带入、按类型和关键词都能搜到，中文名与衰退天数不变', async () => {
+    const t = await setup({ template: 'coding' })
+    // 上次确认在 100 天前：procedure 按 90 天衰退，检索结果带陈旧说明
+    await t.putGlobal({ id: 'mem_proc', type: 'procedure', name: '发版流程', content: '发版先跑测试再打包', summary: '发版步骤', lastConfirmedAt: Date.now() - 100 * DAY_MS })
+    const before = await searchHits(t, { query: '发版', types: ['procedure'] })
+    expect(before).toEqual([{ id: 'mem_proc', type: 'procedure', stalenessNote: expect.stringMatching(/\S/) }])
+
+    await t.update({ template: 'scene-1', scenes: { ...PRESET_SCENES, 'scene-1': { label: '写作', types: ['preference', 'decision'] } } })
+    expect(t.tool('memory_save').parameters.properties.type!.enum).not.toContain('procedure')
+    await expect(t.save({ type: 'procedure', name: '流程', content: '旧场景的类型' })).rejects.toThrow(/type/)
+    expect(await t.assembleOnce()).toContain('## 可复用流程（procedure）\n- [mem_proc] 发版流程（发版步骤）')
+    expect(await searchHits(t, { query: '发版', types: ['procedure'] })).toEqual(before)
+    expect(await searchHits(t, { query: '打包' })).toEqual(before)
+  })
+
+  it('当前场景去掉通用类型 profile：不能再新增，已有的画像照常带入、能搜到', async () => {
+    const t = await setup({ template: 'coding' })
+    await t.putGlobal({ id: 'mem_prof', type: 'profile', name: '常驻城市', content: '用户住在杭州，周末带孩子去西湖', summary: '住杭州' })
+    await t.update({ template: 'scene-1', scenes: { ...PRESET_SCENES, 'scene-1': { label: '写作', types: ['preference', 'knowledge'] } } })
+    expect(t.tool('memory_save').parameters.properties.type!.enum).not.toContain('profile')
+    await expect(t.save({ type: 'profile', name: '画像', content: '场景去掉的通用类型' })).rejects.toThrow(/type/)
+    expect(await t.assembleOnce()).toContain('【记忆·用户画像】用户住在杭州，周末带孩子去西湖')
+    expect((await searchHits(t, { query: '杭州', types: ['profile'] })).map(h => h.id)).toEqual(['mem_prof'])
+  })
+
+  it('删掉自建类型、选保留记忆：不能再新增；已有的照常带入、能搜到，类型显示英文名，按 90 天衰退', async () => {
+    const scenes = { ...PRESET_SCENES, 'scene-1': { label: '合规', types: ['preference', 'regulation'] } }
+    const t = await setup({ template: 'scene-1', customTypes: { regulation }, scenes })
+    await t.putGlobal({ id: 'mem_reg', type: 'regulation', name: '数据出境', content: '数据出境要先过安全评估', summary: '数据出境', lastConfirmedAt: Date.now() - 100 * DAY_MS })
+    expect(await t.assembleOnce()).toContain('【记忆·合规要求】数据出境要先过安全评估')
+    // 删除前按自建定义不衰退
+    expect(await searchHits(t, { query: '出境' })).toEqual([{ id: 'mem_reg', type: 'regulation', stalenessNote: '' }])
+
+    // 保留记忆：只改配置，不动记忆
+    await t.update({ template: 'scene-1', customTypes: {}, scenes: { ...PRESET_SCENES, 'scene-1': { label: '合规', types: ['preference'] } } })
+    expect(t.tool('memory_save').parameters.properties.type!.enum).not.toContain('regulation')
+    await expect(t.save({ type: 'regulation', name: '合规', content: '删掉的类型' })).rejects.toThrow(/type/)
+    const after = await t.assembleOnce()
+    expect(after).not.toContain('合规要求')
+    expect(after).toMatch(/## regulation[^\n]*\n- \[mem_reg\] 数据出境/)
+    expect(await searchHits(t, { query: '出境', types: ['regulation'] })).toEqual([{ id: 'mem_reg', type: 'regulation', stalenessNote: expect.stringMatching(/\S/) }])
+  })
+
+  it('改场景、删类型、退回出厂场景：已有记忆文件逐字节不变', async () => {
+    const t = await setup({ template: 'coding' })
+    const seeds = [
+      { id: 'mem_prof', type: 'profile', content: '用户住在杭州' },
+      { id: 'mem_pref', type: 'preference', content: '测试里不要 mock 数据库' },
+      { id: 'mem_proc', type: 'procedure', content: '发版先跑测试再打包' },
+      { id: 'mem_ref', type: 'reference', content: '设计稿在共享盘' },
+      { id: 'mem_reg', type: 'regulation', content: '数据出境要先过安全评估' },
+    ]
+    for (const s of seeds) await t.putGlobal(s)
+    const files = seeds.map(s => join(t.memoryRoot, 'global', `${s.id}.md`))
+    const read = () => Promise.all(files.map(f => readFile(f, 'utf8')))
+    const before = await read()
+
+    await t.assembleOnce()
+    await t.update({ template: 'scene-1', customTypes: { regulation }, scenes: { ...PRESET_SCENES, 'scene-1': { label: '合规', types: ['preference', 'regulation'] } } })
+    await t.assembleOnce()
+    await t.update({ template: 'scene-1', customTypes: {}, scenes: { ...PRESET_SCENES, 'scene-1': { label: '合规', types: ['preference'] } } })
+    await t.assembleOnce()
+    await t.update({ template: 'coding', removedPresetTypes: ['procedure'] })
+    await t.assembleOnce()
+    await searchHits(t, { query: '测试' })
+    expect(await read()).toEqual(before)
   })
 
   it('自定义类型只加进类型池不生效；勾进当前场景后不重启就能 memory_save', async () => {

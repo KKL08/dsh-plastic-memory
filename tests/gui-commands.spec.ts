@@ -151,6 +151,13 @@ async function seedPair(e: ReturnType<typeof env>, ws?: string) {
 
 const allEntries = async (e: ReturnType<typeof env>) => [...await e.decisions.list(), ...await e.decisions.listSettled()]
 
+/** 记忆根下 .state/ 以外的全部文件（记忆文件、索引、.archive/）：相对路径 → 原文。 */
+async function memoryTree(): Promise<Record<string, string>> {
+  const entries = await readdir(root, { recursive: true, withFileTypes: true })
+  const files = entries.filter(d => d.isFile()).map(d => join(d.parentPath, d.name).slice(root.length + 1)).filter(rel => !rel.startsWith(`${STATE_DIR}/`)).sort()
+  return Object.fromEntries(await Promise.all(files.map(async rel => [rel, await readFile(join(root, rel), 'utf8')] as const)))
+}
+
 /** 待处理里除建议整理以外的项：夹具记忆的确认时间很早，另有「很久没确认」的建议，与账本无关。 */
 const ledgerItems = (view: { items: readonly PendingItem[] }) => view.items.filter(i => i.kind !== 'advice')
 
@@ -3808,9 +3815,11 @@ describe('plan-edits（整理所选：模型出整理计划）', () => {
     const { llm, prompts } = scripted(`\`\`\`json\n${answer(GOOD)}\n\`\`\``)
     const e = env({ llm })
     await seed(e)
+    const memoriesBefore = await memoryTree()
     const body = ok(await e.run(await planOf(e)))
     expect(body).toEqual({ ok: true, cmd: 'plan-edits', plan: GOOD, model: 'deepseek-v4-flash' })
     expect(prompts).toHaveLength(1)
+    expect(await memoryTree()).toEqual(memoriesBefore)
     expect(await e.snapshots.list()).toEqual([])
     expect(await allEntries(e)).toEqual([])
     await expect(readdir(join(root, GUI_VIEW_DIR))).rejects.toThrow()
@@ -4033,6 +4042,7 @@ describe('draft-plan（整理所选：按计划出稿）', () => {
     const { llm, prompts } = scripted(`\`\`\`json\n${answer([DRAFTS[1]!, DRAFTS[0]!])}\n\`\`\``)
     const e = env({ llm })
     await seed(e)
+    const memoriesBefore = await memoryTree()
     const body = ok(await e.run(await draftOf(e)))
     expect(body).toEqual({
       ok: true, cmd: 'draft-plan', model: 'deepseek-v4-flash',
@@ -4042,6 +4052,7 @@ describe('draft-plan（整理所选：按计划出稿）', () => {
       ],
     })
     expect(prompts).toHaveLength(1)
+    expect(await memoryTree()).toEqual(memoriesBefore)
     expect(await e.snapshots.list()).toEqual([])
     expect(await allEntries(e)).toEqual([])
     await expect(readdir(join(root, GUI_VIEW_DIR))).rejects.toThrow()
@@ -4419,6 +4430,27 @@ describe('migrate-type', () => {
     expect((await e.store.get('mem_k'))?.status).toBe('active')
     const deleted = deletedViewSchema.parse(await e.readView('deleted'))
     expect(deleted.items.map(i => i.memory.id).sort()).toEqual(['mem_g', 'mem_o'])
+  })
+
+  it('forget：含密钥的这一类记忆（高危、疑似两级，全局和别的项目）不移到最近删除，文件原样留在原处', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_crit', name: '部署凭证', type: 'client', content: `连接串 ${FAKE_SECRET.sk}` }))
+    await e.store.create(record({ id: 'mem_sus', name: '测试库', type: 'client', content: '测试库 password: Hunter2-2026', ...OTHER }))
+    await e.store.create(record({ id: 'mem_plain', name: '客户', type: 'client' }))
+    const paths = {
+      crit: (await e.store.locate('mem_crit', {}))!.filePath,
+      sus: (await e.store.locate('mem_sus', { workspacePath: OTHER_WS }))!.filePath,
+    }
+    const before = { crit: await readFile(paths.crit, 'utf8'), sus: await readFile(paths.sus, 'utf8') }
+
+    const body = ok(await e.run({ cmd: 'migrate-type', from: 'client', action: 'forget' }))
+    expect(body).toMatchObject({ migrated: 1, skippedSecrets: 2 })
+    expect({ crit: await readFile(paths.crit, 'utf8'), sus: await readFile(paths.sus, 'utf8') }).toEqual(before)
+    for (const dir of [join(root, GLOBAL_DIR, ARCHIVE_DIR), join(root, workspaceDirName(OTHER_WS), ARCHIVE_DIR)]) {
+      const archived = await readdir(dir).catch(() => [] as string[])
+      expect(archived.filter(f => f.includes('部署') || f.includes('测试库'))).toEqual([])
+    }
+    expect(deletedViewSchema.parse(await e.readView('deleted')).items.map(i => i.memory.id)).toEqual(['mem_plain'])
   })
 
   it('PA-03 forget：收集完要删的 id 之后其中一条被改成别的类型：这条不被软删，其余照删', async () => {
@@ -4940,6 +4972,8 @@ describe('suggest（补上建议）', () => {
     const { llm, prompts } = scripted(KEEP_A)
     const e = env({ llm })
     const entry = await seedPair(e)
+    const memoriesBefore = await memoryTree()
+    const recordsBefore = [await e.store.get('mem_a'), await e.store.get('mem_b')]
     expect(ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))).toEqual({ ok: true, cmd: 'suggest', decisionId: entry.id, model: 'deepseek-v4-flash' })
     expect(prompts).toHaveLength(1)
     const saved = (await e.decisions.get(entry.id))!
@@ -4956,6 +4990,8 @@ describe('suggest（补上建议）', () => {
     // 不写记忆、不拍快照
     expect(await e.snapshots.list()).toEqual([])
     expect(await e.store.get('mem_b')).toMatchObject({ status: 'active', content: '用 npm' })
+    expect([a, b]).toEqual(recordsBefore)
+    expect(await memoryTree()).toEqual(memoriesBefore)
   })
 
   it('不认领体检范围、不写体检完成记录：生成期间同一范围照样能体检，之后上次体检时间不变', async () => {
@@ -5834,6 +5870,8 @@ describe('draft-proposal 与按要求应用（补充要求）', () => {
       const { llm, prompts } = scripted(MERGED)
       const { e, entry } = await seeded({ llm })
       const views = await e.readView('pending').catch(() => undefined)
+      const memoriesBefore = await memoryTree()
+      const recordsBefore = [await e.store.get('mem_a'), await e.store.get('mem_b')]
       const body = ok(await draft(e, entry.id))
       const [a, b] = [(await e.store.get('mem_a'))!, (await e.store.get('mem_b'))!]
       expect(body).toEqual({
@@ -5851,6 +5889,8 @@ describe('draft-proposal 与按要求应用（补充要求）', () => {
       expect(await e.decisions.listSettled()).toEqual([])
       expect(await e.snapshots.list()).toEqual([])
       expect(await statuses(e)).toEqual(['active', 'active'])
+      expect([a, b]).toEqual(recordsBefore)
+      expect(await memoryTree()).toEqual(memoriesBefore)
       expect(await e.readView('pending').catch(() => undefined)).toEqual(views)
     })
 

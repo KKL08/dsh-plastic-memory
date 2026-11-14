@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
+import { SidecarStore } from '../src/storage/sidecar.ts'
 import { GLOBAL_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import { fakeExec } from './helpers/exec.ts'
@@ -20,7 +21,7 @@ import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
 import { checkupKey } from '../src/gui/contract.ts'
 import type { CheckupRecord } from '../src/storage/schema.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
-import type { PendingDecision, ScanCacheEntry } from '../src/governance/schema.ts'
+import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, type PendingDecision, type ScanCacheEntry } from '../src/governance/schema.ts'
 import { SECRET_MASK } from '../src/secrets.ts'
 import { record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
@@ -1111,5 +1112,66 @@ describe('executeScan 垂直冲突按记忆所在项目取指令文件', () => {
     expect(await deps.decisions.get(current.id)).toBeDefined()
     expect((await deps.decisions.listSettled()).map(e => e.id)).toEqual([settled.id])
     expect(await deps.decisions.get(project.id)).toBeDefined()
+  })
+})
+
+describe('体检说明文字里的密钥：落进账本、缓存和输出前遮住', () => {
+  /** 记忆根下全部文件的文本（侧表、缓存都在 .state/ 里）。 */
+  async function allFileText(root: string): Promise<string> {
+    const names = await readdir(root, { recursive: true, withFileTypes: true })
+    const files = names.filter(d => d.isFile()).map(d => join(d.parentPath, d.name))
+    return (await Promise.all(files.map(f => readFile(f, 'utf8')))).join('\n')
+  }
+  async function sidecarDeps(llm: SemanticLlm | null) {
+    const { root, store } = await fileBackedStore({})
+    const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
+    const deps = makeDeps({
+      store, decisions: new PendingDecisionsStore(sidecar.pending), cache: sidecar.scanCache, checkups: new CheckupRecordStore(sidecar.checkups),
+      host: { llmOf: () => llm },
+    })
+    return { root, deps }
+  }
+
+  it('模型在冲突说明、基线引用、处理建议里引用的两级密钥：待决账本和体检缓存的文件、扫描结果与渲染文字里都没有原文', async () => {
+    const llm: SemanticLlm = {
+      complete: async () => JSON.stringify({
+        findings: [
+          { type: 'conflict', memoryIds: ['mem_a', 'mem_b'], summary: `两条都写了 ${FAKE_SECRET.sk}`, suggestedAction: '改成 password: Hunter2-2026 之外的写法' },
+          { type: 'conflict', memoryIds: ['mem_a'], baselineRef: `AGENTS.md：token ${FAKE_SECRET.github}`, summary: '与基线里 api_key: TESTONLY0000000000000000 矛盾', suggestedAction: '裁决' },
+        ],
+      }),
+    }
+    const { root, deps } = await sidecarDeps(llm)
+    await deps.store.put(record({ id: 'mem_a', content: '网关走内网' }))
+    await deps.store.put(record({ id: 'mem_b', content: '网关走公网' }))
+    const r = await scanSingle({}, deps)
+
+    expect(r.pendingDecisions.created).toBe(2)
+    expect((await deps.decisions.list()).map(e => e.summary).sort()).toEqual([`两条都写了 ${SECRET_MASK}`, `与基线里 ${SECRET_MASK} 矛盾`].sort())
+    expect((await deps.cache.get(GLOBAL_CACHE_KEY))!.findings).toHaveLength(2)
+    const persisted = await allFileText(root)
+    const shown = JSON.stringify(r) + renderScanResult(r)
+    for (const text of [persisted, shown]) {
+      for (const secret of [FAKE_SECRET.sk, FAKE_SECRET.github, 'Hunter2-2026', 'TESTONLY0000000000000000']) expect(text).not.toContain(secret)
+      expect(text).toContain(SECRET_MASK)
+    }
+  })
+
+  it('解析报错：真实读不出的文件名里带两级密钥，扫描结果与渲染文字里都遮成占位，所在目录照给', async () => {
+    const broken = '---\nname: [\n---\n正文\n'
+    const { root, store } = await fileBackedStore({
+      [`${GLOBAL_DIR}/部署 ${FAKE_SECRET.sk}.md`]: broken,
+      [`${GLOBAL_DIR}/测试库 password=Hunter2-2026.md`]: broken,
+    })
+    const r = await scanSingle({ layers: 'rule' }, makeDeps({ store }))
+    const malformed = r.findings.filter(f => f.type === 'malformed')
+    expect(malformed).toHaveLength(2)
+    for (const f of malformed) {
+      expect(f.summary).toContain(join(root, GLOBAL_DIR))
+      expect(f.summary).toContain(SECRET_MASK)
+    }
+    const shown = JSON.stringify(r) + renderScanResult(r)
+    expect(shown).not.toContain(FAKE_SECRET.sk)
+    expect(shown).not.toContain('Hunter2-2026')
   })
 })
