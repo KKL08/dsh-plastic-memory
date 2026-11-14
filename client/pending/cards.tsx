@@ -563,7 +563,7 @@ function VerticalActions({ item, session, onDone, onRefused }: Pick<CardProps<'c
     : adopted === undefined ? undefined
     : adopted === vertical.keepBaseline ? t(isPurge(adopted) ? 'pending.vertical.adoptNotePurge' : 'pending.vertical.adoptNoteDelete')
       : t('pending.vertical.adoptNoteKeepBoth')
-  const sourced = suggestion?.isSourced === true ? t('pending.suggestion.sourced') : undefined
+  const sourced = suggestion?.isSourced === true ? t('pending.vertical.sourced') : undefined
   const note = isRequesting ? undefined : sourced === undefined ? adoptNote : adoptNote === undefined ? sourced : t('conflict.twoSentences', { first: sourced, second: adoptNote })
   const direct = [
     [vertical.keepBaseline, t('pending.vertical.delete')],

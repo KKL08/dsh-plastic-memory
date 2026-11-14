@@ -3197,6 +3197,11 @@ describe('垂直冲突卡：同一张处理卡（票 10）', () => {
     expect(commands()).toEqual([{ cmd: 'suggest', decisionId: 'd-v' }])
   })
 
+  it('回查过出处：说明行写回查的是这条记忆的出处', () => {
+    setup([card({ suggestion: { ...rewrite, isSourced: true } })])
+    expect(screen.getByText('建议是回查这条记忆的出处后给出的。采纳后这条记忆换成改写稿，可以撤销。')).toBeInTheDocument()
+  })
+
   it('故事 32：改写建议：加粗结论、理由、改写稿和对照；说明行写换成改写稿；采纳只带条目 id 和建议 id，结果卡「已改写这条记忆」显示改写后的内容、写来由，撤销发 undo（冲突条目）', async () => {
     const { commands } = setup([card({ suggestion: rewrite })], { respond: adopted })
     expect(screen.getByText('改写这条记忆').tagName).toBe('STRONG')
