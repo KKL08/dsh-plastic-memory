@@ -45,7 +45,7 @@
 
 <rect x="440" y="252" width="330" height="66" rx="8" fill="#FFFFFF" stroke="#A9C6E6" stroke-width="1"/>
 <text x="605" y="276" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#1C3E63">Global · 全局记忆</text>
-<text x="605" y="296" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#3C6494">跨项目只读共享 · 用户最终决策</text>
+<text x="605" y="296" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#3C6494">跨项目共享 · 新增须经你确认提升</text>
 
 <!-- memory type chips (same category -> same hue) -->
 <text x="90" y="341" dominant-baseline="central" font-size="12" fill="#3C6494">记忆分类</text>
@@ -57,7 +57,7 @@
 <rect x="566" y="330" width="66" height="22" rx="11" fill="#EEF1F5"/><text x="599" y="341" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#5A6472">+ 自定义</text>
 
 <rect x="90" y="360" width="680" height="32" rx="8" fill="#D8E6F6" stroke="#8FB4DD" stroke-width="1"/>
-<text x="430" y="376" text-anchor="middle" dominant-baseline="central" font-size="13" fill="#1C3E63">MEMORY.md 动态索引 · 快照注入来源</text>
+<text x="430" y="376" text-anchor="middle" dominant-baseline="central" font-size="13" fill="#1C3E63">MEMORY.md 生成的索引 · 供浏览</text>
 
 <!-- ===== store <-> governance ===== -->
 <line x1="430" y1="404" x2="430" y2="442" stroke="#B4832F" stroke-width="2" marker-start="url(#g)" marker-end="url(#g)"/>
