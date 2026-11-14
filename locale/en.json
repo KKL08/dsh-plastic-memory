@@ -1,6 +1,7 @@
 {
   "meta": {
     "title": "Plastic Memory",
-    "description": "Cross-session memory with built-in governance for DeepSeek Harness."
+    "description": "A memory plugin that saves automatically, recalls on demand and keeps memories healthy.",
+    "detail": "locale/detail.en.md"
   }
 }
