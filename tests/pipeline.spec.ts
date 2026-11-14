@@ -1017,6 +1017,22 @@ describe('runSavePipeline：子 agent 写入约束', () => {
     }
   })
 
+  it('归属检查之后、管线再读之前记录被接受：锁内重判后不写，接受后的内容和 reviewed 都保留', async () => {
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
+    await store.put(owned('mem_self', 'self'))
+    // 归属检查那次读照常读到待确认版本，读完父会话接受并改写；管线主体再读时拿到的已是接受后的版本
+    const realGet = store.get.bind(store)
+    vi.spyOn(store, 'get').mockImplementationOnce(async (id, target) => {
+      const read = await realGet(id, target)
+      const current = (await realGet('mem_self'))!
+      await store.put({ ...current, content: '主会话接受后的内容', delegation: { ...current.delegation!, reviewed: { by: 'main', at: 8 } } })
+      return read
+    })
+    const r = await runSavePipeline(childCandidate({ action: 'update', id: 'mem_self', content: '子 agent 想改成这样' }), childDeps(store))
+    expect(r).toMatchObject({ kind: 'rejected' })
+    expect((await store.get('mem_self'))!).toMatchObject({ content: '主会话接受后的内容', delegation: { reviewed: { by: 'main', at: 8 } } })
+  })
+
   it('update 用户手改过的待确认记录：原因不提 force，说明子 agent 改不了', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put({ ...owned('mem_self', 'self'), handEdited: true })

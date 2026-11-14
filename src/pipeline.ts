@@ -479,7 +479,9 @@ export async function runSavePipeline(
     const seen: { current?: MemoryRecord } = {}
     const isChangedSinceRead = (current: MemoryRecord | undefined) => {
       seen.current = current
-      return current === undefined || !isSameRecord(current, target!)
+      if (current === undefined || !isSameRecord(current, target!)) return true
+      // 子 agent 的归属按锁内这一份再判：归属检查之后、target 读到之前被接受的，target 本身已是接受后的版本
+      return deps.delegation !== undefined && (current.status !== 'active' || notOwnPending(current, deps.session.id) !== undefined)
     }
     rewritten = await store.put(clean, undefined, isChangedSinceRead)
     if (rewritten === undefined) return changedAfterRead(clean.id, seen.current, deps.delegation !== undefined)
