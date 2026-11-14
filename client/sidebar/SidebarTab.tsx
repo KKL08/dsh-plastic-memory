@@ -198,11 +198,28 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   }
   // 彻底删除的那条视图里已经没有了，按 id 原位留一行说明（删的是最后一条时留在空状态上面，也是焦点的落点）
   const purgedNote = (id: string) => <p key={id} className="pm-side-hint" tabIndex={-1}>{t('pending.secret.deletedNotice')}</p>
+  // 这里软删的原位留「已删除 · 撤销」（删的是最后一条时留在空状态上面）
+  const softRemoved = (id: string) => {
+    const entry = removed.get(id)
+    return entry !== undefined && deletions.of(id, scopeOfMemory(entry.memory)) === 'soft' ? entry.memory : undefined
+  }
+  const deletedRow = (id: string, memory: MemoryCardData) => (
+    <div key={id} className="pm-side-saved pm-side-saved--deleted" data-memory-id={id}>
+      <p className="pm-side-hint">{t('chat.card.deleted')}</p>
+      <Button variant="ghost" unavailable={runner.unavailable(id)} onClick={() => { restore(memory) }}>
+        {t('chat.card.undo')}
+      </Button>
+    </div>
+  )
   const refusedNote = <p className="pm-pending-error" role="alert" tabIndex={-1}>{t('sidebar.action.refused')}</p>
   if (globalCount === 0 && projectCount === 0) {
     return (
       <div className="pm-side">
         {(snapshot?.savedIds ?? []).filter(isPurged).map(purgedNote)}
+        {(snapshot?.savedIds ?? []).flatMap((id) => {
+          const memory = softRemoved(id)
+          return memory === undefined ? [] : [deletedRow(id, memory)]
+        })}
         {refused !== undefined ? refusedNote : null}
         <EmptyState variant="first" title={t('sidebar.empty.title')}>{t('sidebar.empty.body')}</EmptyState>
       </div>
@@ -234,9 +251,10 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     .flatMap((id): Array<{ id: string; memory: MemoryCardData | undefined; isWrittenToAgentsMd?: true; isDeleted?: true }> => {
       if (wroteAgentsMd.has(id)) return [{ id, memory: wroteAgentsMd.get(id), isWrittenToAgentsMd: true }]
       if (isPurged(id)) return [{ id, memory: undefined }]
+      const deleted = softRemoved(id)
+      if (deleted !== undefined) return [{ id, memory: deleted, isDeleted: true }]
       const entry = removed.get(id)
       const how = entry === undefined ? undefined : deletions.of(id, scopeOfMemory(entry.memory))
-      if (entry !== undefined && how === 'soft') return [{ id, memory: entry.memory, isDeleted: true }]
       if (isLiveWrite(id, byId, deletions)) return [{ id, memory: byId.get(id) }]
       return entry?.isRestored === true && how === undefined ? [{ id, memory: entry.memory }] : []
     })
@@ -409,14 +427,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
               const row = memory === undefined
                 ? purgedNote(id)
                 : isDeleted === true
-                  ? (
-                    <div key={id} className="pm-side-saved pm-side-saved--deleted" data-memory-id={id}>
-                      <p className="pm-side-hint">{t('chat.card.deleted')}</p>
-                      <Button variant="ghost" unavailable={runner.unavailable(id)} onClick={() => { restore(memory) }}>
-                        {t('chat.card.undo')}
-                      </Button>
-                    </div>
-                  )
+                  ? deletedRow(id, memory)
                 : isWrittenToAgentsMd === true
                   ? <SavedRow key={id} session={session} memory={memory} card={card} state="wrote-agents-md">{null}</SavedRow>
                   : (

@@ -319,6 +319,17 @@ describe('SidebarTab 这次新写入的', () => {
     expect(saved.getAllByRole('button', { name: '删除这条记忆' })).toHaveLength(2)
   })
 
+  it('删掉的是唯一一条记忆：视图刷新成空后「已删除 · 撤销」留在空状态上面，撤销发 restore', async () => {
+    const fresh = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
+    const { gateway } = setup({ library: library(fresh), session: snapshot({ injectedIds: [], coreIds: [], savedIds: ['n1'] }), pending: pending() })
+    await remove(within(screen.getByRole('region', { name: '这次新写入的' })).getByRole('button', { name: '删除这条记忆' }))
+    act(() => { gateway.setView('library', library()) })
+    expect(screen.getByText('还没有记忆')).toBeInTheDocument()
+    expect(screen.getByText('已删除。14 天内也能在最近删除里找回。')).toBeInTheDocument()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
+    expect(gateway.executed.map(e => e.command).at(-1)).toEqual({ cmd: 'restore', memoryId: 'n1', layer: { kind: 'workspace', workspacePath: WS } })
+  })
+
   it('撤销删除失败不写原因（同对话卡）：还是「已删除」和「撤销」', async () => {
     const fresh = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
     setup(
