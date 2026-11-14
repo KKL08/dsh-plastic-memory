@@ -67,9 +67,10 @@ All notable changes to this project are documented here. The format follows
   memories once they are brought into a chat.
 
 ### Changed
-- Requires DeepSeek Harness v0.2.1-rc.2 or later, the first version with the
-  interface slots the plugin uses. Older hosts refuse to install or start this
-  release; stay on 0.1.1-beta.5 there.
+- Requires DeepSeek Harness v0.2.2-rc.1 or later, which has the interface
+  slots the plugin uses and shows the plugin's own description on the plugin
+  page. Older hosts refuse to install or start this release; stay on
+  0.1.1-beta.5 there.
 - Memories are read from their files on demand; the plugin keeps no copy of
   the library in memory and no longer loads it at start-up.
   `pnpm bench:storage` measures storage timings on your machine.
