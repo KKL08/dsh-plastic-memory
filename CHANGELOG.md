@@ -7,6 +7,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- A write lock on the memory folder that works across processes. With the
+  desktop app and `dsh web` open on the same memories, writes now take turns,
+  so one side can no longer overwrite what the other just saved. A write that
+  cannot get its turn within 10 seconds fails with a clear error. On a Node
+  build without `node:sqlite`, writes keep the protection they had within a
+  single process.
+
+### Fixed
+- Cleaning up an expired checkup claim could remove one that had just been
+  renewed, letting two checkups run on the same scope.
+
 ### Changed
 - Development and CI build against DeepSeek Harness v0.2.2-rc.3, so the
   project compiles with the newest host release; CI keeps running the full
@@ -14,6 +26,7 @@ All notable changes to this project are documented here. The format follows
 - Memory files are parsed once and reused until they change on disk, which
   makes reading memories, search and checkups faster on larger memory
   folders. Files edited by hand or by git are picked up on the next read.
+- The test suite reruns the snapshot tests with the write lock unavailable.
 
 ## [0.2.0-beta.1] - 2026-11-15
 
