@@ -1,6 +1,6 @@
 import type { MemoryStore } from '../store.ts'
 import type { AgentsMdWriter } from '../storage/agents-md.ts'
-import type { SnapshotStore } from '../governance/snapshots.ts'
+import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
 import { isPendingDelegated, type MemoryRecord } from '../record-schema.ts'
 import type { MemorySnapshot } from '../governance/schema.ts'
 import { hasSecret } from '../secrets.ts'
@@ -128,19 +128,23 @@ export async function executePromote(
     ? { ...r, delegation: { ...r.delegation!, reviewed: { by: options.reviewedBy ?? 'main', at: now } } }
     : r
   for (const r of targets) {
+    // 快照和搬家（写 AGENTS.md 的正文）都按预读的这一版：读到之后被别处改过、或已被搬到别的作用域（比如另一次提升先搬走了）就不动，
+    // 计入 skipped，快照里才总是被提升的那一版
+    const isChanged = (current: MemoryRecord) =>
+      current.scope !== r.scope || current.workspacePath !== r.workspacePath || editFingerprint(current) !== editFingerprint(r)
     if (args.target === 'global') {
       // 无损 JSON 不变式：不能把 workspacePath/globalCandidate 置为 undefined 键，解构剔键。
       // 按原记录的 workspace 定位：同 id 多副本时搬走的才是门放行的这份，不是 global 或别的项目的副本
       const promote = ({ workspacePath, globalCandidate, ...rest }: MemoryRecord): MemoryRecord => review({ ...rest, scope: 'global' })
-      if (!(await deps.store.updateIfLive(r, promote, from))) {
-        skipped.push(r.id)   // 读到之后被别处删掉
+      if (!(await deps.store.updateIfLive(r, promote, from, { isChanged }))) {
+        skipped.push(r.id)   // 读到之后被别处删掉或改过
         continue
       }
     } else {
       // 两步无法原子：先软删再写 AGENTS.md，append 失败回滚软删——失败方向宁可"没提升"
       // 也不能"两处并存"（原顺序 append 成功+softDelete 失败会双份注入且结果谎报 promoted）。
-      if (!(await deps.store.updateIfLive(r, cur => review({ ...cur, status: 'deleted', updatedAt: now, deletedAt: cur.deletedAt ?? now }), from))) {
-        skipped.push(r.id)   // 读到之后被别处删掉（软删）：不写 AGENTS.md
+      if (!(await deps.store.updateIfLive(r, cur => review({ ...cur, status: 'deleted', updatedAt: now, deletedAt: cur.deletedAt ?? now }), from, { isChanged }))) {
+        skipped.push(r.id)   // 读到之后被别处删掉（软删）或改过：不写 AGENTS.md
         continue
       }
       try {

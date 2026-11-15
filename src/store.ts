@@ -90,11 +90,15 @@ export class MemoryStore {
     return this.table.update(record.id, from, fn)
   }
   /** 同 update，但锁内发现记录已不存在或已软删就不写、返回 undefined（工具据此报「不存在或已删除」，不抛错）。
-   *  from 同 update：调用方按作用域读到的（locateCopy），给同一个作用域写回，别的作用域里同 id 的副本不动。 */
-  async updateIfLive(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, fn: (current: MemoryRecord) => MemoryRecord, from?: LocateTarget): Promise<MemoryRecord | undefined> {
+   *  from 同 update：调用方按作用域读到的（locateCopy），给同一个作用域写回，别的作用域里同 id 的副本不动。
+   *  isChanged：锁内看到的当前内容过了它（调用方读到之后又被改过）也不写、返回 undefined。 */
+  async updateIfLive(
+    record: Pick<MemoryRecord, 'id' | 'workspacePath'>, fn: (current: MemoryRecord) => MemoryRecord, from?: LocateTarget,
+    opts: { isChanged?: (current: MemoryRecord) => boolean } = {},
+  ): Promise<MemoryRecord | undefined> {
     try {
       return await this.update(record, r => {
-        if (r.status === 'deleted') throw new RecordNotFoundError(r.id)
+        if (r.status === 'deleted' || opts.isChanged?.(r) === true) throw new RecordNotFoundError(r.id)
         return fn(r)
       }, from)
     } catch (err) {
