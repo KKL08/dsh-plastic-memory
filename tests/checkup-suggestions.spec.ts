@@ -92,7 +92,7 @@ function env(opts: { readEvent?: ReadEventFn; autoLimit?: number } = {}) {
   const clock = { now: NOW }
   const sidecar = new SidecarStore({ root, schemas, now: () => clock.now, log: quietLog })
   const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => clock.now }), quietLog, sidecar.recallStats)
-  const decisions = new PendingDecisionsStore(sidecar.pending)
+  const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
   const cache = sidecar.scanCache
   const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
   const checkups = new CheckupRecordStore(sidecar.checkups)
@@ -105,7 +105,7 @@ function env(opts: { readEvent?: ReadEventFn; autoLimit?: number } = {}) {
       generatingSuggestions: () => suggestions.generatingIds(),
     }),
     collectCheckups: () => collectCheckupView({ store, checkups, autoCheckups, cache, now: () => clock.now }),
-    now: () => clock.now, sleep: async () => {},
+    now: () => clock.now, sleep: async () => {}, lock: sidecar.lock,
   })
   const warnings: unknown[][] = []
   const log = { info() {}, error() {}, warn: (...args: unknown[]) => { warnings.push(args) } }

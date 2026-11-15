@@ -581,7 +581,7 @@ describe('memory_health 纯读', () => {
     const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
     const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats }), undefined, sidecar.recallStats)
     const deps = {
-      store, registry, decisions: new PendingDecisionsStore(sidecar.pending), cache: sidecar.scanCache,
+      store, registry, decisions: new PendingDecisionsStore(sidecar.pending, sidecar.lock), cache: sidecar.scanCache,
       thresholds: resolveHealthThresholds('normal'), host: { contextOf: async () => ({ workspacePath: WS }) },
     }
     const writes = await writesDuring(async () => {
@@ -603,7 +603,7 @@ describe('待决账本成员只在仅剩归档的目录里', () => {
     await writeFile(join(wsDir(OTHER), WORKSPACE_MARKER), OTHER + '\n')
     const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
     const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats }), undefined, sidecar.recallStats)
-    const decisions = new PendingDecisionsStore(sidecar.pending)
+    const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
     await decisions.upsert({ memoryIds: ['mem_g1', 'mem_a'], summary: '' }, now)
     await decisions.upsert({ memoryIds: ['mem_g1', 'mem_b'], summary: '' }, now)
     const data = await prereadScopes({ store, decisions, cache: sidecar.scanCache }, [{ kind: 'global' }, { kind: 'workspace', workspacePath: WS }])

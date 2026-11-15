@@ -1,6 +1,7 @@
 import type { MemoryLogger } from '../store.ts'
 import type { SemanticLlm } from '../governance/semantic-scan.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
+import type { RefreshableClaim } from '../kv-table.ts'
 import { genId } from '../governance/schema.ts'
 import { maskDiagnostic } from '../secrets.ts'
 import { runScan, type ScanCoreDeps, type ScanInput, type ScanNote, type ScanToolResult } from '../tools/scan.ts'
@@ -27,7 +28,8 @@ export const processInterval: IntervalTimer = (callback, delayMs) => {
  * 体检开跑前认领这些范围并保持心跳。有一个范围认领不到（别的体检正认领着、没过期）就把已认领的
  * 立刻放掉，返回那个正在体检的范围。认领到之后每 10 秒刷新一次认领时间；刷新时发现认领已不是自己的（被当成残留清掉、
  * 别的进程接手了）就调 onLost，由调用方触发这次体检的取消信号：执行器在下一个写入检查点前停下，不再提交。
- * 认领到和放掉之后都调 onChange（重写体检视图里的「进行中」）。release 先停心跳、等在途的刷新做完，再放掉认领（只删自己的）。
+ * 认领到和放掉之后都调 onChange（重写体检视图里的「进行中」）。release 先停心跳、等在途的刷新做完，再放掉认领（只删自己的）；
+ * 放不掉的不抛错，60 秒后按残留处理，视图里的「进行中」等下一次视图重写才消失。
  */
 export async function holdCheckups(checkups: Pick<CheckupRecordStore, 'claim'>, scopes: readonly Scope[], opts: {
   interval: IntervalTimer
@@ -57,15 +59,18 @@ export async function holdCheckups(checkups: Pick<CheckupRecordStore, 'claim'>, 
     release: async () => {
       stop()
       await refreshing
-      try {
-        for (const claim of claimed.claims) await claim.release()
-      } catch (err) {
-        // 没放掉的认领不再刷新，60 秒后按残留处理
-        opts.log.warn('[plastic-memory] 放掉体检认领失败，60 秒后按残留处理', err)
-      }
+      await releaseEach(claimed.claims, opts.log)
       await opts.onChange?.()
     },
   }
+}
+
+/** 一起放掉这些认领（同一把写锁共用一次拿锁），一个失败不耽误其余的，不抛错。 */
+async function releaseEach(claims: readonly RefreshableClaim[], log: MemoryLogger): Promise<void> {
+  const results = await Promise.allSettled(claims.map(claim => claim.release()))
+  const failed = results.flatMap(r => (r.status === 'rejected' ? [r.reason as unknown] : []))
+  // 没放掉的认领不再刷新，60 秒后按残留处理
+  if (failed.length > 0) log.warn('[plastic-memory] 放掉体检认领失败，60 秒后按残留处理', failed[0])
 }
 
 export interface CheckupRunDeps {

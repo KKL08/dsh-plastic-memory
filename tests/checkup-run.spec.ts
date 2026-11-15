@@ -24,6 +24,10 @@ import { record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 import { instructionsOf, noInstructions } from './helpers/instructions.ts'
 import type { ReadInstructions } from '../src/governance/instructions.ts'
+import type { RootLock } from '../src/root-lock.ts'
+import { createRootLock } from '../src/storage/root-lock.ts'
+import { RootLockTimeoutError } from '../src/errors.ts'
+import { fireUntilSettled, manualTimers } from './helpers/manual-timers.ts'
 
 // 一次体检：真实临时目录（FileTable + .state 侧表 + 视图文件），体检核心用真的；
 // 只把进程边界换掉：宿主模型（假 llm）、心跳计时（手动触发）、时钟、文件系统故障。
@@ -58,11 +62,16 @@ function manualHeartbeat() {
   return { beats, interval }
 }
 
-function env(opts: { log?: CheckupRunDeps['log']; views?: (w: ViewWriter) => CheckupRunDeps['views']; onClaimChanged?: () => Promise<void>; instructions?: ReadInstructions } = {}) {
+function env(opts: {
+  log?: CheckupRunDeps['log']; views?: (w: ViewWriter) => CheckupRunDeps['views']; onClaimChanged?: () => Promise<void>; instructions?: ReadInstructions
+  /** 写锁（缺省同一记忆根共用的那把）：接线层同款，注入侧表、文件表、待决账本。 */
+  lock?: RootLock
+} = {}) {
   const clock = { now: NOW }
-  const sidecar = new SidecarStore({ root, schemas, now: () => clock.now, log: quietLog })
-  const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => clock.now }), quietLog, sidecar.recallStats)
-  const decisions = new PendingDecisionsStore(sidecar.pending)
+  const lock = opts.lock !== undefined ? { lock: opts.lock } : {}
+  const sidecar = new SidecarStore({ root, schemas, now: () => clock.now, log: quietLog, ...lock })
+  const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => clock.now, ...lock }), quietLog, sidecar.recallStats)
+  const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
   const snapshots = new SnapshotStore(sidecar.snapshots)
   const cache = sidecar.scanCache
   const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
@@ -73,7 +82,7 @@ function env(opts: { log?: CheckupRunDeps['log']; views?: (w: ViewWriter) => Che
     memoryRoot: root, log: quietLog,
     collect: () => collectGlobalViews({ store, decisions, snapshots, cache, ignores, checkups, autoCheckups, registry, memoryRoot: root, now: () => clock.now, log: quietLog }),
     collectCheckups: checkupView,
-    now: () => clock.now, sleep: async () => {},
+    now: () => clock.now, sleep: async () => {}, lock: sidecar.lock,
   })
   const heartbeat = manualHeartbeat()
   const deps: CheckupRunDeps = {
@@ -600,5 +609,55 @@ describe('收集与记录出错不挡体检', () => {
     expect(r).toMatchObject({ kind: 'done' })
     expect(r).not.toHaveProperty('compared')
     expect(l.warn).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('心跳与写锁', () => {
+  it('RL-14 心跳刷新时拿锁超时：这次跳过、认领不丢，下个心跳刷新成功，体检正常做完写下完成记录', async () => {
+    const timers = manualTimers()
+    const real = createRootLock({ root, log: quietLog, timers })
+    // 记下每次进锁的结果：心跳刷新是哪一次，就等哪一次
+    const runs: Array<Promise<unknown>> = []
+    const lock: RootLock = { run: fn => { const p = real.run(fn); runs.push(p); return p } }
+    const warnings: string[] = []
+    let open!: () => void
+    const m = answering([], { gate: new Promise<void>(resolve => { open = resolve }) })
+    const e = env({ lock, log: { info() {}, warn: (msg: string) => { warnings.push(msg) }, error() {} } })
+    await seedScopes(e)
+    const running = e.run({ target: GLOBAL, llm: m.llm })
+    await m.called
+    const claimPath = join(root, STATE_DIR, 'checkups', `${createHash('sha1').update(checkupKey(GLOBAL)).digest('hex')}.claim`)
+    const claimed = await readFile(claimPath, 'utf8')
+
+    // 别的进程正持着写锁：这次刷新等满上限报超时
+    const other = createRootLock({ root, log: quietLog })
+    let release!: () => void
+    const isHeld = new Promise<void>(resolve => {
+      void other.run(() => { resolve(); return new Promise<void>(r => { release = r }) })
+    })
+    await isHeld
+    e.clock.now += 10_000
+    const before = runs.length
+    e.heartbeat.beats[0]!.callback()
+    await timers.scheduled()
+    const timedOut = runs[before]!
+    await fireUntilSettled(timedOut, timers)
+    await expect(timedOut).rejects.toBeInstanceOf(RootLockTimeoutError)
+    await vi.waitFor(() => { expect(warnings.some(msg => msg.includes('刷新体检认领失败'))).toBe(true) })
+    expect(await readFile(claimPath, 'utf8')).toBe(claimed)
+    expect(await e.otherProcess().isClaimed(checkupKey(GLOBAL))).toBe(true)
+    release()
+
+    // 下个心跳：拿得到锁，认领时间刷成此刻
+    e.clock.now += 10_000
+    const next = runs.length
+    e.heartbeat.beats[0]!.callback()
+    await vi.waitFor(() => { expect(runs.length).toBeGreaterThan(next) })
+    expect(await runs[next]).toBe(true)
+    expect(JSON.parse(await readFile(claimPath, 'utf8'))).toMatchObject({ at: NOW + 20_000 })
+
+    open()
+    expect((await running).kind).toBe('done')
+    expect((await e.recordOf(checkupKey(GLOBAL)))?.completed).toEqual({ startedAt: NOW, completedAt: NOW + 20_000, by: 'manual' })
   })
 })

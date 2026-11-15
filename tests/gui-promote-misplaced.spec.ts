@@ -46,13 +46,13 @@ function env() {
   const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
   const clock = { now: NOW }
   const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => clock.now }), undefined, sidecar.recallStats)
-  const decisions = new PendingDecisionsStore(sidecar.pending)
+  const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
   const snapshots = new SnapshotStore(sidecar.snapshots)
   const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
   const cache = sidecar.scanCache
   const checkups = new CheckupRecordStore(sidecar.checkups)
   const autoCheckups = new AutoCheckupSettingStore(sidecar.autoCheckups)
-  const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, snapshots, cache, checkups, autoCheckups, ignores, registry, memoryRoot: root, now: () => clock.now }), now: () => clock.now, sleep: async () => {} })
+  const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, snapshots, cache, checkups, autoCheckups, ignores, registry, memoryRoot: root, now: () => clock.now }), now: () => clock.now, sleep: async () => {}, lock: sidecar.lock })
   const command = createMemoryCommand({
     memoryRoot: root, store, decisions, snapshots, cache, checkups, autoCheckups, ignores, registry, views,
     agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')),

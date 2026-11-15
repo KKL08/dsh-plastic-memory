@@ -39,3 +39,13 @@ export class TypeRegistryError extends Error {
     this.code = code
   }
 }
+
+/** 等记忆根写锁到上限仍没拿到（别的进程一直在写）：这次写入没有执行，稍后重试即可。 */
+export class RootLockTimeoutError extends Error {
+  readonly code: 'root-lock-timeout'
+  constructor(waitedMs: number) {
+    super(`等待记忆根写锁 ${waitedMs / 1000} 秒仍未拿到（别的进程正在写），本次写入未执行；稍后重试`)
+    this.name = 'RootLockTimeoutError'
+    this.code = 'root-lock-timeout'
+  }
+}

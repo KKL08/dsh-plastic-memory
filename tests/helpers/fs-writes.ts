@@ -16,12 +16,17 @@ const WRITE_FUNCTIONS = new Set([
 
 const state = { recording: false, calls: [] as string[] }
 
+/** 写锁建锁库目录（`.state/lock`）不记：锁库不存数据，第一次拿锁时建一次，和写没写记忆、侧表无关。 */
+function isLockDir(fn: string, path: unknown): boolean {
+  return fn === 'mkdir' && /[\\/]\.state[\\/]lock$/.test(String(path))
+}
+
 /** 包一层：写类函数照调原实现，记录期间成功返回的记下 `函数名(第一个参数)`。 */
 export function recordWrites<T extends object>(actual: T): T {
   return Object.fromEntries(Object.entries(actual).map(([key, value]) => [key, typeof value === 'function' && WRITE_FUNCTIONS.has(key)
     ? async (...args: unknown[]) => {
         const result = await (value as (...a: unknown[]) => Promise<unknown>)(...args)
-        if (state.recording) state.calls.push(`${key}(${String(args[0])})`)
+        if (state.recording && !isLockDir(key, args[0])) state.calls.push(`${key}(${String(args[0])})`)
         return result
       }
     : value])) as T

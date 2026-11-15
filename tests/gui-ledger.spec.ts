@@ -17,7 +17,7 @@ afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
 function ledger() {
   const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
-  return new PendingDecisionsStore(sidecar.pending)
+  return new PendingDecisionsStore(sidecar.pending, sidecar.lock)
 }
 
 describe('账本 schema 向后兼容', () => {

@@ -2,6 +2,7 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { MemoryStore, MemoryLogger } from '../store.ts'
 import type { KvTable } from '../kv-table.ts'
+import type { RootLock } from '../root-lock.ts'
 import { byPosition, type LocatedRecord } from '../storage/table.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { PendingDecisionsStore } from '../governance/decisions.ts'
@@ -165,12 +166,15 @@ export async function collectCheckupView(deps: CheckupSourceDeps): Promise<Check
  * 同一个文件两次替换至少隔开 VIEW_REPLACE_GAP_MS：宿主的文件观察对同一文件约 50ms 内的变更只通知第一次，
  * 紧挨着的第二次替换会被漏掉，浏览器半侧就停在上一版，直到下一次变化或刷新。
  * 几个进程（桌面版与 `dsh web`）同开时：全局视图和体检视图替换前比生成时刻，早收集的不盖晚收集的（见 writeText）；
- * 归属对照每次等完替换间隔、写前重读磁盘再合并。
+ * 归属对照每次等完替换间隔、写前重读磁盘再合并。读盘、比较到 rename 整段在记忆根写锁内，别的进程的替换插不进中间。
  * 视图是派生缓存，写失败只记日志，不影响触发它的操作。
  * 卸载（dispose）后不再写：之后的请求直接返回，排队未开始的丢弃，进行中的那次写完才返回。
  */
 /** 同一视图文件两次替换的最小间隔（ms）。宿主节流窗口约 50ms，文件事件送达还有抖动：实测隔 100ms 仍偶有漏推，150ms 不再漏。 */
 export const VIEW_REPLACE_GAP_MS = 150
+
+/** 没注入写锁时：替换不另拿锁。 */
+const NO_ROOT_LOCK: RootLock = { run: fn => fn() }
 
 export class ViewWriter {
   private readonly dir: string
@@ -188,10 +192,14 @@ export class ViewWriter {
   private readonly collectCheckups: (() => Promise<CheckupView>) | undefined
   private readonly now: () => number
   private readonly sleep: (ms: number) => Promise<void>
+  private readonly lock: RootLock
   /** 每个视图文件上次替换的时刻。 */
   private readonly replacedAt = new Map<string, number>()
 
-  /** collectCheckups：体检视图的收集；缺省不写体检视图。 */
+  /**
+   * collectCheckups：体检视图的收集；缺省不写体检视图。
+   * lock：记忆根写锁，每次替换从读盘到 rename 在锁内；接线层注入插件实例的那一把。缺省不拿锁。
+   */
   constructor(opts: {
     memoryRoot: string
     collect: () => Promise<GlobalViews>
@@ -199,6 +207,7 @@ export class ViewWriter {
     log?: MemoryLogger
     now?: () => number
     sleep?: (ms: number) => Promise<void>
+    lock?: RootLock
   }) {
     this.dir = join(opts.memoryRoot, GUI_VIEW_DIR)
     this.log = opts.log ?? console
@@ -206,6 +215,7 @@ export class ViewWriter {
     this.collectCheckups = opts.collectCheckups
     this.now = opts.now ?? Date.now
     this.sleep = opts.sleep ?? (ms => new Promise<void>(resolve => setTimeout(resolve, ms)))
+    this.lock = opts.lock ?? NO_ROOT_LOCK
   }
 
   /** 只重写体检视图（设置改了、调度检查时）：不等节流，排在进行中的写入之后；内容和磁盘上的一样就不写。 */
@@ -350,6 +360,7 @@ export class ViewWriter {
    * 替换一个视图文件。render 在替换间隔等完之后才调用，返回 undefined 就不写：要按盘上现状合并的（归属对照）在这里读盘。
    * generatedAt：这份视图的生成时刻。给了就紧贴 rename 读盘上那份，盘上的更晚就不写（删掉临时文件）：
    * 几个进程同开时，早收集、晚写完的视图不盖掉别的进程刚写的新视图。
+   * 替换间隔在锁外等，从 render 到 rename 在写锁内：读盘合并、比生成时刻都不会被别的进程的替换插在中间。
    */
   private async replace(fileName: string, render: () => Promise<string | undefined>, generatedAt?: number): Promise<void> {
     await mkdir(this.dir, { recursive: true })
@@ -358,16 +369,18 @@ export class ViewWriter {
     // 封顶：时钟往回调过时 last 在此刻之后，不封顶就要多等回调的那段
     const wait = last === undefined ? 0 : Math.min(last + VIEW_REPLACE_GAP_MS - this.now(), VIEW_REPLACE_GAP_MS)
     if (wait > 0) await this.sleep(wait)
-    const text = await render()
-    if (text === undefined) return
-    const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
-    await writeFile(tmp, text, 'utf8')
-    if (generatedAt !== undefined && await this.generatedAtOnDisk(path) > generatedAt) {
-      await rm(tmp, { force: true })
-      return
-    }
-    await rename(tmp, path)
-    this.replacedAt.set(fileName, this.now())
+    await this.lock.run(async () => {
+      const text = await render()
+      if (text === undefined) return
+      const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
+      await writeFile(tmp, text, 'utf8')
+      if (generatedAt !== undefined && await this.generatedAtOnDisk(path) > generatedAt) {
+        await rm(tmp, { force: true })
+        return
+      }
+      await rename(tmp, path)
+      this.replacedAt.set(fileName, this.now())
+    })
   }
 
   /** 盘上那份视图的生成时刻：读不到、没有这个字段、版本号不是当前的，或晚于此刻（时钟往回调过）的按 0 算。 */

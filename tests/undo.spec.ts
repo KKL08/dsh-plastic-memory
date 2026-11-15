@@ -42,7 +42,7 @@ function env() {
   const now = () => clock.now
   const sidecar = new SidecarStore({ root, log: quietLog, now, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
   const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, log: quietLog, now }), quietLog, sidecar.recallStats)
-  const decisions = new PendingDecisionsStore(sidecar.pending)
+  const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
   const snapshots = new SnapshotStore(sidecar.snapshots)
   const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
   const deps = { store, decisions, snapshots, ignores, now, instructions: noInstructions }

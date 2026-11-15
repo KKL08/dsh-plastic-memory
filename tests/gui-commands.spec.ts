@@ -89,7 +89,7 @@ function env(opts: EnvOpts = {}) {
   })
   // 表和命令用同一个时钟：软删记的时刻和最近删除的保留期清扫才对得上
   const store = new MemoryStore(opts.table ?? new FileTable({ root, stats: sidecar.recallStats, now: () => clock.now }), undefined, sidecar.recallStats)
-  const decisions = new PendingDecisionsStore(opts.wrapPending?.(sidecar.pending) ?? sidecar.pending)
+  const decisions = new PendingDecisionsStore(opts.wrapPending?.(sidecar.pending) ?? sidecar.pending, sidecar.lock)
   const snapshots = new SnapshotStore(sidecar.snapshots)
   const cache = sidecar.scanCache
   const checkups = new CheckupRecordStore(sidecar.checkups)
@@ -103,7 +103,7 @@ function env(opts: EnvOpts = {}) {
     }),
     collectCheckups: () => collectCheckupView({ store, checkups, autoCheckups, cache, now: () => clock.now, ...(opts.governanceEnabled !== undefined ? { isGovernanceEnabled: () => opts.governanceEnabled! } : {}) }),
     // 替换间隔按测试时钟算、不真等：节流本身由视图测试单独覆盖
-    now: () => clock.now, sleep: async () => {},
+    now: () => clock.now, sleep: async () => {}, lock: sidecar.lock,
   })
   // 本进程调度器收到的「设置改了」通知次数
   const autoCheckupChanges = { count: 0 }

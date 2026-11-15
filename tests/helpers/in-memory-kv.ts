@@ -2,7 +2,7 @@ import type { BatchKvTable, CasKvTable, ClaimKvTable, RefreshableClaimKvTable } 
 
 /** 内存 KV：侧表与治理各表的测试替身，不进发布包。认领只在本进程内排他。 */
 export class InMemoryKvTable<T> implements ClaimKvTable<T>, CasKvTable<T>, RefreshableClaimKvTable<T> {
-  private map = new Map<string, T>()
+  protected map = new Map<string, T>()
   private claimed = new Map<string, symbol>()
   async get(key: string) { return this.map.get(key) }
   async list() { return [...this.map.entries()] }
@@ -35,4 +35,8 @@ export class InMemoryKvTable<T> implements ClaimKvTable<T>, CasKvTable<T>, Refre
 
 export class InMemoryBatchKvTable<T> extends InMemoryKvTable<T> implements BatchKvTable<T> {
   async putMany(entries: ReadonlyArray<[string, T]>) { for (const [key, value] of entries) await super.put(key, value) }
+  /** 同文件实现：整段读改写中间不让出，并发的两次不会交错。 */
+  async mergeMany(ids: readonly string[], fn: (current: T | undefined, key: string) => T) {
+    for (const id of ids) this.map.set(id, fn(this.map.get(id), id))
+  }
 }

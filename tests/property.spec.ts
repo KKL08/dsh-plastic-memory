@@ -247,7 +247,7 @@ describe('子 agent 记忆的生命周期', () => {
     const sidecar = new SidecarStore({ root: memoryRoot, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
     const command = createMemoryCommand({
       memoryRoot, store: new MemoryStore(new FileTable({ root: memoryRoot, stats: sidecar.recallStats }), undefined, sidecar.recallStats),
-      decisions: new PendingDecisionsStore(sidecar.pending), snapshots: new SnapshotStore(sidecar.snapshots), cache: sidecar.scanCache,
+      decisions: new PendingDecisionsStore(sidecar.pending, sidecar.lock), snapshots: new SnapshotStore(sidecar.snapshots), cache: sidecar.scanCache,
       checkups: new CheckupRecordStore(sidecar.checkups), autoCheckups: new AutoCheckupSettingStore(sidecar.autoCheckups), ignores: new AdviceIgnoreStore(sidecar.adviceIgnores),
       registry: buildTypeRegistry({ template: 'coding', customTypes: {} }), agentsMd: createAgentsMdWriter(join(memoryRoot, 'AGENTS.md')),
       views: { request: async () => undefined, rewriteAll: async () => undefined, collectViews: async () => { throw new Error('不收集视图') }, requestCheckups: async () => {} },

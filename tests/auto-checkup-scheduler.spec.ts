@@ -162,7 +162,7 @@ function env(opts: {
   // 侧表也用这个时钟：认领的时间和是否残留按它算
   const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }, now: () => clock.now })
   const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => clock.now }), undefined, sidecar.recallStats)
-  const decisions = new PendingDecisionsStore(sidecar.pending)
+  const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
   const checkups = new CheckupRecordStore(sidecar.checkups)
   const autoCheckups = new AutoCheckupSettingStore(sidecar.autoCheckups)
   const cache = sidecar.scanCache
@@ -173,7 +173,7 @@ function env(opts: {
   const source = { store, checkups, autoCheckups, cache, isGovernanceEnabled: () => governance.isEnabled, now: () => clock.now }
   const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
   const collectViews = () => collectGlobalViews({ store, decisions, cache, ignores, checkups, registry, memoryRoot: root, now: () => clock.now })
-  const writer = new ViewWriter({ memoryRoot: root, collect: collectViews, collectCheckups: () => collectCheckupView(source), now: () => clock.now, sleep: async () => {} })
+  const writer = new ViewWriter({ memoryRoot: root, collect: collectViews, collectCheckups: () => collectCheckupView(source), now: () => clock.now, sleep: async () => {}, lock: sidecar.lock })
   const timers = fakeTimer(clock)
   const instructions = opts.instructions ?? noInstructions
   const suggestions = opts.suggestions === undefined ? undefined : new CheckupSuggestions({

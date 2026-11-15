@@ -6,6 +6,7 @@ import { memoryDomainSpec } from './domain-spec.ts'
 import { MemoryStore } from './store.ts'
 import { FileTable } from './storage/file-table.ts'
 import { SidecarStore } from './storage/sidecar.ts'
+import { createRootLock } from './storage/root-lock.ts'
 import type { LegacyKvTables } from './storage/legacy-kv-import.ts'
 import { resolveMemoryRoot } from './storage/paths.ts'
 import { formatIndexLine } from './index-line.ts'
@@ -154,12 +155,16 @@ export async function apply(ctx: Context, config: Config) {
   }
 
   const memoryRoot = resolveMemoryRoot(config.memoryRoot)
+  // 记忆根写锁：一个插件实例一把，注入文件表、侧表、待决账本、视图写入器（同实例内按计数嵌套）。懒打开，没有关闭步骤，卸载不用处理它：
+  // 卸载后迟到的写入照样拿锁，和热重载后的新实例互斥
+  const rootLock = createRootLock({ root: memoryRoot, log: ctx.logger })
   // 侧表（快照、待决账本、扫描缓存、召回统计）住 <memoryRoot>/.state/，构造不做 I/O。
   // storageDomain 不再是必需注入：只为首次侧表访问时导入旧 KV 的快照与待决账本（0.3.0 移除）。
   // 按 llm / sessionQuery 同款惯例经 ctx.get 探测，且推迟到导入真正发生时——apply 期间宿主的
   // storageDomain 未必已挂上。探测落空返回 undefined：不写标记，本进程不再探，下次启动重探。
   const sidecar = new SidecarStore({
     root: memoryRoot,
+    lock: rootLock,
     schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema },
     openLegacyKv: async (): Promise<LegacyKvTables | undefined> => {
       let facility: DomainFacility | undefined
@@ -197,6 +202,7 @@ export async function apply(ctx: Context, config: Config) {
   // ctx.logger 结构上满足该形状（info/warn/error），直接注入，宿主按插件名归因。
   const fileTable = new FileTable({
     root: memoryRoot,
+    lock: rootLock,
     stats: sidecar.recallStats,
     // 磁盘索引不带陈旧度（静态文件里的时间相对标注会随时间失真），注入侧的陈旧度由 snapshot.ts 计算
     formatIndexLine: (r, file) => formatIndexLine(r, { passive: registry.get(r.type).recall === 'passive', file }),
@@ -205,7 +211,7 @@ export async function apply(ctx: Context, config: Config) {
   // 加载期零 I/O：FileTable 构造不碰磁盘，每个操作读它涉及的目录（磁盘是唯一真相，外部改动下次操作就能看到）
   const store = new MemoryStore(fileTable, ctx.logger, sidecar.recallStats)
   // forget 的快照先行与待决账本清理需要这两个存储，治理关闭时也接线
-  const decisions = new PendingDecisionsStore(sidecar.pending)
+  const decisions = new PendingDecisionsStore(sidecar.pending, rootLock)
   // 拍完快照落盘后复核：读完记录之后被彻底删除的那份在快照里脱敏
   const snapshots = new SnapshotStore(sidecar.snapshots, { findGone: goneCopies(store) })
   const scanCache = sidecar.scanCache
@@ -363,7 +369,7 @@ export async function apply(ctx: Context, config: Config) {
   ctx.inject(['commands'], child => {
     const commands = (child as unknown as { commands: { register(def: MemoryCommandDefinition): () => void } }).commands
     const writer = new ViewWriter({
-      memoryRoot, log: ctx.logger,
+      memoryRoot, log: ctx.logger, lock: rootLock,
       collect: collectViews,
       collectCheckups: () => collectCheckupView(checkupSource),
     })

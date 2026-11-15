@@ -81,7 +81,7 @@ function inspect() {
     store: new MemoryStore(new FileTable({ root, stats: sidecar.recallStats }), undefined, sidecar.recallStats),
     checkups: new CheckupRecordStore(sidecar.checkups),
     autoCheckups: new AutoCheckupSettingStore(sidecar.autoCheckups),
-    decisions: new PendingDecisionsStore(sidecar.pending),
+    decisions: new PendingDecisionsStore(sidecar.pending, sidecar.lock),
     cache: sidecar.scanCache,
   }
 }

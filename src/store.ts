@@ -59,7 +59,6 @@ export class MemoryStore {
   private table: MemoryTable
   private readonly log: MemoryLogger
   private stats: BatchKvTable<RecallStats>
-  private recallChain: Promise<unknown> = Promise.resolve() // markRecalled 的读改写在进程内串行
 
   /** log 缺省回退 console；stats：召回统计侧表（接线层传 .state/recall-stats.json）。 */
   constructor(table: MemoryTable, log: MemoryLogger | undefined, stats: BatchKvTable<RecallStats>) {
@@ -219,26 +218,13 @@ export class MemoryStore {
     return (await this.queryScope(filter)).records
   }
 
-  /** 召回统计只读改写侧表，不经 table.update——记忆文件不因召回而重写。一次调用一次读、内存合并、
-   *  一次批量写（单文件表只换一次文件）。跨进程单文件 LWW（参考字段）。
+  /** 召回统计只读改写侧表，不经 table.update——记忆文件不因召回而重写。一次调用是侧表的一次读改写（mergeMany：
+   *  进程内链加写锁，一次读、内存合并、一次写，单文件表只换一次文件），同一进程并发、跨进程都不少计（写锁不可用时只保证同一进程）。
    *  ids 取自调用方同一次读取的结果（search 命中、快照 core 区），存活由那次读保证，这里不再逐 id 定位。 */
-  markRecalled(ids: string[], now = Date.now()): Promise<void> {
-    const run = () => this.markRecalledInner(ids, now)
-    const next = this.recallChain.then(run, run)
-    this.recallChain = next.catch(() => {})
-    return next
-  }
-
-  private async markRecalledInner(ids: string[], now: number): Promise<void> {
+  async markRecalled(ids: string[], now = Date.now()): Promise<void> {
     try {
-      const current = new Map(await this.stats.list())
-      const next = new Map<string, RecallStats>()
-      for (const id of ids) {
-        // 同一次调用里重复出现的 id 累加（与逐条 put 时的旧行为一致）
-        const row = next.get(id) ?? current.get(id)
-        next.set(id, { id, recallCount: (row?.recallCount ?? 0) + 1, lastRecalledAt: now })
-      }
-      await this.stats.putMany([...next])
+      // 读当前行、加一、写回整段在侧表的读改写里。同一次调用里重复出现的 id 依次累加
+      await this.stats.mergeMany(ids, (row, id) => ({ id, recallCount: (row?.recallCount ?? 0) + 1, lastRecalledAt: now }))
     } catch (err) {
       this.log.error('[plastic-memory] 召回统计更新失败:', err)
     }

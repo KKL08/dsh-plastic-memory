@@ -86,7 +86,7 @@ export const goneCopies = (store: Pick<MemoryStore, 'get' | 'readRaw'>) => async
 /**
  * 只动 target 那一份时，快照里哪些同 id 记录算它的历史：target 作用域的，加上别的作用域里、那个作用域此刻已定位不到这个 id（含归档）的——
  * 那是这条记忆换作用域（提升、移到项目）之前留下的。别的作用域还有这个 id 的，是那一份自己的历史，不算。
- * 先按作用域算好保留集合，返回的谓词是同步的（快照表在串行化的重写里用）。
+ * 先按作用域算好保留集合，返回的谓词是同步的（快照表在条件写的回调里用）。
  */
 export async function copyHistory(
   store: Pick<MemoryStore, 'get'>, records: Iterable<Located>, ids: ReadonlySet<string>, target: Scope,

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
+import { defaultRootLock } from '../src/storage/root-lock.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { GLOBAL_DIR, STATE_DIR, workspaceDirName } from '../src/storage/paths.ts'
 import { MemoryStore } from '../src/store.ts'
@@ -60,7 +61,7 @@ function harness() {
   let clock = T0
   const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
   const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => clock }), undefined, sidecar.recallStats)
-  const decisions = new PendingDecisionsStore(sidecar.pending)
+  const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
   const snapshots = new SnapshotStore(sidecar.snapshots)
   const sourceDeps = { store, decisions, cache: sidecar.scanCache, registry, memoryRoot: root, now: () => clock }
   return {
@@ -799,8 +800,10 @@ describe('视图写入', () => {
   async function readView(name: GlobalViewName) {
     return JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_VIEW_FILES[name]), 'utf8'))
   }
-  /** 替换间隔按固定时钟算、不真等；专测节流的那一例自己注入 now 与 sleep。 */
-  const noWait = { now: () => T0, sleep: async () => {} }
+  /** 写入器用的写锁：和 harness 的侧表、文件表同一把（同一进程同一记忆根共用的那把）。 */
+  const viewLock = () => defaultRootLock(root, console)
+  /** 替换间隔按固定时钟算、不真等；专测节流的那一例自己注入 now 与 sleep。lock 用 getter：展开时才取当前用例的记忆根。 */
+  const noWait = { now: () => T0, sleep: async () => {}, get lock() { return viewLock() } }
 
   it('同一 tick 内多次触发只收集、只写一遍；之后再触发再写', async () => {
     const h = harness()
@@ -831,7 +834,7 @@ describe('视图写入', () => {
     const sleeps: number[] = []
     let wake!: () => void
     const sleep = (ms: number) => { sleeps.push(ms); return new Promise<void>(resolve => { wake = resolve }) }
-    const writer = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews(h.sourceDeps), now: () => t, sleep })
+    const writer = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews(h.sourceDeps), now: () => t, sleep, lock: viewLock() })
     const libraryIds = async () => (await readView('library')).layers[1].items.map((i: { id: string }) => i.id)
 
     await writer.request(['library'])
@@ -971,7 +974,7 @@ describe('视图写入', () => {
   const readCheckup = async () => checkupViewSchema.parse(JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_CHECKUP_VIEW_FILE), 'utf8')))
   const tmpLeft = async () => (await listViews()).filter(n => n.includes('.tmp-'))
   /** 写入器的时钟晚于两次采集（盘上的 generatedAt 不算「晚于当前时刻」）。 */
-  const afterBoth = { now: () => T0 + 1000, sleep: async () => {} }
+  const afterBoth = { now: () => T0 + 1000, sleep: async () => {}, get lock() { return viewLock() } }
 
   it('PA-09 两个写入器：早采集的晚写时不覆盖晚采集的，四个全局视图都留晚的那份，不留临时文件', async () => {
     const h = harness()
@@ -1065,7 +1068,7 @@ describe('视图写入', () => {
     const sleeps: number[] = []
     const sleep = (ms: number) => { sleeps.push(ms); return new Promise<void>(resolve => { wake = resolve }) }
     let next = await h.views()
-    const a = new ViewWriter({ memoryRoot: root, collect: async () => next, now: () => t, sleep })
+    const a = new ViewWriter({ memoryRoot: root, collect: async () => next, now: () => t, sleep, lock: viewLock() })
     await a.request(['library'])
     t += 40
     h.setClock(t)
@@ -1120,7 +1123,7 @@ describe('视图写入', () => {
     let wake!: () => void
     const sleeps: number[] = []
     const sleep = (ms: number) => { sleeps.push(ms); return new Promise<void>(resolve => { wake = resolve }) }
-    const a = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') }, now: () => t, sleep })
+    const a = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') }, now: () => t, sleep, lock: viewLock() })
     await a.requestWorkspace('/w/a1', '/w/a1')
     t += 40
     const waiting = a.requestWorkspace('/w/a2', '/w/a2')

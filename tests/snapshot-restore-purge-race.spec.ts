@@ -40,7 +40,7 @@ function session() {
   const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
   const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats }), undefined, sidecar.recallStats)
   const snapshots = new SnapshotStore(sidecar.snapshots)
-  const decisions = new PendingDecisionsStore(sidecar.pending)
+  const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
   return {
     store, snapshots,
     forget: (ids: string[]) => executeForget({ ids, reason: '含密钥' }, ctx, { store, snapshots, decisions }),

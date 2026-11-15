@@ -52,11 +52,11 @@ afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 function env(opts: { llm?: SemanticLlm } = {}) {
   const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
   const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => NOW }), undefined, sidecar.recallStats)
-  const decisions = new PendingDecisionsStore(sidecar.pending)
+  const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
   const snapshots = new SnapshotStore(sidecar.snapshots)
   const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
   const cache = sidecar.scanCache
-  const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, cache, ignores, registry, memoryRoot: root, now: () => NOW }), now: () => NOW, sleep: async () => {} })
+  const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, cache, ignores, registry, memoryRoot: root, now: () => NOW }), now: () => NOW, sleep: async () => {}, lock: sidecar.lock })
   const host = {
     contextOf: async () => ({ workspacePath: WS, delegationDepth: 0, session: { id: 'sess-1' } }),
     llmOf: () => opts.llm ?? null,

@@ -11,7 +11,7 @@ import type { MemoryLogger } from '../src/storage/table.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import type { MemorySnapshot, PendingDecision } from '../src/governance/schema.ts'
-import { type KvTable } from '../src/kv-table.ts'
+import { type CasKvTable } from '../src/kv-table.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
@@ -121,12 +121,14 @@ describe('按 id 定位先挑在用副本：一层在用、另一层有更新的
 
 describe('快照脱敏串行化：两次 redact 同时进行，互不把对方的明文写回', () => {
   /** list 之后让出一次事件循环再 put：模拟侧表文件读写之间的间隙，让两次读改写交错。 */
-  class SlowKv<T> implements KvTable<T> {
+  class SlowKv<T> implements CasKvTable<T> {
     private inner = new InMemoryKvTable<T>()
     get(key: string) { return this.inner.get(key) }
     async list() { const r = await this.inner.list(); await new Promise(res => setTimeout(res, 0)); return r }
     put(key: string, value: T) { return this.inner.put(key, value) }
     delete(key: string) { return this.inner.delete(key) }
+    deleteIf(key: string, isStill: (current: T) => boolean) { return this.inner.deleteIf(key, isStill) }
+    update(key: string, fn: (current: T | undefined) => T | undefined) { return this.inner.update(key, fn) }
   }
 
   it('同一快照里 X、Y 各含一个密钥，并发 redact({X}) 与 redact({Y}) 后两条都是脱敏的', async () => {

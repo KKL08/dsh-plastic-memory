@@ -1126,7 +1126,7 @@ describe('体检说明文字里的密钥：落进账本、缓存和输出前遮�
     const { root, store } = await fileBackedStore({})
     const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
     const deps = makeDeps({
-      store, decisions: new PendingDecisionsStore(sidecar.pending), cache: sidecar.scanCache, checkups: new CheckupRecordStore(sidecar.checkups),
+      store, decisions: new PendingDecisionsStore(sidecar.pending, sidecar.lock), cache: sidecar.scanCache, checkups: new CheckupRecordStore(sidecar.checkups),
       host: { llmOf: () => llm },
     })
     return { root, deps }
