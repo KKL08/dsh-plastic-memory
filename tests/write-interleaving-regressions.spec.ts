@@ -219,3 +219,23 @@ describe('快照恢复与密钥硬删同一条：恢复读完快照、硬删随�
     expect(firstCall(trace, 0, `readFile(${PROJ}/alpha.md)`, redacted)).toBeGreaterThan(redacted)
   })
 })
+
+// 界面裁决先按 id 查条目在不在，认领之后再读一次。两次之间被别处裁决完的，认领后那次读不到：回的说明要和一开始就查不到时相同
+describe('两次裁决同一条冲突：一次查完条目、认领之前，另一次裁决完', () => {
+  it('后到的那次回「不存在或已处理」，与串行里后裁决的一次相同', async () => {
+    const seed: Seed = { a: 'workspace', b: 'workspace', isSameName: false, conflict: 'open' }
+    const ops: MemOp[] = [{ kind: 'resolve', verdict: 'keep-left' }, { kind: 'resolve', verdict: 'keep-both' }]
+    const s = phasedScheduler([
+      { op: 0, until: call => call.startsWith('readFile(.state/pending/') },
+      { op: 1 },
+      { op: 0 },
+    ])
+    await assertSerialEquivalent(memorySubject(seed), s, ops)
+    // 窗口确实出现了：后一次查条目在前一次落定之前
+    const trace = scheduleTrace(s)
+    const checked = firstCall(trace, 0, call => call.startsWith('readFile(.state/pending/'))
+    const settled = firstCall(trace, 1, call => call.startsWith('rename(.state/pending/'))
+    expect(checked).toBeGreaterThanOrEqual(0)
+    expect(settled).toBeGreaterThan(checked)
+  })
+})

@@ -558,6 +558,8 @@ async function dispatch(
     if (r.kind === 'error') {
       if (r.code === 'cross-workspace') return fail(cmd, 'cross-workspace', r.message, r.rejected)
       if (r.code === 'stale') return behind('stale', adopt?.memoryIds ?? [], r.message)
+      // 认领之后重读才发现条目没了（刚被别处裁决完）：和一开始就查不到同一个说法
+      if (r.code === 'not-found') return notFound(decisionId)
       return fail(cmd, r.code ?? 'failed', r.message)
     }
     if (r.kind === 'resolved' && r.isUnrecorded) return { ok: true, cmd, decisionId, isUnrecorded: true }
