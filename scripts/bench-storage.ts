@@ -10,6 +10,9 @@
  * 计时口径（每项先空跑一轮预热，不计入；之后跑 --rounds 轮取中位数）：
  *   - 构造：新建 SidecarStore + FileTable，零 I/O（应接近 0 ms）。
  *   - readScope（当前项目 + global）：按范围读两目录（读文件、解析、合并召回统计），执行器切换后每次工具调用的基本成本。
+ *     解析缓存是热的（同一个文件表反复读）；另列冷读（每轮新建文件表，缓存是空的）与关缓存两行作对照。
+ *     关缓存仍走缓存的冻结与存取，不等于加缓存之前的版本：比冷读有没有变慢，要拿同机的上一个版本背靠背跑。
+ *     生成完先等过解析缓存的 racy 窗口（3 s），否则刚写下的文件都不进缓存。表后报缓存填满一次的堆增量。
  *   - 快照冻结：SnapshotCache.assemble，每轮一个新 session（预读可见记录 + 组装 + 首次冻结计召回）。
  *   - memory_search / memory_save / update / memory_health：对应执行器；不接 llm / sessionQuery，health 只有规则层。
  *     执行器按范围读：search 与快照读当前项目 + global，health 单层读该层（含 .archive/）+ global，全库体检读全部目录。
@@ -29,6 +32,7 @@ import { setFlagsFromString } from 'node:v8'
 import { runInNewContext } from 'node:vm'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { FileTable } from '../src/storage/file-table.ts'
+import { ParseCache } from '../src/storage/parse-cache.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { ARCHIVE_DIR, GLOBAL_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
@@ -51,6 +55,8 @@ import { expandQueryTerms, matchScore } from '../src/text.ts'
 import { withinValidity } from '../src/record-freshness.ts'
 
 const GLOBAL_COUNT = 200
+/** 生成完等这么久再计时：比解析缓存的 racy 窗口（3 s）多一点。 */
+const SETTLE_WAIT_MS = 3_100
 const DAY = 86_400_000
 
 const { values: opts } = parseArgs({
@@ -219,10 +225,15 @@ try {
   await seedSidecar.recallStats.putMany(seeded.filter(() => rand() < 0.3)
     .map(r => [r.id, { id: r.id, recallCount: 1 + Math.floor(rand() * 20), lastRecalledAt: now - Math.floor(rand() * 30 * DAY) }]))
   const genMs = performance.now() - t0
+  await new Promise(resolve => setTimeout(resolve, SETTLE_WAIT_MS))
 
   // 工具共用的一份运行时（对应插件加载后的接线对象；记忆本身不常驻内存）
   const sidecar = newSidecar(root)
-  const fileTable = new FileTable({ root, stats: sidecar.recallStats, formatIndexLine: fmtIndex, log: quietLog })
+  const newTable = (parseCache?: ParseCache<never>) =>
+    new FileTable({ root, stats: sidecar.recallStats, formatIndexLine: fmtIndex, log: quietLog, parseCache })
+  const fileTable = newTable()
+  const uncached = newTable(new ParseCache({ maxEntries: 0 }))
+  const visibleDirs = [join(root, workspaceDirName(currentWs)), join(root, GLOBAL_DIR)]
   const store = new MemoryStore(fileTable, quietLog, sidecar.recallStats)
   const decisions = new PendingDecisionsStore(sidecar.pending)
   const snapshots = new SnapshotStore(sidecar.snapshots)
@@ -238,6 +249,10 @@ try {
   const updateTargets = seeded.filter(r => r.workspacePath === currentWs && r.status === 'active')
   // 顶层只有 active（非 active 在 .archive/，缺省不读）
   const visibleActive = seeded.filter(r => r.status === 'active' && (r.scope === 'global' || r.workspacePath === currentWs)).length
+  const readVisible = async (table: FileTable) => {
+    const r = await table.readScope(visibleDirs)
+    if (r.records.length !== visibleActive) throw new Error(`readScope 记录数不对：${r.records.length}，应为 ${visibleActive}`)
+  }
 
   // jieba 首次加载（import 包 + 读主词典建实例）在一切计时之前单独测；之后的搜索都是热的
   const tJieba = performance.now()
@@ -249,10 +264,9 @@ try {
     await bench('构造（零 I/O）', async () => {
       new FileTable({ root, stats: newSidecar(root).recallStats, formatIndexLine: fmtIndex, log: quietLog })
     }),
-    await bench('readScope（当前项目 + global）', async () => {
-      const r = await fileTable.readScope([join(root, workspaceDirName(currentWs)), join(root, GLOBAL_DIR)])
-      if (r.records.length !== visibleActive) throw new Error(`readScope 记录数不对：${r.records.length}，应为 ${visibleActive}`)
-    }),
+    await bench('readScope（当前项目 + global）', () => readVisible(fileTable)),
+    await bench('readScope 冷读（每轮新缓存）', () => readVisible(newTable())),
+    await bench('readScope 关缓存', () => readVisible(uncached)),
     await bench('快照冻结（当前项目 + global）', async () => {
       const s = {}
       snapshotCache.setWorkspacePath(s, currentWs)
@@ -296,6 +310,16 @@ try {
   console.log('| 操作 | 中位数 ms | 轮数 |')
   console.log('| --- | ---: | ---: |')
   for (const r of results) console.log(`| ${r.label} | ${r.ms.toFixed(1)} | ${rounds} |`)
+
+  // 解析缓存填满一次的内存：新建一个文件表读一遍可见目录，持有它再 gc，读数相对之前的基线
+  gc()
+  const heap0 = process.memoryUsage().heapUsed
+  const cache = new ParseCache<never>()
+  await newTable(cache).readScope(visibleDirs)   // 前面 memory_save 已加了记录，不核对条数
+  gc()
+  const mb = (bytes: number) => (bytes / 2 ** 20).toFixed(1)
+  console.log('')
+  console.log(`解析缓存填满一次（${cache.size} 条）：堆增量 ${mb(process.memoryUsage().heapUsed - heap0)} MB`)
 
   // —— 检索指标 ——
   // 包一层 store 截下执行器自己那次按范围读取的结果：预筛词、候选、listedCount 都是执行器实际用的，bench 不重算
