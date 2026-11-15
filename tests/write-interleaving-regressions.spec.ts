@@ -190,3 +190,32 @@ describe('遗忘读完、软删之前同一条被改过', () => {
     expect(obs.state.find(([p]) => p === `${PROJ}/beta.md`)?.[1]).toContain('模型改写 1')
   })
 })
+
+// 快照恢复写完再读一次快照，发现已脱敏就撤回刚写的那条（对方删文件在后，会连它一起删）。现状本来就和快照一样时恢复什么也没写，
+// 撤回删掉的就是原来那份：对方随后找不到它，回报删了 0 条，按 id 清待决账本也跟着落空
+describe('快照恢复与密钥硬删同一条：恢复读完快照、硬删随即脱敏', () => {
+  it('现状与快照相同：恢复不写也不撤回，硬删照常删到它', async () => {
+    const seed: Seed = { a: 'workspace', b: 'workspace', isSameName: false, secret: 'a', isSnapshotted: true }
+    const ops: MemOp[] = [{ kind: 'restoreSnapshot' }, { kind: 'hardDelete', id: 'a', layer: 'workspace' }]
+    const nth = (n: number, isCall: (call: string) => boolean) => {
+      let seen = 0
+      return (call: string) => isCall(call) && ++seen === n
+    }
+    // 恢复读快照三次：列出、取出、写入前按盘上现读（见 SnapshotStore.restore）；硬删往快照目录改名两次：自己的先行快照、脱敏既有快照
+    const s = phasedScheduler([
+      { op: 0, until: nth(3, call => call.startsWith('readFile(.state/snapshots/')) },
+      { op: 1, until: nth(2, call => call.startsWith('rename(.state/snapshots/')) },
+      { op: 0 },
+      { op: 1 },
+    ])
+    // 串行里只有「恢复全写完再硬删」与「硬删完再恢复」两种：前者硬删删到它，后者恢复跳过它
+    await assertSerialEquivalent(memorySubject(seed), s, ops)
+    // 窗口确实出现了：恢复写入前读快照时还没脱敏，硬删脱敏之后恢复才去写这一条
+    const trace = scheduleTrace(s)
+    const read = firstCall(trace, 0, nth(3, call => call.startsWith('readFile(.state/snapshots/')))
+    const redacted = firstCall(trace, 1, nth(2, call => call.startsWith('rename(.state/snapshots/')))
+    expect(read).toBeGreaterThanOrEqual(0)
+    expect(redacted).toBeGreaterThan(read)
+    expect(firstCall(trace, 0, `readFile(${PROJ}/alpha.md)`, redacted)).toBeGreaterThan(redacted)
+  })
+})
