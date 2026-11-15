@@ -36,7 +36,7 @@ const sidecar = new SidecarStore({
 })
 const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, log }), log, sidecar.recallStats)
 const snapshots = new SnapshotStore(sidecar.snapshots)
-const decisions = new PendingDecisionsStore(sidecar.pending)
+const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 const session = { id: `s-${tag}`, lastSeq: 1 }
 

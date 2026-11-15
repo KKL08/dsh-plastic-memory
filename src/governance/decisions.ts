@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { CasKvTable, ClaimKvTable } from '../kv-table.ts'
+import type { RootLock } from '../root-lock.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { OverflowLevel } from '../contract-codes.ts'
 import {
@@ -188,25 +189,43 @@ function mergeReport(existing: PendingDecision, input: UpsertInput): PendingDeci
 /** 账本用的表：带排他认领，清理用条件删除。 */
 export type PendingTable = ClaimKvTable<PendingDecision> & Pick<CasKvTable<PendingDecision>, 'deleteIf'>
 
+/** 不跨进程的表（内存表）用：认领段不另拿锁。 */
+const NO_ROOT_LOCK: RootLock = { run: fn => fn() }
+
 export class PendingDecisionsStore {
   private table: PendingTable
+  private readonly lock: RootLock
 
-  constructor(table: PendingTable) {
+  /** lock：记忆根写锁，认领段整段在锁内；接线层注入插件实例的那一把。缺省不拿锁，只给内存表用。 */
+  constructor(table: PendingTable, lock: RootLock = NO_ROOT_LOCK) {
     this.table = table
+    this.lock = lock
   }
 
   /**
-   * 认领一条条目后执行 fn，跑完释放：同一条目同时只有一个持有者（侧表实现跨进程），两条相反的裁决不会各删一方。
-   * 已被别人认领时不等待，返回 { isClaimed: false }，什么都不做。fn 里要重新读条目确认它仍是期望的状态：
-   * 认领之前它可能刚被别人裁决完。不可重入：fn 里不能再认领同一条。
+   * 认领一条条目后在写锁内执行 fn，跑完释放：同一条目同时只有一个持有者（侧表实现跨进程），两条相反的裁决不会各删一方；
+   * 别的进程的写入插不进 fn 中间。先认领再拿锁：已被别人认领时不等待（也不等锁），返回 { isClaimed: false }，什么都不做。
+   * fn 里不能等模型。fn 里要重新读条目确认它仍是期望的状态：认领之前它可能刚被别人裁决完。不可重入：fn 里不能再认领同一条。
+   * 认领在同一段持锁里放掉（表与账本用同一把锁，释放按计数嵌套）：fn 做完不再争锁，免得等锁超时把做成了的事报成失败。
+   * 第一次拿锁就失败时 fn 没跑，单独清理认领；清理失败不盖掉拿锁的错误，认领留到超时按残留清。
    */
   async withClaim<R>(id: string, fn: () => Promise<R>): Promise<{ isClaimed: true; value: R } | { isClaimed: false }> {
     const release = await this.table.claim(id)
     if (release === undefined) return { isClaimed: false }
+    let isEntered = false
     try {
-      return { isClaimed: true, value: await fn() }
-    } finally {
-      await release()
+      const value = await this.lock.run(async () => {
+        isEntered = true
+        try {
+          return await fn()
+        } finally {
+          await release()
+        }
+      })
+      return { isClaimed: true, value }
+    } catch (err) {
+      if (!isEntered) await release().catch(() => {})
+      throw err
     }
   }
 

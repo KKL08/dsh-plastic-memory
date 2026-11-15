@@ -84,7 +84,7 @@ function harness(opts: { readEvent?: ReadEventFn; now?: number } = {}) {
   const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
   const table = new FileTable({ root, stats: sidecar.recallStats })
   const store = new MemoryStore(table, undefined, sidecar.recallStats)
-  const decisions = new PendingDecisionsStore(sidecar.pending)
+  const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
   const snapshots = new SnapshotStore(sidecar.snapshots)
   const session = { id: 's-test', lastSeq: 10, turnStartSeq: 5 }
   /** ws 传 null 表示没有工作目录的会话（global 层视图）；默认当前项目。 */

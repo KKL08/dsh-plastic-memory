@@ -52,6 +52,18 @@ export function createRootLock(opts: RootLockOptions): RootLock {
   return new SqliteRootLock(opts)
 }
 
+const defaultLocks = new Map<string, RootLock>()
+
+/**
+ * 文件表、侧表没注入写锁时用的缺省锁：同一进程里同一个记忆根共用一个实例，文件表在锁内写侧表时按计数嵌套，不会自己等自己。
+ * 插件接线层不用它：每个插件实例自己建一个注入各写入点，热重载时新旧实例才互斥。
+ */
+export function defaultRootLock(root: string, log: MemoryLogger): RootLock {
+  let lock = defaultLocks.get(root)
+  if (lock === undefined) defaultLocks.set(root, lock = createRootLock({ root, log }))
+  return lock
+}
+
 /**
  * 同步加载 node:sqlite，只吞掉它第一次加载时那条 SQLite 实验特性警告（Node 24.15 之前会打到 stderr），
  * 其余警告照常转发。替换与还原在同一个同步块里，中间不会跑别的代码。

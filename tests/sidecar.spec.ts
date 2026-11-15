@@ -88,6 +88,7 @@ async function exists(path: string) {
 async function listFiles(dir: string, prefix = ''): Promise<string[]> {
   const out: string[] = []
   for (const e of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+    if (e.isDirectory() && prefix === '' && e.name === 'lock') continue // 写锁的锁库目录：常驻、不存数据，不算侧表文件
     if (e.isDirectory()) out.push(...await listFiles(join(dir, e.name), `${prefix}${e.name}/`))
     else out.push(prefix + e.name)
   }

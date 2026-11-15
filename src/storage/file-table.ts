@@ -12,6 +12,8 @@ import type { KvTable } from '../kv-table.ts'
 import type { RecallStats } from './schema.ts'
 import { decodeFile, digestMismatch, encodeRecord, type DecodeOutcome, type FileLocation } from './frontmatter.ts'
 import { ParseCache, type CachedFile, type FileSignature } from './parse-cache.ts'
+import type { RootLock } from '../root-lock.ts'
+import { defaultRootLock } from './root-lock.ts'
 import {
   WORKSPACE_MARKER, INDEX_FILE, GLOBAL_DIR, ARCHIVE_DIR, workspaceDirName, slugifyName, isReservedFileName,
   isMemoryFileName, isCompanionLikeFileName, isWorkspaceDirName, deriveFileId, isDerivedFileId,
@@ -72,6 +74,8 @@ export interface FileTableOptions {
   log?: MemoryLogger
   /** 解析缓存，缺省每个文件表新建一个；只在本文件内部用（readDirs）。 */
   parseCache?: ParseCache<DecodeOutcome>
+  /** 记忆根写锁，写路径与维护点都在锁内。接线层注入插件实例的那一把；缺省用同一进程同一记忆根共用的那把（root-lock.ts）。 */
+  lock?: RootLock
 }
 
 /**
@@ -118,8 +122,8 @@ function frontmatterOf(raw: string): string {
 /**
  * 文件表：磁盘是唯一真相，进程里不常驻记忆表。构造不做 I/O；每个操作读它涉及的目录。
  * 读目录时每个文件都 stat，签名没变才用解析缓存里的结果（parse-cache.ts），外部改动下一次读就能看到。
- * 读路径不加锁、不写盘；写路径经一条 Promise 链串行，锁内先 locate 重读磁盘再应用修改（外部编辑不丢）；create 是例外：新 id 不定位，排他占名。
- * 锁只管本进程：写盘前复核文件原文仍是 locate 读到的那份，被别的进程或用户改过就重新 locate、重算后再写。
+ * 读路径不加锁、不写盘；写路径经一条 Promise 链串行、在记忆根写锁内，锁内先 locate 重读磁盘再应用修改（外部编辑不丢）；create 是例外：新 id 不定位，排他占名。
+ * 写锁让插件进程之间的写入互斥；用户手编、git 这类外部写者不认锁：写盘前复核文件原文仍是 locate 读到的那份，被改过就重新 locate、重算后再写。
  * 记忆目录的维护只有两处入口：写路径末尾（被写的目录）与 maintain（快照冻结时由调用方对 global + 当前 workspace 调用），都走同一把锁。
  */
 export class FileTable implements MemoryTable {
@@ -127,18 +131,21 @@ export class FileTable implements MemoryTable {
   private readonly log: MemoryLogger
   private readonly opts: FileTableOptions
   private readonly parseCache: ParseCache<DecodeOutcome>
+  private readonly lock: RootLock
   readonly globalDir: string
 
   constructor(opts: FileTableOptions) {
     this.opts = opts
     this.log = opts.log ?? console
     this.parseCache = opts.parseCache ?? new ParseCache()
+    this.lock = opts.lock ?? defaultRootLock(opts.root, this.log)
     this.globalDir = join(opts.root, GLOBAL_DIR)
   }
 
-  /** 互斥执行：所有写路径都经过这里串行。 */
+  /** 互斥执行：所有写路径都经过这里，进程内按链串行，轮到了再拿写锁（排队期间不占写锁）。 */
   private locked<T>(fn: () => Promise<T>): Promise<T> {
-    const next = this.chain.then(fn, fn)
+    const run = () => this.lock.run(fn)
+    const next = this.chain.then(run, run)
     this.chain = next.catch(() => {})
     return next
   }
@@ -437,7 +444,7 @@ export class FileTable implements MemoryTable {
    *  - ① 再生 MEMORY.md：顶层 active 且未过期，同 id 取一份，name 再 id 排序，内容不变不写
    *  - ⑤ 陈旧 tmp 清理
    * 同 id 副本不在这里删（只在写该 id 时清理，见 persist）。
-   * 锁只管本进程：回写、搬家、过期删除动手前都复核磁盘原文，读后被别的进程或用户改过的文件本轮跳过，下次维护再处理。
+   * 写锁挡不住用户手编、git，写锁不可用时也挡不住别的进程：回写、搬家、过期删除动手前都复核磁盘原文，读后被改过的文件本轮跳过，下次维护再处理。
    */
   private async maintainDirs(dirs: readonly string[]): Promise<void> {
     const { scopeDirs } = await this.resolveDirs([...new Set(dirs)])

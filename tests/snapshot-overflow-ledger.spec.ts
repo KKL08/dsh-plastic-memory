@@ -27,7 +27,7 @@ afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
 function ledger() {
   const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
-  return new PendingDecisionsStore(sidecar.pending)
+  return new PendingDecisionsStore(sidecar.pending, sidecar.lock)
 }
 
 async function seed(store: MemoryStore, n: number, prefix = 'mem') {

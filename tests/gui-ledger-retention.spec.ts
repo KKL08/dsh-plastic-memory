@@ -26,7 +26,7 @@ describe('保留窗口过后连带清理已裁决条目', () => {
     let clock = T0
     const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
     const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => clock }), undefined, sidecar.recallStats)
-    const decisions = new PendingDecisionsStore(sidecar.pending)
+    const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
     const snapshots = new SnapshotStore(sidecar.snapshots)
     const resolve = (decisionId: string, verdict: 'keep-left' | 'keep-both') =>
       executeConfirm({ action: 'resolve', decisionId, verdict }, { workspacePath: undefined }, { instructions: noInstructions, store, decisions, snapshots, now: () => clock })
@@ -50,7 +50,7 @@ describe('保留窗口过后连带清理已裁决条目', () => {
 
   it('下一次裁决顺手清扫：不用单独调 sweep', async () => {
     const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
-    const decisions = new PendingDecisionsStore(sidecar.pending)
+    const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
     const old = (await decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '', fingerprint: 'f1' }, T0)).entry
     await decisions.settle(old.id, 'keep-right', T0, { snapshotId: 'snap_old' })
     const next = (await decisions.upsert({ memoryIds: ['mem_c', 'mem_d'], summary: '', fingerprint: 'f2' }, T0)).entry
@@ -60,7 +60,7 @@ describe('保留窗口过后连带清理已裁决条目', () => {
 
   it('提升为全局的条目同样过了保留窗口就清掉（快照已过期，不能再撤销）；留在本项目的不动', async () => {
     const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
-    const decisions = new PendingDecisionsStore(sidecar.pending)
+    const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
     const promoted = (await decisions.upsert({ kind: 'promote-candidate', memoryIds: ['mem_p'], summary: '', fingerprint: 'fp' }, T0)).entry
     const local = (await decisions.upsert({ kind: 'promote-candidate', memoryIds: ['mem_q'], summary: '', fingerprint: 'fq' }, T0)).entry
     await decisions.settle(promoted.id, 'promoted', T0, { snapshotId: 'snap_p' })

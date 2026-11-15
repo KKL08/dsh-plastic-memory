@@ -14,7 +14,7 @@ import { apply, Config, inject } from '../src/index.ts'
 import { SidecarStore, STATE_DIR, RECALL_STATS_FILE } from '../src/storage/sidecar.ts'
 import { KV_IMPORT_MARKER } from '../src/storage/legacy-kv-import.ts'
 import { kvImportMarkerSchema } from '../src/storage/schema.ts'
-import { WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
+import { INDEX_FILE, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { TypeRegistryError } from '../src/errors.ts'
 import { buildSemanticPrompt } from '../src/governance/semantic-scan.ts'
@@ -40,6 +40,9 @@ import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
 import { defaultJiebaLoader } from '../src/search/jieba-segmenter.ts'
+import { createRootLock } from '../src/storage/root-lock.ts'
+import { encodeMemoryCommand } from '../src/gui/contract.ts'
+import { fireUntilSettled, manualTimers } from './helpers/manual-timers.ts'
 
 // 进程边界的观察：fsTrace.on 期间记下插件对 node:fs、node:fs/promises 的每次调用（函数名 + 第一个参数）。平时原样透传。
 // fsTrace.hold：给了就先问它一次（参数形如 `readFile(<路径>)`），返回 promise 的那次 node:fs/promises 调用等它落定再执行。
@@ -2276,5 +2279,116 @@ describe('配置热生效（loader/volatile-update）', () => {
     const pending = await readNow('pending', pendingViewSchema)
     expect([pending.items, pending.dot]).toEqual([[], 'none'])
     expect(await new PendingDecisionsStore(sidecarAt(t.memoryRoot).pending).listOverflow()).toEqual([])
+  })
+})
+
+/**
+ * 写锁的接线：插件实例在接线层建一把写锁，注入文件表、侧表、待决账本。在文件系统边界把某次写入挂住，
+ * 再用同一记忆根上另一个写锁实例去拿锁：拿不到（挂上退避计时器）就说明挂住的那次写入在写锁内。
+ */
+describe('写锁接线', () => {
+  type ToolDef = { name: string; execute(args: unknown, exec: unknown): Promise<unknown> }
+
+  /** 另一个写锁实例此刻拿不到锁；返回它的那次 run，用例最后推进计时器让它拿到。 */
+  async function expectLockHeld(memoryRoot: string) {
+    const timers = manualTimers()
+    const probe = createRootLock({ root: memoryRoot, log: { info() {}, warn() {}, error() {} }, timers })
+    const probed = probe.run(async () => {})
+    await timers.scheduled()
+    return () => fireUntilSettled(probed, timers).then(() => probed)
+  }
+
+  it('RL-15 接线层：旧实例卸载时还有没写完的写入，新实例同时写入：每次写入都在写锁内，新旧实例互斥，结果和串行一致', async () => {
+    const memoryRoot = await makeTmpRoot()
+    const config = new Config({ memoryRoot, governance: { enabled: false, onWrite: false } } as never)
+    const cwd = await realpath(await makeTmpRoot())
+    const boot = async () => {
+      const defs = new Map<string, ToolDef>()
+      const ctx = { ...mockCtx(), tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } }, logger: { info() {}, warn() {}, error() {} } }
+      await apply(ctx as never, config)
+      const save = (name: string) => defs.get('memory_save')!.execute(
+        { action: 'create', scope: 'workspace', type: 'preference', name, content: `${name} 的正文`, summary: name, sourceMode: 'user-explicit' },
+        fakeExec({ agent: { session: hostSession(`sess-${name}`, { cwd }), options: {} } } as never)) as Promise<{ kind: string; record?: { id: string } }>
+      return { ctx, save }
+    }
+    // 挂住每一次记忆文件的写入（写临时文件那一步，目录索引不算），按到达顺序排队；另记下拿写锁时建锁库目录的调用（每次尝试拿锁都会建一次）
+    const memoryDir = join(memoryRoot, workspaceDirName(cwd))
+    const prefix = `writeFile(${memoryDir}${sep}`
+    const lockDir = join(memoryRoot, STATE_DIR, 'lock')
+    const arrivals: Array<{ name: string; release: () => void }> = []
+    let lockAttempts = 0
+    let onArrive: (() => void) | undefined
+    fsTrace.hold = call => {
+      if (call === `mkdir(${lockDir})`) lockAttempts++
+      if (!call.startsWith(prefix) || !call.includes('.md.tmp-') || call.startsWith(`${prefix}${INDEX_FILE}`)) return undefined
+      return new Promise<void>(release => {
+        arrivals.push({ name: call.slice(prefix.length).split('.md.tmp-')[0]!, release })
+        onArrive?.()
+      })
+    }
+    const nextArrival = async (n: number) => { while (arrivals.length < n) await new Promise<void>(resolve => { onArrive = resolve }) }
+
+    const old = await boot()
+    const alpha = old.save('alpha')
+    const beta = old.save('beta')
+    // 先到文件表的那次写入挂在锁里，另一次排在它后面，卸载时都还没写完
+    await nextArrival(1)
+    const first = arrivals[0]!.name
+    expect(['alpha', 'beta']).toContain(first)
+    const probes = [await expectLockHeld(memoryRoot)]
+
+    await old.ctx.dispose()
+    const fresh = await boot()
+    const attemptsBefore = lockAttempts
+    const gamma = fresh.save('gamma')
+    // 新实例拿锁撞上旧实例正持着的锁、退避后又试了一次；这期间它的写入没有落盘
+    await vi.waitFor(() => { expect(lockAttempts - attemptsBefore).toBeGreaterThanOrEqual(2) })
+    expect(arrivals.map(a => a.name)).toEqual([first])
+
+    for (let n = 1; n <= 3; n++) {
+      await nextArrival(n)
+      if (n > 1) probes.push(await expectLockHeld(memoryRoot))
+      arrivals[n - 1]!.release()
+    }
+    const saved = await Promise.all([alpha, beta, gamma])
+    expect(saved.map(r => r.kind)).toEqual(['saved', 'saved', 'saved'])
+    expect(arrivals.map(a => a.name).sort()).toEqual(['alpha', 'beta', 'gamma'])
+    fsTrace.hold = undefined
+    for (const probe of probes) await probe()
+
+    const files = (await readdir(memoryDir)).sort()
+    expect(files).toEqual([WORKSPACE_MARKER, INDEX_FILE, 'alpha.md', 'beta.md', 'gamma.md'])
+    const index = await readFile(join(memoryDir, INDEX_FILE), 'utf8')
+    for (const r of saved) expect(index).toContain(r.record!.id)
+  })
+
+  it('RL-19 接线层：界面裁决命令认领之后整段在写锁内', async () => {
+    const memoryRoot = await makeTmpRoot()
+    const defs: Array<{ handler(inv: { rawInput: string; agent: unknown }): Promise<{ kind: string; text?: string }> }> = []
+    const ctx = mockCtx({ commands: { register: (def) => { defs.push(def as (typeof defs)[number]); return () => {} } } })
+    await apply({ ...ctx, logger: { info() {}, warn() {}, error() {} } } as never, new Config({ memoryRoot } as never))
+    const { entry } = await new PendingDecisionsStore(sidecarAt(memoryRoot).pending).upsert({ kind: 'overflow', memoryIds: [], summary: '超出上限', fingerprint: '1' }, 1)
+    // 认领文件建好之后，裁决段里第一次读这条待决项时挂住
+    const pendingDir = join(memoryRoot, STATE_DIR, 'pending')
+    let isClaimed = false
+    let release!: () => void
+    let markHeld!: () => void
+    const held = new Promise<void>(resolve => { markHeld = resolve })
+    fsTrace.hold = call => {
+      if (call.startsWith(`writeFile(${join(pendingDir, `${entry.id}.claim`)}`)) isClaimed = true
+      else if (isClaimed && call === `readFile(${join(pendingDir, `${entry.id}.json`)})`) {
+        fsTrace.hold = undefined
+        markHeld()
+        return new Promise<void>(resolve => { release = resolve })
+      }
+      return undefined
+    }
+    const agent = { session: { header: { id: 'sess-x' }, seq: 1 } }
+    const ran = defs[0]!.handler({ rawInput: encodeMemoryCommand({ cmd: 'dismiss-overflow', decisionId: entry.id }).slice('/memory'.length), agent })
+    await held
+    const probe = await expectLockHeld(memoryRoot)
+    release()
+    expect(JSON.parse((await ran).text!)).toMatchObject({ ok: true, cmd: 'dismiss-overflow', decisionId: entry.id })
+    await probe()
   })
 })

@@ -41,7 +41,7 @@ const sidecar = new SidecarStore({
   root, log, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema },
 })
 const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, log, now }), log, sidecar.recallStats)
-const decisions = new PendingDecisionsStore(sidecar.pending)
+const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
 const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
 const cache = sidecar.scanCache
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })

@@ -67,7 +67,7 @@ function harness() {
   const table = new FileTable({ root, stats: sidecar.recallStats })
   const store = new MemoryStore(table, undefined, sidecar.recallStats)
   const snapshots = new SnapshotStore(sidecar.snapshots)
-  const decisions = new PendingDecisionsStore(sidecar.pending)
+  const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
   const ctx = async () => ({ workspacePath: WS, session: SESSION })
   const cache = new SnapshotCache({ store, registry, budget: 4000, memoryRoot: root })
   return {

@@ -8,6 +8,8 @@ import { autoCheckupSettingSchema, checkupRecordSchema, recallStatsSchema, type 
 import { STATE_DIR } from './paths.ts'
 import { SAFE_KEY_RE, atomicWrite, breakStaleLock, createExclusive, describeError, errnoCode, isStaleLock, lockOwner } from './state-files.ts'
 import { LegacyKvImport, type LegacyKvTables } from './legacy-kv-import.ts'
+import type { RootLock } from '../root-lock.ts'
+import { defaultRootLock } from './root-lock.ts'
 
 /**
  * 侧表文件存储：快照、待决账本、扫描缓存、
@@ -24,9 +26,9 @@ import { LegacyKvImport, type LegacyKvTables } from './legacy-kv-import.ts'
  *   .state/auto-checkups/<sha1(范围键)>.json  自动体检设置表，每个范围一文件
  *   .state/recall-stats.json        整张表一个文件 { [id]: RecallStats }
  *
- * 写都是 tmp + rename 原子写，进程内经一条 Promise 链串行；读不加锁。侧表读写跨进程单条 LWW，
- * 旧 KV 导入用锁文件跨进程串行，裁决用条目旁的认领文件跨进程互斥（同一条待决项同时只许一次裁决），
- * 体检同样按范围认领（同一个范围同时只体检一次）。
+ * 写都是 tmp + rename 原子写，进程内经一条 Promise 链串行，轮到了再拿记忆根写锁（排队期间不占写锁）；读不加锁。
+ * 旧 KV 导入另用锁文件跨进程串行，裁决用条目旁的认领文件跨进程互斥（同一条待决项同时只许一次裁决），
+ * 体检同样按范围认领（同一个范围同时只体检一次）。认领不进进程内链：排他创建、发现被占都不拿写锁，只有清残留、刷新、释放各自进写锁。
  * 坏文件跳过并记日志，不抛。快照、账本、扫描缓存、建议忽略表的条目 schema 由接线层注入（storage 不 import governance）；
  * 体检记录表、自动体检设置表的 schema 是存储层自己的（storage/schema.ts），不经注入。
  *
@@ -60,12 +62,16 @@ export interface SidecarOptions<S, P, C, I> {
   openLegacyKv?: () => Promise<LegacyKvTables | undefined>
   log?: MemoryLogger
   now?: () => number
+  /** 记忆根写锁。接线层注入插件实例的那一把；缺省用同一进程同一记忆根共用的那把（root-lock.ts）。 */
+  lock?: RootLock
 }
 
 type Locked = <R>(fn: () => Promise<R>) => Promise<R>
 
 interface TableEnv {
   locked: Locked
+  /** 记忆根写锁本身：认领的清残留、刷新、释放直接用它，不经进程内链 */
+  lock: RootLock
   /** 导入屏障；召回统计表不用 */
   ready: () => Promise<void>
   log: MemoryLogger
@@ -204,27 +210,42 @@ class EntryFileTable<T extends { id: string }> implements ClaimKvTable<T>, CasKv
     await mkdir(this.dir, { recursive: true })
     const id = Math.random().toString(36).slice(2)
     const claimText = () => JSON.stringify({ pid: process.pid, at: this.env.now(), id })
+    const { lock } = this.env
+    const owned: RefreshableClaim = {
+      refresh: () => lock.run(async () => {
+        if (await lockOwner(path) !== id) return false
+        await atomicWrite(path, claimText())
+        return true
+      }),
+      release: () => lock.run(async () => { if (await lockOwner(path) === id) await rm(path, { force: true }) }),
+    }
+    // 快速路径不拿写锁：排他创建本身原子；被占且没超时立即返回，不等对方的裁决段
     for (let attempt = 0; attempt < 2; attempt++) {
-      if (await createExclusive(path, claimText())) {
-        return {
-          refresh: async () => {
-            if (await lockOwner(path) !== id) return false
-            await atomicWrite(path, claimText())
-            return true
-          },
-          release: async () => { if (await lockOwner(path) === id) await rm(path, { force: true }) },
-        }
-      }
-      let held: string
+      if (await createExclusive(path, claimText())) return owned
+      let text: string
       try {
-        held = await readFile(path, 'utf8')
+        text = await readFile(path, 'utf8')
       } catch (err) {
         if (errnoCode(err) === 'ENOENT') continue // 刚被释放
         throw err
       }
-      if (!isStaleLock(held, this.env.now(), CLAIM_STALE_MS)) return undefined
-      this.env.log.warn(`[plastic-memory] 认领残留（持有进程已退出或超时），清理后重试：${path}`)
-      await breakStaleLock(path, held)
+      if (!isStaleLock(text, this.env.now(), CLAIM_STALE_MS)) return undefined
+      // 残留：进写锁清掉再建，清与建之间别的进程不会再清一次。锁外读到的可能已过时（持有者等锁期间刚刷新过），
+      // 锁内重读再判：刷新、释放也在锁内，判定到清理之间它不会再变
+      const isCreated = await lock.run(async () => {
+        let current: string
+        try {
+          current = await readFile(path, 'utf8')
+        } catch (err) {
+          if (errnoCode(err) !== 'ENOENT') throw err
+          return createExclusive(path, claimText()) // 刚被释放
+        }
+        if (!isStaleLock(current, this.env.now(), CLAIM_STALE_MS)) return false
+        this.env.log.warn(`[plastic-memory] 认领残留（持有进程已退出或超时），清理后重试：${path}`)
+        await breakStaleLock(path, current)
+        return createExclusive(path, claimText())
+      })
+      if (isCreated) return owned
     }
     return undefined
   }
@@ -323,9 +344,11 @@ class MapFileTable<T> implements BatchKvTable<T> {
   }
 
   async delete(key: string): Promise<boolean> {
+    // 不存在不写盘、也不拿写锁：加载期的清扫不该建出 .state/。锁外读到没有，就当删在别处写入之前
+    if (!(await this.readAll()).has(key)) return false
     return this.env.locked(async () => {
       const current = await this.readAll()
-      if (!current.has(key)) return false // 不存在不写盘：加载期的清扫不该建出 .state/
+      if (!current.has(key)) return false
       const next = new Map(current)
       next.delete(key)
       await this.writeAll(next)
@@ -347,6 +370,8 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
   private readonly opts: SidecarOptions<S, P, C, I>
   private readonly log: MemoryLogger
   private chain: Promise<unknown> = Promise.resolve() // 进程内互斥：侧表写与导入串行化
+  /** 记忆根写锁：侧表写、导入都在锁内；接线层把同一把也注入文件表与待决账本 */
+  readonly lock: RootLock
   private readonly legacy: LegacyKvImport<S, P>
 
   /** 构造不做 I/O：目录按需在首次写入时建。 */
@@ -354,14 +379,16 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
     this.opts = opts
     this.log = opts.log ?? console
     this.stateDir = join(opts.root, STATE_DIR)
+    this.lock = opts.lock ?? defaultRootLock(opts.root, this.log)
+    const lock = this.lock
     const locked: Locked = fn => this.locked(fn)
     const now = () => this.now()
     this.legacy = new LegacyKvImport({
       stateDir: this.stateDir, dirs: { snapshots: SNAPSHOTS_DIR, pending: PENDING_DIR },
       schemas: { snapshots: opts.schemas.snapshots, pending: opts.schemas.pending }, openLegacyKv: opts.openLegacyKv, locked, log: this.log, now,
     })
-    const gated: TableEnv = { locked, ready: () => this.legacy.ensureImported(), log: this.log, now }
-    const ungated: TableEnv = { locked, ready: async () => {}, log: this.log, now }
+    const gated: TableEnv = { locked, lock, ready: () => this.legacy.ensureImported(), log: this.log, now }
+    const ungated: TableEnv = { locked, lock, ready: async () => {}, log: this.log, now }
     const safeKey = (key: string) => (SAFE_KEY_RE.test(key) ? key : undefined)
     const sha1 = (key: string) => createHash('sha1').update(key).digest('hex')
     this.snapshots = new EntryFileTable(join(this.stateDir, SNAPSHOTS_DIR), safeKey, opts.schemas.snapshots, gated)
@@ -378,8 +405,10 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
     return this.legacy.isImportSettled()
   }
 
+  /** 进程内按链串行，轮到了再拿写锁。 */
   private locked<R>(fn: () => Promise<R>): Promise<R> {
-    const next = this.chain.then(fn, fn)
+    const run = () => this.lock.run(fn)
+    const next = this.chain.then(run, run)
     this.chain = next.catch(() => {})
     return next
   }

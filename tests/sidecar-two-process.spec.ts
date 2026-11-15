@@ -159,7 +159,7 @@ describe('双进程工具调用', () => {
     expect((await Promise.all([a.exited, b.exited])).map(([code]) => code)).toEqual([0, 0])
 
     const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
-    const entries = await new PendingDecisionsStore(sidecar.pending).list()
+    const entries = await new PendingDecisionsStore(sidecar.pending, sidecar.lock).list()
     expect(entries.map(e => dedupKey(e.memoryIds)).sort()).toEqual(pairs.map(p => dedupKey(p)).sort())
     expect(ra.created + rb.created).toBe(pairs.length)
     const files = await readdir(join(root, STATE_DIR, 'pending'))

@@ -84,7 +84,7 @@ function harness() {
   const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats }), undefined, sidecar.recallStats)
   // 同接线层：快照落盘后按副本复核
   const snapshots = new SnapshotStore(sidecar.snapshots, { findGone: goneCopies(store) })
-  const decisions = new PendingDecisionsStore(sidecar.pending)
+  const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
   return {
     store, snapshots, sidecar,
     forget: (ids: string[], reason = '含密钥', log?: MemoryLogger) =>
