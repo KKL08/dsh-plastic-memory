@@ -54,7 +54,8 @@ function localKeyOf(command: MemoryCommand, code: GuiErrorCode): LocaleKey | und
   switch (code) {
     case 'stale':
       return command.cmd === 'undo' || command.cmd === 'restore' ? 'pending.undo.stale'
-        : command.cmd === 'ignore-advice' ? 'pending.ignore.stale' : 'pending.edit.stale'
+        : command.cmd === 'ignore-advice' ? 'pending.ignore.stale'
+        : command.cmd === 'forget' || command.cmd === 'hard-delete' ? 'pending.delete.stale' : 'pending.edit.stale'
     // 按记忆动手的：要动的记忆已经不在（多半在外面删了），服务端已重写视图。待决项的在前面算别处已处理；撤销的是快照没了，照常显示原话
     case 'not-found': return 'memoryId' in command || 'memories' in command ? 'pending.memory.gone' : undefined
     case 'secret-critical': return 'pending.edit.secretCritical'
