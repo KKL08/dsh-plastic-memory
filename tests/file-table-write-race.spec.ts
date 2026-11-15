@@ -175,8 +175,8 @@ describe('put：locate 之后文件被改，按新的位置与附加字段重写
 function afterGet(store: MemoryStore, id: string, act: (loc: LocatedFile) => Promise<void>) {
   const get = store.get.bind(store)
   let fired = false
-  vi.spyOn(store, 'get').mockImplementation(async (gid, hint) => {
-    const r = await get(gid, hint)
+  vi.spyOn(store, 'get').mockImplementation(async (gid, hint, opts) => {
+    const r = await get(gid, hint, opts)
     if (gid === id && !fired && r !== undefined) {
       fired = true
       await act((await store.locate(gid, hint))!)
