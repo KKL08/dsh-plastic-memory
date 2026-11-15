@@ -22,6 +22,9 @@ All notable changes to this project are documented here. The format follows
   missing; the delete now finds it.
 - A snapshot could have a memory redacted when that memory had only been
   promoted to another scope; it is now left intact unless it holds a secret.
+- A snapshot taken while a memory with a suspected secret was being deleted
+  for good could keep the secret if another file in that scope was
+  unreadable; it is now redacted.
 - Forgetting a memory that was edited after it was read removed the newer
   text; it is now skipped and reported.
 - Restoring a snapshot whose entries already matched the files could mark

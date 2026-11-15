@@ -2,7 +2,7 @@ import type { MemoryRecord } from '../record-schema.ts'
 import type { GovernanceRejectCode } from '../contract-codes.ts'
 import type { LocateOptions, MemoryStore } from '../store.ts'
 import { ledgerLabel, scopeKey, scopeOfMemory, type Scope } from '../scope.ts'
-import { hasCriticalSecret, hasSecret } from '../secrets.ts'
+import { hasSecret } from '../secrets.ts'
 import { editFingerprint } from '../governance/snapshots.ts'
 
 /** 据定位结果做不可逆决定（脱敏）的地方用：没找到在写锁内确认，见 LocateOptions。 */
@@ -87,8 +87,8 @@ export const goneCopies = (store: Pick<MemoryStore, 'get' | 'readRaw' | 'copiesO
     // 拍快照之后被别的写入搬到了别的作用域：记录还在用，快照里的原文也没多留什么。含密钥的一律当被删：内容相同证明不了是搬家，
     // 别层可能是另一份独立副本、这一份刚被只删这一层的硬删清掉，豁免了就留下能恢复出来的明文；错脱敏的代价只是这份快照恢复不了它
     if (!hasSecret(r) && await isMovedElsewhere(store, r, scope)) continue
-    // 有读不出的文件时，读不出的可能就是它：只有含高危密钥的照样判不在（错脱敏也比留明文强），其余的说不准，不判
-    if (!read.isPartial || hasCriticalSecret(r)) gone.add(r)
+    // 有读不出的文件时，读不出的可能就是它：只有含密钥的（高危或疑似）照样判不在（错脱敏也比留明文强），其余的说不准，不判
+    if (!read.isPartial || hasSecret(r)) gone.add(r)
   }
   return gone
 }
