@@ -163,3 +163,30 @@ describe('快照读完、落盘前，同一条含密钥的记录只在项目这�
     })
   }
 })
+
+// 遗忘（含裁决删败方）在锁外预读、按读数拍先行快照，再在锁内软删。两步之间别的写入改了这条时，删掉的是新版本、快照里是旧版本，
+// 撤销按快照恢复就把那次改写丢了。软删在锁内按预读的内容和位置核对，对不上就不删
+describe('遗忘读完、软删之前同一条被改过', () => {
+  it('模型改写插在裁决删败方的预读与软删之间：败方不删、留着改写后的那一版，条目仍未决', async () => {
+    const seed: Seed = { a: 'workspace', b: 'workspace', isSameName: false, conflict: 'open' }
+    const ops: MemOp[] = [{ kind: 'resolve', verdict: 'keep-left' }, { kind: 'modelRewrite', id: 'b', isForced: true }]
+    const obs = await observeSerial(memorySubject(seed), ops, [{ index: 0, part: 'read' }, { index: 1, part: 'all' }, { index: 0, part: 'commit' }])
+    expect((obs.outcomes[0] as { value: { ok: boolean } }).value.ok).toBe(false)
+    const file = (path: string) => obs.state.find(([p]) => p === path)?.[1]
+    expect(file(`${PROJ}/beta.md`)).toContain('模型改写 1')
+    expect(file(`${PROJ}/.archive/beta.md`)).toBeUndefined()
+    // 模型改写另记一条可撤销的改写条目，这里只看那条冲突
+    const conflicts = obs.state.filter(([p]) => p.startsWith('.state/pending/') && p.endsWith('.json'))
+      .map(([, text]) => JSON.parse(text) as { fingerprint?: string; settled?: unknown }).filter(e => e.fingerprint === 'fp-ab')
+    expect(conflicts).toHaveLength(1)
+    expect(conflicts[0]!.settled).toBeUndefined()
+  })
+
+  it('模型改写插在遗忘的预读与软删之间：不删，计入的遗忘里没有它', async () => {
+    const seed: Seed = { a: 'workspace', b: 'workspace', isSameName: false }
+    const ops: MemOp[] = [{ kind: 'forget', id: 'b' }, { kind: 'modelRewrite', id: 'b', isForced: true }]
+    const obs = await observeSerial(memorySubject(seed), ops, [{ index: 0, part: 'read' }, { index: 1, part: 'all' }, { index: 0, part: 'commit' }])
+    expect((obs.outcomes[0] as { value: { forgotten: string[] } }).value.forgotten).toEqual([])
+    expect(obs.state.find(([p]) => p === `${PROJ}/beta.md`)?.[1]).toContain('模型改写 1')
+  })
+})

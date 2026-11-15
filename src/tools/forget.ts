@@ -3,7 +3,7 @@ import type { SnapshotStore } from '../governance/snapshots.ts'
 import type { PendingDecisionsStore } from '../governance/decisions.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { MemorySnapshot } from '../governance/schema.ts'
-import { redactRecord } from '../governance/snapshots.ts'
+import { editFingerprint, redactRecord } from '../governance/snapshots.ts'
 import { hasSecret, maskSecrets } from '../secrets.ts'
 import {
   copyHistory, crossWorkspaceNote, gateRecords, locateCopy,
@@ -34,7 +34,8 @@ export interface ForgetOptions {
   isSoftOnly?: boolean
   /** 同 id 多副本时只认这一份（GUI 按页面上那一份操作）；缺省按会话 workspace 定位。跨 workspace 门照旧按会话判定。 */
   target?: Scope
-  /** 删除时锁内看到的当前内容过了它就不删（不计入 forgotten）：调用方按某个条件收集的 id，收集之后被改得不再符合的留着。 */
+  /** 删除时锁内看到的当前内容过了它就不删（不计入 forgotten）：调用方按某个条件收集的 id，收集之后被改得不再符合的留着。
+   *  不给也照样核对一项：软删时内容或位置已和预读（快照里那份）不同的不删，否则撤销会按快照丢掉这次改动。 */
   isChanged?: (current: MemoryRecord) => boolean
   /** 末尾按记忆 id 清账本时留下这一条（裁决冲突删败方：本次的条目要结清、留着撤销）。 */
   keepDecisionId?: string
@@ -143,7 +144,10 @@ export async function executeForget(
       await purge(record)
       continue
     }
-    const outcome = await deps.store.softDeleteUnlessSecret(record, { ...deleteOpts, isChanged: options.isChanged, isSecret })
+    // 预读之后被别处改过或搬走的不删：快照里是预读那份，删掉新版本再按快照撤销就丢了那次改动。
+    // 改得含了密钥的照旧交给下面的密钥判断（改走硬删、所有快照脱敏，用不着撤销）
+    const isChanged = (cur: MemoryRecord) => options.isChanged?.(cur) === true || (!isSecret(cur) && isChangedSinceRead(cur, record))
+    const outcome = await deps.store.softDeleteUnlessSecret(record, { ...deleteOpts, isChanged, isSecret })
     if (outcome === 'deleted') forgotten.push(record.id)
     else if (outcome === 'has-secret') {
       if (options.isSoftOnly === true) skippedSecrets.push(record.id)   // 只软删：照样交回调用方
@@ -175,6 +179,11 @@ export async function executeForget(
     ok: true, forgotten, hardDeleted, missing, rejected, otherWorkspaces, snapshotId: snapshot.id, clearedDecisions, ...softOnlyFields(),
     message: `已遗忘 ${forgotten.length} 条记忆${missingNote}。${hardNote}${restoreNote}${secretNote()}${wsNote}`,
   }
+}
+
+/** 锁内看到的当前内容与预读的那份内容不同，或换了位置（同 id 的另一层副本、被提升）。 */
+function isChangedSinceRead(current: MemoryRecord, read: MemoryRecord): boolean {
+  return current.scope !== read.scope || current.workspacePath !== read.workspacePath || editFingerprint(current) !== editFingerprint(read)
 }
 
 /** 除 target 外哪个作用域都没有（含归档）的 id。 */
