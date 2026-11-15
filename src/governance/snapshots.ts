@@ -91,8 +91,6 @@ export interface SnapshotStoreOptions {
 export class SnapshotStore {
   private table: CasKvTable<MemorySnapshot>
   private findGone: SnapshotStoreOptions['findGone']
-  /** redact / purge / 落盘复核是整快照的读改写，进程内串行，否则两次并发改写会把对方抹掉的内容写回。 */
-  private rewriteChain: Promise<void> = Promise.resolve()
 
   constructor(table: CasKvTable<MemorySnapshot>, options: SnapshotStoreOptions = {}) {
     this.table = table
@@ -118,7 +116,7 @@ export class SnapshotStore {
     }
     await this.table.put(snapshot.id, snapshot)
     const findGone = this.findGone
-    if (findGone !== undefined) await this.serialize(() => this.redactGoneNow(snapshot.id, findGone))
+    if (findGone !== undefined) await this.redactGoneNow(snapshot.id, findGone)
     await this.sweep(now)  // 顺手清理超窗口的旧快照
     return snapshot
   }
@@ -147,34 +145,26 @@ export class SnapshotStore {
    * 内容没变的（不含这些 id、或已脱敏过）不写。
    */
   redact(ids: ReadonlySet<string>, isCopy: (r: SnapshotRecord) => boolean = () => true): Promise<void> {
-    return this.serialize(() => this.redactNow(r => ids.has(r.id) && isCopy(r)))
+    return this.redactNow(r => ids.has(r.id) && isCopy(r))
   }
 
   /**
    * 彻底删除最近删除里的记忆（GUI 的 hard-delete）：所有快照里去掉命中的记录，快照因此空了就整份删掉。
    * 之后按快照恢复、撤销都找不到它。每个快照同 redact 在写锁内重读再改；抹空了再删，删前在锁内确认此刻仍是空的。
    */
-  purge(isPurged: (r: SnapshotRecord) => boolean): Promise<void> {
-    return this.serialize(async () => {
-      for (const [key, snap] of await this.table.list()) {
-        if (!snap.data.some(isPurged)) continue
-        let isEmptied = false
-        await this.table.update(key, cur => {
-          if (cur === undefined) return undefined
-          const data = cur.data.filter(r => !isPurged(r))
-          if (data.length === cur.data.length) return undefined
-          isEmptied = data.length === 0
-          return { ...cur, memoryIds: data.map(r => r.id), data }
-        })
-        if (isEmptied) await this.table.deleteIf(key, cur => cur.data.length === 0)
-      }
-    })
-  }
-
-  private serialize(task: () => Promise<void>): Promise<void> {
-    const run = this.rewriteChain.then(task)
-    this.rewriteChain = run.catch(() => {})
-    return run
+  async purge(isPurged: (r: SnapshotRecord) => boolean): Promise<void> {
+    for (const [key, snap] of await this.table.list()) {
+      if (!snap.data.some(isPurged)) continue
+      let isEmptied = false
+      await this.table.update(key, cur => {
+        if (cur === undefined) return undefined
+        const data = cur.data.filter(r => !isPurged(r))
+        if (data.length === cur.data.length) return undefined
+        isEmptied = data.length === 0
+        return { ...cur, memoryIds: data.map(r => r.id), data }
+      })
+      if (isEmptied) await this.table.deleteIf(key, cur => cur.data.length === 0)
+    }
   }
 
   /**

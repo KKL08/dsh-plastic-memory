@@ -345,7 +345,7 @@ class MapFileTable<T> implements BatchKvTable<T> {
     })
   }
 
-  /** 锁内读当前整表，逐个 id 算新行，只换一次文件。跨进程的召回计数靠它不少计。 */
+  /** 锁内读当前整表，逐个 id 算新行，只换一次文件。召回计数靠它不少计：同一进程并发靠进程内链，跨进程靠写锁。 */
   async mergeMany(ids: readonly string[], fn: (current: T | undefined, key: string) => T): Promise<void> {
     if (ids.length === 0) return
     await this.env.locked(async () => {
