@@ -11,6 +11,9 @@ All notable changes to this project are documented here. The format follows
 - Development and CI build against DeepSeek Harness v0.2.2-rc.3, so the
   project compiles with the newest host release; CI keeps running the full
   check on v0.2.2-rc.1. The published 0.2.0-beta.1 works on both.
+- Memory files are parsed once and reused until they change on disk, which
+  makes reading memories, search and checkups faster on larger memory
+  folders. Files edited by hand or by git are picked up on the next read.
 
 ## [0.2.0-beta.1] - 2026-11-15
 
