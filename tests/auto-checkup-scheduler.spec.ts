@@ -173,7 +173,7 @@ function env(opts: {
   const source = { store, checkups, autoCheckups, cache, isGovernanceEnabled: () => governance.isEnabled, now: () => clock.now }
   const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
   const collectViews = () => collectGlobalViews({ store, decisions, cache, ignores, checkups, registry, memoryRoot: root, now: () => clock.now })
-  const writer = new ViewWriter({ memoryRoot: root, collect: collectViews, collectCheckups: () => collectCheckupView(source), now: () => clock.now, sleep: async () => {} })
+  const writer = new ViewWriter({ memoryRoot: root, collect: collectViews, collectCheckups: () => collectCheckupView(source), now: () => clock.now, sleep: async () => {}, lock: sidecar.lock })
   const timers = fakeTimer(clock)
   const instructions = opts.instructions ?? noInstructions
   const suggestions = opts.suggestions === undefined ? undefined : new CheckupSuggestions({

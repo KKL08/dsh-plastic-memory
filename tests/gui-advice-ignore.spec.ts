@@ -56,7 +56,7 @@ function env(opts: { llm?: SemanticLlm } = {}) {
   const snapshots = new SnapshotStore(sidecar.snapshots)
   const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
   const cache = sidecar.scanCache
-  const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, cache, ignores, registry, memoryRoot: root, now: () => NOW }), now: () => NOW, sleep: async () => {} })
+  const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, cache, ignores, registry, memoryRoot: root, now: () => NOW }), now: () => NOW, sleep: async () => {}, lock: sidecar.lock })
   const host = {
     contextOf: async () => ({ workspacePath: WS, delegationDepth: 0, session: { id: 'sess-1' } }),
     llmOf: () => opts.llm ?? null,

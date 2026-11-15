@@ -83,7 +83,7 @@ const sidecar = new SidecarStore({
 const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => clock.now }), undefined, sidecar.recallStats)
 const checkups = new CheckupRecordStore(sidecar.checkups)
 const source = { store, checkups, autoCheckups: new AutoCheckupSettingStore(sidecar.autoCheckups), cache: sidecar.scanCache, now: () => clock.now }
-const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('这里只写体检视图') }, collectCheckups: () => collectCheckupView(source), now: () => clock.now, sleep: async () => {} })
+const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('这里只写体检视图') }, collectCheckups: () => collectCheckupView(source), now: () => clock.now, sleep: async () => {}, lock: sidecar.lock })
 const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
 const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
 // 体检之后的后续段：这里不写待处理视图，只重写体检视图

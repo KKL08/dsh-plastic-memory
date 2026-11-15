@@ -60,7 +60,7 @@ function env() {
   const snapshots = new SnapshotStore(sidecar.snapshots)
   const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
   const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
-  const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, snapshots, cache: sidecar.scanCache, ignores, registry, memoryRoot: root, now }), now, sleep: async () => {} })
+  const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, snapshots, cache: sidecar.scanCache, ignores, registry, memoryRoot: root, now }), now, sleep: async () => {}, lock: sidecar.lock })
   const command = createMemoryCommand({
     memoryRoot: root, store, decisions, snapshots, cache: sidecar.scanCache, registry, views, ignores,
     checkups: new CheckupRecordStore(sidecar.checkups), autoCheckups: new AutoCheckupSettingStore(sidecar.autoCheckups),

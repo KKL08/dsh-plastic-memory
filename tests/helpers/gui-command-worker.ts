@@ -45,7 +45,7 @@ const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
 const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
 const cache = sidecar.scanCache
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
-const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, cache, ignores, registry, memoryRoot: root, now }), now, sleep: async () => {} })
+const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, cache, ignores, registry, memoryRoot: root, now }), now, sleep: async () => {}, lock: sidecar.lock })
 const command = createMemoryCommand({
   memoryRoot: root, store, decisions, snapshots: new SnapshotStore(sidecar.snapshots), cache,
   checkups: new CheckupRecordStore(sidecar.checkups), autoCheckups: new AutoCheckupSettingStore(sidecar.autoCheckups), ignores, registry, views,

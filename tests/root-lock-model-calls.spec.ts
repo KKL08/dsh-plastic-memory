@@ -55,7 +55,7 @@ function env(answer?: (input: { system: string; user: string }) => string) {
   const checkups = new CheckupRecordStore(sidecar.checkups)
   const autoCheckups = new AutoCheckupSettingStore(sidecar.autoCheckups)
   const views = new ViewWriter({
-    memoryRoot: root, log: quietLog, now, sleep: async () => {},
+    memoryRoot: root, log: quietLog, now, sleep: async () => {}, lock,
     collect: () => collectGlobalViews({ store, decisions, snapshots, cache, ignores, checkups, autoCheckups, registry, memoryRoot: root, now }),
     collectCheckups: () => collectCheckupView({ store, checkups, autoCheckups, cache, now }),
   })
@@ -177,5 +177,20 @@ describe('RL-12 持锁时不等模型', () => {
     expect(e.model.depths.length).toBeGreaterThanOrEqual(1)
     expect((await e.checkups.list()).map(r => r.completed?.by)).toEqual(['auto'])
     expectModelOutsideLock(e)
+  })
+
+  it('RL-12 视图写入：替换间隔的等待在锁外，替换本身在锁内', async () => {
+    const lock = depthLock()
+    const sleeps: Array<{ ms: number; depth: number }> = []
+    const writer = new ViewWriter({
+      memoryRoot: root, log: quietLog, lock, now: () => NOW,
+      sleep: async ms => { sleeps.push({ ms, depth: lock.depth }) },
+      collect: () => { throw new Error('不该收集全局视图') },
+    })
+    await writer.requestWorkspace('/w/a', '/w/a')
+    await writer.requestWorkspace('/w/b', '/w/b')
+    expect(sleeps).toEqual([{ ms: 150, depth: 0 }])
+    expect(lock.maxDepth).toBe(1)
+    expect(lock.depth).toBe(0)
   })
 })

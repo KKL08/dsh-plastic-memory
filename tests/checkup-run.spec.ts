@@ -82,7 +82,7 @@ function env(opts: {
     memoryRoot: root, log: quietLog,
     collect: () => collectGlobalViews({ store, decisions, snapshots, cache, ignores, checkups, autoCheckups, registry, memoryRoot: root, now: () => clock.now, log: quietLog }),
     collectCheckups: checkupView,
-    now: () => clock.now, sleep: async () => {},
+    now: () => clock.now, sleep: async () => {}, lock: sidecar.lock,
   })
   const heartbeat = manualHeartbeat()
   const deps: CheckupRunDeps = {

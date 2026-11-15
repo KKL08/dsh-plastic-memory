@@ -155,7 +155,7 @@ export async function apply(ctx: Context, config: Config) {
   }
 
   const memoryRoot = resolveMemoryRoot(config.memoryRoot)
-  // 记忆根写锁：一个插件实例一把，注入文件表、侧表、待决账本（同实例内按计数嵌套）。懒打开，没有关闭步骤，卸载不用处理它：
+  // 记忆根写锁：一个插件实例一把，注入文件表、侧表、待决账本、视图写入器（同实例内按计数嵌套）。懒打开，没有关闭步骤，卸载不用处理它：
   // 卸载后迟到的写入照样拿锁，和热重载后的新实例互斥
   const rootLock = createRootLock({ root: memoryRoot, log: ctx.logger })
   // 侧表（快照、待决账本、扫描缓存、召回统计）住 <memoryRoot>/.state/，构造不做 I/O。
@@ -369,7 +369,7 @@ export async function apply(ctx: Context, config: Config) {
   ctx.inject(['commands'], child => {
     const commands = (child as unknown as { commands: { register(def: MemoryCommandDefinition): () => void } }).commands
     const writer = new ViewWriter({
-      memoryRoot, log: ctx.logger,
+      memoryRoot, log: ctx.logger, lock: rootLock,
       collect: collectViews,
       collectCheckups: () => collectCheckupView(checkupSource),
     })

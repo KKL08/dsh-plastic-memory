@@ -15,6 +15,8 @@ import { executeSearch } from '../src/tools/search.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../src/governance/schema.ts'
 import { RootLockTimeoutError } from '../src/errors.ts'
+import { collectGlobalViews } from '../src/gui/view-writer.ts'
+import { GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_WORKSPACE_MAP_FILE } from '../src/gui/contract.ts'
 import type { RootLock } from '../src/root-lock.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import { record } from './helpers/record.ts'
@@ -29,6 +31,7 @@ import { spawnWorker, type LineWorker } from './helpers/spawn-worker.ts'
 
 const LOCK_WORKER = fileURLToPath(new URL('./helpers/root-lock-worker.ts', import.meta.url))
 const WRITE_WORKER = fileURLToPath(new URL('./helpers/lock-write-worker.ts', import.meta.url))
+const VIEW_WORKER = fileURLToPath(new URL('./helpers/view-writer-worker.ts', import.meta.url))
 const schemas = { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }
 const quietLog = { info() {}, warn() {}, error() {} }
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
@@ -417,4 +420,48 @@ describe('RL-17 一个进程写个不停，另一个进程照样写得进去', (
         `改写方改写 ${hammered.count} 次、超时 ${hammered.timeouts} 次，最长等待 ${hammered.maxWaitMs.toFixed(1)} ms`)
     }
   }, 120_000)
+})
+
+describe('RL-11 两个进程交错写同一个全局视图', () => {
+  it('RL-11 早收集的一方等锁时，晚收集的一方先写完：盘上是晚收集那份的内容；两边各记的会话归属都在', async () => {
+    const T0 = 1_763_164_800_000
+    const { store, decisions, sidecar } = wired(createRootLock({ root, log: quietLog }))
+    await store.create(record({ id: 'mem_old', name: '旧的', content: '用 pnpm' }))
+    // a 晚收集，视图写入的第 1、2 次 run 都停在屏障；b 早收集，从不停
+    const [a, b] = await Promise.all([
+      startWorker(VIEW_WORKER, [root, signals, 'a', String(T0 + 10), '1,2']),
+      startWorker(VIEW_WORKER, [root, signals, 'b', String(T0), '-']),
+    ])
+
+    // b 先收集（只有 mem_old），收集完先停住；随后盘上多了 mem_new，a 再收集（两条都有）并拿到锁停住
+    b.send('library')
+    await waitForSignal(signals, 'b.collect.1.done')
+    await store.create(record({ id: 'mem_new', name: '新的', content: '用 npm' }))
+    a.send('library')
+    await waitForSignal(signals, 'a.collect.1.done')
+    await signal(signals, 'a.collect.1.go')
+    await waitForSignal(signals, 'a.1.held')
+    // b 带着早收集的视图去写，到了锁前；a 放行
+    await signal(signals, 'b.collect.1.go')
+    await waitForSignal(signals, 'b.1.arrived')
+    await signal(signals, 'a.1.go')
+    expect(await Promise.all([a.nextLine(), b.nextLine()])).toEqual(['wrote library', 'wrote library'])
+
+    const late = await collectGlobalViews({ store, decisions, cache: sidecar.scanCache, registry, memoryRoot: root, now: () => T0 + 10 })
+    const onDisk = JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_VIEW_FILES.library), 'utf8')) as unknown
+    expect(onDisk).toEqual(JSON.parse(JSON.stringify(late.library)))
+    expect(JSON.stringify(onDisk)).toContain('mem_new')
+
+    // 会话归属：a 持锁停住时 b 来记另一条，b 到了锁前再放行 a
+    a.send('workspace /w/a')
+    await waitForSignal(signals, 'a.2.held')
+    b.send('workspace /w/b')
+    await waitForSignal(signals, 'b.2.arrived')
+    await signal(signals, 'a.2.go')
+    expect((await Promise.all([a.nextLine(), b.nextLine()])).sort()).toEqual(['wrote workspace /w/a', 'wrote workspace /w/b'])
+    const map = JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_WORKSPACE_MAP_FILE), 'utf8')) as { cwds: Record<string, string> }
+    expect(map.cwds).toEqual({ '/w/a': '/w/a', '/w/b': '/w/b' })
+    expect((await readdir(join(root, GUI_VIEW_DIR))).filter(n => n.includes('.tmp-'))).toEqual([])
+    expect(a.stderr() + b.stderr()).toBe('')
+  }, 30_000)
 })
