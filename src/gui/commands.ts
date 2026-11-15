@@ -558,6 +558,8 @@ async function dispatch(
     if (r.kind === 'error') {
       if (r.code === 'cross-workspace') return fail(cmd, 'cross-workspace', r.message, r.rejected)
       if (r.code === 'stale') return behind('stale', adopt?.memoryIds ?? [], r.message)
+      // 认领之后重读才发现条目没了（刚被别处裁决完）：和一开始就查不到同一个说法
+      if (r.code === 'not-found') return notFound(decisionId)
       return fail(cmd, r.code ?? 'failed', r.message)
     }
     if (r.kind === 'resolved' && r.isUnrecorded) return { ok: true, cmd, decisionId, isUnrecorded: true }
@@ -873,6 +875,8 @@ async function dispatch(
       if (r.rejected.length > 0) return fail(cmd, 'cross-workspace', r.message, r.rejected)
       if ((r.skippedSecrets?.length ?? 0) > 0) return fail(cmd, 'has-secret', `记忆 ${command.memoryId} 含密钥，删除后不可恢复，未做任何改动`)
       if (!r.ok) return fail(cmd, 'not-found', r.message)
+      // 读到之后被别处改过或搬走：没删，不能报成功
+      if (r.skipped.length > 0) return { ...fail(cmd, 'stale', `记忆 ${command.memoryId} 刚在别处被改过或移动，没有删除`), memoryIds: [command.memoryId] }
       return { ok: true, cmd, memoryIds: r.forgotten, ...(r.snapshotId !== null ? { snapshotId: r.snapshotId } : {}) }
     }
 

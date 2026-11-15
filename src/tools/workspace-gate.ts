@@ -1,8 +1,12 @@
 import type { MemoryRecord } from '../record-schema.ts'
 import type { GovernanceRejectCode } from '../contract-codes.ts'
-import type { MemoryStore } from '../store.ts'
-import { ledgerLabel, scopeOfMemory, type Scope } from '../scope.ts'
-import { hasCriticalSecret } from '../secrets.ts'
+import type { LocateOptions, MemoryStore } from '../store.ts'
+import { ledgerLabel, scopeKey, scopeOfMemory, type Scope } from '../scope.ts'
+import { hasSecret } from '../secrets.ts'
+import { editFingerprint } from '../governance/snapshots.ts'
+
+/** 据定位结果做不可逆决定（脱敏）的地方用：没找到在写锁内确认，见 LocateOptions。 */
+const RECHECKED: LocateOptions = { isMissRechecked: true }
 
 /**
  * 跨 workspace 门（S2）：治理工具只在用户明确选择「全局整理」后才动其他项目的记录。
@@ -49,24 +53,25 @@ export function isCopyOf(record: Pick<MemoryRecord, 'scope' | 'workspacePath'>, 
  * 按副本定位（含非 active）：只读目标作用域，别的作用域里同 id 的副本再新也不取；目标作用域没有这个 id 时当作没找到。
  * 写回时调用方给同一个作用域（store 删除类方法的 at），改的就是读到的这一份。
  */
-export async function locateCopy(store: Pick<MemoryStore, 'get'>, id: string, target: Scope): Promise<MemoryRecord | undefined> {
-  const record = await store.get(id, target)
+export async function locateCopy(store: Pick<MemoryStore, 'get'>, id: string, target: Scope, opts?: LocateOptions): Promise<MemoryRecord | undefined> {
+  const record = await store.get(id, target, opts)
   return record !== undefined && isCopyOf(record, target) ? record : undefined
 }
 
 /**
  * records 里此刻在各自作用域里已经不在了（任何状态都没有，即被彻底删除）的那些副本。每个作用域整读一次（含归档），
  * 不逐条定位：按 id 定位要扫整个作用域，一份快照几百条时成了平方级；缺 workspacePath 的按 id 两级定位。
+ * 换了作用域的（提升、移到项目）不算：别的作用域里有内容一样的这一条，就是它搬过去了。含密钥的不认这条豁免（见 isMovedElsewhere）。
  * 接线层把它交给 SnapshotStore，拍完快照落盘后复核（见 SnapshotStore.capture）。
  */
-export const goneCopies = (store: Pick<MemoryStore, 'get' | 'readRaw'>) => async <T extends Located & Pick<MemoryRecord, 'content' | 'name' | 'summary' | 'tags'>>(records: readonly T[]): Promise<Set<T>> => {
+export const goneCopies = (store: Pick<MemoryStore, 'get' | 'readRaw' | 'copiesOf'>) => async <T extends MemoryRecord>(records: readonly T[]): Promise<Set<T>> => {
   // 作用域标签 → 盘上读得出的 id，和这个作用域里有没有读不出的文件或目录（项目标记读不出时目录整个不在清单里，看不出来，是残留）
   const present = new Map<string, { ids: Set<string>; isPartial: boolean }>()
   const gone = new Set<T>()
   for (const r of records) {
     const scope = scopeOfMemory(r)
     if (scope === undefined) {
-      if ((await store.get(r.id)) === undefined) gone.add(r)
+      if ((await store.get(r.id, {}, RECHECKED)) === undefined) gone.add(r)
       continue
     }
     const label = workspaceLabel(r)
@@ -77,10 +82,25 @@ export const goneCopies = (store: Pick<MemoryStore, 'get' | 'readRaw'>) => async
       present.set(label, read)
     }
     if (read.ids.has(r.id)) continue
-    // 有读不出的文件时，读不出的可能就是它：只有含高危密钥的照样判不在（错脱敏也比留明文强），其余的说不准，不判
-    if (!read.isPartial || hasCriticalSecret(r)) gone.add(r)
+    // 按范围读是锁外的、先列目录后读文件，正赶上别的写入挪这个文件（改名、归档）时两处都可能落空；脱敏不可逆，按 id 再定位一次，没找到在锁内确认
+    if ((await store.get(r.id, scope, RECHECKED)) !== undefined) continue
+    // 拍快照之后被别的写入搬到了别的作用域：记录还在用，快照里的原文也没多留什么。含密钥的一律当被删：内容相同证明不了是搬家，
+    // 别层可能是另一份独立副本、这一份刚被只删这一层的硬删清掉，豁免了就留下能恢复出来的明文；错脱敏的代价只是这份快照恢复不了它
+    if (!hasSecret(r) && await isMovedElsewhere(store, r, scope)) continue
+    // 有读不出的文件时，读不出的可能就是它：只有含密钥的（高危或疑似）照样判不在（错脱敏也比留明文强），其余的说不准，不判
+    if (!read.isPartial || hasSecret(r)) gone.add(r)
   }
   return gone
+}
+
+/** 除 own 外的某个作用域里有这个 id，且内容与 r 相同（换作用域搬过去的那一条，也可能是另一份独立副本，所以只给不含密钥的用）。 */
+async function isMovedElsewhere(store: Pick<MemoryStore, 'get' | 'copiesOf'>, r: MemoryRecord, own: Scope): Promise<boolean> {
+  for (const scope of await store.copiesOf(r.id)) {
+    if (scopeKey(scope) === scopeKey(own)) continue
+    const copy = await store.get(r.id, scope)
+    if (copy !== undefined && editFingerprint(copy) === editFingerprint(r)) return true
+  }
+  return false
 }
 
 /**
@@ -98,7 +118,8 @@ export async function copyHistory(
     if (!ids.has(r.id) || isCopyOf(r, target) || checked.has(key(r))) continue
     checked.add(key(r))
     const scope = scopeOfMemory(r)
-    if (scope !== undefined && (await locateCopy(store, r.id, scope)) !== undefined) kept.add(key(r))
+    // 判成「不在了」就会被一并脱敏，不可逆：没找到在锁内确认（同 goneCopies）
+    if (scope !== undefined && (await locateCopy(store, r.id, scope, RECHECKED)) !== undefined) kept.add(key(r))
   }
   return r => ids.has(r.id) && !kept.has(key(r))
 }

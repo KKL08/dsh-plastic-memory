@@ -169,7 +169,8 @@ describe('RL-10 裁决冲突（败方含高危密钥）与改写败方交错', (
       expect(await local.store.get(loser.id)).toBeUndefined()
     }
     const texts = await snapshotFiles()
-    expect(texts.length).toBeGreaterThanOrEqual(2 * ROUNDS)
+    // 平移时钟只作用在本进程：子进程按真实时间拍的快照在这边看是三年前的，下一轮拍快照时随过期清理删掉，数量不作数
+    if (process.env.PM_SHIFT_CLOCK !== '1') expect(texts.length).toBeGreaterThanOrEqual(2 * ROUNDS)
     for (const text of texts) expect(text).not.toContain(SECRET)
   }, 60_000)
 })

@@ -4,7 +4,7 @@ import { RecordNotFoundError } from './errors.ts'
 import { expandQueryTerms, matchScore } from './text.ts'
 import {
   byPosition, resolveLiveFirst,
-  type MemoryLogger, type MemoryTable, type LocateTarget, type ScopeReadOptions, type ScopeReadResult, type KeywordMatch,
+  type MemoryLogger, type MemoryTable, type LocateTarget, type LocateOptions, type ScopeReadOptions, type ScopeReadResult, type KeywordMatch,
   type DirectoryNote, type QuarantineEntry,
 } from './storage/table.ts'
 import type { BatchKvTable } from './kv-table.ts'
@@ -12,7 +12,7 @@ import type { RecallStats } from './storage/schema.ts'
 import { hasSecret } from './secrets.ts'
 import type { Scope } from './scope.ts'
 
-export type { MemoryLogger, MemoryTable, KeywordMatch, LocateTarget, SessionTarget } from './storage/table.ts'
+export type { MemoryLogger, MemoryTable, KeywordMatch, LocateTarget, LocateOptions, SessionTarget } from './storage/table.ts'
 
 /** 查询范围：一个作用域（全局或某个项目），或当前会话的可见集合（global + 当前 workspace）。缺省读全部目录。 */
 export type QueryScope = Scope | { kind: 'visible'; workspacePath: string | undefined }
@@ -69,11 +69,11 @@ export class MemoryStore {
 
   /** 按 id 定位（含非 active）；缺省是不带当前项目的会话视角，目标规则见 LocateTarget。
    *  位置即作用域（同 readRaw）：.archive/ 里 status 仍写着 active 的按 deleted 返回。 */
-  async get(id: string, target: LocateTarget = {}): Promise<MemoryRecord | undefined> {
-    const found = await this.table.locate(id, target)
+  async get(id: string, target: LocateTarget = {}, opts?: LocateOptions): Promise<MemoryRecord | undefined> {
+    const found = await this.table.locate(id, target, opts)
     return found === undefined ? undefined : byPosition(found)
   }
-  locate(id: string, target: LocateTarget = {}) { return this.table.locate(id, target) }
+  locate(id: string, target: LocateTarget = {}, opts?: LocateOptions) { return this.table.locate(id, target, opts) }
   /** 这个 id 在哪些作用域有副本（任何状态，含只在 .archive/ 里的）：全局在前，项目按路径排序。 */
   copiesOf(id: string): Promise<Scope[]> { return this.table.copiesOf(id) }
   listWorkspaceDirs() { return this.table.listWorkspaceDirs() }
@@ -90,11 +90,15 @@ export class MemoryStore {
     return this.table.update(record.id, from, fn)
   }
   /** 同 update，但锁内发现记录已不存在或已软删就不写、返回 undefined（工具据此报「不存在或已删除」，不抛错）。
-   *  from 同 update：调用方按作用域读到的（locateCopy），给同一个作用域写回，别的作用域里同 id 的副本不动。 */
-  async updateIfLive(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, fn: (current: MemoryRecord) => MemoryRecord, from?: LocateTarget): Promise<MemoryRecord | undefined> {
+   *  from 同 update：调用方按作用域读到的（locateCopy），给同一个作用域写回，别的作用域里同 id 的副本不动。
+   *  isChanged：锁内看到的当前内容过了它（调用方读到之后又被改过）也不写、返回 undefined。 */
+  async updateIfLive(
+    record: Pick<MemoryRecord, 'id' | 'workspacePath'>, fn: (current: MemoryRecord) => MemoryRecord, from?: LocateTarget,
+    opts: { isChanged?: (current: MemoryRecord) => boolean } = {},
+  ): Promise<MemoryRecord | undefined> {
     try {
       return await this.update(record, r => {
-        if (r.status === 'deleted') throw new RecordNotFoundError(r.id)
+        if (r.status === 'deleted' || opts.isChanged?.(r) === true) throw new RecordNotFoundError(r.id)
         return fn(r)
       }, from)
     } catch (err) {
@@ -116,7 +120,8 @@ export class MemoryStore {
 
   async softDelete(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, opts: DeleteOptions = {}): Promise<boolean> {
     const target = deleteTarget(record, opts)
-    if (!(await this.table.locate(record.id, target))) return false
+    // 没找到要在锁内确认：调用方读到过它，锁外这一眼可能正夹在别的写入挪它的中间（见 LocateOptions）
+    if (!(await this.table.locate(record.id, target, { isMissRechecked: true }))) return false
     try {
       await this.table.update(record.id, target, r => markDeleted(r, opts.now))
     } catch (err) {
@@ -151,7 +156,7 @@ export class MemoryStore {
     opts: DeleteOptions & { isChanged?: (current: MemoryRecord) => boolean; isSecret?: (current: MemoryRecord) => boolean } = {},
   ): Promise<'deleted' | 'has-secret' | 'changed' | 'missing'> {
     const target = deleteTarget(record, opts)
-    if (!(await this.table.locate(record.id, target))) return 'missing'
+    if (!(await this.table.locate(record.id, target, { isMissRechecked: true }))) return 'missing'
     try {
       // 走 update 的读改写：写盘前又被改就在新内容上重判，判密钥看的始终是将被覆盖的那份
       let outcome: 'deleted' | 'has-secret' | 'changed' = 'deleted'

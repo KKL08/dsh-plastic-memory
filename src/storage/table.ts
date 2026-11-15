@@ -82,6 +82,12 @@ export interface SessionTarget {
  */
 export type LocateTarget = Scope | SessionTarget
 
+export interface LocateOptions {
+  /** 没找到时一律到写锁内再找一次才算没有（据此做不可逆决定的调用方用，也挡住别的进程正在挪的文件）。
+   *  不给时只在锁外扫描期间本进程有写入在跑时才进锁确认，只读入口照旧不碰锁库。 */
+  isMissRechecked?: boolean
+}
+
 export function isScopeTarget(target: LocateTarget): target is Scope {
   return target.kind !== undefined
 }
@@ -101,7 +107,7 @@ export interface WorkspaceDirListing {
 }
 
 /**
- * 记忆表：磁盘是唯一真相，进程里不常驻记忆表。读方法不加锁、不写盘；写方法在实现内串行。
+ * 记忆表：磁盘是唯一真相，进程里不常驻记忆表。读方法不写盘、不加锁（按 id 的定位没找到时、copiesOf 例外，见各自说明）；写方法在实现内串行。
  * `dirs` 用绝对目录路径标识（global 用 global 目录）；测试用的内存表用同一套目录名（storage/paths），语义是按 scope 过滤。
  * 执行器的读法只有三种：按范围 readScope、按 id locate、listWorkspaceDirs 枚举。
  */
@@ -111,7 +117,8 @@ export interface MemoryTable {
   /** 某个 workspace 的目录：确定性目录名的标记匹配就用它，否则经清单找（手工改名的目录）；还没有目录时为空。 */
   workspaceDirs(workspacePath: string): Promise<string[]>
   readScope(dirs: string[], opts?: ScopeReadOptions): Promise<ScopeReadResult>
-  locate(id: string, target: LocateTarget): Promise<LocatedFile | undefined>
+  /** 按 id 定位。别的写入正在挪这个文件时锁外扫描可能新旧两处都看不到：实现在这种情况下到写锁内再确认，见 LocateOptions。 */
+  locate(id: string, target: LocateTarget, opts?: LocateOptions): Promise<LocatedFile | undefined>
   listWorkspaceDirs(): Promise<WorkspaceDirListing>
   /** 新 id：不定位，排他占名落盘（撞名追加 id 片段，不覆盖别的记录）。 */
   create(record: MemoryRecord): Promise<void>
@@ -125,7 +132,7 @@ export interface MemoryTable {
   /** 物理删除（含 .archive/ 里的文件）；at 同 update，清副本见 LocateTarget。
    *  召回统计行只在哪个作用域都没有这个 id 了才清。skipIf：对锁内定位到的当前文件求值，为真就不删、返回 false。 */
   delete(id: string, at: LocateTarget, skipIf?: (current: LocatedFile) => boolean): Promise<boolean>
-  /** 这个 id 在哪些作用域有副本（任何状态，含只在 .archive/ 里的）：全局在前，项目按路径排序，同一作用域只算一次。 */
+  /** 这个 id 在哪些作用域有副本（任何状态，含只在 .archive/ 里的）：全局在前，项目按路径排序，同一作用域只算一次。在写锁内扫（理由同 locate）。 */
   copiesOf(id: string): Promise<Scope[]>
   /**
    * 维护点（写路径末尾与快照冻结时调用）：只动给定目录，锁内、幂等。再生索引；顶层非 active 搬 .archive/（.archive/ 里 status 仍为 active

@@ -593,6 +593,25 @@ describe('restore', () => {
     expect((await allEntries(e)).map(d => d.id)).toEqual([entry.id])
   })
 
+  it('forget：读到之后这条被别处改过，不删，回 stale，不报成功', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_late', name: '戊', content: '旧正文' }))
+    const get = e.store.get.bind(e.store)
+    let isFired = false
+    vi.spyOn(e.store, 'get').mockImplementation(async (id, hint, opts) => {
+      const r = await get(id, hint, opts)
+      if (id === 'mem_late' && !isFired && r !== undefined) {
+        isFired = true
+        await e.store.put({ ...r, content: '别处刚改的正文', updatedAt: r.updatedAt + 1 })
+      }
+      return r
+    })
+    const body = err(await e.run({ cmd: 'forget', memoryId: 'mem_late' }))
+    vi.restoreAllMocks()
+    expect(body.code).toBe('stale')
+    expect(await e.store.get('mem_late')).toMatchObject({ status: 'active', content: '别处刚改的正文' })
+  })
+
   it('forget 删掉的记忆：restore 按快照恢复，与冲突无关', async () => {
     const e = env()
     await e.store.create(record({ id: 'mem_f', name: '丁' }))

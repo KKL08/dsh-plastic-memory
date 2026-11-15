@@ -31,7 +31,7 @@ const EXPECTED: Record<GuiErrorCode, (command: MemoryCommand) => Outcome> = {
   'claimed': () => ({ kind: 'handled-elsewhere' }),
   'not-found': c => OPEN_ITEM_COMMANDS.has(c.cmd) ? { kind: 'handled-elsewhere' } : isTidy(c) ? local('not-found', 'library.batch.stale')
     : 'memoryId' in c || 'memories' in c ? local('not-found', 'pending.memory.gone') : raw('not-found'),
-  'stale': c => local('stale', isTidy(c) ? 'library.batch.stale' : is(c, 'undo', 'restore') ? 'pending.undo.stale' : is(c, 'ignore-advice') ? 'pending.ignore.stale' : 'pending.edit.stale'),
+  'stale': c => local('stale', isTidy(c) ? 'library.batch.stale' : is(c, 'undo', 'restore') ? 'pending.undo.stale' : is(c, 'ignore-advice') ? 'pending.ignore.stale' : is(c, 'forget', 'hard-delete') ? 'pending.delete.stale' : 'pending.edit.stale'),
   'secret-critical': () => local('secret-critical', 'pending.edit.secretCritical'),
   'no-baseline': () => local('no-baseline', 'pending.suggestion.noBaseline'),
   'target-taken': c => local('target-taken', is(c, 'undo') ? 'pending.move.undoTaken' : is(c, 'promote', 'promote-memory') ? 'pending.promote.taken' : 'pending.move.taken'),

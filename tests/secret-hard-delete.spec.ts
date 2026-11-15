@@ -401,6 +401,29 @@ describe('PA-08：拍快照与彻底删除同一条含密钥的记忆交错', ()
     expect(text).not.toContain(FAKE_SECRET.sk)
   })
 
+  it('PA-08 同一作用域里另有一个读不出的文件，快照落盘前另一个进程彻底删除了含疑似密钥的这条：照样脱敏，恢复不出明文', async () => {
+    const a = harness()
+    const b = harness()
+    await a.store.create(wsRec({ id: 'mem_pw', name: '测试账号', content: 'password: Test123456' }))
+    await writeFile(join(wsDir(), 'broken.md'), '---\nname: [没闭合\n---\n')
+    const capture = a.snapshots.capture.bind(a.snapshots)
+    a.snapshots.capture = async (input, now) => {
+      expect((await b.forget(['mem_pw'])).hardDeleted).toEqual(['mem_pw'])
+      return capture(input, now)
+    }
+
+    const created = await a.snapshot({ action: 'create', memoryIds: ['mem_pw'] })
+    if (created.kind !== 'created') throw new Error(created.kind)
+
+    const { text, json } = await rawSnapshot(created.snapshotId)
+    expect(text).not.toContain('Test123456')
+    expect(json.data.find(r => r.id === 'mem_pw')!.redacted).toBe(true)
+    const restored = await a.snapshot({ action: 'restore', snapshotId: created.snapshotId })
+    if (restored.kind !== 'restored') throw new Error(restored.kind)
+    expect(restored.redacted).toEqual(['mem_pw'])
+    expect(await a.store.get('mem_pw', { workspacePath: WS })).toBeUndefined()
+  })
+
   it('PA-08 快照落盘复核时全局目录一时读不出（权限）：不算已删除，快照里这份不脱敏', async () => {
     const a = harness()
     await a.store.create(baseRecord({ id: 'mem_plain', name: '构建命令', content: '用 pnpm build' }))

@@ -57,6 +57,13 @@ export function isConflicting(current: MemoryRecord | undefined, snapshotted: Me
     && !isDeepStrictEqual(restoreProjection(current), restoreProjection(snapshotted))
 }
 
+/** 现状与快照里这条除召回统计外完全相同（位置、状态、时间戳都算）：恢复写回也不会改动它。 */
+function isSameRecord(current: MemoryRecord | undefined, snapshotted: SnapshotRecord): boolean {
+  if (current === undefined) return false
+  const stable = ({ recallCount: _count, lastRecalledAt: _at, ...rest }: MemoryRecord) => rest
+  return isDeepStrictEqual(stable(current), stable(snapshotted))
+}
+
 /**
  * 密钥硬删的快照脱敏（含密钥的记忆被遗忘后，快照里也不能留明文）：命中密钥的字段换成占位文本，打 redacted 标记，
  * 其余字段原样。按这份记录自己的内容检测——旧版本可能还没贴密钥，那就只打标记（记忆已物理删除，不再可恢复）。
@@ -245,11 +252,18 @@ export class SnapshotStore {
       for (const [i, rec] of targets.entries()) {
         const latest = rec.redacted ? rec : before.get(rec.id)
         if (latest?.redacted) { outcomes.push('redacted'); continue }
+        // 现状已和快照里这条完全相同：不写，也不进撤回名单。撤回删的是「刚写回的那一版」，这时删掉的其实是原来那份，
+        // 正在删它的那次密钥硬删随后找不到它，回报删了 0 条、待决账本也清不到
+        let isAlreadyThere = false
         const put = latest === undefined ? undefined
-          : await store.put(rec, target === 'exact' ? scopeAt(rec.workspacePath) : { workspacePath: rec.workspacePath },
-            overwrite === true ? undefined : cur => blocks(cur, rec))
+          : await store.put(rec, target === 'exact' ? scopeAt(rec.workspacePath) : { workspacePath: rec.workspacePath }, cur => {
+            isAlreadyThere = false
+            if (overwrite !== true && blocks(cur, rec)) return true
+            isAlreadyThere = isSameRecord(cur, rec)
+            return isAlreadyThere
+          })
         if (put !== undefined) written.set(i, put)
-        outcomes.push(put === undefined ? 'skipped' : 'restored')
+        outcomes.push(put === undefined && !isAlreadyThere ? 'skipped' : 'restored')
       }
     } finally {
       // 后面某条写入抛错也要跑：前面已写回的可能正赶上别处的密钥硬删

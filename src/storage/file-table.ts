@@ -6,7 +6,7 @@ import type { Scope } from '../scope.ts'
 import {
   byPosition, resolveDuplicates, pickLiveFirst, isScopeTarget, scopesOf,
   type MemoryTable, type MemoryLogger, type DirectoryNote, type QuarantineEntry, type LocatedFile, type LocatedRecord,
-  type LocateTarget, type ScopeReadOptions, type ScopeReadResult, type WorkspaceDirListing, type KeywordMatch,
+  type LocateTarget, type LocateOptions, type ScopeReadOptions, type ScopeReadResult, type WorkspaceDirListing, type KeywordMatch,
 } from './table.ts'
 import type { KvTable } from '../kv-table.ts'
 import type { RecallStats } from './schema.ts'
@@ -128,6 +128,9 @@ function frontmatterOf(raw: string): string {
  */
 export class FileTable implements MemoryTable {
   private chain: Promise<unknown> = Promise.resolve()  // 进程内互斥：写路径与维护点串行化
+  /** 锁内段进入的次数与正在跑的个数：锁外定位据此判断扫描期间有没有写入（见 locate）。 */
+  private writeEpoch = 0
+  private writesRunning = 0
   private readonly log: MemoryLogger
   private readonly opts: FileTableOptions
   private readonly parseCache: ParseCache<DecodeOutcome>
@@ -144,7 +147,11 @@ export class FileTable implements MemoryTable {
 
   /** 互斥执行：所有写路径都经过这里，进程内按链串行，轮到了再拿写锁（排队期间不占写锁）。 */
   private locked<T>(fn: () => Promise<T>): Promise<T> {
-    const run = () => this.lock.run(fn)
+    const run = () => this.lock.run(async () => {
+      this.writeEpoch++
+      this.writesRunning++
+      try { return await fn() } finally { this.writesRunning-- }
+    })
     const next = this.chain.then(run, run)
     this.chain = next.catch(() => {})
     return next
@@ -395,8 +402,18 @@ export class FileTable implements MemoryTable {
     return found
   }
 
-  async locate(id: string, target: LocateTarget): Promise<LocatedFile | undefined> {
-    const slot = await this.locateSlot(id, target)
+  /**
+   * 挪文件（改名、归档、恢复：先 link 新位置再删旧位置）都在锁内；锁外的扫描先列目录、后读文件，夹在一次挪动中间时
+   * 新旧两处都可能看不到。所以锁外没找到、而扫描期间本表有写入在跑时，到锁内再找一次才算没有；
+   * opts.isMissRechecked 时没找到一律到锁内再找（也挡住别的进程的挪动）。找到了、或没撞上写入的不进锁，只读入口照旧不碰锁库。
+   */
+  async locate(id: string, target: LocateTarget, opts: LocateOptions = {}): Promise<LocatedFile | undefined> {
+    const epoch = this.writeEpoch
+    const wasIdle = this.writesRunning === 0
+    let slot = await this.locateSlot(id, target)
+    if (slot === undefined && (opts.isMissRechecked === true || !wasIdle || this.writeEpoch !== epoch)) {
+      slot = await this.locked(() => this.locateSlot(id, target))
+    }
     return slot && this.toLocated(slot)
   }
 
@@ -421,11 +438,14 @@ export class FileTable implements MemoryTable {
   }
 
   async copiesOf(id: string): Promise<Scope[]> {
-    // 每个项目看的目录与给作用域定位时相同（hintDirs）：标准目录在就不看同一项目的改名目录，按这里返回的作用域定位才找得到
-    const listing = await this.listWorkspaceDirs()
-    const workspaces = await Promise.all([...new Set(listing.entries.map(e => e.workspacePath))].map(p => this.hintDirs(p, listing)))
-    const copies = await this.scanForId(id, [{ dir: this.globalDir, loc: { scope: 'global' } }, ...workspaces.flat()])
-    return scopesOf(copies.map(c => c.record))
+    // 在锁内扫（理由同 locate）：少了哪一份从结果上看不出来，调用方却据此决定提升会不会撞上全局那份、别的副本要不要一并处理
+    return this.locked(async () => {
+      // 每个项目看的目录与给作用域定位时相同（hintDirs）：标准目录在就不看同一项目的改名目录，按这里返回的作用域定位才找得到
+      const listing = await this.listWorkspaceDirs()
+      const workspaces = await Promise.all([...new Set(listing.entries.map(e => e.workspacePath))].map(p => this.hintDirs(p, listing)))
+      const copies = await this.scanForId(id, [{ dir: this.globalDir, loc: { scope: 'global' } }, ...workspaces.flat()])
+      return scopesOf(copies.map(c => c.record))
+    })
   }
 
   // —— 写侧（锁内）——
@@ -791,7 +811,8 @@ export class FileTable implements MemoryTable {
 
   async delete(id: string, at: LocateTarget, skipIf?: (current: LocatedFile) => boolean): Promise<boolean> {
     return this.locked(async () => {
-      const slot = await this.locate(id, at)
+      const found = await this.locateSlot(id, at)
+      const slot = found && this.toLocated(found)
       if (!slot || skipIf?.(slot)) return false
       await this.removeFile(slot.filePath)
       // 彻底删除（密钥硬删、最近删除里的彻底删除）的承诺是「可见集合里再没有它」：global 与该记录目录里同 id 的其余副本

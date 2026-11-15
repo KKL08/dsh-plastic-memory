@@ -18,6 +18,17 @@ All notable changes to this project are documented here. The format follows
 ### Fixed
 - Cleaning up an expired checkup claim could remove one that had just been
   renewed, letting two checkups run on the same scope.
+- Deleting a memory while it was being moved or restored could report it as
+  missing; the delete now finds it.
+- A snapshot could have a memory redacted when that memory had only been
+  promoted to another scope; it is now left intact unless it holds a secret.
+- A snapshot taken while a memory with a suspected secret was being deleted
+  for good could keep the secret if another file in that scope was
+  unreadable; it is now redacted.
+- Forgetting a memory that was edited after it was read removed the newer
+  text; it is now skipped and reported.
+- Restoring a snapshot whose entries already matched the files could mark
+  those files as its own and remove them when the restore was undone.
 
 ### Changed
 - Development and CI build against DeepSeek Harness v0.2.2-rc.3, so the
@@ -26,7 +37,11 @@ All notable changes to this project are documented here. The format follows
 - Memory files are parsed once and reused until they change on disk, which
   makes reading memories, search and checkups faster on larger memory
   folders. Files edited by hand or by git are picked up on the next read.
-- The test suite reruns the snapshot tests with the write lock unavailable.
+- Promoting a memory that was edited after it was read now skips it and
+  reports it as skipped, instead of moving the newer text.
+- The test suite reruns the snapshot tests with the write lock unavailable,
+  and searches interleavings of concurrent writes, checking each outcome
+  against a serial order.
 
 ## [0.2.0-beta.1] - 2026-11-15
 

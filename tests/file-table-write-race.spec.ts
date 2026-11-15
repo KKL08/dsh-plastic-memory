@@ -175,8 +175,8 @@ describe('put：locate 之后文件被改，按新的位置与附加字段重写
 function afterGet(store: MemoryStore, id: string, act: (loc: LocatedFile) => Promise<void>) {
   const get = store.get.bind(store)
   let fired = false
-  vi.spyOn(store, 'get').mockImplementation(async (gid, hint) => {
-    const r = await get(gid, hint)
+  vi.spyOn(store, 'get').mockImplementation(async (gid, hint, opts) => {
+    const r = await get(gid, hint, opts)
     if (gid === id && !fired && r !== undefined) {
       fired = true
       await act((await store.locate(gid, hint))!)
@@ -229,15 +229,16 @@ describe('读改写的工具调用：读到之后被别处改过的正文不丢'
     expect(after.globalCandidate).toBeUndefined()
   })
 
-  it('memory_promote 提升到 global 搬的是最新内容', async () => {
+  it('memory_promote 提升到 global：读到之后正文被改过就不搬，计入 skipped，新正文留在项目里', async () => {
     const store = newStore()
     await store.put(wsRecord())
     changeContentAfterGet(store, 'mem_race', '并发改的')
     const r = await executePromote({ confirmedIds: ['mem_race'], target: 'global' }, { workspacePath: '/proj' }, promoteDeps(store))
-    expect(r.promoted).toEqual([{ id: 'mem_race', target: 'global' }])
+    expect(r.promoted).toEqual([])
+    expect(r.skipped).toEqual(['mem_race'])
     vi.restoreAllMocks()
-    const after = (await store.get('mem_race'))!
-    expect(after.scope).toBe('global')
+    const after = (await store.get('mem_race', { workspacePath: '/proj' }))!
+    expect(after.scope).toBe('workspace')
     expect(after.content).toBe('并发改的')
   })
 

@@ -16,6 +16,9 @@ const noSqlite = [
   'tests/hand-edit-restore.spec.ts',
   'tests/confirm-settle.spec.ts',
   'tests/gui-commands.spec.ts',
+  'tests/write-interleaving-regressions.spec.ts',
+  'tests/write-interleavings-sidecar.spec.ts',
+  'tests/write-interleavings-secrets.spec.ts',
 ]
 
 export default defineConfig({
