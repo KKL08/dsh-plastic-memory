@@ -163,7 +163,8 @@ class EntryFileTable<T extends { id: string }> implements ClaimKvTable<T>, CasKv
     })
   }
 
-  /** 写锁内重读再删：与 put 同在进程内的写链上，判定之后本进程刚写入的新值不会被删；跨进程仍是单条 LWW（重读到删除之间别的进程写入的会被删）。 */
+  /** 写锁内重读再删：与 put 同在进程内的写链上、同在记忆根写锁内，判定之后别处刚写入的新值不会被删。
+   *  写锁不可用时只在本实例内成立，跨进程退回单条 LWW（重读到删除之间别的进程写入的会被删）。 */
   async deleteIf(key: string, isStill: (current: T) => boolean): Promise<boolean> {
     const path = this.pathOf(key)
     await this.env.ready()
@@ -181,7 +182,8 @@ class EntryFileTable<T extends { id: string }> implements ClaimKvTable<T>, CasKv
     })
   }
 
-  /** 写锁内重读再写：与 put 同在进程内的写链上，判定之后本进程刚写入的新值不会被旧值盖掉；跨进程仍是单条 LWW。 */
+  /** 写锁内重读再写：与 put 同在进程内的写链上、同在记忆根写锁内，判定之后别处刚写入的新值不会被旧值盖掉。
+   *  写锁不可用时只在本实例内成立，跨进程退回单条 LWW。 */
   async update(key: string, fn: (current: T | undefined) => T | undefined): Promise<boolean> {
     const path = this.pathOf(key)
     if (path === undefined) throw new Error(`侧表键不能当文件名：${key}`)
@@ -343,6 +345,16 @@ class MapFileTable<T> implements BatchKvTable<T> {
     })
   }
 
+  /** 锁内读当前整表，逐个 id 算新行，只换一次文件。跨进程的召回计数靠它不少计。 */
+  async mergeMany(ids: readonly string[], fn: (current: T | undefined, key: string) => T): Promise<void> {
+    if (ids.length === 0) return
+    await this.env.locked(async () => {
+      const next = new Map(await this.readAll())
+      for (const id of ids) next.set(id, fn(next.get(id), id))
+      await this.writeAll(next)
+    })
+  }
+
   async delete(key: string): Promise<boolean> {
     // 不存在不写盘、也不拿写锁：加载期的清扫不该建出 .state/。锁外读到没有，就当删在别处写入之前
     if (!(await this.readAll()).has(key)) return false
@@ -358,7 +370,7 @@ class MapFileTable<T> implements BatchKvTable<T> {
 }
 
 export class SidecarStore<S extends { id: string }, P extends { id: string }, C extends { id: string }, I extends { id: string }> {
-  readonly snapshots: KvTable<S>
+  readonly snapshots: CasKvTable<S>
   readonly pending: ClaimKvTable<P> & CasKvTable<P>
   readonly scanCache: CasKvTable<C>
   readonly recallStats: BatchKvTable<RecallStats>

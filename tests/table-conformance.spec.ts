@@ -199,6 +199,21 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect(await store.softDelete({ id: 'ghost2', workspacePath: undefined })).toBe(false)
   })
 
+  it('召回统计表 mergeMany：按每个 id 的当前行算新行（没有为 undefined），同一次里重复的 id 依次累加，与已有条目合并', async () => {
+    await stats.put('mem_a', { id: 'mem_a', recallCount: 4, lastRecalledAt: 1 })
+    await stats.put('mem_c', { id: 'mem_c', recallCount: 7, lastRecalledAt: 1 })
+    const seen: Array<[string, number | undefined]> = []
+    await stats.mergeMany(['mem_a', 'mem_b', 'mem_a'], (current, id) => {
+      seen.push([id, current?.recallCount])
+      return { id, recallCount: (current?.recallCount ?? 0) + 1, lastRecalledAt: 9 }
+    })
+    expect(seen).toEqual([['mem_a', 4], ['mem_b', undefined], ['mem_a', 5]])
+    expect((await stats.list()).map(([k, v]) => [k, v.recallCount, v.lastRecalledAt]).sort())
+      .toEqual([['mem_a', 6, 9], ['mem_b', 1, 9], ['mem_c', 7, 1]])
+    await stats.mergeMany([], () => { throw new Error('空列表不该调 fn') })
+    expect(await stats.list()).toHaveLength(3)
+  })
+
   it('markRecalled 只写召回统计侧表：统计 +1，不经 table.update、不逐 id 定位，不重写记忆文件', async () => {
     const rec = record({ id: 'mem_recall_1', name: 'markrecalled-test', content: '待召回内容', updatedAt: 1 })
     await store.put(rec)
@@ -206,7 +221,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     const filePath = root ? join(root, GLOBAL_DIR, 'markrecalled-test.md') : undefined
     const update = vi.spyOn(table, 'update')
     const locate = vi.spyOn(table, 'locate')
-    const putMany = vi.spyOn(stats, 'putMany')
+    const mergeMany = vi.spyOn(stats, 'mergeMany')
 
     const writes = await writesDuring(async () => {
       await store.markRecalled([rec.id])
@@ -216,7 +231,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect(update).not.toHaveBeenCalled()
     // ids 来自调用方同一次读取的结果（search 命中、快照 core 区），存活由那次读保证，不再逐 id 两级定位
     expect(locate).not.toHaveBeenCalled()
-    expect(putMany).toHaveBeenCalledTimes(2) // 每次 markRecalled 只批量写一次，不论几个 id
+    expect(mergeMany).toHaveBeenCalledTimes(2) // 每次 markRecalled 只批量写一次，不论几个 id
     const row = await stats.get(rec.id)
     expect(row).toMatchObject({ id: rec.id, recallCount: 3 })
     expect(row!.lastRecalledAt).not.toBeNull()

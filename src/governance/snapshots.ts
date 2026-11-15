@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import type { MemoryRecord } from '../record-schema.ts'
-import type { KvTable } from '../kv-table.ts'
+import type { CasKvTable } from '../kv-table.ts'
 import { REDACTED_PLACEHOLDER, genId, type MemorySnapshot, type SnapshotRecord } from './schema.ts'
 import { RETENTION_MS } from '../retention.ts'
 import { maskSecrets, secretFields } from '../secrets.ts'
@@ -73,6 +73,9 @@ export function redactRecord(r: SnapshotRecord): SnapshotRecord {
 /** 快照说明可能是 agent 写的原文（forget 的原因、手动快照的说明）：落盘前两级密钥都遮。 */
 const maskDescription = (text: string) => maskSecrets(text, { severity: 'suspected' })
 
+/** 快照里一条记录的身份：id 加所在作用域。同一份快照里可能有同 id 的几个副本（不同层），按身份才分得开。 */
+const recordIdentity = (r: SnapshotRecord) => JSON.stringify([r.id, r.scope, r.workspacePath ?? null])
+
 /**
  * 记忆快照：只管记忆数据的可恢复性，操作审计走 dsh session log。
  * 只存受影响记录，非全量。
@@ -86,12 +89,12 @@ export interface SnapshotStoreOptions {
 }
 
 export class SnapshotStore {
-  private table: KvTable<MemorySnapshot>
+  private table: CasKvTable<MemorySnapshot>
   private findGone: SnapshotStoreOptions['findGone']
   /** redact / purge / 落盘复核是整快照的读改写，进程内串行，否则两次并发改写会把对方抹掉的内容写回。 */
   private rewriteChain: Promise<void> = Promise.resolve()
 
-  constructor(table: KvTable<MemorySnapshot>, options: SnapshotStoreOptions = {}) {
+  constructor(table: CasKvTable<MemorySnapshot>, options: SnapshotStoreOptions = {}) {
     this.table = table
     this.findGone = options.findGone
   }
@@ -140,7 +143,8 @@ export class SnapshotStore {
   /**
    * 密钥硬删：所有含这些 id 的快照里把该记录脱敏（redactRecord），同快照的其他记录不动。
    * isCopy：只删了一层的那份时只认那一层的副本，别层同 id 副本的快照不动；缺省不分层。
-   * 每个快照经侧表 put 原子重写（tmp + rename）；内容没变的（不含这些 id、或已脱敏过）不写。
+   * 每个快照在表的写锁内重读再改（update）：按此刻的内容判、脱敏，别处刚脱敏的不会被盖回明文、刚清除的不会被写回来；
+   * 内容没变的（不含这些 id、或已脱敏过）不写。
    */
   redact(ids: ReadonlySet<string>, isCopy: (r: SnapshotRecord) => boolean = () => true): Promise<void> {
     return this.serialize(() => this.redactNow(r => ids.has(r.id) && isCopy(r)))
@@ -148,15 +152,21 @@ export class SnapshotStore {
 
   /**
    * 彻底删除最近删除里的记忆（GUI 的 hard-delete）：所有快照里去掉命中的记录，快照因此空了就整份删掉。
-   * 之后按快照恢复、撤销都找不到它。
+   * 之后按快照恢复、撤销都找不到它。每个快照同 redact 在写锁内重读再改；抹空了再删，删前在锁内确认此刻仍是空的。
    */
   purge(isPurged: (r: SnapshotRecord) => boolean): Promise<void> {
     return this.serialize(async () => {
       for (const [key, snap] of await this.table.list()) {
-        const data = snap.data.filter(r => !isPurged(r))
-        if (data.length === snap.data.length) continue
-        if (data.length === 0) await this.table.delete(key)
-        else await this.table.put(key, { ...snap, memoryIds: data.map(r => r.id), data })
+        if (!snap.data.some(isPurged)) continue
+        let isEmptied = false
+        await this.table.update(key, cur => {
+          if (cur === undefined) return undefined
+          const data = cur.data.filter(r => !isPurged(r))
+          if (data.length === cur.data.length) return undefined
+          isEmptied = data.length === 0
+          return { ...cur, memoryIds: data.map(r => r.id), data }
+        })
+        if (isEmptied) await this.table.deleteIf(key, cur => cur.data.length === 0)
       }
     })
   }
@@ -168,8 +178,9 @@ export class SnapshotStore {
   }
 
   /**
-   * 读盘上这份快照，已不在盘上的记录脱敏后写回；没有要脱敏的不写。写回的是复核前读到的那份：复核期间别的进程彻底删除了其中
-   * 另一条、已把它在盘上脱敏，会被这次写回盖成明文，所以写回后重读再查，直到没有新的要脱敏。
+   * 读盘上这份快照，锁外查出已不在盘上的记录，再在写锁内重读、按记录身份把它们脱敏（update）；没有要脱敏的不写。
+   * 写回后重读再查，直到没有新的要脱敏：写锁不可用时条件写只在本实例内原子，别的进程在这次重读之后脱敏、清除的条目
+   * 仍可能被写回盖掉，重读能把它补上。
    */
   private async redactGoneNow(id: string, findGone: NonNullable<SnapshotStoreOptions['findGone']>): Promise<void> {
     for (;;) {
@@ -177,17 +188,22 @@ export class SnapshotStore {
       if (snap === undefined) return
       const gone = await findGone(snap.data.filter(r => r.redacted !== true))
       if (gone.size === 0) return
-      await this.table.put(id, { ...snap, data: snap.data.map(r => (gone.has(r) ? redactRecord(r) : r)) })
+      const goneIds = new Set([...gone].map(recordIdentity))
+      const isGone = (r: SnapshotRecord) => r.redacted !== true && goneIds.has(recordIdentity(r))
+      await this.table.update(id, cur => (cur?.data.some(isGone) ? { ...cur, data: cur.data.map(r => (isGone(r) ? redactRecord(r) : r)) } : undefined))
     }
   }
 
   private async redactNow(isHit: (r: SnapshotRecord) => boolean): Promise<void> {
-    for (const [, snap] of await this.table.list()) {
+    for (const [key, snap] of await this.table.list()) {
       if (!snap.data.some(isHit)) continue
-      const data = snap.data.map(r => (isHit(r) ? redactRecord(r) : r))
-      // 说明一并遮：早先的快照落盘时还没遮过
-      const description = maskDescription(snap.description)
-      if (description !== snap.description || !isDeepStrictEqual(data, snap.data)) await this.table.put(snap.id, { ...snap, description, data })
+      await this.table.update(key, cur => {
+        if (cur === undefined) return undefined
+        const data = cur.data.map(r => (isHit(r) ? redactRecord(r) : r))
+        // 说明一并遮：早先的快照落盘时还没遮过
+        const description = maskDescription(cur.description)
+        return description !== cur.description || !isDeepStrictEqual(data, cur.data) ? { ...cur, description, data } : undefined
+      })
     }
   }
 

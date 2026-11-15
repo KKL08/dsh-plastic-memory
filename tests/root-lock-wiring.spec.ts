@@ -13,10 +13,11 @@ import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { executeSearch } from '../src/tools/search.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../src/governance/schema.ts'
+import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type PendingDecision } from '../src/governance/schema.ts'
 import { RootLockTimeoutError } from '../src/errors.ts'
 import { collectGlobalViews } from '../src/gui/view-writer.ts'
 import { GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_WORKSPACE_MAP_FILE } from '../src/gui/contract.ts'
+import { KV_IMPORT_MARKER } from '../src/storage/legacy-kv-import.ts'
 import type { RootLock } from '../src/root-lock.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import { record } from './helpers/record.ts'
@@ -158,7 +159,7 @@ describe('RL-19 认领：先认领、再进锁', () => {
     const b = realLock()
     const first = wired(a.lock, () => NOW).decisions
     const second = wired(b.lock, () => NOW).decisions
-    // 两边都已过了侧表的旧 KV 导入屏障（每个实例第一次访问侧表时进一次写锁，常态下启动时就过了）
+    // 两边都已过了侧表的旧 KV 导入屏障（导入标记已结清的实例不进写锁；这里先访问一次，免得用例依赖标记的状态）
     await first.list()
     await second.list()
     const inSegment = deferred()
@@ -464,4 +465,80 @@ describe('RL-11 两个进程交错写同一个全局视图', () => {
     expect((await readdir(join(root, GUI_VIEW_DIR))).filter(n => n.includes('.tmp-'))).toEqual([])
     expect(a.stderr() + b.stderr()).toBe('')
   }, 30_000)
+})
+
+describe('旧 KV 导入屏障与写锁', () => {
+  const NOW = 1_000_000
+  const markerPath = () => join(root, STATE_DIR, KV_IMPORT_MARKER)
+
+  it('导入标记早已结清：刚启动的实例第一次认领时另一方正持锁跑裁决段，立即拿到 { isClaimed: false }，不推进计时器', async () => {
+    await wired(realLock().lock).sidecar.snapshots.list() // 早先的实例已结清导入
+    expect(existsSync(markerPath())).toBe(true)
+    const a = realLock()
+    const first = wired(a.lock, () => NOW).decisions
+    const inSegment = deferred()
+    const leave = deferred()
+    const firstRun = first.withClaim('pd_x', async () => {
+      inSegment.resolve()
+      await leave.promise
+      return 'first'
+    })
+    await inSegment.promise
+    const settleProbe = await expectLockBusy()
+
+    const b = realLock()
+    const cold = wired(b.lock, () => NOW).decisions // 刚启动：还没访问过侧表
+    const claimed = cold.withClaim('pd_x', async () => 'cold')
+    expect(await Promise.race([claimed, b.timers.scheduled().then(() => 'waited')])).toEqual({ isClaimed: false })
+    expect(b.timers.fired + b.timers.pending).toBe(0)
+
+    leave.resolve()
+    expect(await firstRun).toEqual({ isClaimed: true, value: 'first' })
+    await settleProbe()
+  })
+
+  it('导入因拿锁超时没跑成：这次访问报 root-lock-timeout，不记住失败，下次访问重试并写下标记', async () => {
+    const b = realLock()
+    const { sidecar } = wired(b.lock)
+    const other = await holdElsewhere()
+    const first = sidecar.snapshots.list()
+    await fireUntilSettled(first, b.timers)
+    await expect(first).rejects.toBeInstanceOf(RootLockTimeoutError)
+    expect(b.timers.elapsed).toBe(10_000)
+    expect(existsSync(markerPath())).toBe(false)
+
+    await other.release()
+    expect(await sidecar.snapshots.list()).toEqual([])
+    expect(existsSync(markerPath())).toBe(true)
+  })
+
+  it('导入中断过（旧行与部分已导入的文件并存、没有标记）时拿锁超时：这次删除报 root-lock-timeout、不执行；下次访问续传后再删，删掉的不会被导回来', async () => {
+    const entry: PendingDecision = { id: 'pd_a', memoryIds: ['mem_a', 'mem_b'], summary: 'pd_a', firstSeenAt: 1 }
+    const pendingDir = join(root, STATE_DIR, 'pending')
+    await mkdir(pendingDir, { recursive: true })
+    await writeFile(join(pendingDir, 'pd_a.json'), JSON.stringify(entry)) // 上次导入写到一半就中断
+    let rows: Array<[string, unknown]> = [['pd_a', entry]]
+    const openLegacyKv = async () => ({ snapshots: [], pending: [...rows], discard: async () => { rows = [] } })
+    const b = realLock()
+    const sidecar = new SidecarStore({ root, schemas, lock: b.lock, log: quietLog, openLegacyKv })
+
+    const other = await holdElsewhere()
+    const deletion = sidecar.pending.delete('pd_a')
+    // 推到导入那次获取等满上限；之后别处放开写锁，删除若还往下走就能拿到锁
+    while (b.timers.elapsed < 10_000) {
+      await b.timers.scheduled()
+      b.timers.fire()
+    }
+    await Promise.race([deletion.then(() => {}, () => {}), b.timers.scheduled()])
+    await other.release()
+    await fireUntilSettled(deletion, b.timers)
+    await expect(deletion).rejects.toBeInstanceOf(RootLockTimeoutError)
+    expect(existsSync(join(pendingDir, 'pd_a.json'))).toBe(true)
+
+    // 下次访问续传、结清，再删就删掉了，之后的访问也不会把它导回来
+    expect(await sidecar.pending.delete('pd_a')).toBe(true)
+    expect(await sidecar.pending.get('pd_a')).toBeUndefined()
+    expect(rows).toEqual([])
+    expect(JSON.parse(await readFile(markerPath(), 'utf8'))).toMatchObject({ source: 'kv', discarded: true })
+  })
 })

@@ -41,4 +41,7 @@ export interface CasKvTable<T> extends KvTable<T> {
 export interface BatchKvTable<T> extends KvTable<T> {
   /** 一次写入多条，与已有条目合并（同键覆盖）。 */
   putMany(entries: ReadonlyArray<[string, T]>): Promise<void>
+  /** 批量读改写：在表的写锁内读当前整表，按 ids 的顺序对每个 key 求 fn(此刻的行，没有为 undefined)，结果写回（同一个 key 出现几次就依次算几次），
+   *  整份只写一次。ids 为空不写。 */
+  mergeMany(ids: readonly string[], fn: (current: T | undefined, key: string) => T): Promise<void>
 }

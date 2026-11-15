@@ -35,4 +35,7 @@ export class InMemoryKvTable<T> implements ClaimKvTable<T>, CasKvTable<T>, Refre
 
 export class InMemoryBatchKvTable<T> extends InMemoryKvTable<T> implements BatchKvTable<T> {
   async putMany(entries: ReadonlyArray<[string, T]>) { for (const [key, value] of entries) await super.put(key, value) }
+  async mergeMany(ids: readonly string[], fn: (current: T | undefined, key: string) => T) {
+    for (const id of ids) await super.put(id, fn(await super.get(id), id))
+  }
 }

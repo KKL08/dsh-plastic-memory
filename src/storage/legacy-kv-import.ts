@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import type { ZodType } from 'zod'
 import type { MemoryLogger } from './table.ts'
 import { kvImportMarkerSchema, type KvImportMarker } from './schema.ts'
+import { RootLockTimeoutError } from '../errors.ts'
 import { SAFE_KEY_RE, atomicWrite, breakStaleLock, createExclusive, describeError, errnoCode, isStaleLock, lockOwner } from './state-files.ts'
 
 /**
@@ -12,8 +13,8 @@ import { SAFE_KEY_RE, atomicWrite, breakStaleLock, createExclusive, describeErro
  *   .state/kv-import.json           导入的完成标记
  *   .state/kv-import.lock           导入期间的跨进程锁，导完即删
  *
- * 侧表（sidecar.ts）的快照、待决账本、扫描缓存每个读写方法先 await 一次 ensureImported（memoize；在侧表的进程内锁里、
- * 再持跨进程锁文件执行，锁内重查标记）。导入只碰那两个目录和自己的标记、锁文件。
+ * 侧表（sidecar.ts）的快照、待决账本、扫描缓存每个读写方法先 await 一次 ensureImported（memoize；先在锁外读一次标记，
+ * 已结清就不进锁；否则在侧表的进程内锁里、再持跨进程锁文件执行，锁内重查标记）。导入只碰那两个目录和自己的标记、锁文件。
  */
 
 export const KV_IMPORT_MARKER = 'kv-import.json'
@@ -86,19 +87,31 @@ export class LegacyKvImport<S extends { id: string }, P extends { id: string }> 
     return marker !== undefined && isSettled(marker)
   }
 
-  /** 锁内初始化屏障，memoize 成一个 Promise。失败或服务缺席都不写标记：本进程不再重试，
-   *  下次启动标记仍缺失，续传（排他创建保证已迁入的条目不被覆盖）。 */
+  /** 初始化屏障，memoize 成一个 Promise。标记已结清（常态）就不进写锁：认领的快速路径不该等别人的裁决段。
+   *  失败或服务缺席都不写标记：本进程不再重试，下次启动标记仍缺失，续传（排他创建保证已迁入的条目不被覆盖）。
+   *  拿写锁超时例外：不记住这次失败，下次访问重试；超时往上抛，挡住这次访问。导入没结清时放行写入，
+   *  删掉的条目会在重试时从旧 KV 导回来。 */
   ensureImported(): Promise<void> {
-    this.imported ??= this.opts.locked(() => this.importInner()).catch(err => {
-      this.opts.log.warn(`[plastic-memory] 旧 KV 侧表导入失败，下次启动续传：${describeError(err)}`)
+    this.imported ??= this.importOnce().catch(err => {
+      const isLockTimeout = err instanceof RootLockTimeoutError
+      this.opts.log.warn(`[plastic-memory] 旧 KV 侧表导入失败，${isLockTimeout ? '下次访问重试' : '下次启动续传'}：${describeError(err)}`)
+      if (!isLockTimeout) return
+      this.imported = undefined
+      throw err
     })
     return this.imported
+  }
+
+  private async importOnce(): Promise<void> {
+    const seen = await this.readMarker(join(this.opts.stateDir, KV_IMPORT_MARKER))
+    if (seen !== undefined && isSettled(seen)) return
+    await this.opts.locked(() => this.importInner())
   }
 
   private async importInner(): Promise<void> {
     const markerPath = join(this.opts.stateDir, KV_IMPORT_MARKER)
     const seen = await this.readMarker(markerPath)
-    if (seen !== undefined && isSettled(seen)) return // 常态：不抢锁
+    if (seen !== undefined && isSettled(seen)) return // 等写锁期间别的进程刚结清：不抢导入锁
     const release = await this.acquireImportLock()
     try {
       await this.importLocked(markerPath)

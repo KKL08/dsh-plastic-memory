@@ -219,8 +219,8 @@ export class MemoryStore {
     return (await this.queryScope(filter)).records
   }
 
-  /** 召回统计只读改写侧表，不经 table.update——记忆文件不因召回而重写。一次调用一次读、内存合并、
-   *  一次批量写（单文件表只换一次文件）。跨进程单文件 LWW（参考字段）。
+  /** 召回统计只读改写侧表，不经 table.update——记忆文件不因召回而重写。一次调用在侧表写锁内一次读、内存合并、
+   *  一次写（单文件表只换一次文件），跨进程也不少计。
    *  ids 取自调用方同一次读取的结果（search 命中、快照 core 区），存活由那次读保证，这里不再逐 id 定位。 */
   markRecalled(ids: string[], now = Date.now()): Promise<void> {
     const run = () => this.markRecalledInner(ids, now)
@@ -231,14 +231,8 @@ export class MemoryStore {
 
   private async markRecalledInner(ids: string[], now: number): Promise<void> {
     try {
-      const current = new Map(await this.stats.list())
-      const next = new Map<string, RecallStats>()
-      for (const id of ids) {
-        // 同一次调用里重复出现的 id 累加（与逐条 put 时的旧行为一致）
-        const row = next.get(id) ?? current.get(id)
-        next.set(id, { id, recallCount: (row?.recallCount ?? 0) + 1, lastRecalledAt: now })
-      }
-      await this.stats.putMany([...next])
+      // 读当前行、加一、写回整个在侧表的写锁内：别的进程同时记召回也不少计。同一次调用里重复出现的 id 依次累加
+      await this.stats.mergeMany(ids, (row, id) => ({ id, recallCount: (row?.recallCount ?? 0) + 1, lastRecalledAt: now }))
     } catch (err) {
       this.log.error('[plastic-memory] 召回统计更新失败:', err)
     }
