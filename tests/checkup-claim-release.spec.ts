@@ -9,6 +9,7 @@ import { createRootLock } from '../src/storage/root-lock.ts'
 import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
 import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../src/governance/schema.ts'
 import { checkupKey } from '../src/gui/contract.ts'
+import { holdCheckups, type IntervalTimer } from '../src/gui/checkup-run.ts'
 import type { Scope } from '../src/scope.ts'
 import type { RootLock } from '../src/root-lock.ts'
 import { fireUntilSettled, manualTimers, type ManualTimers } from './helpers/manual-timers.ts'
@@ -90,5 +91,40 @@ describe('认领不全时回滚已拿到的体检认领', () => {
     expect(await checkups.claim([G, A, B])).toEqual({ busy: B })
     expect(existsSync(claimPath(G))).toBe(true)
     expect(existsSync(claimPath(A))).toBe(false)
+  })
+})
+
+/** 心跳不跑：这里只看放掉认领。 */
+const noInterval: IntervalTimer = () => () => {}
+
+describe('体检做完放掉认领', () => {
+  it('放掉时写锁被别处占满上限：这次照常返回、不抛错，放完重写一次视图；没放掉的认领留着，按残留处理', async () => {
+    const { checkups, timers } = wired()
+    let changes = 0
+    const held = await holdCheckups(checkups, [G, A], { interval: noInterval, onLost: () => {}, onChange: () => { changes++ }, log: quietLog })
+    if ('busy' in held) throw new Error('应认领到')
+    expect(changes).toBe(1)
+
+    const leave = await holdLockElsewhere()
+    const released = held.release()
+    await fireUntilSettled(released, timers)
+    await expect(released).resolves.toBeUndefined()
+    expect(timers.elapsed).toBe(10_000) // 两个认领共用一次拿锁，只等一轮上限
+    expect(changes).toBe(2)
+    expect(existsSync(claimPath(G)) && existsSync(claimPath(A))).toBe(true)
+    await leave()
+  })
+
+  it('放掉时一个认领删不掉：其余的照样放掉，不抛错，放完重写一次视图', async () => {
+    const { checkups } = wired()
+    let changes = 0
+    const held = await holdCheckups(checkups, [G, A], { interval: noInterval, onLost: () => {}, onChange: () => { changes++ }, log: quietLog })
+    if ('busy' in held) throw new Error('应认领到')
+
+    faults.rmFails = path => path === claimPath(G)
+    await expect(held.release()).resolves.toBeUndefined()
+    expect(existsSync(claimPath(G))).toBe(true)
+    expect(existsSync(claimPath(A))).toBe(false)
+    expect(changes).toBe(2)
   })
 })
