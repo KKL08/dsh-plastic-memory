@@ -10,7 +10,7 @@
 
 [简体中文](README.md) · **English**
 
-![Version](https://img.shields.io/badge/version-0.2.0--beta.1-yellow)
+![Version](https://img.shields.io/badge/version-0.2.0--beta.2-yellow)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-DeepSeek%20Harness%20%E2%89%A5v0.2.2--rc.1-4D6BFF)
 
@@ -61,14 +61,14 @@ Everyone works with agents in their own way, and memory shouldn't be a rigid pre
 
 Requires DeepSeek Harness v0.2.2-rc.1 or later. Both the desktop app and the web version are supported; the desktop app currently gives the best experience.
 
-**Desktop app (recommended)**: open the Plugins page in the sidebar, click Add plugin, enter `dsh-plastic-memory@0.2.0-beta.1` and confirm.
+**Desktop app (recommended)**: open the Plugins page in the sidebar, click Add plugin, enter `dsh-plastic-memory@0.2.0-beta.2` and confirm.
 
 **Web version**: add it on the Plugins page as well; pnpm must be installed on your machine.
 
 **Command line**: replace `web` with the profile you want to install into, then restart.
 
 ```bash
-dsh plugin --profile web add dsh-plastic-memory@0.2.0-beta.1
+dsh plugin --profile web add dsh-plastic-memory@0.2.0-beta.2
 ```
 
 Installation details and upgrade notes
