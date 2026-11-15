@@ -62,6 +62,8 @@ export interface ForgetResult {
   clearedDecisions: number
   /** 只在 isSoftOnly 时出现：含密钥、没有动的 id。 */
   skippedSecrets?: string[]
+  /** 读到之后被别处改过或搬走、这次没删的。 */
+  skipped: string[]
 }
 
 /**
@@ -108,7 +110,7 @@ export async function executeForget(
   if (found.length === 0) {
     const missingText = missing.length > 0 ? `没有找到可遗忘的记忆（${missing.join('、')}），可能 id 有误或已删除。` : '没有遗忘任何记忆。'
     return {
-      ok: false, forgotten: [], hardDeleted: [], missing, rejected, otherWorkspaces, snapshotId: null, clearedDecisions: 0, ...softOnlyFields(),
+      ok: false, forgotten: [], hardDeleted: [], skipped: [], missing, rejected, otherWorkspaces, snapshotId: null, clearedDecisions: 0, ...softOnlyFields(),
       message: `${missingText}${secretNote()}${wsNote}`,
     }
   }
@@ -131,11 +133,12 @@ export async function executeForget(
   const hardDeleted: string[] = []
   // 指明了副本：删的时候也只认那个作用域，与定位同口径
   const deleteOpts = { at: options.target }
+  const skipped: string[] = []
   const purge = async (record: MemoryRecord) => {
     if (await deps.store.hardDelete(record, deleteOpts, options.isChanged)) {
       forgotten.push(record.id)
       hardDeleted.push(record.id)
-    }
+    } else skipped.push(record.id)
   }
   // 读过之后另一个会话才写进密钥的：锁内按当前内容判出来，不软删
   const lateSecrets: MemoryRecord[] = []
@@ -152,7 +155,7 @@ export async function executeForget(
     else if (outcome === 'has-secret') {
       if (options.isSoftOnly === true) skippedSecrets.push(record.id)   // 只软删：照样交回调用方
       else lateSecrets.push(record)
-    }
+    } else skipped.push(record.id)
   }
   if (lateSecrets.length > 0) {
     // 改走硬删，同样先脱敏所有快照（含本次这份）再物理删除
@@ -171,13 +174,14 @@ export async function executeForget(
 
   ;(deps.log ?? console).info(`[plastic-memory] 遗忘 ${forgotten.length} 条记忆（${forgotten.join('、')}），其中硬删 ${hardDeleted.length} 条，原因：${reason}`)
   const missingNote = missing.length > 0 ? `；未找到：${missing.join('、')}` : ''
+  const skippedNote = skipped.length > 0 ? `${skipped.length} 条读到之后被别处改过、搬走或删掉（${skipped.join('、')}），未删除，重新读取后再决定。` : ''
   const hardNote = hardDeleted.length > 0
     ? `其中 ${hardDeleted.length} 条含密钥（${hardDeleted.join('、')}），已物理删除，不进 14 天回收、不可恢复，快照里的副本已脱敏；请轮换泄漏的凭证。`
     : ''
   const restoreNote = hardDeleted.length < forgotten.length ? `已自动快照（${snapshot.id}），14 天内可用 memory_snapshot 恢复。` : ''
   return {
-    ok: true, forgotten, hardDeleted, missing, rejected, otherWorkspaces, snapshotId: snapshot.id, clearedDecisions, ...softOnlyFields(),
-    message: `已遗忘 ${forgotten.length} 条记忆${missingNote}。${hardNote}${restoreNote}${secretNote()}${wsNote}`,
+    ok: true, forgotten, hardDeleted, skipped, missing, rejected, otherWorkspaces, snapshotId: snapshot.id, clearedDecisions, ...softOnlyFields(),
+    message: `已遗忘 ${forgotten.length} 条记忆${missingNote}。${hardNote}${restoreNote}${skippedNote}${secretNote()}${wsNote}`,
   }
 }
 
