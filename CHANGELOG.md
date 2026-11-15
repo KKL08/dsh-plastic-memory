@@ -5,7 +5,7 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/) with pre-release tags while the host
 (DeepSeek Harness) is itself in pre-release.
 
-## [Unreleased]
+## [0.2.0-beta.2] - 2026-11-15
 
 ### Added
 - A write lock on the memory folder that works across processes. With the
@@ -13,7 +13,8 @@ All notable changes to this project are documented here. The format follows
   so one side can no longer overwrite what the other just saved. A write that
   cannot get its turn within 10 seconds fails with a clear error. On a Node
   build without `node:sqlite`, writes keep the protection they had within a
-  single process.
+  single process. The lock only covers processes running this version or
+  later, so update every place that opens the same memories.
 
 ### Fixed
 - Cleaning up an expired checkup claim could remove one that had just been
@@ -33,7 +34,7 @@ All notable changes to this project are documented here. The format follows
 ### Changed
 - Development and CI build against DeepSeek Harness v0.2.2-rc.3, so the
   project compiles with the newest host release; CI keeps running the full
-  check on v0.2.2-rc.1. The published 0.2.0-beta.1 works on both.
+  check on v0.2.2-rc.1.
 - Memory files are parsed once and reused until they change on disk, which
   makes reading memories, search and checkups faster on larger memory
   folders. Files edited by hand or by git are picked up on the next read.
