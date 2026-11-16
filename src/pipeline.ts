@@ -137,8 +137,7 @@ export const SUBAGENT_MAX_SAVES_DEFAULT = 10
 
 /**
  * update 写入那一刻发现目标在读到之后被改过：按目标此刻的样子回拒绝。原因会进模型上下文，当前内容按注入的口径遮明确密钥。
- * 子 agent 照旧回 subagent-restricted、带回主会话；主会话目标此刻带手改标记的回 hand-edited，其余（删掉、被别的会话改写、
- * 提升、取代）回 target-missing。
+ * 子 agent 照旧回 subagent-restricted、带回主会话；主会话（删掉、被别的会话或用户改过、提升、取代）回 target-missing。
  */
 function changedAfterRead(id: string, current: MemoryRecord | undefined, isFromSubagent: boolean): PipelineResult {
   if (isFromSubagent) {
@@ -150,9 +149,7 @@ function changedAfterRead(id: string, current: MemoryRecord | undefined, isFromS
   }
   const masked = maskSecretSurface(current)
   const shown = `记忆 ${id}（${masked.name}）在这次保存期间被改过，当前内容是：\n${masked.content}\n未保存。`
-  return current.handEdited
-    ? { kind: 'rejected', code: 'hand-edited', subcode, reason: `${shown}用户刚手改过它：先在对话里问用户要不要改写，用户同意后带 force: true 重发。` }
-    : { kind: 'rejected', code: 'target-missing', subcode, reason: `${shown}按当前内容重新组织要改的部分，再用 action=update 重发。` }
+  return { kind: 'rejected', code: 'target-missing', subcode, reason: `${shown}按当前内容重新组织要改的部分，再用 action=update 重发。` }
 }
 
 /** 子 agent 改不了这条记录的原因；是本会话创建、还没升档、还在本项目的返回 undefined。已删除的由调用处先拦。 */
@@ -207,12 +204,12 @@ async function checkSubagentWrite(
   if ((candidate.supersedes ?? []).length > 0) {
     return { code: 'subagent-restricted', subcode: 'subagent-supersedes', reason: '子 agent 不能用 supersedes 替代旧记忆；去掉 supersedes 重发，要替代哪条带回主会话。' }
   }
-  // force 放行的三道检查（去重、手改保护、疑似密钥）都要用户点头，子 agent 问不到用户
+  // force 放行的两道检查（去重、疑似密钥）都要用户点头，子 agent 问不到用户
   if (candidate.force) {
     return {
       code: 'subagent-restricted',
       subcode: 'subagent-force',
-      reason: '子 agent 不能带 force：去重、手改保护、疑似密钥三道检查子 agent 都过不去。撞重复就另存或放弃，疑似密钥一律不存；去掉 force 重发。',
+      reason: '子 agent 不能带 force：去重、疑似密钥两道检查子 agent 都过不去。撞重复就另存或放弃，疑似密钥一律不存；去掉 force 重发。',
     }
   }
   // update 只改本会话存下、还没升档的；目标不存在或已删除的也拒（不交给 target-missing：其间被恢复成主档就会放过去）。
@@ -335,25 +332,6 @@ export async function runSavePipeline(
     else if (old.status === 'active') replaced.push(old)
   }
 
-  // 手改保护：用户手改过的记忆不被模型悄悄覆盖或替代。和结构去重、疑似密钥同一个放行口（force），放在两者之前：
-  // 那两处的回复都叫模型带 force 重发，排在后面会把手改保护一并跳过；用户同意改写后带 force 重发，疑似密钥照样落警告。
-  // 原因会进模型上下文：当前内容按注入的口径遮明确密钥。跨项目目标在上面已拒，这里只会给出本次可见的内容。
-  const handEdited = [...(candidate.action === 'update' && target!.handEdited ? [target!] : []), ...replaced.filter(r => r.handEdited)]
-  if (handEdited.length > 0 && !candidate.force) {
-    const current = handEdited.map((r) => {
-      const masked = maskSecretSurface(r)
-      return `记忆 ${r.id}（${masked.name}）用户手改过，当前内容是：\n${masked.content}`
-    })
-    return {
-      kind: 'rejected',
-      code: 'hand-edited',
-      // 子 agent 问不到用户、也不能带 force（见 checkSubagentWrite），不给 force 指引
-      reason: deps.delegation
-        ? `${current.join('\n\n')}\n未保存。这条记忆用户手改过，子 agent 改不了，带回主会话。`
-        : `${current.join('\n\n')}\n未保存。先在对话里问用户要不要改写，用户同意后带 force: true 重发。`,
-    }
-  }
-
   // 2. confidence 决议：只能下调
   const cap = CONFIDENCE_BY_SOURCE[candidate.sourceMode]
   const confidence = Math.min(candidate.confidence ?? cap, cap)
@@ -401,8 +379,6 @@ export async function runSavePipeline(
       updatedAt: now, lastConfirmedAt: now,
       supersedes: candidate.supersedes ?? target!.supersedes,
       globalCandidate: globalCandidate || target!.globalCandidate,
-      // 内容由本次会话重写，出处随之对应：清除手编标记（pruneUndefined 剔键）
-      handEdited: undefined,
       // 创建者四个字段永不改。子 agent 改写：内容仍是子级写的，reviewed 一律去掉（回到待确认）；
       // 主会话改写待确认记录即升档：reviewed 缺省时补 main，已有的（用户改过、早先接受过）不动
       delegation: deps.delegation

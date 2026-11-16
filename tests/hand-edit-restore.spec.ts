@@ -9,7 +9,6 @@ import { encodeRecord, splitFrontmatter } from '../src/storage/frontmatter.ts'
 import { STATE_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
 import { MemoryStore } from '../src/store.ts'
 import { SnapshotCache } from '../src/runtime.ts'
-import { HAND_EDITED_NOTE } from '../src/index-line.ts'
 import { executeSearch, renderSearchResult } from '../src/tools/search.ts'
 import { executeSave } from '../src/tools/save.ts'
 import { executeSnapshotTool } from '../src/tools/snapshot.ts'
@@ -89,7 +88,7 @@ function restored<T extends { kind: string }>(r: T): Extract<T, { kind: 'restore
 }
 
 describe('手编检测与恢复比较投影', () => {
-  it('改正文不改 frontmatter → 渲染带手编标注；维护点后文件里 handEdited: true、lastConfirmedAt 等于 mtime；memory_save update 后标记清除且 source 更新', async () => {
+  it('改正文不改 frontmatter → 不加任何标注；维护点后 lastConfirmedAt、updatedAt 等于 mtime、不写手改标记；memory_save update 不用 force 直接写，source 更新', async () => {
     const path = await writeMem('pnpm.md', wsRec({ id: 'mem_h', name: '包管理', summary: '用 pnpm', content: '包管理用 pnpm' }))
     await handEdit(path, '包管理用 pnpm', '包管理用 pnpm，锁文件必须提交')
     const editedAt = Date.now() - 3 * DAY
@@ -97,42 +96,48 @@ describe('手编检测与恢复比较投影', () => {
     const mtime = (await stat(path)).mtimeMs
     const h = harness()
 
-    // 渲染：search 与注入都带手编标注
+    // 渲染：search 与注入都不带手编标注
     const hit = (await h.search('锁文件')).hits[0]
     expect(hit.id).toBe('mem_h')
-    expect(renderSearchResult({ hits: [hit] })).toContain(HAND_EDITED_NOTE)
+    expect(renderSearchResult({ hits: [hit] })).not.toContain('手编')
     const injected = await h.assemble()          // 快照冻结 = 维护点
-    expect(injected).toContain(HAND_EDITED_NOTE)
+    expect(injected).not.toContain('手编')
 
-    // 维护点后落盘
+    // 维护点后落盘：时间戳取 mtime，不写手改标记
     const fm = await frontmatter(path)
-    expect(fm.handEdited).toBe(true)
+    expect(fm).not.toHaveProperty('handEdited')
     expect(fm.lastConfirmedAt).toBe(iso(mtime))
     expect(fm.updatedAt).toBe(iso(mtime))
 
-    // memory_save update：手改过的先拒（手改保护），问过用户带 force 重发后标记清除，source 指向本次会话
-    const args = { action: 'update', id: 'mem_h', name: '包管理', type: 'preference', scope: 'workspace', content: '包管理用 pnpm，锁文件必须提交', summary: '用 pnpm', sourceMode: 'user-explicit' } as const
-    expect(await h.save(args)).toMatchObject({ kind: 'rejected', code: 'hand-edited' })
-    const updated = await h.save({ ...args, force: true })
-    expect(updated.kind).toBe('updated')
+    // memory_save update：手改过的照常更新，不用 force；source 指向本次会话
+    const args = { action: 'update', id: 'mem_h', name: '包管理', type: 'preference', scope: 'workspace', content: '包管理用 pnpm，锁文件和 .npmrc 都要提交', summary: '用 pnpm', sourceMode: 'user-explicit' } as const
+    expect((await h.save(args)).kind).toBe('updated')
     const after = await frontmatter(path)
-    expect(after).not.toHaveProperty('handEdited')
     expect(after.source).toMatchObject({ sessionId: SESSION.id })
-    const again = (await h.store.get('mem_h'))!
-    expect(again.handEdited).toBeUndefined()
-    expect(again.source?.sessionId).toBe(SESSION.id)
-    expect(renderSearchResult({ hits: (await h.search('锁文件')).hits })).not.toContain(HAND_EDITED_NOTE)
+    expect((await h.store.get('mem_h'))!.content).toBe('包管理用 pnpm，锁文件和 .npmrc 都要提交')
+  })
+
+  it('旧版本落盘的 handEdited: true：读取时忽略（不进记录、不进 extras），维护点回写时去掉这一行；模型 update 不用 force', async () => {
+    const path = await writeMem('legacy.md', wsRec({ id: 'mem_l', name: '旧标记', summary: '旧版手改', content: '旧版手改过的正文' }))
+    const text = await readFile(path, 'utf8')
+    await writeFile(path, text.replace(/^digest: /m, 'handEdited: true\ndigest: '))
+    const h = harness()
+    expect(await h.store.get('mem_l')).not.toHaveProperty('handEdited')
+    await h.assemble()                            // 维护点
+    expect(await readFile(path, 'utf8')).not.toContain('handEdited')
+    const args = { action: 'update', id: 'mem_l', name: '旧标记', type: 'preference', scope: 'workspace', content: '模型更新后的正文', summary: '旧版手改', sourceMode: 'user-explicit' } as const
+    expect((await h.save(args)).kind).toBe('updated')
   })
 
   it('恢复比较投影（name、type、tags、summary、正文、validFrom、validTo、confidence、supersedes、source）在比较时刻由当前文件与快照记录各算一份，不读文件里的 digest', async () => {
-    // 字段集合钉死：时间戳、status、handEdited、digest、位置、召回统计都不在里面
+    // 字段集合钉死：时间戳、status、digest、位置、召回统计都不在里面
     expect(Object.keys(restoreProjection(wsRec())).sort()).toEqual([
       'confidence', 'content', 'name', 'source', 'summary', 'supersedes', 'tags', 'type', 'validFrom', 'validTo',
     ])
     const MIN = 60_000   // 有效期按分钟比（文件里写到分钟）
     const base = wsRec({ id: 'mem_p', content: '第一行\n第二行', validFrom: 10 * MIN, validTo: 20 * MIN, supersedes: ['mem_x'] })
     const same = (a: MemoryRecord) => isDeepStrictEqual(restoreProjection(a), restoreProjection(base))
-    expect(same({ ...base, updatedAt: 9, lastConfirmedAt: 9, status: 'superseded', handEdited: true, recallCount: 7, scope: 'global', workspacePath: undefined })).toBe(true)
+    expect(same({ ...base, updatedAt: 9, lastConfirmedAt: 9, status: 'superseded', recallCount: 7, scope: 'global', workspacePath: undefined })).toBe(true)
     expect(same({ ...base, content: base.content.replace(/\n/g, '\r\n') })).toBe(true)
     // 旧版本快照里不在整分钟上的有效期：按向外取整后比，和转换后的文件视为相同
     expect(same({ ...base, validFrom: 10 * MIN + 59_999, validTo: 20 * MIN - 59_999 })).toBe(true)
@@ -143,7 +148,7 @@ describe('手编检测与恢复比较投影', () => {
     ]
     for (const c of changes) expect(same({ ...base, ...c }), JSON.stringify(c)).toBe(false)
 
-    // 不读 digest：文件里的 digest 被改坏（读侧因此标手编），但投影与快照一致 → 照常恢复；
+    // 不读 digest：文件里的 digest 被改坏，但投影与快照一致 → 照常恢复；
     // 快照之后 updatedAt 被推后（非内容变化）也不算修改
     const h = harness()
     const path = await writeMem('p.md', wsRec({ id: 'mem_p', content: '投影探针' }))
@@ -153,7 +158,6 @@ describe('手编检测与恢复比较投影', () => {
     await writeFile(path, text
       .replace(/^digest: .*$/m, 'digest: d1:0000000000000000')
       .replace(/^updatedAt: .*$/m, `updatedAt: ${iso(Date.now() + DAY)}`))
-    expect((await h.store.get('mem_p'))!.handEdited).toBe(true)
     const r = restored(await h.snapshot({ action: 'restore', snapshotId: created.snapshotId }))
     expect(r.restored).toEqual(['mem_p'])
     expect(r.skipped).toEqual([])

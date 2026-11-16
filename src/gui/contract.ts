@@ -87,7 +87,6 @@ export const memoryCardSchema = z.object({
   updatedAt: z.number(),
   lastConfirmedAt: z.number(),
   validTo: z.number().optional(),
-  handEdited: z.boolean().optional(),
   /** 子 agent 写入的记忆：第几层子 agent 建的，谁升的档（缺省 = 待确认）。普通记忆不带。 */
   delegation: z.object({ depth: z.number().int().min(1), reviewed: reviewedBySchema.optional() }).optional(),
   /** 记忆文件的绝对路径。 */
@@ -781,12 +780,12 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   /**
    * 「采纳建议」：按条目上 id 为 suggestionId 的处理建议落盘，界面不回传建议内容。收横向、垂直冲突。保留 A、保留 B、都保留
    * 记法同 resolve 的 keep-left / keep-right / keep-both（另记依据和结论代码），撤销、最近删除、败方含高危密钥时的物理删除都同 resolve。
-   * 融合：保留方改写成融合稿（标手改）、另一条进最近删除，整批一份快照，条目结清为 plan-applied，结果的 memoryIds 是保留方、被并入的；
+   * 融合：保留方改写成融合稿、另一条进最近删除，整批一份快照，条目结清为 plan-applied，结果的 memoryIds 是保留方、被并入的；
    * 撤销按回执把两条都恢复、冲突回到待处理；从最近删除恢复被并入的那条只恢复它。某一项没写成时同 apply-edits：已写的条件退回，
    * 没退干净的回 isPartial（没退回、仍是这次写下的另记一笔可撤销的账，decisionId 是那一笔），冲突条目不结清。
    * 服务端认领条目后核对：建议 id 一致、依据版本（冲突指纹、每条的完整内容指纹和作用域键）仍是此刻的，对不上回 stale，什么都不动；
    * 写入时锁内按依据再比一次。条目不在待处理回 not-found；不是冲突回 invalid-args。过跨项目门（同 resolve）。
-   * 垂直冲突：删除这条记法同 resolve 的 keep-right，都保留同 keep-both；改写这条记忆同融合（改写稿标手改，条目结清为 plan-applied，回执只有改写一项、没有败方，
+   * 垂直冲突：删除这条记法同 resolve 的 keep-right，都保留同 keep-both；改写这条记忆同融合（条目结清为 plan-applied，回执只有改写一项、没有败方，
    * 撤销后记忆恢复、冲突回到待处理）。另按这条记忆此刻对应的指令文件核对依据里的基线指纹，拿不到或指令文件改过回 stale；在哪个会话里采纳都一样。指令文件不改。
    * 依据是要求时（补充要求）带 proposal（draft-proposal 回的方案，依据版本原样带回）代替 suggestionId：落盘、撤销、核对同上，结清时记来源 request；
    * 操作和结论对不上（每条恰好一项、按条目顺序，融合的改写项在合并规则选的保留方上）回 invalid-args；
@@ -831,7 +830,7 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   /** 刷新一条记忆的确认时间（建议整理「很久没确认」的「仍然有效」），内容不动。不受体检开关影响。 */
   z.object({ cmd: z.literal('confirm'), memoryId: z.string(), layer: targetScope, allowCrossWorkspace }),
   /**
-   * 建议整理的「直接改」：正文、名称、摘要、标签换成给定值，updatedAt、lastConfirmedAt 记为当前时间，标手改（模型改写、替代前要先问用户）；
+   * 建议整理的「直接改」：正文、名称、摘要、标签换成给定值，updatedAt、lastConfirmedAt 记为当前时间；
    * 类型、作用域、出处、有效期、置信度、取代关系、召回统计不动。base 是卡片加载时的版本，磁盘上对不上回 stale，什么都不动。
    * 新内容含高危密钥回 secret-critical；疑似密钥回 secret-suspected，用户确认后带 force 重发。快照先行（项目记忆也拍），
    * 在账本里留一条已结清的条目，结果的 decisionId 交给 undo 撤销。

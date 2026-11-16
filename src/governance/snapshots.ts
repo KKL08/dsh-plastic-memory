@@ -28,7 +28,7 @@ export interface SnapshotDiffEntry {
 
 /**
  * 恢复比较投影：判「快照后被修改」只比这些内容字段，
- * 不含时间戳、status、handEdited、位置与召回统计，也不读文件里的 digest——手改后立即恢复也能判出，
+ * 不含时间戳、status、位置与召回统计，也不读文件里的 digest——手改后立即恢复也能判出，
  * 没有 digest 的旧快照同样能比。正文 CRLF 归一为 LF（与 digest 一致，换行风格不算修改）。
  */
 export function restoreProjection(r: MemoryRecord) {

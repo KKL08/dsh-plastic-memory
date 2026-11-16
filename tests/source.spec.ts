@@ -61,7 +61,7 @@ describe('executeSource', () => {
   })
 
   it('命中时名称由执行器返回；名称里的高危密钥遮掉', async () => {
-    const store = await storeWith(record({ name: `部署 ${FAKE_SECRET.sk}`, handEdited: true }))
+    const store = await storeWith(record({ name: `部署 ${FAKE_SECRET.sk}` }))
     const readEvent: ReadEventFn = vi.fn().mockResolvedValue({ session: { id: 'session-x' }, events: [] })
     const result = await executeSource({ memoryId: 'mem_a' }, ctx, { store, getReadEvent: () => readEvent })
     if (result.kind !== 'ok') throw new Error(result.kind)

@@ -9,6 +9,8 @@ import { formatValidity, localDateAt, roundValidity } from '../validity.ts'
 
 /** 保留键：位置由目录表达、正文即 content、召回统计住 .state/。 */
 const RESERVED_KEYS = new Set(['scope', 'workspacePath', 'recallCount', 'lastRecalledAt', 'content'])
+/** 停用的键：旧版本写下的 handEdited（手改标记）。读取时丢掉、不进 extras，下次回写时随之消失。 */
+const RETIRED_KEYS = new Set(['handEdited'])
 /** 时间戳字段：文件面 ISO 8601（写出 UTC 毫秒；有效期键例外，见 VALIDITY_KEYS），内存面 epoch ms。 */
 const TIME_KEYS = new Set(['createdAt', 'updatedAt', 'lastConfirmedAt', 'deletedAt', 'validFrom', 'validTo'])
 /**
@@ -26,7 +28,7 @@ const HAND_WRITTEN_CONFIDENCE = 0.9
 const FILE_KEY_ORDER = [
   'id', 'name', 'type', 'tags', 'status', 'confidence', 'source',
   'createdAt', 'updatedAt', 'lastConfirmedAt', 'deletedAt', 'validFrom', 'validTo',
-  'supersedes', 'summary', 'globalCandidate', 'handEdited', 'delegation', 'digest',
+  'supersedes', 'summary', 'globalCandidate', 'delegation', 'digest',
 ] as const
 const KNOWN_FILE_KEYS = new Set<string>(FILE_KEY_ORDER)
 
@@ -91,14 +93,14 @@ function yamlErrorAt(e: unknown): string {
   return at === undefined ? e.code : `${e.code}（frontmatter 第 ${at.line} 行第 ${at.col} 列）`
 }
 
-/** 内容摘要：name、summary、正文以 LF 拼接（CRLF 归一）后 sha1 前 16 位，带算法前缀。只用于手编检测。 */
+/** 内容摘要：name、summary、正文以 LF 拼接（CRLF 归一）后 sha1 前 16 位，带算法前缀。只用于判断文件被手改过（维护点据此刷新时间戳）。 */
 export function computeDigest(name: string, summary: string, content: string): string {
   const text = `${name}\n${summary}\n${content}`.replace(/\r\n/g, '\n')
   return `${DIGEST_PREFIX}${createHash('sha1').update(text).digest('hex').slice(0, 16)}`
 }
 
 /**
- * 文件里的 digest「认识且不匹配」= 内容被手改过：读取时据此标 handEdited，维护点据此把 updatedAt / lastConfirmedAt
+ * 文件里的 digest「认识且不匹配」= 内容被手改过：维护点据此把 updatedAt / lastConfirmedAt
  * 取 mtime。缺省或前缀不认识视为未知（0.1.x 文件、手建文件），不算不匹配。
  */
 export function digestMismatch(fileDigest: unknown, r: Pick<MemoryRecord, 'name' | 'summary' | 'content'>): boolean {
@@ -138,6 +140,7 @@ export function decodeRecord(parsed: ParsedMemoryFile, loc: FileLocation, opts: 
   const reserved: string[] = []
   for (const [k, v] of Object.entries(parsed.data)) {
     if (KNOWN_FILE_KEYS.has(k)) src[k] = v
+    else if (RETIRED_KEYS.has(k)) continue
     else if (RESERVED_KEYS.has(k)) reserved.push(k)   // 权威来源是目录/正文/侧表：忽略，进目录级说明
     else extras[k] = v
   }
@@ -151,8 +154,7 @@ export function decodeRecord(parsed: ParsedMemoryFile, loc: FileLocation, opts: 
     if (src[k] === undefined && opts.mtimeMs !== undefined) src[k] = opts.mtimeMs
   }
   if (src.id === undefined && opts.relPath !== undefined) src.id = deriveFileId(opts.relPath)
-  const fileDigest = src.digest
-  delete src.digest
+  delete src.digest   // 只在维护点按原文比对（file-table），记录里不带
   const assembled = {
     tags: [], summary: '', status: 'active',
     ...src,
@@ -168,8 +170,6 @@ export function decodeRecord(parsed: ParsedMemoryFile, loc: FileLocation, opts: 
   const cap = r.data.source ? CONFIDENCE_BY_SOURCE[r.data.source.sourceMode] : undefined
   const confidence = cap === undefined ? (r.data.confidence ?? HAND_WRITTEN_CONFIDENCE) : Math.min(r.data.confidence ?? cap, cap)
   const record: MemoryRecord = { ...r.data, confidence }
-  // digest：缺省或前缀不认识 = 未知（0.1.x 文件、手建文件），不标；认识且不匹配 = 被手改过
-  if (digestMismatch(fileDigest, record)) record.handEdited = true
   const notes: DecodeNote[] = reserved.length === 0 ? [] : [{
     level: 'info', code: 'reserved-keys', keys: reserved,
     text: `frontmatter 含保留键 ${reserved.join('、')}，已忽略（位置由目录决定，正文即 content，召回统计不在文件里）`,

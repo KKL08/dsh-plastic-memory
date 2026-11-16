@@ -12,7 +12,7 @@ import { isPendingDelegated } from '../src/record-schema.ts'
 import { captureError } from './helpers/errors.ts'
 
 // 0.2.0 文件契约：手建文件放宽、派生 id、时间戳放宽、
-// digest / handEdited / deletedAt、固定键序、保留键说明、不抛的隔离包装。
+// digest / deletedAt / 停用的 handEdited、固定键序、保留键说明、不抛的隔离包装。
 
 const MTIME = Date.UTC(2026, 9, 1, 8, 30, 0, 123)
 const GLOBAL = { scope: 'global' } as const
@@ -37,7 +37,7 @@ describe('手建文件缺省值表', () => {
       createdAt: MTIME, updatedAt: MTIME, lastConfirmedAt: MTIME,
       scope: 'global', recallCount: 0, lastRecalledAt: null,
     })
-    for (const k of ['source', 'supersedes', 'globalCandidate', 'validFrom', 'validTo', 'handEdited', 'deletedAt']) {
+    for (const k of ['source', 'supersedes', 'globalCandidate', 'validFrom', 'validTo', 'deletedAt']) {
       expect(r).not.toHaveProperty(k)
     }
     expect(extras).toEqual({})
@@ -215,32 +215,23 @@ describe('digest', () => {
     expect(splitFrontmatter(text).data.digest).toBe(computeDigest(r.name, r.summary, r.content))
   })
 
-  it('decode：digest 匹配 → 不标手编；digest 不进 extras', () => {
+  it('decode：digest 不进记录、不进 extras', () => {
     const back = decodeRaw(encodeRecord(record({}), {}))
-    expect(back.record).not.toHaveProperty('handEdited')
+    expect(back.record).not.toHaveProperty('digest')
     expect(back.extras).toEqual({})
   })
 
-  it('decode：digest 存在且不匹配（正文被手改）→ 内存 handEdited: true', () => {
-    const tampered = encodeRecord(record({}), {}).replace('一律用 pnpm', '一律用 npm')
-    expect(decodeRaw(tampered).record.handEdited).toBe(true)
-  })
-
-  it('decode：name / summary 被手改同样判手编', () => {
+  it('decode：digest 不匹配（正文、名称、摘要被手改）只是读回改后的值，不加任何标记', () => {
     const text = encodeRecord(record({}), {})
-    expect(decodeRaw(text.replace('name: 包管理用 pnpm', 'name: 包管理用 yarn')).record.handEdited).toBe(true)
-    expect(decodeRaw(text.replace('summary: 包管理选型', 'summary: 选型')).record.handEdited).toBe(true)
-  })
-
-  it.each([
-    ['缺省', (t: string) => t.replace(/digest: \S+\n/, '')],
-    ['不认识的前缀', (t: string) => t.replace(/digest: \S+/, 'digest: d9:0123456789abcdef')],
-    ['非字符串', (t: string) => t.replace(/digest: \S+/, 'digest: 42')],
-  ])('decode：digest %s → 视为未知，不标手编（即使正文变了）', (_label, mutate) => {
-    const text = mutate(encodeRecord(record({}), {})).replace('一律用 pnpm', '一律用 npm')
-    const back = decodeRaw(text)
-    expect(back.record).not.toHaveProperty('handEdited')
-    expect(back.extras).toEqual({})
+    for (const tampered of [
+      text.replace('一律用 pnpm', '一律用 npm'),
+      text.replace('name: 包管理用 pnpm', 'name: 包管理用 yarn'),
+      text.replace('summary: 包管理选型', 'summary: 选型'),
+    ]) {
+      const back = decodeRaw(tampered)
+      expect(back.record).toEqual(decodeRaw(tampered.replace(/digest: \S+\n/, '')).record)
+      expect(back.extras).toEqual({})
+    }
   })
 
   it('手建文件没写 summary 时按空串算 digest', () => {
@@ -249,20 +240,22 @@ describe('digest', () => {
   })
 })
 
-describe('handEdited 与 deletedAt 编解码', () => {
-  it('往返保留；缺省时键不存在', () => {
-    const r = record({ handEdited: true, deletedAt: 1787166499999, status: 'deleted' })
+describe('deletedAt 编解码与停用的 handEdited', () => {
+  it('deletedAt 往返保留；缺省时键不存在', () => {
+    const r = record({ deletedAt: 1787166499999, status: 'deleted' })
     const text = encodeRecord(r, {})
-    expect(text).toContain('handEdited: true')
     expect(text).toContain('deletedAt: ')
     expect(decodeRaw(text).record).toEqual({ ...r, recallCount: 0, lastRecalledAt: null })
-    const plain = encodeRecord(record({}), {})
-    expect(plain).not.toContain('handEdited')
-    expect(plain).not.toContain('deletedAt')
+    expect(encodeRecord(record({}), {})).not.toContain('deletedAt')
   })
 
-  it('落盘 handEdited: true 而 digest 匹配：标记保留（只由 update 清除）', () => {
-    expect(decodeRaw(encodeRecord(record({ handEdited: true }), {})).record.handEdited).toBe(true)
+  it('旧版本写下的 handEdited: true：读取时丢掉（不进记录、不进 extras，不出目录说明），重新写出时不再出现', () => {
+    const legacy = encodeRecord(record({}), {}).replace(/^digest: /m, 'handEdited: true\ndigest: ')
+    const back = decodeRaw(legacy)
+    expect(back.record).not.toHaveProperty('handEdited')
+    expect(back.extras).toEqual({})
+    expect(back.notes).toEqual([])
+    expect(encodeRecord(back.record, back.extras)).not.toContain('handEdited')
   })
 })
 
@@ -270,13 +263,13 @@ describe('写出键顺序固定', () => {
   it('全字段 + 未知键：已知键按契约序，未知键原样接在后面', () => {
     const r = record({
       validFrom: 1, validTo: 2, deletedAt: 3, supersedes: ['mem_old'], globalCandidate: true,
-      handEdited: true, status: 'deleted',
+      status: 'deleted',
     })
     const keys = Object.keys(splitFrontmatter(encodeRecord(r, { zeta: 1, alpha: 2 })).data)
     expect(keys).toEqual([
       'id', 'name', 'type', 'tags', 'status', 'confidence', 'source',
       'createdAt', 'updatedAt', 'lastConfirmedAt', 'deletedAt', 'validFrom', 'validTo',
-      'supersedes', 'summary', 'globalCandidate', 'handEdited', 'digest',
+      'supersedes', 'summary', 'globalCandidate', 'digest',
       'zeta', 'alpha',
     ])
   })
@@ -332,19 +325,14 @@ describe('delegation 编解码', () => {
     expect(digestOf(record({ delegation: { ...creator, reviewed: { by: 'user', at: AT } } }))).toBe(plain)
   })
 
-  it('改了委派块不算手编', () => {
-    const text = encodeRecord(record({ delegation: creator }), {}).replace('depth: 2', 'depth: 3')
-    expect(decodeRaw(text).record.handEdited).toBeUndefined()
-  })
-
-  it('键序：排在 handEdited 之后、digest 之前；不在 extras 里', () => {
-    const text = encodeRecord(record({ handEdited: true, delegation: creator }), { zeta: 1 })
+  it('键序：排在 globalCandidate 之后、digest 之前；不在 extras 里', () => {
+    const text = encodeRecord(record({ globalCandidate: true, delegation: creator }), { zeta: 1 })
     const keys = Object.keys(splitFrontmatter(text).data)
-    expect(keys.slice(-4)).toEqual(['handEdited', 'delegation', 'digest', 'zeta'])
+    expect(keys.slice(-4)).toEqual(['globalCandidate', 'delegation', 'digest', 'zeta'])
     expect(decodeRaw(text).extras).toEqual({ zeta: 1 })
   })
 
-  it('旧版不认识这个键时走 extras：嵌套块原样写回；写在 digest 之后的委派块新版读回仍是待确认、不算手编', () => {
+  it('旧版不认识这个键时走 extras：嵌套块原样写回；写在 digest 之后的委派块新版读回仍是待确认', () => {
     const fromNew = splitFrontmatter(encodeRecord(record({ delegation: creator }), {}))
     const { delegation, ...known } = fromNew.data
     // 旧版的编码器与当前同一段代码，只是白名单里没有这个键：未知顶层键整块进 extras、写在已知键之后
@@ -355,7 +343,6 @@ describe('delegation 编解码', () => {
     const back = decodeRaw(oldWrite).record
     expect(back.delegation).toEqual(creator)
     expect(isPendingDelegated(back)).toBe(true)
-    expect(back.handEdited).toBeUndefined()
   })
 
   it('非法的委派块（depth 0）整条隔离，不悄悄当主档', () => {
@@ -442,7 +429,7 @@ describe('0.1.x 旧文件往返', () => {
   it.each([
     ['数字时间戳', (ms: number) => String(ms)],
     ['ISO 毫秒时间戳', (ms: number) => new Date(ms).toISOString()],
-  ])('%s：decode → encode → decode 语义不变，补写 digest、不标手编', (_label, ts) => {
+  ])('%s：decode → encode → decode 语义不变，补写 digest', (_label, ts) => {
     const first = decodeRecord(splitFrontmatter(legacy(ts)), { scope: 'workspace', workspacePath: '/repo' }, { relPath: 'repo-1/x.md', mtimeMs: MTIME })
     expect(first.record).toMatchObject({
       id: 'mem_legacy01', confidence: 0.5, createdAt: 1754784000123, updatedAt: 1754784000456,
@@ -450,7 +437,6 @@ describe('0.1.x 旧文件往返', () => {
       source: { sessionId: 'sess-old', eventRange: [3, 9], sourceMode: 'agent-inferred' },
       content: '集成测试必须连真实数据库，不 mock。',
     })
-    expect(first.record).not.toHaveProperty('handEdited')
     expect(first.extras).toEqual({ owner: 'yk' })
 
     const rewritten = encodeRecord(first.record, first.extras)

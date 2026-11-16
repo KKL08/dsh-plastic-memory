@@ -5,6 +5,15 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/) with pre-release tags while the host
 (DeepSeek Harness) is itself in pre-release.
 
+## [Unreleased]
+
+### Changed
+- Memories you edited by hand are no longer locked against model updates.
+  When a conversation calls for a change, the model updates them like any
+  other memory, without asking first or needing `force`. The "hand-edited"
+  note on such memories is gone; a mark left in an existing file is ignored
+  and dropped the next time that memory is written.
+
 ## [0.2.0-beta.2] - 2026-11-15
 
 ### Added

@@ -270,8 +270,8 @@ describe('renderSaveDescription（memory_save 工具描述来源）', () => {
     expect(description).toContain('preference')
   })
 
-  it('交代改写用户手改过的记忆要先问用户', () => {
-    expect(registry.renderSaveDescription()).toContain('改写或替代用户手改过的记忆，要先在对话里问用户，同意后带 force: true 重发。')
+  it('不再交代手改保护：改写用户改过的记忆不用先问', () => {
+    expect(registry.renderSaveDescription()).not.toContain('手改')
   })
 
   it('交代记录是过程动作：回复不特意说记下了，用户明确要求记住时才应一句', () => {

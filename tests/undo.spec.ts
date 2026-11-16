@@ -77,7 +77,7 @@ async function seedEdit(e: Env, id = 'mem_e', workspacePath: string | undefined 
   await e.store.create(rec)
   const before = (await copy(e, id, workspacePath))!
   const snap = await e.snapshots.capture({ operation: 'pre-update', description: '直接改前', records: [before] }, NOW)
-  const committed = await e.store.update(before, cur => ({ ...cur, content: '改后', updatedAt: NOW, handEdited: true }), scopeAt(workspacePath))
+  const committed = await e.store.update(before, cur => ({ ...cur, content: '改后', updatedAt: NOW }), scopeAt(workspacePath))
   return (await e.decisions.addEdit(committed, { memoryIds: [id], summary: '甲', workspaces: [label(workspacePath)] }, 'edited', snap.id, NOW)).id
 }
 
@@ -87,7 +87,7 @@ async function seedMerge(e: Env) {
   await e.store.create(record({ id: 'mem_r', name: '删掉的', content: '删掉的正文' }))
   const [kept, removed] = [(await copy(e, 'mem_k'))!, (await copy(e, 'mem_r'))!]
   const snap = await e.snapshots.capture({ operation: 'pre-update', description: '直接合并前', records: [kept, removed] }, NOW)
-  const committed = await e.store.update(kept, cur => ({ ...cur, content: '合并后的正文', updatedAt: NOW, handEdited: true }), GLOBAL)
+  const committed = await e.store.update(kept, cur => ({ ...cur, content: '合并后的正文', updatedAt: NOW }), GLOBAL)
   expect(await e.store.softDelete(removed, { at: GLOBAL, now: NOW })).toBe(true)
   const id = (await e.decisions.addEdit(committed, { memoryIds: ['mem_k', 'mem_r'], summary: '合并后', workspaces: ['global', 'global'] }, 'merged', snap.id, NOW)).id
   return { id, kept, removed: (await copy(e, 'mem_r'))! }
@@ -203,17 +203,17 @@ describe('原样可撤：按种类的机制与撤后去向', () => {
     else expect([settled, (await e.decisions.get(id))?.id]).toEqual([undefined, id])
   })
 
-  it('force 改写、替代手改过的记忆后撤销：内容、状态、手改标记都回到改前；替代时新写的那条保留', async () => {
+  it('改写、替代用户改过的记忆后撤销：内容、状态都回到用户改的那版；替代时新写的那条保留', async () => {
     for (const kind of ['update', 'supersede'] as const) {
       await rm(root, { recursive: true, force: true })
       const e = env()
       await e.store.create(record({ id: 'mem_h', name: '名-mem_h', content: '改前的内容', ...at(WS) }))
-      await e.store.update({ id: 'mem_h', workspacePath: WS }, r => ({ ...r, content: '用户手改后的内容', handEdited: true }), scopeAt(WS))
+      await e.store.update({ id: 'mem_h', workspacePath: WS }, r => ({ ...r, content: '用户手改后的内容' }), scopeAt(WS))
       const saved = kind === 'update'
         ? await save(e, { action: 'update', id: 'mem_h', name: '名-mem_h', content: '用户同意后的新内容' })
         : await save(e, { name: '新说法', content: '完全不同的新说法', supersedes: ['mem_h'] })
       undoneOf(await e.undo(await modelChangeOf(e)))
-      expect(await copy(e, 'mem_h', WS)).toMatchObject({ content: '用户手改后的内容', status: 'active', handEdited: true })
+      expect(await copy(e, 'mem_h', WS)).toMatchObject({ content: '用户手改后的内容', status: 'active' })
       if (saved.kind === 'saved') expect(await copy(e, saved.record.id, WS)).toMatchObject({ status: 'active', content: '完全不同的新说法' })
     }
   })

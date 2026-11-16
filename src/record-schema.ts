@@ -27,8 +27,6 @@ export const memoryRecordSchema = z.object({
   supersedes: z.array(z.string()).optional(),
   /** 模型自主判断"该全局"但无权直写 global：落 workspace 时打此标记，治理时作为提升候选。 */
   globalCandidate: z.boolean().optional(),
-  /** 文件内容与 digest 不符（被手改过）：出处可能不对应。memory_save update 重写时清除。 */
-  handEdited: z.boolean().optional(),
   /**
    * 子 agent 写入的委派信息（宿主填）。缺省 = 主会话或手建。顶层键：旧版插件把它当未知键原样保留，嵌进 source 会在维护回写时丢掉。
    * 创建者四个字段写入后不再改，升档只加 reviewed。

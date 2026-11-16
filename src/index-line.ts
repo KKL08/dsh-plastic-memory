@@ -3,16 +3,11 @@ import { isPendingDelegated, type MemoryRecord } from './record-schema.ts'
 /** 低置信（模型推断）标注，索引行 / 快照 / search 结果共用同一份文案。 */
 export const INFERENCE_NOTE = '（模型推断，未经确认）'
 
-/** 手编标注：文件内容与 digest 不符（被手改过），memory_source 回查到的会话可能已不是这段内容的来源。 */
-export const HAND_EDITED_NOTE = '（已手编，出处可能不对应）'
-
 /** 待确认标注：子 agent 写入、还没有主会话或用户升档。 */
 export const DELEGATED_PENDING_NOTE = '（子 agent 写入，未确认）'
 
-/** 三种标注只出一个：已手编 → 待确认 → 模型推断。 */
+/** 两种标注只出一个：待确认 → 模型推断。 */
 export function sourceNote(r: MemoryRecord): string {
-  // 手编优先：内容已由用户改写，推断标注说的是改写前的内容
-  if (r.handEdited) return HAND_EDITED_NOTE
   // 待确认压过推断：子 agent 的推断本来就未确认，一条标注说清楚是谁写的、还没确认
   if (isPendingDelegated(r)) return DELEGATED_PENDING_NOTE
   // 判据是 sourceMode 而非 confidence：任何来源都可被下调，user-explicit 存 0.7 会被阈值误标

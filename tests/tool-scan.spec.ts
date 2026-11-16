@@ -430,7 +430,7 @@ describe('executeScan 全库体检', () => {
 
   it('PA-10 全量体检：提升候选的摘要手改进高危密钥，按项目聚合的候选只给遮盖后的文字', async () => {
     const deps = makeDeps()
-    await deps.store.put(record({ id: 'mem_c', scope: 'workspace', workspacePath: '/proj-a', globalCandidate: true, summary: `候选 ${FAKE_SECRET.github}`, handEdited: true }))
+    await deps.store.put(record({ id: 'mem_c', scope: 'workspace', workspacePath: '/proj-a', globalCandidate: true, summary: `候选 ${FAKE_SECRET.github}` }))
     const r = await executeScan({ scope: 'all', layers: 'rule' }, deps, fakeExec())
     if (r.kind !== 'checkup') throw new Error(r.kind)
     expect(r.promoteCandidates.byWorkspace).toEqual([{ workspacePath: '/proj-a', items: [{ id: 'mem_c', summary: `候选 ${SECRET_MASK}` }] }])
@@ -597,7 +597,7 @@ describe('renderScanResult', () => {
 
   it('PA-10 提升候选的摘要手改进高危密钥：体检报告只给遮盖后的文字', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
-    await store.put(record({ id: 'mem_c', scope: 'workspace', workspacePath: '/a', globalCandidate: true, summary: `候选 ${FAKE_SECRET.github}`, handEdited: true }))
+    await store.put(record({ id: 'mem_c', scope: 'workspace', workspacePath: '/a', globalCandidate: true, summary: `候选 ${FAKE_SECRET.github}` }))
     const r = await scanSingle({ scope: '/a', layers: 'rule' }, makeDeps({ store }))
     expect(r.promoteCandidates.items).toEqual([{ id: 'mem_c', summary: `候选 ${SECRET_MASK}` }])
     expect(renderScanResult(r)).not.toContain(FAKE_SECRET.github)

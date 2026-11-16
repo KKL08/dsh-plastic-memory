@@ -37,7 +37,7 @@ export function createSaveTool(deps: SaveToolDeps, options: { allowSubagent?: bo
       supersedes: { type: 'array', items: { type: 'string' }, description: '被这条新记忆取代的旧记忆 id（action=create 时用）。旧的随即失效、不再带入；旧说法要留档时用它，只是补充或改正同一条用 action=update。' },
       validFrom: { type: 'string', description: `生效起始，本机时间。只有用户说了从什么时候开始才填；只有截止时间的，填 validTo 就够。用户说了具体时刻写 "${VALIDITY_FORMAT}"，没说就只写日期 "${VALIDITY_DATE_FORMAT}"，插件补上现在的时分。` },
       validTo: { type: 'string', description: `失效截止，本机时间。只有用户明确给了截止时间，或信息本身有确定的到期日（一次活动、临时方案）才填，其余不填。用户说了具体时刻写 "${VALIDITY_FORMAT}"（如「今天下午三点前」写 "2026-10-29 15:00"），没说就只写日期 "${VALIDITY_DATE_FORMAT}"，插件补上现在的时分；截止在今天的必须写时刻。必须晚于现在和 validFrom。到点后这条记忆不再带入新对话，也搜不到；已带入当前对话的，到下个会话或上下文压缩后才去掉。` },
-      force: { type: 'boolean', description: '跳过结构去重、疑似密钥拦截与手改保护（用户已确认）' },
+      force: { type: 'boolean', description: '跳过结构去重与疑似密钥拦截（用户已确认）' },
     },
     output: {
       schema: { type: 'json' },
