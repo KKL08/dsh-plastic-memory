@@ -261,13 +261,12 @@ function applyOpsProblem(ops: readonly ApplyEditOp[], keep: readonly { memoryId:
   return stray === undefined ? undefined : `删除项 ${stray.memoryId} 的承接 ${stray.kind === 'forget' ? stray.into : ''} 不是本批的改写项或核对项`
 }
 
-/** 用户亲手改的四个面写进去（直接改、直接合并、整理所选的改写项）：updatedAt、lastConfirmedAt 记为现在，标手改；出处、类型、作用域等不动。 */
-function asHandEdited(cur: MemoryRecord, fields: { content: string; name: string; summary: string; tags: string[] }, now: number): MemoryRecord {
-  // 标手改：出处还是原来的会话，「已手编，出处可能不对应」照实；模型之后要改写、替代它得先问用户（同手改文件）
+/** 用户在界面里定下的四个面写进去（直接改、直接合并、整理所选的改写项、冲突采纳）：updatedAt、lastConfirmedAt 记为现在；出处、类型、作用域等不动。 */
+function withUserEdits(cur: MemoryRecord, fields: { content: string; name: string; summary: string; tags: string[] }, now: number): MemoryRecord {
   // 子 agent 写的待确认记录：用户亲手改过就算升档；已升档的不改写升档来源
   const delegation = isPendingDelegated(cur) ? { delegation: { ...cur.delegation!, reviewed: { by: 'user' as const, at: now } } } : {}
   const { content, name, summary, tags } = fields
-  return { ...cur, content, name, summary, tags, updatedAt: now, lastConfirmedAt: now, handEdited: true, ...delegation }
+  return { ...cur, content, name, summary, tags, updatedAt: now, lastConfirmedAt: now, ...delegation }
 }
 
 /** 整理所选逐项写的写入记录：written 是这一项实际提交的那份（没写成为 undefined），之后的回执、回退都按它。 */
@@ -305,7 +304,7 @@ async function writeBatch(items: readonly BatchItem[], store: MemoryStore, now: 
           candidate = undefined
           // 锁内按磁盘上的现状再核对一次：读过之后被改过就原样不写
           if (isChanged(cur)) return cur
-          return (candidate = asHandEdited(cur, op, now))
+          return (candidate = withUserEdits(cur, op, now))
         }, at)
         if (candidate !== undefined) write.written = committed
       } else {
@@ -929,7 +928,7 @@ async function dispatch(
           mine = undefined
           // 锁内按磁盘上的现状再核对一次：读过之后被改过就原样不写
           if (cur.status !== 'active' || isStale(cur, kept.base)) return cur
-          return (mine = asHandEdited(cur, command, now))
+          return (mine = withUserEdits(cur, command, now))
         }, own)
       } catch (error) {
         if (!(error instanceof RecordNotFoundError)) throw error

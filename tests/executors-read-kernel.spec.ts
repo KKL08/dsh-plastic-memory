@@ -9,7 +9,6 @@ import { ARCHIVE_DIR, GLOBAL_DIR, INDEX_FILE, STATE_DIR, WORKSPACE_MARKER, deriv
 import { MemoryStore } from '../src/store.ts'
 import { SnapshotCache } from '../src/runtime.ts'
 import { COLD_START_TEXT, coldStartUnparseableText } from '../src/snapshot.ts'
-import { HAND_EDITED_NOTE } from '../src/index-line.ts'
 import { executeSearch, renderSearchResult } from '../src/tools/search.ts'
 import { executeHealth, renderHealthResult, type HealthToolDeps } from '../src/tools/health.ts'
 import { executeScan, renderScanResult, type ScanToolDeps } from '../src/tools/scan.ts'
@@ -403,7 +402,7 @@ describe('执行器走按范围读取与两级定位', () => {
     }
   })
 
-  it('handEdited 记录渲染带「已手编，出处可能不对应」，memory_source 对无 source 返回「无出处」', async () => {
+  it('手改过的记录不加手编标注，memory_source 照常回查；无 source 返回「无出处」', async () => {
     const edited = wsRec({ id: 'mem_edit', name: '手编探针', content: '原文', source: { sessionId: 'sess-1', eventRange: [3, 4], sourceMode: 'agent-inferred' } })
     const path = await writeMem(wsDir(WS), 'edit.md', edited, WS)
     await writeFile(path, (await readFile(path, 'utf8')).replace('原文', '手编探针 用户改过的正文'))
@@ -413,13 +412,13 @@ describe('执行器走按范围读取与两级定位', () => {
 
     const hit = (await h.search('用户改过')).hits[0]
     expect(hit.id).toBe('mem_edit')
-    expect(renderSearchResult({ hits: [hit] })).toContain(HAND_EDITED_NOTE)
-    expect(HAND_EDITED_NOTE).toContain('已手编，出处可能不对应')
-    expect(await h.assemble()).toContain(HAND_EDITED_NOTE)
+    expect(renderSearchResult({ hits: [hit] })).not.toContain('已手编')
+    expect(await h.assemble()).not.toContain('已手编')
 
     const src = await h.source('mem_edit')
     expect(src.kind).toBe('ok')
-    expect(renderSourceResult(src)).toContain('已手编，出处可能不对应')
+    expect(renderSourceResult(src)).toContain('当时的话')
+    expect(renderSourceResult(src)).not.toContain('已手编')
 
     const noSourceId = deriveFileId(relative(root, join(wsDir(WS), 'nosrc.md')))
     const none = await h.source(noSourceId)

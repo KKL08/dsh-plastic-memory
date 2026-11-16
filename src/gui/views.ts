@@ -85,7 +85,6 @@ function card(r: MemoryRecord, data: ScopePreread, filePath = data.filePaths.get
     ...(r.source !== undefined ? { sourceMode: r.source.sourceMode, sourceSessionId: r.source.sessionId } : {}),
     createdAt: r.createdAt, updatedAt: r.updatedAt, lastConfirmedAt: r.lastConfirmedAt,
     ...(r.validTo !== undefined ? { validTo: r.validTo } : {}),
-    ...(r.handEdited ? { handEdited: true } : {}),
     ...(r.delegation !== undefined
       ? { delegation: { depth: r.delegation.depth, ...(r.delegation.reviewed !== undefined ? { reviewed: r.delegation.reviewed.by } : {}) } }
       : {}),

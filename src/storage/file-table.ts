@@ -458,7 +458,7 @@ export class FileTable implements MemoryTable {
    * 维护点（写路径末尾与快照冻结时调用；锁内，只动给定目录，幂等）。每个目录读顶层 + .archive/ 一遍，逐文件：
    *  - .archive/ 里 status 仍为 active 的按位置归一成 deleted（位置即作用域，不搬回顶层）；deleted 缺 deletedAt 用 mtime 补
    *  - ③ .archive/ 里 deletedAt 超保留期的物理删除，哪层都没有这个 id 了才清召回统计行（superseded 不清）
-   *  - ④ 手建 / 手编回写：digest 认识且不匹配 → handEdited、updatedAt 与 lastConfirmedAt 取 mtime；缺 id / 缺 digest / 时间戳形态 /
+   *  - ④ 手建 / 手编回写：digest 认识且不匹配 → updatedAt 与 lastConfirmedAt 取 mtime；缺 id / 缺 digest / 时间戳形态 /
    *    缺省字段由重新 encode 补齐；判「有变化」= 重新 encode 后与磁盘原文逐字节比较，不同才写；顶层含保留键的文件不回写
    *  - ② 顶层非 active 的搬进 .archive/（撞名追加 id 片段）；已过期的 active 文件不动
    *  - ① 再生 MEMORY.md：顶层 active 且未过期，同 id 取一份，name 再 id 排序，内容不变不写
@@ -488,7 +488,7 @@ export class FileTable implements MemoryTable {
           continue
         }
         if (digestMismatch(DIGEST_LINE_RE.exec(frontmatterOf(slot.raw))?.[1], record)) {
-          record = { ...record, handEdited: true, updatedAt: slot.mtimeMs, lastConfirmedAt: slot.mtimeMs }
+          record = { ...record, updatedAt: slot.mtimeMs, lastConfirmedAt: slot.mtimeMs }
         }
         const text = encodeRecord(record, slot.extras)
         if (!inArchive && record.status !== 'active') {

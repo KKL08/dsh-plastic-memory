@@ -5,6 +5,22 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/) with pre-release tags while the host
 (DeepSeek Harness) is itself in pre-release.
 
+## [Unreleased]
+
+### Added
+- `memory_save` updates can change just part of a memory: pass `edits`, each
+  an exact `oldString` from the current text and its `newString`. The rest of
+  the memory stays as it was, and if any edit does not match exactly once, the
+  whole update is rejected and nothing is written. The chat card shows the
+  edited memory the same way as a full rewrite.
+
+### Changed
+- Memories you edited by hand are no longer locked against model updates.
+  When a conversation calls for a change, the model updates them like any
+  other memory, without asking first or needing `force`. The "hand-edited"
+  note on such memories is gone; a mark left in an existing file is ignored
+  and dropped the next time that memory is written.
+
 ## [0.2.0-beta.2] - 2026-11-15
 
 ### Added

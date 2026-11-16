@@ -12,11 +12,13 @@ export type RejectCode =
   | 'schema-invalid'    // 字段校验失败
   | 'secret-critical'   // 明确厂商特征的密钥，拒存不落盘
   | 'secret-suspected'  // 疑似密钥（无厂商特征），未带 force 时拒存；用户确认后带 force: true 重发
-  | 'hand-edited'       // update 目标或同作用域 supersedes 目标用户手改过，未带 force 时拒存；问过用户、同意后带 force: true 重发。这次保存期间才被手改的带 force 也拒（内部子码 changed-after-read）
   | 'validity-format'      // validFrom / validTo 不是 YYYY-MM-DD HH:mm 或 YYYY-MM-DD（validity.ts）
   | 'validity-nonexistent' // validFrom / validTo 的日期或时刻不存在（2 月 30 日、25:00）
   | 'validity-past'        // validTo 不晚于当前时间，存下即过期
   | 'validity-reversed'    // validTo 不晚于 validFrom，有效期为空
+  | 'edit-invalid'         // edits 用法不对：配了 create、和 content 同传、空数组、oldString 为空或与 newString 相同
+  | 'edit-not-found'       // edits 某处的 oldString 在正文里找不到；原因带当前正文
+  | 'edit-ambiguous'       // edits 某处的 oldString 命中多处又没带 replaceAll
   | 'subagent-restricted'  // 子 agent 会话（delegationDepth ≥ 1）越过写入约束：依据、类型、替代、force、改写归属、新建配额，原因按条区分
 
 /**

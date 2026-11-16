@@ -13,9 +13,11 @@
  * 模型改写已有记忆（update）的也列在这里：折叠行写「改写了 N 条」，展开后那条元信息带「已改写」，下方「改前 / 改后」对照与「撤销修改」；
  * 这次调用替代了旧记忆的，那条下方一行「替代了「旧名」」与「撤销修改」，折叠行末尾「· 替代了 N 条旧记忆」（见 model-change.tsx）。
  * 改动按工具调用 id 认领全部记忆视图的 modelChanges，会话结束后照样认得；视图里没有、且调用已超出保留窗口的改写写「已超过 14 天」。
+ * 只传 edits 的改写，参数里没有改后的整条：卡片和「改后」按改前快照应用这次的 edits 算出来（同整条改写只认自己这次调用，之后再被改、撤销也不变），
+ * 参数里传了的字段以参数为准；改前快照已过保留窗口（或对不上）时取全部记忆视图里的那条。
  */
 import { useId, useMemo, useState } from 'react'
-import { RETENTION_MS, sameScope, scopeOfMemory, type LibraryView, type ModelChange, type Scope } from '../../src/gui/contract.ts'
+import { applyEdits, maskSecretSurface, RETENTION_MS, sameScope, scopeOfMemory, type LibraryView, type ModelChange, type Scope } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { workspaceOf } from '../session-pick.ts'
 import { useT } from '../i18n.tsx'
@@ -208,7 +210,22 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
     const { scope, workspacePath } = rewrite.before
     return { ...item, memory: { ...rest, scope, ...(workspacePath !== undefined ? { workspacePath } : {}) } }
   }
-  const candidates = saved.filter(item => current(placed(item)).promotion === 'candidate').length
+  // 只传 edits 的改写：参数里只有 id 和改动，改后的样子按改前快照重算，算不出时取视图（视图与快照只遮高危密钥，这里同其他卡片连疑似密钥也遮）
+  const filled = (item: SavedMemory): SavedMemory => {
+    const at = placed(item)
+    if (item.edit === undefined) return at
+    const rewrite = rewriteOf(item)
+    const before = rewrite === undefined || rewrite === 'expired' ? undefined : rewrite.before
+    const outcome = before === undefined ? undefined : applyEdits(before.content, item.edit.edits)
+    const source = before !== undefined && outcome !== undefined && 'content' in outcome
+      ? { ...before, content: outcome.content, ...item.edit.fields }
+      : liveCard(library.status === 'ready' ? library.data : undefined, item.memory.id, scopeOf(at.memory))
+    if (source === undefined) return at
+    const { name, type, summary, content, tags } = source
+    return { ...at, memory: maskSecretSurface({ ...at.memory, name, type, summary, content, tags }, { severity: 'suspected' }) }
+  }
+  const candidates = saved.filter(item => current(filled(item)).promotion === 'candidate').length
+  const firstName = saved[0] === undefined ? undefined : filled(saved[0]).memory.name
   const rewritten = saved.filter(item => item.isUpdate === true).length
   const fresh = saved.length - rewritten
   // 替代：视图里认得出的按条目；认不出（改前快照已过保留窗口、条目随之清掉）的按参数里的 supersedes 计
@@ -240,7 +257,7 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
             : (
               <>
                 <span className="pm-saved-lead">{foldedNode}</span>
-                <span className="pm-saved-first" title={saved[0]?.memory.name}>{saved[0]?.memory.name}</span>
+                <span className="pm-saved-first" title={firstName}>{firstName}</span>
                 {candidates > 0
                   ? <span className="pm-saved-hint" title={t('chat.card.folded.promote', { count: candidates })}><i className="pm-sep" aria-hidden="true">·</i>{t('chat.card.folded.promote', { count: candidates })}</span>
                   : null}
@@ -254,7 +271,7 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
       </h3>
       <div className="pm-saved-list" id={listId} hidden={!isOpen}>
         {isOpen ? saved.map((item) => {
-          const { memory, promotion } = current(placed(item))
+          const { memory, promotion } = current(filled(item))
           return (
             <SavedRow
               key={item.callId}

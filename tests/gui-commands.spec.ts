@@ -2974,7 +2974,7 @@ describe('edit-memory（建议整理的直接改）', () => {
     cmd: 'edit-memory', memoryId, layer: scopeOf(workspacePath), base, content: '新正文', name: '新名称', summary: '新摘要', tags: ['新标签'], ...fields,
   })
 
-  it('文件里 content / name / summary / tags 是新值；updatedAt、lastConfirmedAt 刷新，digest 重算，标手改（模型改写前要先问用户），索引行重写；其余字段一概不动', async () => {
+  it('文件里 content / name / summary / tags 是新值；updatedAt、lastConfirmedAt 刷新，digest 重算，不标手改，索引行重写；其余字段一概不动', async () => {
     const e = env()
     const original = record({
       id: 'mem_e', name: '发版流程', type: 'project', scope: 'workspace', workspacePath: SESSION_WS,
@@ -2991,8 +2991,7 @@ describe('edit-memory（建议整理的直接改）', () => {
     const after = (await e.store.get('mem_e', { workspacePath: SESSION_WS }))!
     expect([after.content, after.name, after.summary, after.tags]).toEqual(['新正文', '发版步骤', '新摘要', ['发版', 'npm']])
     expect([after.updatedAt, after.lastConfirmedAt]).toEqual([LATER, LATER])
-    expect(after.handEdited).toBe(true)
-    const changed = ['content', 'name', 'summary', 'tags', 'updatedAt', 'lastConfirmedAt', 'handEdited'] as const
+    const changed = ['content', 'name', 'summary', 'tags', 'updatedAt', 'lastConfirmedAt'] as const
     const rest = (r: typeof original) => Object.fromEntries(Object.entries(r).filter(([k]) => !(changed as readonly string[]).includes(k)))
     expect(rest(after)).toEqual(rest(original))
 
@@ -3000,7 +2999,7 @@ describe('edit-memory（建议整理的直接改）', () => {
     expect(body.filePath).toBe(path)
     const fm = splitFrontmatter(await readFile(path, 'utf8')).data
     expect(fm.digest).toBe(computeDigest('发版步骤', '新摘要', '新正文'))
-    expect(fm.handEdited).toBe(true)
+    expect(fm).not.toHaveProperty('handEdited')
     const index = await readFile(join(dirname(path), INDEX_FILE), 'utf8')
     expect(index).toContain('新摘要')
     expect(index).not.toContain('旧摘要')
@@ -3099,15 +3098,15 @@ describe('edit-memory（建议整理的直接改）', () => {
     expect(await allEntries(e)).toEqual([])
   })
 
-  it('改过之后模型不带 force 改写这条：hand-edited 拒绝，文件不动', async () => {
+  it('界面直接改过之后，模型不带 force 照常改写这条', async () => {
     const e = env()
     await e.store.create(record({ id: 'mem_g', name: '甲', content: '旧正文', scope: 'workspace', workspacePath: SESSION_WS }))
     ok(await e.run(edit('mem_g', SESSION_WS, await baseOf(e, 'mem_g'))))
     const r = await runSavePipeline(candidate({ action: 'update', id: 'mem_g', scope: 'workspace', content: '模型想写的' }), {
       store: e.store, registry, workspacePath: SESSION_WS, session: { id: 'sess-1', lastSeq: 1 }, snapshots: e.snapshots, decisions: e.decisions,
     })
-    expect(r).toMatchObject({ kind: 'rejected', code: 'hand-edited' })
-    expect((await e.store.get('mem_g', { workspacePath: SESSION_WS }))!.content).toBe('新正文')
+    expect(r.kind).toBe('updated')
+    expect((await e.store.get('mem_g', { workspacePath: SESSION_WS }))!.content).toBe('模型想写的')
   })
 
   describe('子 agent 写入的记忆', () => {
@@ -3309,7 +3308,7 @@ describe('merge-memories（内容重复的直接合并）', () => {
     expect(body.memoryIds).toEqual([keptId, removedId])
     const kept = (await e.store.get(keptId, scopeAt(ws(keptId))))!
     expect([kept.status, kept.content, kept.name, kept.summary, kept.tags, kept.updatedAt]).toEqual(['active', '合并后的正文', '合并后', '合并摘要', ['甲', '乙'], LATER])
-    expect(kept.handEdited).toBe(true)
+    expect(kept).not.toHaveProperty('handEdited')
     const removed = (await e.store.get(removedId, scopeAt(ws(removedId))))!
     // 删除时刻用注入的时钟，最近删除的保留期才算得准
     expect([removed.status, removed.updatedAt, removed.deletedAt]).toEqual(['deleted', LATER, LATER])
@@ -4561,7 +4560,7 @@ describe('apply-edits（整理所选：应用全部）', () => {
 
     expect(body.memoryIds).toEqual(['mem_p', 'mem_c', 'mem_e', 'mem_b'])
     const after = async (id: string) => (await locateCopy(e.store, id, wsScope))!
-    expect(await after('mem_c')).toMatchObject({ status: 'active', content: 'mem_c 改写后', name: 'mem_c 新名', summary: 'mem_c 新摘要', tags: ['biome'], updatedAt: LATER, lastConfirmedAt: LATER, handEdited: true })
+    expect(await after('mem_c')).toMatchObject({ status: 'active', content: 'mem_c 改写后', name: 'mem_c 新名', summary: 'mem_c 新摘要', tags: ['biome'], updatedAt: LATER, lastConfirmedAt: LATER })
     expect(await after('mem_e')).toMatchObject({ status: 'active', content: 'mem_e 改写后' })
     expect([(await after('mem_p')).status, (await after('mem_b')).status]).toEqual(['deleted', 'deleted'])
     expect([(await after('mem_p')).deletedAt, (await after('mem_p')).content]).toEqual([LATER, '代码格式化统一用 prettier。'])
@@ -5522,7 +5521,7 @@ describe('apply-proposal（采纳融合建议：保留方改写成融合稿，�
   }
   const deletedItems = async (e: ReturnType<typeof env>) => deletedViewSchema.parse(await e.readView('deleted')).items
 
-  it('保留方改写成融合稿（标手改）、另一条软删，一份快照覆盖两条；条目结清为 plan-applied，带回执、依据、改后指纹，引用被删那条的其他条目清掉', async () => {
+  it('保留方改写成融合稿、另一条软删，一份快照覆盖两条；条目结清为 plan-applied，带回执、依据、改后指纹，引用被删那条的其他条目清掉', async () => {
     const { e, entry, suggestion } = await merged()
     const other = (await e.decisions.upsert({ memoryIds: ['mem_b', 'mem_c'], summary: '另一条冲突', fingerprint: 'fp-bc' }, 1)).entry
     e.clock.now = LATER
@@ -5532,7 +5531,7 @@ describe('apply-proposal（采纳融合建议：保留方改写成融合稿，�
     expect(snap!.data.map(r => [r.id, r.content])).toEqual([['mem_a', '用 pnpm'], ['mem_b', '用 npm']])
     const a = (await e.store.get('mem_a'))!
     const b = (await e.store.get('mem_b'))!
-    expect(a).toMatchObject({ ...DRAFT, status: 'active', handEdited: true, updatedAt: LATER })
+    expect(a).toMatchObject({ ...DRAFT, status: 'active', updatedAt: LATER })
     expect(b).toMatchObject({ status: 'deleted', content: '用 npm' })
 
     const settled = await e.decisions.listSettled()
@@ -6062,7 +6061,7 @@ describe('draft-proposal 与按要求应用（补充要求）', () => {
       e.clock.now = LATER
       const body = ok(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, proposal }))
       expect(body).toMatchObject({ ok: true, decisionId: entry.id, memoryIds: ['mem_a', 'mem_b'] })
-      expect(await e.store.get('mem_a')).toMatchObject({ ...DRAFT, status: 'active', handEdited: true })
+      expect(await e.store.get('mem_a')).toMatchObject({ ...DRAFT, status: 'active' })
       expect((await e.store.get('mem_b'))!.status).toBe('deleted')
       expect((await e.decisions.listSettled())[0]!.settled).toMatchObject({ verdict: 'plan-applied', proposal: { source: 'request', action: 'merge' } })
       ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
@@ -6294,14 +6293,14 @@ describe('垂直冲突（记忆和指令文件）用处理卡', () => {
       expect(await e.snapshots.list()).toEqual([])
     })
 
-    it('改写：记忆换成改写稿（标手改），一份快照；条目结清为 plan-applied（只有改写一项回执、没有败方），改后指纹按这条记忆所在项目的指令文件重算；指令文件不改', async () => {
+    it('改写：记忆换成改写稿，一份快照；条目结清为 plan-applied（只有改写一项回执、没有败方），改后指纹按这条记忆所在项目的指令文件重算；指令文件不改', async () => {
       const { e, entry, suggestion } = await suggested('rewrite', { draft: DRAFT })
       e.clock.now = LATER
       const body = ok(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id }))
       const [snap] = await e.snapshots.list()
       expect(body).toEqual({ ok: true, cmd: 'apply-proposal', decisionId: entry.id, memoryIds: ['mem_v'], snapshotId: snap!.id })
       const written = await memoryNow(e)
-      expect(written).toMatchObject({ ...DRAFT, status: 'active', handEdited: true })
+      expect(written).toMatchObject({ ...DRAFT, status: 'active' })
       const [settled] = await e.decisions.listSettled()
       expect(settled).toMatchObject({ id: entry.id, fingerprint: conflictFingerprint([written], BASELINE) })
       expect(settled!.settled).toEqual({

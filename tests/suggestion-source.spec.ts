@@ -95,12 +95,11 @@ describe('处理建议的出处回查', () => {
     expect(asked).toEqual([])
   })
 
-  it('读不到时那一条没有出处，不报错：没有出处锚、手改过、会话不存在、窗口里没有对话文字、宿主没有读事件服务', async () => {
-    const { readEvent } = sessions({ 'sess-a': [turnStart(10), toolResult(11, '只有工具输出')], 'sess-h': [userMessage(11, '旧话')] })
+  it('读不到时那一条没有出处，不报错：没有出处锚、会话不存在、窗口里没有对话文字、宿主没有读事件服务', async () => {
+    const { readEvent } = sessions({ 'sess-a': [turnStart(10), toolResult(11, '只有工具输出')] })
     const handWritten = mem('n', { source: undefined })
-    const edited = mem('h', { handEdited: true })
     const gone = mem('x')
-    expect(await readSuggestionSources({ workspaces: [P, P, P, P], records: [mem('a'), handWritten, edited, gone] }, readEvent)).toEqual([undefined, undefined, undefined, undefined])
+    expect(await readSuggestionSources({ workspaces: [P, P, P], records: [mem('a'), handWritten, gone] }, readEvent)).toEqual([undefined, undefined, undefined])
     expect(await readSuggestionSources({ workspaces: [P, P], records: [mem('a'), mem('b')] }, null)).toEqual([undefined, undefined])
   })
 })

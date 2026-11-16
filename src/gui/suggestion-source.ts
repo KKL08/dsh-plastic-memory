@@ -8,7 +8,7 @@ import { sourceWindow, type RawEvent, type ReadEventFn } from '../tools/source.t
  * 能读哪些按冲突所属的作用域定：条目记下的作用域（项目内的冲突是那个项目，全局与项目之间的是这两个）加全局；
  * 此刻不在这些作用域里的记忆一律不读。memory_source 按当前会话的项目判断，没有会话的体检用不了它的规则。
  * 宿主的读事件接口不看调用方在哪个项目，范围只由这里把住；会话的锚由记忆自己给，读不到任意会话。
- * 读不到（没有锚、手改过、会话不在了、没有服务）时那一条没有出处，不报错。
+ * 读不到（没有锚、会话不在了、没有服务）时那一条没有出处，不报错。
  */
 
 export interface SourceLine {
@@ -68,8 +68,8 @@ function conversationOf(events: readonly RawEvent[]): SourceLine[] {
 async function readOne(r: MemoryRecord, allowed: ReadonlySet<string>, readEvent: ReadEventFn): Promise<SourceExcerpt | undefined> {
   const own = scopeOfMemory(r)
   if (own === undefined || !allowed.has(scopeKey(own))) return undefined
-  // 手编的没有锚；手改过的，锚上的对话可能已不是现在内容的来源
-  if (r.source === undefined || r.handEdited === true) return undefined
+  // 手编的没有锚
+  if (r.source === undefined) return undefined
   try {
     const win = await readEvent(sourceWindow({ ...r, source: r.source }))
     const lines = conversationOf(win.events ?? [])

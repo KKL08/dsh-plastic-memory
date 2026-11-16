@@ -183,7 +183,7 @@ describe('runSavePipeline', () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({
       id: 'mem_handedit', type: 'preference', scope: 'workspace', workspacePath: '/proj',
-      content: '认证逻辑在 `src/auth.ts`', summary: `认证入口 ${FAKE_SECRET.sk}`, handEdited: true,
+      content: '认证逻辑在 `src/auth.ts`', summary: `认证入口 ${FAKE_SECRET.sk}`,
     }))
     const dup = await runSavePipeline(candidate({ content: '`src/auth.ts` 负责认证' }), deps(store))
     if (dup.kind !== 'duplicate-suspected') throw new Error(dup.kind)
@@ -660,7 +660,7 @@ describe('runSavePipeline：有效期', () => {
   })
 })
 
-// 模型改写、替代的兜底：改前先拍快照、记一条可撤销的已结清条目；手改过的记忆不悄悄覆盖
+// 模型改写、替代的兜底：改前先拍快照、记一条可撤销的已结清条目
 describe('runSavePipeline：模型改写的兜底', () => {
   function guarded(store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())) {
     const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
@@ -733,41 +733,6 @@ describe('runSavePipeline：模型改写的兜底', () => {
     expect(await e.decisions.listSettled()).toEqual([])
   })
 
-  it('update 目标手改过：不写入、不拍快照，rejected(hand-edited)，原因带当前内容与 force 指引', async () => {
-    const e = guarded()
-    const target = await seed(e.store)
-    await e.store.put({ ...target, content: '用户手改后的内容', handEdited: true })
-    const r = await runSavePipeline(candidate({ action: 'update', id: target.id, content: '模型想写的' }), e.deps)
-    if (r.kind !== 'rejected') throw new Error(r.kind)
-    expect(r.code).toBe('hand-edited')
-    expect(r.reason).toContain('用户手改后的内容')
-    expect(r.reason).toContain(target.id)
-    expect(r.reason).toContain('force: true')
-    expect((await e.store.get(target.id))!.content).toBe('用户手改后的内容')
-    expect(await e.snapshots.list()).toEqual([])
-    expect(await e.decisions.listSettled()).toEqual([])
-  })
-
-  it('同作用域替代目标手改过：新记忆不落盘、旧记忆保持 active', async () => {
-    const e = guarded()
-    const old = await seed(e.store)
-    await e.store.put({ ...old, content: '用户手改后的旧记忆', handEdited: true })
-    const r = await runSavePipeline(candidate({ scope: 'workspace', name: '新说法', content: '完全不同的新说法', force: false, supersedes: [old.id] }), e.deps)
-    expect(r).toMatchObject({ kind: 'rejected', code: 'hand-edited' })
-    if (r.kind === 'rejected') expect(r.reason).toContain('用户手改后的旧记忆')
-    expect((await e.store.get(old.id))!.status).toBe('active')
-    expect(await e.store.query({})).toHaveLength(1)
-  })
-
-  it('替代手改过的记忆、新内容又和它重叠：先拦手改，不回疑似重复（那条回复叫模型带 force 重发，会把手改保护一并跳过）', async () => {
-    const e = guarded()
-    const old = await seed(e.store, { content: '测试统一用 Postgres 16 跑集成测试' })
-    await e.store.put({ ...old, handEdited: true })
-    const r = await runSavePipeline(candidate({ scope: 'workspace', content: '测试统一用 Postgres 17 跑集成测试', supersedes: [old.id] }), e.deps)
-    expect(r).toMatchObject({ kind: 'rejected', code: 'hand-edited' })
-    expect((await e.store.get(old.id))!.status).toBe('active')
-  })
-
   it('supersedes 里同一个 id 写两遍：只记一条撤销', async () => {
     const e = guarded()
     const old = await seed(e.store, { name: '旧说法' })
@@ -776,46 +741,7 @@ describe('runSavePipeline：模型改写的兜底', () => {
     expect(await e.decisions.listSettled()).toHaveLength(1)
   })
 
-  it('手改保护先于疑似密钥拦截：问过用户带 force 重发，疑似密钥照旧留警告', async () => {
-    const e = guarded()
-    const target = await seed(e.store)
-    await e.store.put({ ...target, handEdited: true })
-    const r = await runSavePipeline(candidate({ action: 'update', id: target.id, content: '内部约定 api_key: TESTONLY0000000000000' }), e.deps)
-    expect(r).toMatchObject({ kind: 'rejected', code: 'hand-edited' })
-  })
-
-  it('原因里的当前内容遮掉密钥（结果会进模型上下文）', async () => {
-    const e = guarded()
-    const target = await seed(e.store)
-    await e.store.put({ ...target, content: `凭证 ${FAKE_SECRET.github}`, handEdited: true })
-    const r = await runSavePipeline(candidate({ action: 'update', id: target.id, content: '模型想写的' }), e.deps)
-    if (r.kind !== 'rejected') throw new Error(r.kind)
-    expect(r.reason).not.toContain(FAKE_SECRET.github)
-  })
-
-  it('force 改写手改过的记忆：照常写入、拍快照、记账，可撤销', async () => {
-    const e = guarded()
-    const target = await seed(e.store)
-    await e.store.put({ ...target, content: '用户手改后的内容', handEdited: true })
-    const r = await runSavePipeline(candidate({ action: 'update', id: target.id, content: '用户同意后的新内容', force: true }), e.deps)
-    if (r.kind !== 'updated') throw new Error(r.kind)
-    expect(r.record.content).toBe('用户同意后的新内容')
-    const [snap] = await e.snapshots.list()
-    expect(snap!.data[0]).toMatchObject({ content: '用户手改后的内容', handEdited: true })
-    expect((await e.decisions.listSettled())[0]).toMatchObject({ kind: 'rewrite', settled: { snapshotId: snap!.id } })
-  })
-
-  it('force 替代手改过的旧记忆：照常标 superseded、拍快照、记账', async () => {
-    const e = guarded()
-    const old = await seed(e.store)
-    await e.store.put({ ...old, handEdited: true })
-    const r = await runSavePipeline(candidate({ scope: 'workspace', name: '新说法', content: '完全不同的新说法', force: true, supersedes: [old.id] }), e.deps)
-    expect(r.kind).toBe('saved')
-    expect((await e.store.get(old.id))!.status).toBe('superseded')
-    expect((await e.decisions.listSettled())[0]).toMatchObject({ kind: 'supersede', memoryIds: [old.id] })
-  })
-
-  it('没手改过的记忆：结果与不带账本时逐字一致', async () => {
+  it('带账本与不带账本：update 结果逐字一致', async () => {
     const plain = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const e = guarded()
     for (const store of [plain, e.store]) await store.put({ ...(await seed(store)), id: 'mem_same', name: '同一条' })
@@ -1031,16 +957,6 @@ describe('runSavePipeline：子 agent 写入约束', () => {
     const r = await runSavePipeline(childCandidate({ action: 'update', id: 'mem_self', content: '子 agent 想改成这样' }), childDeps(store))
     expect(r).toMatchObject({ kind: 'rejected' })
     expect((await store.get('mem_self'))!).toMatchObject({ content: '主会话接受后的内容', delegation: { reviewed: { by: 'main', at: 8 } } })
-  })
-
-  it('update 用户手改过的待确认记录：原因不提 force，说明子 agent 改不了', async () => {
-    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
-    await store.put({ ...owned('mem_self', 'self'), handEdited: true })
-    const r = await runSavePipeline(childCandidate({ action: 'update', id: 'mem_self', content: '子 agent 想改成这样' }), childDeps(store))
-    if (r.kind !== 'rejected') throw new Error(r.kind)
-    expect(r.code).toBe('hand-edited')
-    expect(r.reason).toContain('这条记忆用户手改过，子 agent 改不了，带回主会话')
-    expect(r.reason).not.toContain('force')
   })
 
   it('疑似密钥：原因不提 force，写明疑似密钥一律不存', async () => {

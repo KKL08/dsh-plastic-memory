@@ -241,7 +241,7 @@ describe('维护点动作 ④：手建 / 手编文件回写', () => {
     expect(await treeEntries(root)).toEqual(before)
   })
 
-  it('digest 存在且不匹配（正文被手改）→ 重算 digest、handEdited: true、updatedAt 与 lastConfirmedAt 取 mtime；再维护不再动', async () => {
+  it('digest 存在且不匹配（正文被手改）→ 重算 digest、updatedAt 与 lastConfirmedAt 取 mtime、不写手改标记；再维护不再动', async () => {
     const original = record({ id: 'mem_e', name: '手编', content: '原文', summary: '摘要' })
     const path = await writeMem(globalDir(), 'e.md', original)
     await writeFile(path, (await readFile(path, 'utf8')).replace('原文', '用户改过的正文'))
@@ -249,13 +249,12 @@ describe('维护点动作 ④：手建 / 手编文件回写', () => {
     const { table } = open()
     await table.maintain([globalDir()])
     const fm = await frontmatter(path)
-    expect(fm.handEdited).toBe(true)
+    expect(fm).not.toHaveProperty('handEdited')
     expect(fm.digest).toBe(computeDigest('手编', '摘要', '用户改过的正文'))
     expect(fm.updatedAt).toBe(iso(edited))
     expect(fm.lastConfirmedAt).toBe(iso(edited))
     expect(fm.createdAt).toBe(iso(original.createdAt))   // createdAt 不动
     const hit = (await table.locate('mem_e', {}))!.record
-    expect(hit.handEdited).toBe(true)
     expect(hit.updatedAt).toBe(Date.parse(iso(edited)))
     const before = await treeEntries(root)
     expect(await writesDuring(() => table.maintain([globalDir()]))).toEqual([])
@@ -371,15 +370,17 @@ describe('维护点动作 ④：旧版本写的有效期改写成本机时间', 
     expect((await table.locate('mem_top', {}))!.record).toEqual(before)
   })
 
-  it('转换之后手改正文照样判出手编；转换本身不算手编', async () => {
+  it('转换本身不算手改（updatedAt 不动）；转换之后手改正文，维护点照样把 updatedAt 取 mtime', async () => {
     const path = await writeRaw(wsDir(), '冻结期.md', legacy(old({ id: 'mem_top', name: '冻结期', content: '原文' })), WS)
     const { table } = open()
+    const converted = (await table.locate('mem_top', {}))!.record.updatedAt
     await table.maintain([wsDir()])
-    expect((await table.locate('mem_top', {}))!.record.handEdited).toBeUndefined()
+    expect((await table.locate('mem_top', {}))!.record.updatedAt).toBe(converted)
     await writeFile(path, (await readFile(path, 'utf8')).replace('原文', '用户改过的正文'))
-    expect((await table.locate('mem_top', {}))!.record.handEdited).toBe(true)
+    const edited = await touch(path, Date.now() - DAY)
     await table.maintain([wsDir()])
-    expect((await frontmatter(path)).handEdited).toBe(true)
+    expect((await frontmatter(path)).updatedAt).toBe(iso(edited))
+    expect(await readFile(path, 'utf8')).not.toContain('handEdited')
   })
 })
 

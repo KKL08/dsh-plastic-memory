@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatIndexLine, sourceNote, DELEGATED_PENDING_NOTE, HAND_EDITED_NOTE, INFERENCE_NOTE } from '../src/index-line.ts'
+import { formatIndexLine, sourceNote, DELEGATED_PENDING_NOTE, INFERENCE_NOTE } from '../src/index-line.ts'
 import { STALENESS_NOTE } from '../src/record-freshness.ts'
 import { record } from './helpers/record.ts'
 
@@ -25,15 +25,14 @@ describe('MEMORY.md 行与注入索引行末尾带文件名（同源格式，pas
   })
 })
 
-// 三种标注只显示一个：已手编 → 子 agent 写入未确认 → 模型推断
+// 两种标注只显示一个：子 agent 写入未确认 → 模型推断
 describe('来源标注的优先级', () => {
   const inferred = { sessionId: 's', eventRange: [0, 1] as [number, number], sourceMode: 'agent-inferred' as const }
   const pending = { sessionId: 'sub', depth: 1, parentSessionId: 'main' }
 
-  it('待确认记录带「（子 agent 写入，未确认）」，压过模型推断；已手编再压过它', () => {
+  it('待确认记录带「（子 agent 写入，未确认）」，压过模型推断', () => {
     expect(DELEGATED_PENDING_NOTE).toBe('（子 agent 写入，未确认）')
     expect(sourceNote(record({ delegation: pending, source: inferred }))).toBe(DELEGATED_PENDING_NOTE)
-    expect(sourceNote(record({ delegation: pending, source: inferred, handEdited: true }))).toBe(HAND_EDITED_NOTE)
     expect(sourceNote(record({ source: inferred }))).toBe(INFERENCE_NOTE)
   })
 

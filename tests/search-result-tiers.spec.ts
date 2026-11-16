@@ -360,7 +360,7 @@ describe('工具描述', () => {
     expect(d).not.toMatch(/\d/)
   })
 
-  it('保存工具描述含更新前读全文的引导', () => {
-    expect(registry.renderSaveDescription()).toContain('更新会替换整条正文，更新前先确认已读过目标记忆的全文。')
+  it('保存工具描述含更新前读全文的引导，少量修改走 edits', () => {
+    expect(registry.renderSaveDescription()).toContain('只改其中几处时传 edits：oldString 从当前正文原样摘取、只命中一处，其余正文和没传的字段保持原样；要重新组织整条时才传 content，它会替换整条正文。两种写法都要先读过目标记忆的全文。')
   })
 })
