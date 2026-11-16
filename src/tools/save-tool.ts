@@ -5,6 +5,9 @@ import { executeSave, renderSaveResult, type SaveToolDeps } from './save.ts'
 import { toToolOutput } from './output.ts'
 import { VALIDITY_DATE_FORMAT, VALIDITY_FORMAT } from '../validity.ts'
 
+/** 整条写入才必填的字段共用的说明：参数表里都是可选，必填项由管线按 action 校验。 */
+const WHOLE_WRITE = 'create 和整条 update 必填；用 edits 时不传就保留原值。'
+
 /**
  * 子 agent 会话里的写入规则（工具说明只有一份，各会话共用，所以写成条件段）。
  * 子 agent 收到的是委派方裁剪过的任务，存下的记录先待确认，由委派方决定去留。
@@ -23,15 +26,28 @@ export function createSaveTool(deps: SaveToolDeps, options: { allowSubagent?: bo
     name: 'memory_save',
     description: options.allowSubagent ? `${description}\n${SUBAGENT_RULES}` : description,
     parameters: {
-      // dsh 参数 DSL：漏写 required: true 即为可选，必填字段一个都不能漏
+      // dsh 参数 DSL：漏写 required: true 即为可选。name、type、scope、content、summary 只在整条写入时必填（edits 时可省），由管线按 action 校验
       action: { type: 'string', enum: ['create', 'update'], required: true },
       id: { type: 'string', description: 'action=update 时必填，目标记忆 id' },
-      name: { type: 'string', required: true, description: '简短标题（2-16 字）' },
-      type: { type: 'string', enum: typeNames, required: true },
-      scope: { type: 'string', enum: ['global', 'workspace'], required: true },
-      content: { type: 'string', required: true, description: '正文。按所选类型说明里的「正文」写法组织（类型说明没写正文写法的，写清事实和它的依据或情境），写成陈述句并标明主体（「用户要求…」「项目定了…」），日后读到时能和用户当下的话分开；只写对话或资料里有依据的内容，不替用户编理由；原话里的人名、地名、数字和单位照写，不概括成类别。怎么用由类型统一交代，正文里不另列泛泛的使用场景和注意事项；不写行号、临时路径这类很快过时的细节，改用稳定的位置描述。完整经过可以用 memory_source 回查，不用抄进正文。' },
-      summary: { type: 'string', required: true, description: '一句话说清这条记忆讲什么，显示在索引里，供人和模型判断相关不相关；不复述 name，不堆关键词。' },
-      tags: { type: 'array', items: { type: 'string' }, description: '只写正文、name、summary 里都没出现、但以后可能被拿来搜它的词：同义词、中英文别名、缩写。不写泛化概念。' },
+      name: { type: 'string', description: `简短标题（2-16 字）。${WHOLE_WRITE}` },
+      type: { type: 'string', enum: typeNames, description: WHOLE_WRITE },
+      scope: { type: 'string', enum: ['global', 'workspace'], description: WHOLE_WRITE },
+      content: { type: 'string', description: `整条正文，会替换原来的全部正文；只改其中几处用 edits。按所选类型说明里的「正文」写法组织（类型说明没写正文写法的，写清事实和它的依据或情境），写成陈述句并标明主体（「用户要求…」「项目定了…」），日后读到时能和用户当下的话分开；只写对话或资料里有依据的内容，不替用户编理由；原话里的人名、地名、数字和单位照写，不概括成类别。怎么用由类型统一交代，正文里不另列泛泛的使用场景和注意事项；不写行号、临时路径这类很快过时的细节，改用稳定的位置描述。完整经过可以用 memory_source 回查，不用抄进正文。${WHOLE_WRITE}` },
+      edits: {
+        type: 'array',
+        description: '只改正文里的几处时用（配 action=update，不传 content）。按顺序应用，后一处匹配的是前一处改完的正文；任一处不成立，整次都不写。',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            oldString: { type: 'string', required: true, description: '要替换的原文，从当前正文原样摘取（标点、空格、换行一致）。在正文里只能出现一次，出现多次就多带些前后文。' },
+            newString: { type: 'string', required: true, description: '换成的文字；删掉这段就填空字符串。' },
+            replaceAll: { type: 'boolean', description: 'oldString 出现多次、每处都要换时填 true。' },
+          },
+        },
+      },
+      summary: { type: 'string', description: `一句话说清这条记忆讲什么，显示在索引里，供人和模型判断相关不相关；不复述 name，不堆关键词。${WHOLE_WRITE}` },
+      tags: { type: 'array', items: { type: 'string' }, description: '只写正文、name、summary 里都没出现、但以后可能被拿来搜它的词：同义词、中英文别名、缩写。不写泛化概念。用 edits 时不传就保留原标签。' },
       sourceMode: { type: 'string', enum: ['user-explicit', 'user-behavior', 'environment-observed', 'agent-inferred', 'agent-action-confirmed'], required: true, description: '信息从哪来，决定置信度上限。user-explicit：用户明说的。agent-action-confirmed：你做的事经用户确认有效，或被采纳。user-behavior：用户反复做出的动作（多次改写、撤销、拒绝同一类做法）；对一次举动揣测动机不算。environment-observed：从文件、命令输出、配置里直接读到的事实。agent-inferred：你自己的推断和解读；只要中间有一步是你推出来的、不是直接看到的，就填它。' },
       confidence: { type: 'number', description: '取值 0–1（0.9=确定，0.5=推测）。越界会被夹到边界、不报错，所以想表达低置信就填小值，别填 0 以上的整数' },
       supersedes: { type: 'array', items: { type: 'string' }, description: '被这条新记忆取代的旧记忆 id（action=create 时用）。旧的随即失效、不再带入；旧说法要留档时用它，只是补充或改正同一条用 action=update。' },

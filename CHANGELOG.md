@@ -7,6 +7,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `memory_save` updates can change just part of a memory: pass `edits`, each
+  an exact `oldString` from the current text and its `newString`. The rest of
+  the memory stays as it was, and if any edit does not match exactly once, the
+  whole update is rejected and nothing is written. The chat card shows the
+  edited memory the same way as a full rewrite.
+
 ### Changed
 - Memories you edited by hand are no longer locked against model updates.
   When a conversation calls for a change, the model updates them like any

@@ -71,6 +71,13 @@ describe('折叠行：对齐宿主通用工具行，只换摘要', () => {
   it('结果决定措辞：疑似重复没记住、没搜到、全都不存在、作用域缺省为本项目', () => {
     expect(rowSummary(result('memory_save', saveArgs, '这个主题可能已有记忆：\n- mem_0：x'))).toBe('没有记住「测试不 mock 数据库」')
     expect(rowSummary(result('memory_save', { ...saveArgs, action: 'update', id: 'mem_1' }, '已更新记忆 mem_1。'))).toBe('已更新「测试不 mock 数据库」')
+  })
+
+  it('只传 edits 的更新：参数里没有名称，取结果里的名称；旧格式结果没有名称时写 id', () => {
+    const editArgs = { action: 'update', id: 'mem_1', edits: [{ oldString: 'Postgres', newString: 'MySQL' }], sourceMode: 'user-explicit' }
+    expect(rowSummary(result('memory_save', editArgs, '已更新记忆 mem_1（测试不 mock 数据库）。回复里不用提这次保存。'))).toBe('已更新「测试不 mock 数据库」')
+    expect(rowSummary(result('memory_save', editArgs, '已更新记忆 mem_1。'))).toBe('已更新「mem_1」')
+    expect(rowSummary({ toolName: 'memory_save', useDisclosure: disclosure(), phase: 'start', block: { argsRaw: JSON.stringify(editArgs) } })).toBe('正在记住「mem_1」')
     expect(rowSummary(result('memory_search', { query: '数据库' }, '没有匹配的记忆。'))).toBe('没有搜到「数据库」')
     expect(rowSummary(result('memory_forget', { ids: ['mem_9'], reason: 'x' }, '以下记忆不存在：mem_9'))).toBe('没有可删除的记忆')
     expect(rowSummary(result('memory_scan', {}, 'ok'))).toBe('体检本项目')
@@ -368,6 +375,20 @@ describe('交付卡出现的条件', () => {
     expect(data?.saved[1]!.memory).toMatchObject({ name: saveArgs.name, content: saveArgs.content, scope: 'workspace' })
     // 作用域以服务端结果为准（全局候选可能降级到本项目）
     expect(data?.saved[2]!.memory).toMatchObject({ name: '全局', scope: 'workspace', content: saveArgs.content, sourceMode: 'user-explicit' })
+  })
+
+  it('只传 edits 的更新带上 edits 和参数里传了的字段：名称取结果里的，正文由交付卡按改前快照算', () => {
+    const editArgs = { action: 'update', id: 'mem_0', edits: [{ oldString: 'a', newString: 'b' }], sourceMode: 'user-explicit' }
+    const data = turnData([
+      turnStart,
+      call(2, 'c1', 'memory_save', editArgs), res(3, 'c1', '已更新记忆 mem_0（测试不 mock 数据库）。回复里不用提这次保存。'),
+      call(4, 'c2', 'memory_save', { ...saveArgs, action: 'update', id: 'mem_1' }), res(5, 'c2', '已更新记忆 mem_1（测试不 mock 数据库）。'),
+    ])
+    expect(data?.saved.map(s => [s.memory.id, s.isUpdate, s.edit])).toEqual([
+      ['mem_0', true, { edits: [{ oldString: 'a', newString: 'b' }], fields: {} }],
+      ['mem_1', true, undefined],
+    ])
+    expect(data?.saved[0]!.memory).toMatchObject({ name: '测试不 mock 数据库', content: '' })
   })
 
   it('参数里的 supersedes 去重后带上（交付卡在视图里认不出这次替代时用）；没有或不是字符串数组时不带', () => {
@@ -1444,6 +1465,41 @@ describe('交付卡：模型改写、替代已有记忆', () => {
     expect(row('mem_r').getAllByText('改写后的正文')).toHaveLength(2)
     expect(row('mem_1').queryByText('已改写')).toBeNull()
     expect(row('mem_1').queryByRole('button', { name: '撤销修改' })).toBeNull()
+  })
+
+  it('只传 edits 的改写：改后 = 改前快照按这次的 edits 改出来的样子（之后再被改也不跟着变），没传的字段取改前那份', () => {
+    const edits = [{ oldString: '改前', newString: '改后' }, { oldString: '正文', newString: '正文 password=hunter2abc' }]
+    const edited: SavedMemory = { ...rewrite(), edit: { edits, fields: {} }, memory: { ...rewrite().memory, name: '改写的那条', type: '', summary: '', content: '' } }
+    // 视图里这条已被之后的调用改成别的样子
+    const later = { ...saved('mem_r', '之后又改过的正文').memory, name: '改写的那条', workspacePath: WS }
+    const library: LibraryView = { ...libraryWith([change({ state: 'changed' })]), layers: [{ layer: { kind: 'workspace', workspacePath: WS }, items: [later] }] }
+    renderInShell(<SavedMemoriesCard sessionId="s1" cwd={WS} saved={[edited]} now={NOW} openDetail={() => {}} />, createFakeGateway({ views: { library } }))
+    fireEvent.click(screen.getByRole('button', { expanded: false }))
+    // 卡片正文和「改前 / 改后」的改后各一处
+    expect(row('mem_r').getAllByText(/^改后的正文/)).toHaveLength(2)
+    expect(row('mem_r').queryByText('之后又改过的正文')).toBeNull()
+    // 交付卡连疑似密钥也遮
+    expect(document.body.textContent).not.toContain('hunter2abc')
+    // 类型取改前那份（参数里没有）
+    expect(row('mem_r').getByText('行为偏好')).toBeInTheDocument()
+    cleanup()
+    // 参数里传了的字段（名称）以参数为准
+    const renamed: SavedMemory = { ...edited, edit: { edits, fields: { name: '新名字' } }, memory: { ...edited.memory, name: '新名字' } }
+    card([renamed], [change()])
+    expect(screen.getByRole('button', { expanded: false })).toHaveTextContent('这轮改写了 1 条记忆：新名字›')
+  })
+
+  it('只传 edits 的改写，改前快照已过保留窗口：取全部记忆视图里的那条；视图里也没有时名称取结果', () => {
+    const edited: SavedMemory = { ...rewrite(), edit: { edits: [{ oldString: 'a', newString: 'b' }], fields: {} }, memory: { ...rewrite().memory, name: '结果里的名称', type: '', summary: '', content: '' } }
+    const live = { ...saved('mem_r', '视图里的正文').memory, name: '视图里的名称', type: 'knowledge' }
+    const library: LibraryView = { ...libraryWith([]), layers: [{ layer: { kind: 'global' }, items: [live] }] }
+    renderInShell(<SavedMemoriesCard sessionId="s1" cwd={WS} saved={[edited]} now={NOW + RETENTION_MS + 1} openDetail={() => {}} />, createFakeGateway({ views: { library } }))
+    fireEvent.click(screen.getByRole('button', { expanded: false }))
+    expect(row('mem_r').getByText('视图里的正文')).toBeInTheDocument()
+    expect(row('mem_r').getByText('事实与经验')).toBeInTheDocument()
+    cleanup()
+    card([edited], [], undefined, NOW + RETENTION_MS + 1)
+    expect(screen.getByRole('button', { expanded: false })).toHaveTextContent('这轮改写了 1 条记忆：结果里的名称›')
   })
 
   it('改写的是本来就在全局的记忆：不写「已提升为全局」', () => {

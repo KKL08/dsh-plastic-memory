@@ -400,6 +400,18 @@ describe('memory_save update：读到目标之后、写入之前目标被改过�
     expect(await readFile(path, 'utf8').catch(() => undefined)).toBe(text)
   })
 
+  it('精确修改：读到目标、算好新正文之后目标被改过，回拒绝，不拿旧读数算出的正文盖掉新内容', async () => {
+    const path = await seed('mem_race.md', record({ content: '端口 3000，超时 5 秒' }))
+    const text = encodeRecord(record({ content: '端口 3000，超时 30 秒', updatedAt: later }), {})
+    changeAfterRead(path, text, AFTER_LOCATE)
+    const r = await runSavePipeline(
+      { action: 'update', id: 'mem_race', sourceMode: 'user-explicit', edits: [{ oldString: '端口 3000', newString: '端口 8080' }] },
+      saveDeps(new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())),
+    )
+    expect(r).toMatchObject({ kind: 'rejected', code: 'target-missing', subcode: 'changed-after-read' })
+    expect(await readFile(path, 'utf8')).toBe(text)
+  })
+
   it('PA-02：界面改过：拒绝原因带用户那一版的内容', async () => {
     const path = await seed('mem_race.md', record())
     changeAfterRead(path, encodeRecord(record({ content: '用户改的', updatedAt: later }), {}), AFTER_LOCATE)

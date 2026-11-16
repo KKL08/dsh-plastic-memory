@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from 'node:util'
+import { applyEdits, type SaveEdit } from './edits.ts'
 import type { MemoryRecord, SourceMode } from './record-schema.ts'
 import type { CodedNote, RejectCode, WarningCode } from './contract-codes.ts'
 import { ALREADY_REVIEWED_REASON, CONFIDENCE_BY_SOURCE, NOT_DELEGATED_REASON, isPendingDelegated, memoryRecordSchema } from './record-schema.ts'
@@ -30,6 +31,13 @@ export interface SaveCandidate {
   validTo?: string
   force?: boolean
 }
+
+export type { SaveEdit } from './edits.ts'
+
+/** 整条写入才必填的字段：精确修改（edits）时都可省，省掉的沿用目标记忆的。 */
+type WholeWriteKey = 'name' | 'type' | 'scope' | 'content' | 'summary' | 'tags'
+/** 写入管线的入参（memory_save 的参数）：整条写入的必填项由 resolveInput 按 action 校验；tags 缺省按空数组。 */
+export type SaveInput = Omit<SaveCandidate, WholeWriteKey> & Partial<Pick<SaveCandidate, WholeWriteKey>> & { edits?: SaveEdit[] }
 
 /**
  * 子 agent 会话的委派上下文：深度、直接父会话取自宿主 header，根会话沿父链解析（解析不到缺省），
@@ -127,6 +135,85 @@ function resolveValidity(
 }
 
 type PipelineDeps = Parameters<typeof runSavePipeline>[1]
+type Rejection = { code: RejectCode; subcode?: SaveRejectSubcode; reason: string }
+
+/**
+ * update 目标能不能改，能改时原样交回：不存在、已删除回 target-missing；workspace 记忆只能在其所属项目里更新（deps.workspacePath 为 undefined
+ * 的无 cwd 会话也落此拦截），global 目标不受限——例行维护全局记忆是设计意图（快照先行兜底）。
+ */
+function checkUpdateTarget(id: string | undefined, target: MemoryRecord | undefined, workspacePath: string | undefined): { target: MemoryRecord } | Rejection {
+  if (!target || target.status === 'deleted') {
+    return { code: 'target-missing', reason: `更新目标不存在或已删除：${id ?? '(缺 id)'}` }
+  }
+  if (target.scope === 'workspace' && target.workspacePath !== workspacePath) {
+    return { code: 'cross-workspace', reason: `不能跨项目修改其他 workspace 的记忆：目标属于 ${target.workspacePath ?? '(未知项目)'}，当前会话在 ${workspacePath ?? '(无工作目录)'}。请在该项目的会话里更新。` }
+  }
+  return { target }
+}
+
+const WHOLE_WRITE_REQUIRED = ['name', 'type', 'scope', 'content', 'summary'] as const
+
+/**
+ * 在目标正文上应用 edits（见 edits.ts），不成立时换成给模型的拒绝原因。
+ * 原因会进模型上下文：附上的当前正文按注入的口径遮明确密钥（和模型平时读到的同一份，照着摘 oldString 才对得上）。
+ */
+function editTarget(target: MemoryRecord, edits: readonly SaveEdit[]): { content: string } | Rejection {
+  const outcome = applyEdits(target.content, edits)
+  if ('content' in outcome) return outcome
+  const nth = outcome.index + 1
+  if (outcome.failure === 'ambiguous') {
+    return { code: 'edit-ambiguous', reason: `第 ${nth} 处修改的 oldString 在正文里出现 ${outcome.count} 次，未保存。多带一些前后文让它只命中一处；确实要全部替换就加 replaceAll: true。` }
+  }
+  const after = outcome.index > 0 ? '（从第 2 处起，匹配的是前面几处改完的正文）' : ''
+  return {
+    code: 'edit-not-found',
+    reason: `第 ${nth} 处修改的 oldString 在正文里找不到${after}，未保存。oldString 要从当前正文原样摘取，标点、空格、换行都要一致。当前正文是：\n${maskSecretSurface(target).content}`,
+  }
+}
+
+/**
+ * 把入参补成完整的候选。整条写入：校验必填项，tags 缺省按空数组。精确修改：只能配 update、不能和 content 同传；
+ * 读到目标后在它的正文上应用 edits，没传的字段沿用目标的，返回的 base 就是这份读数——后面写入时的读后被改复核以它为准，
+ * 别处在这之后改过就不拿旧读数算出的正文去盖。
+ */
+async function resolveInput(input: SaveInput, deps: PipelineDeps): Promise<{ candidate: SaveCandidate; base?: MemoryRecord } | Rejection> {
+  const { edits, ...rest } = input
+  if (edits === undefined) {
+    const missing = WHOLE_WRITE_REQUIRED.filter(k => rest[k] === undefined)
+    if (missing.length > 0) {
+      const hint = input.action === 'update' && missing.includes('content') ? '。只改正文里的几处时传 edits，name、summary 等不传就保留原值' : ''
+      return { code: 'schema-invalid', reason: `action=${input.action} 缺少 ${missing.join('、')}${hint}` }
+    }
+    return { candidate: { ...rest, tags: rest.tags ?? [] } as SaveCandidate }
+  }
+  const invalid = (reason: string): Rejection => ({ code: 'edit-invalid', reason: `${reason}未保存。` })
+  if (input.action !== 'update') return invalid('edits 只用于 action=update，新建记忆传整条 content。')
+  if (rest.content !== undefined) return invalid('edits 和 content 只能传一个：改几处传 edits，重写整条传 content。')
+  if (edits.length === 0) return invalid('edits 是空的，至少写一处修改。')
+  for (const [i, edit] of edits.entries()) {
+    if (edit.oldString === '') return invalid(`第 ${i + 1} 处修改的 oldString 是空的：写出要替换的那段原文；要在某处加内容，把那处原文写进 oldString，newString 写原文加上新内容。`)
+    if (edit.oldString === edit.newString) return invalid(`第 ${i + 1} 处修改的 oldString 和 newString 一样，没有改动。`)
+  }
+  const read = input.id === undefined ? undefined : await deps.store.get(input.id, { workspacePath: deps.workspacePath })
+  // 子 agent 先看能不能改这条，再比对原文：改不了的不回找不到原文、不贴正文让它重试
+  const notWritable = deps.delegation ? subagentTargetProblem(input.id ?? '(缺 id)', read, deps.session.id) : undefined
+  if (notWritable !== undefined) return notWritable
+  const checked = checkUpdateTarget(input.id, read, deps.workspacePath)
+  if ('code' in checked) return checked
+  const { target } = checked
+  const applied = editTarget(target, edits)
+  if ('code' in applied) return applied
+  const candidate: SaveCandidate = {
+    ...rest,
+    name: rest.name ?? target.name,
+    type: rest.type ?? target.type,
+    scope: rest.scope ?? target.scope,
+    summary: rest.summary ?? target.summary,
+    tags: rest.tags ?? target.tags,
+    content: applied.content,
+  }
+  return { candidate, base: target }
+}
 
 /** 子 agent 能用的依据：它收到的指令来自委派方，用户明说、用户行为、经用户确认的动作都无从谈起。 */
 const SUBAGENT_SOURCE_MODES: readonly SourceMode[] = ['environment-observed', 'agent-inferred']
@@ -159,6 +246,18 @@ function notOwnPending(target: MemoryRecord, sessionId: string): string | undefi
   if (!isPendingDelegated(target)) return ALREADY_REVIEWED_REASON
   if (target.scope !== 'workspace') return '已经提升为全局'
   if (target.status === 'superseded') return '已经被取代了'
+  return undefined
+}
+
+/** 子 agent 能不能改这条：不存在或已删除的也拒（不交给 target-missing：其间被恢复成主档就会放过去）；能改返回 undefined。 */
+function subagentTargetProblem(id: string, target: MemoryRecord | undefined, sessionId: string): Rejection & { subcode: SaveRejectSubcode } | undefined {
+  if (target === undefined || target.status === 'deleted') {
+    return { code: 'subagent-restricted', subcode: 'subagent-target-gone', reason: `要改的记忆 ${id} 不存在或已删除，带回主会话。` }
+  }
+  const why = notOwnPending(target, sessionId)
+  if (why !== undefined) {
+    return { code: 'subagent-restricted', subcode: 'subagent-not-own', reason: `子 agent 只能改本会话存下、还没被接受的记忆；${id} ${why}。要改的内容带回主会话。` }
+  }
   return undefined
 }
 
@@ -212,17 +311,10 @@ async function checkSubagentWrite(
       reason: '子 agent 不能带 force：去重、疑似密钥两道检查子 agent 都过不去。撞重复就另存或放弃，疑似密钥一律不存；去掉 force 重发。',
     }
   }
-  // update 只改本会话存下、还没升档的；目标不存在或已删除的也拒（不交给 target-missing：其间被恢复成主档就会放过去）。
-  // 写入时在存储锁内按最新读数再判一次（见下方 put 的 skipIf），其间被接受、删除、提升的不覆盖
+  // update 只改本会话存下、还没升档的。写入时在存储锁内按最新读数再判一次（见下方 put 的 skipIf），其间被接受、删除、提升的不覆盖
   if (candidate.action === 'update' && candidate.id !== undefined) {
-    const target = await deps.store.get(candidate.id, { workspacePath: deps.workspacePath })
-    if (target === undefined || target.status === 'deleted') {
-      return { code: 'subagent-restricted', subcode: 'subagent-target-gone', reason: `要改的记忆 ${candidate.id} 不存在或已删除，带回主会话。` }
-    }
-    const why = notOwnPending(target, deps.session.id)
-    if (why !== undefined) {
-      return { code: 'subagent-restricted', subcode: 'subagent-not-own', reason: `子 agent 只能改本会话存下、还没被接受的记忆；${candidate.id} ${why}。要改的内容带回主会话。` }
-    }
+    const problem = subagentTargetProblem(candidate.id, await deps.store.get(candidate.id, { workspacePath: deps.workspacePath }), deps.session.id)
+    if (problem !== undefined) return problem
   }
   // 新建配额：现数本会话创建的记录（在用含已过期、已取代都算，删了就释放），不加锁、不另存计数。
   // 软限制：串行调用不超，同一子会话并行调用可能多存一两条。无工作目录的 create 交给后面的 no-workspace
@@ -238,7 +330,7 @@ async function checkSubagentWrite(
 }
 
 export async function runSavePipeline(
-  input: SaveCandidate,
+  input: SaveInput,
   deps: {
     store: MemoryStore
     registry: TypeRegistry
@@ -262,8 +354,10 @@ export async function runSavePipeline(
   const { store, registry, session } = deps
   const now = deps.now?.() ?? Date.now()
 
-  // 0. 子 agent 写入约束（主会话没有 delegation，原样往下走）
-  const subagent = deps.delegation ? await checkSubagentWrite(input, deps) : { candidate: input, warnings: [] }
+  // 0. 入参补成完整候选（精确修改在这里读目标、算出新正文），再过子 agent 写入约束（主会话没有 delegation，原样往下走）
+  const resolved = await resolveInput(input, deps)
+  if ('code' in resolved) return { kind: 'rejected', ...resolved }
+  const subagent = deps.delegation ? await checkSubagentWrite(resolved.candidate, deps) : { candidate: resolved.candidate, warnings: [] }
   if ('code' in subagent) return { kind: 'rejected', ...subagent }
   const { candidate } = subagent
 
@@ -278,15 +372,12 @@ export async function runSavePipeline(
   const scopeWarnings: SaveWarning[] = []
   let target: MemoryRecord | undefined
   if (candidate.action === 'update') {
-    target = candidate.id ? await store.get(candidate.id, { workspacePath: deps.workspacePath }) : undefined
-    if (!target || target.status === 'deleted') {
-      return { kind: 'rejected', code: 'target-missing', reason: `更新目标不存在或已删除：${candidate.id ?? '(缺 id)'}` }
-    }
-    // 跨 workspace 改写拦截：workspace 记忆只能在其所属项目里更新（deps.workspacePath 为 undefined
-    // 的无 cwd 会话也落此拦截）。global 目标不受限——例行维护全局记忆是设计意图（快照先行兜底）。
-    if (target.scope === 'workspace' && target.workspacePath !== deps.workspacePath) {
-      return { kind: 'rejected', code: 'cross-workspace', reason: `不能跨项目修改其他 workspace 的记忆：目标属于 ${target.workspacePath ?? '(未知项目)'}，当前会话在 ${deps.workspacePath ?? '(无工作目录)'}。请在该项目的会话里更新。` }
-    }
+    // 精确修改用算新正文时的那份读数，不再读一次：之后的改动都要在写入时的复核里拦下
+    const checked = resolved.base !== undefined
+      ? { target: resolved.base }
+      : checkUpdateTarget(candidate.id, candidate.id ? await store.get(candidate.id, { workspacePath: deps.workspacePath }) : undefined, deps.workspacePath)
+    if ('code' in checked) return { kind: 'rejected', ...checked }
+    target = checked.target
     // scope 不随 update 变更——否则例行内容更新会把用户确认提升过的 global 记忆
     // 静默拉回当前项目（提升闸被写入链绕过）。降级同样没有免确认通道。
     scope = target.scope

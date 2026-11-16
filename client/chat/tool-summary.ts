@@ -41,14 +41,16 @@ export interface SavedResult {
   id: string
   type?: string
   scope?: 'global' | 'workspace'
+  /** 已更新的那条的名称（只传 edits 的更新参数里没有名称）；旧格式的结果没有。 */
+  name?: string
 }
 
-/** `renderSaveResult` 的首行：「已保存记忆 <id>（<type>，<scope>）…」「已更新记忆 <id>。」；其余（疑似重复、拒绝）不算记住。 */
+/** `renderSaveResult` 的首行：「已保存记忆 <id>（<type>，<scope>）…」「已更新记忆 <id>（<名称>）。」（旧格式没有名称）；其余（疑似重复、拒绝）不算记住。 */
 export function parseSaveResult(text: string): SavedResult | undefined {
   const saved = /^已保存记忆 ([^\s（]+)（([^，）]+)，(global|workspace)）/.exec(text)
   if (saved) return { kind: 'saved', id: saved[1]!, type: saved[2]!, scope: saved[3] as 'global' | 'workspace' }
-  const updated = /^已更新记忆 ([^\s。]+)。/.exec(text)
-  if (updated) return { kind: 'updated', id: updated[1]! }
+  const updated = /^已更新记忆 ([^\s。（]+)(?:（(.+?)）)?。/.exec(text)
+  if (updated) return { kind: 'updated', id: updated[1]!, ...(updated[2] === undefined ? {} : { name: updated[2] }) }
   return undefined
 }
 
@@ -67,7 +69,8 @@ const SOURCE_MODES = ['user-explicit', 'user-behavior', 'environment-observed', 
 
 /**
  * 一次成功的新记（kind = saved）或改写（kind = updated）→ 记忆卡：id / 类型 / 作用域取结果，原文、名字、来源取参数。
- * 改写的结果只有 id：类型取参数，作用域也先取参数（改写不改作用域，参数可能填错），由交付卡按全部记忆视图校正。
+ * 改写的结果只有 id 和名称：类型取参数，作用域也先取参数（改写不改作用域，参数可能填错），由交付卡按全部记忆视图校正。
+ * 只传 edits 的改写参数里没有名称、正文这些：名称取结果，其余留空，由交付卡从全部记忆视图取改后的样子。
  * 参数是 agent 发的原文，没经过视图的遮盖，这里遮掉密钥片段，疑似密钥也遮（带 force 存下的也不例外）。
  */
 export function savedMemoryCard(args: Args | undefined, resultText: string, time: number): MemoryCard | undefined {
@@ -76,7 +79,7 @@ export function savedMemoryCard(args: Args | undefined, resultText: string, time
   const sourceMode = SOURCE_MODES.find(mode => mode === args.sourceMode)
   return maskSecretSurface({
     id: result.id,
-    name: str(args.name),
+    name: str(args.name) || (result.name ?? ''),
     type: result.type ?? str(args.type),
     scope: result.scope ?? (args.scope === 'global' ? 'global' : 'workspace'),
     summary: str(args.summary),
@@ -107,10 +110,11 @@ export function toolSummary(toolName: MemoryToolName, args: Args | undefined, re
   if (args === undefined) return null
   switch (toolName) {
     case 'memory_save': {
-      const name = str(args.name)
+      // 只传 edits 的更新参数里没有名称：取结果里的，旧格式结果也没有时写 id
+      const name = str(args.name) || str(args.id)
       if (resultText === null) return { key: 'chat.tool.save.running', params: { name } }
       const result = parseSaveResult(resultText)
-      return { key: result === undefined ? 'chat.tool.save.notSaved' : `chat.tool.save.${result.kind}`, params: { name } }
+      return { key: result === undefined ? 'chat.tool.save.notSaved' : `chat.tool.save.${result.kind}`, params: { name: str(args.name) || (result?.name ?? name) } }
     }
     case 'memory_search': {
       const query = str(args.query)

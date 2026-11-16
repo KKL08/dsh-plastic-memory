@@ -4,7 +4,7 @@
  * 挂到 Turn 上；交付卡在 `conversation.chat.turnTail` 里按 `turn.data` 读。数据从会话日志重放得到，
  * 历史会话、刷新后都一样。宿主类型不引包，按结构手写最小子集（0.2.1-rc.2）。
  */
-import type { MemoryCard } from '../../src/gui/contract.ts'
+import type { MemoryCard, SaveEdit } from '../../src/gui/contract.ts'
 import { parseArgs, parseSaveResult, savedMemoryCard } from './tool-summary.ts'
 
 /** Turn 数据的 key，也是 Definition 的 kind。 */
@@ -18,8 +18,19 @@ export interface SavedMemory {
   memory: MemoryCard
   /** 这次是改写已有记忆（action: update）；缺省 = 新记。 */
   isUpdate?: true
+  /**
+   * 改写只传了 edits（没有整条正文）：这次的 edits 和参数里传了的字段。memory 里只有 id 和名称，
+   * 交付卡按改前快照应用这些 edits 算出改后的样子。
+   */
+  edit?: EditArgs
   /** 参数里要替代的旧记忆 id（去重）；视图里认不出这次替代（已过保留窗口）时交付卡据此写过期说明。 */
   supersedes?: readonly string[]
+}
+
+export interface EditArgs {
+  edits: readonly SaveEdit[]
+  /** 参数里传了的字段，覆盖改前那份；没传的沿用改前的。 */
+  fields: Partial<Pick<MemoryCard, 'name' | 'type' | 'summary' | 'tags'>>
 }
 
 export interface SavedTurnData {
@@ -61,6 +72,23 @@ export interface SavedTurnDefinition {
 const supersedesOf = (value: unknown): string[] =>
   Array.isArray(value) ? [...new Set(value.filter((id): id is string => typeof id === 'string'))] : []
 
+const isEdit = (value: unknown): value is SaveEdit => {
+  const e = value as Partial<SaveEdit> | null
+  return typeof e === 'object' && e !== null && typeof e.oldString === 'string' && typeof e.newString === 'string'
+    && (e.replaceAll === undefined || typeof e.replaceAll === 'boolean')
+}
+
+/** 只传 edits 的改写参数（没有 content）→ edits 与传了的字段；不是这种改写时 undefined。 */
+function editArgsOf(args: Record<string, unknown> | undefined): EditArgs | undefined {
+  if (args === undefined || args.content !== undefined || !Array.isArray(args.edits) || !args.edits.every(isEdit)) return undefined
+  const fields: EditArgs['fields'] = {}
+  if (typeof args.name === 'string') fields.name = args.name
+  if (typeof args.type === 'string') fields.type = args.type
+  if (typeof args.summary === 'string') fields.summary = args.summary
+  if (Array.isArray(args.tags)) fields.tags = args.tags.filter((tag): tag is string => typeof tag === 'string')
+  return { edits: args.edits.map(({ oldString, newString, replaceAll }) => ({ oldString, newString, ...(replaceAll === undefined ? {} : { replaceAll }) })), fields }
+}
+
 const turnOf = (event: EventLike) => String((event.data as { turn: number }).turn)
 
 export const savedTurnDefinition: SavedTurnDefinition = {
@@ -91,12 +119,14 @@ export const savedTurnDefinition: SavedTurnDefinition = {
     const memory = savedMemoryCard(args, text, event.time)
     if (memory === undefined) return state
     const isUpdate = parseSaveResult(text)?.kind === 'updated'
+    const edit = isUpdate ? editArgsOf(args) : undefined
     const supersedes = supersedesOf(args?.supersedes)
     return {
       ...state,
       saved: [...state.saved, {
         callId: String(message.source.callId), seq: event.seq, memory,
         ...(isUpdate ? { isUpdate: true as const } : {}),
+        ...(edit !== undefined ? { edit } : {}),
         ...(supersedes.length > 0 ? { supersedes } : {}),
       }],
     }

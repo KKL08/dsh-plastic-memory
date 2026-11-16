@@ -3,8 +3,9 @@ import type { MemoryStore } from '../store.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { SnapshotStore } from '../governance/snapshots.ts'
 import type { PendingDecisionsStore } from '../governance/decisions.ts'
-import { isPendingDelegated } from '../record-schema.ts'
-import { runSavePipeline, type PipelineResult, type SaveCandidate, type SaveDelegation } from '../pipeline.ts'
+import { isPendingDelegated, type MemoryRecord } from '../record-schema.ts'
+import { maskSecretSurface } from '../secrets.ts'
+import { runSavePipeline, type PipelineResult, type SaveDelegation, type SaveInput } from '../pipeline.ts'
 
 /** memory_save 运行时需要的会话上下文，由宿主会话适配器的 saveContextOf 提供。 */
 export interface SaveContext {
@@ -15,8 +16,8 @@ export interface SaveContext {
   delegation?: SaveDelegation
 }
 
-/** memory_save 的入参：schema 里 tags 可选，落库前归一化成 SaveCandidate（tags 必填）。 */
-export type SaveArgs = Omit<SaveCandidate, 'tags'> & { tags?: string[] }
+/** memory_save 的入参：整条写入的必填项、tags 缺省值都由管线按 action 处理（精确修改时没传的沿用目标记忆的）。 */
+export type SaveArgs = SaveInput
 
 /** memory_save 工具的依赖，纯逻辑层与框架绑定层共用。 */
 export interface SaveToolDeps {
@@ -36,9 +37,15 @@ export interface SaveToolDeps {
 /** 成功保存、改写时附在第一行末：记录是过程动作，界面已展示写入的记忆，回复里不必再报。 */
 const QUIET_NOTE = '回复里不用提这次保存。'
 
-/** 把管线结果渲染成给模型看的一段文本。纯函数。开头的「已保存记忆」「已更新记忆」是对话卡解析的格式（client/chat/tool-summary.ts），不能改。 */
+/**
+ * 把管线结果渲染成给模型看的一段文本。纯函数。开头的「已保存记忆 <id>（<类型>，<作用域>）」「已更新记忆 <id>（<名称>）」
+ * 是对话卡解析的格式（client/chat/tool-summary.ts），改了要同步那边；更新带名称，是因为只传 edits 的参数里没有名称。
+ */
 /** 摘要嵌进句子里：去掉摘要自带的句末句号，免得拼出「。。」 */
 const summaryClause = (summary: string): string => summary.replace(/[。.]$/u, '')
+
+/** 已更新里的名称：按整条记录判密钥（跨字段的疑似密钥也算），遮掉后折成一行，对话卡按首行解析。 */
+const shownName = (record: MemoryRecord): string => maskSecretSurface(record, { severity: 'suspected' }).name.replace(/\s+/g, ' ').trim()
 
 export function renderSaveResult(result: PipelineResult): string {
   let text: string
@@ -54,8 +61,8 @@ export function renderSaveResult(result: PipelineResult): string {
     case 'updated':
       // 子 agent 改写自己的待确认记录：仍待确认，同新建一样要它报给委派方
       text = isPendingDelegated(result.record)
-        ? `已更新记忆 ${result.record.id}。仍待确认：${summaryClause(result.record.summary)}。不进主会话注入；在回复里报给委派方（id 和摘要），由它决定接受、改写或丢弃。`
-        : `已更新记忆 ${result.record.id}。${QUIET_NOTE}`
+        ? `已更新记忆 ${result.record.id}（${shownName(result.record)}）。仍待确认：${summaryClause(result.record.summary)}。不进主会话注入；在回复里报给委派方（id 和摘要），由它决定接受、改写或丢弃。`
+        : `已更新记忆 ${result.record.id}（${shownName(result.record)}）。${QUIET_NOTE}`
       break
     case 'duplicate-suspected': {
       const listed = `这个主题可能已有记忆：\n${result.existing.map(e => `- ${e.id}：${e.summary}`).join('\n')}`
@@ -88,8 +95,7 @@ export async function executeSave(
   deps: SaveToolDeps,
 ): Promise<PipelineResult> {
   const context = await deps.host.saveContextOf(exec)
-  const candidate: SaveCandidate = { ...args, tags: args.tags ?? [] } // 可选参数归一化
-  const result = await runSavePipeline(candidate, {
+  const result = await runSavePipeline(args, {
     store: deps.store,
     registry: deps.registry,
     // 无条件传真实 workspace 上下文：pipeline 要靠它判断 global 是否降级为候选（scope=global 时

@@ -12,12 +12,26 @@ describe('对话卡解析的文本格式与服务端渲染器一致', () => {
   it('memory_save：已保存（id / type / scope）与已更新', () => {
     const saved = record({ id: 'mem_abc', type: 'preference', scope: 'workspace' })
     expect(parseSaveResult(renderSaveResult({ kind: 'saved', record: saved }))).toEqual({ kind: 'saved', id: 'mem_abc', type: 'preference', scope: 'workspace' })
-    expect(parseSaveResult(renderSaveResult({ kind: 'updated', record: saved }))).toEqual({ kind: 'updated', id: 'mem_abc' })
+    expect(parseSaveResult(renderSaveResult({ kind: 'updated', record: saved }))).toEqual({ kind: 'updated', id: 'mem_abc', name: saved.name })
+    // 已更新带上名称（只传 edits 的更新参数里没有名称，折叠行从这里取）；名称自带括号也认得
+    const bracketed = record({ id: 'mem_br', name: '方案（草稿）' })
+    expect(parseSaveResult(renderSaveResult({ kind: 'updated', record: bracketed }))).toEqual({ kind: 'updated', id: 'mem_br', name: '方案（草稿）' })
     // 子 agent 存下的待确认记录同一个首行格式
     const pending = record({ id: 'mem_sub', type: 'knowledge', scope: 'workspace', delegation: { sessionId: 's-child', depth: 1, parentSessionId: 's-main' } })
     expect(parseSaveResult(renderSaveResult({ kind: 'saved', record: pending }))).toEqual({ kind: 'saved', id: 'mem_sub', type: 'knowledge', scope: 'workspace' })
+    expect(parseSaveResult(renderSaveResult({ kind: 'updated', record: pending }))).toEqual({ kind: 'updated', id: 'mem_sub', name: pending.name })
+    // 名称里的换行折成空格：手写 YAML 可能写出多行名称，首行照样解析得出
+    const multiline = record({ id: 'mem_ml', name: 'service\nconfiguration' })
+    expect(parseSaveResult(renderSaveResult({ kind: 'updated', record: multiline }))).toEqual({ kind: 'updated', id: 'mem_ml', name: 'service configuration' })
     expect(parseSaveResult(renderSaveResult({ kind: 'rejected', code: 'unknown-type', reason: '未知类型' }))).toBeUndefined()
     expect(parseSaveResult(renderSaveResult({ kind: 'duplicate-suspected', existing: [saved] }))).toBeUndefined()
+  })
+
+  it('memory_save：已更新里的名称按整条记录判密钥（含跨字段的疑似密钥），遮掉再写', () => {
+    const split = record({ id: 'mem_x', name: 'Hunter2-2026xyz', content: 'old\npassword:' })
+    const text = renderSaveResult({ kind: 'updated', record: split })
+    expect(text).not.toContain('Hunter2-2026xyz')
+    expect(parseSaveResult(text)?.kind).toBe('updated')
   })
 
   it('memory_search：命中数按段计', () => {

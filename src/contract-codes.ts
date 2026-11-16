@@ -16,6 +16,9 @@ export type RejectCode =
   | 'validity-nonexistent' // validFrom / validTo 的日期或时刻不存在（2 月 30 日、25:00）
   | 'validity-past'        // validTo 不晚于当前时间，存下即过期
   | 'validity-reversed'    // validTo 不晚于 validFrom，有效期为空
+  | 'edit-invalid'         // edits 用法不对：配了 create、和 content 同传、空数组、oldString 为空或与 newString 相同
+  | 'edit-not-found'       // edits 某处的 oldString 在正文里找不到；原因带当前正文
+  | 'edit-ambiguous'       // edits 某处的 oldString 命中多处又没带 replaceAll
   | 'subagent-restricted'  // 子 agent 会话（delegationDepth ≥ 1）越过写入约束：依据、类型、替代、force、改写归属、新建配额，原因按条区分
 
 /**

@@ -81,7 +81,7 @@ describe('memory_save 绑定', () => {
   const describedParam = (name: string) => (schemaOf(makeTool()) as { properties: Record<string, { description?: string }> }).properties[name]!.description
 
   it('content 的参数说明：按类型的正文写法、陈述句标明主体、只写有依据的内容、具体名称和数值照写、不写很快过时的细节', () => {
-    expect(describedParam('content')).toBe('正文。按所选类型说明里的「正文」写法组织（类型说明没写正文写法的，写清事实和它的依据或情境），写成陈述句并标明主体（「用户要求…」「项目定了…」），日后读到时能和用户当下的话分开；只写对话或资料里有依据的内容，不替用户编理由；原话里的人名、地名、数字和单位照写，不概括成类别。怎么用由类型统一交代，正文里不另列泛泛的使用场景和注意事项；不写行号、临时路径这类很快过时的细节，改用稳定的位置描述。完整经过可以用 memory_source 回查，不用抄进正文。')
+    expect(describedParam('content')).toBe('整条正文，会替换原来的全部正文；只改其中几处用 edits。按所选类型说明里的「正文」写法组织（类型说明没写正文写法的，写清事实和它的依据或情境），写成陈述句并标明主体（「用户要求…」「项目定了…」），日后读到时能和用户当下的话分开；只写对话或资料里有依据的内容，不替用户编理由；原话里的人名、地名、数字和单位照写，不概括成类别。怎么用由类型统一交代，正文里不另列泛泛的使用场景和注意事项；不写行号、临时路径这类很快过时的细节，改用稳定的位置描述。完整经过可以用 memory_source 回查，不用抄进正文。create 和整条 update 必填；用 edits 时不传就保留原值。')
   })
 
   it('supersedes 的参数说明：填被取代的旧记忆 id，和 update 分工', () => {
@@ -89,8 +89,8 @@ describe('memory_save 绑定', () => {
   })
 
   it('summary 与 tags 分工：summary 一句话说清讲什么，tags 只写文本里没有的检索词', () => {
-    expect(describedParam('summary')).toBe('一句话说清这条记忆讲什么，显示在索引里，供人和模型判断相关不相关；不复述 name，不堆关键词。')
-    expect(describedParam('tags')).toBe('只写正文、name、summary 里都没出现、但以后可能被拿来搜它的词：同义词、中英文别名、缩写。不写泛化概念。')
+    expect(describedParam('summary')).toBe('一句话说清这条记忆讲什么，显示在索引里，供人和模型判断相关不相关；不复述 name，不堆关键词。create 和整条 update 必填；用 edits 时不传就保留原值。')
+    expect(describedParam('tags')).toBe('只写正文、name、summary 里都没出现、但以后可能被拿来搜它的词：同义词、中英文别名、缩写。不写泛化概念。用 edits 时不传就保留原标签。')
   })
 
   it('sourceMode 的参数说明逐一定义五种来源，推断链上有一步是推出来的就填 agent-inferred', () => {
