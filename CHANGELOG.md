@@ -5,7 +5,7 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/) with pre-release tags while the host
 (DeepSeek Harness) is itself in pre-release.
 
-## [Unreleased]
+## [0.2.0-beta.3] - 2026-11-16
 
 ### Added
 - `memory_save` updates can change just part of a memory: pass `edits`, each
