@@ -33,18 +33,20 @@ When a chat adds or updates memories, a card appears under the reply so you can 
 - **Your own setup**  
 General, Coding and Office modes are built in, and you can define your own scenes and memory types, choosing what gets remembered and how. The injection budget, source lookup and health reminder sensitivity are all adjustable on the settings page.
 
-<table>
-  <tr>
-    <td width="33%"><img src="assets/screenshots/sidebar-and-card.png" alt="Memory card in a chat and the right sidebar"></td>
-    <td width="33%"><img src="assets/screenshots/settings.png" alt="Settings page: scenes and memory types"></td>
-    <td width="33%"><img src="assets/screenshots/memory-pending.png" alt="Memory page: suggestions for conflicts and promotions"></td>
-  </tr>
-  <tr>
-    <td align="center">Chat card and right sidebar</td>
-    <td align="center">Settings page: scenes and memory types</td>
-    <td align="center">Memory page: suggestions for conflicts and promotions</td>
-  </tr>
-</table>
+<p align="center">
+  <img src="assets/screenshots/sidebar-and-card.png" alt="Memory card in a chat and the right sidebar" width="560"><br>
+  <sub>Chat card and right sidebar</sub>
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/settings.png" alt="Settings page: scenes and memory types" width="560"><br>
+  <sub>Settings page: scenes and memory types</sub>
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/memory-pending.png" alt="Memory page: suggestions for conflicts and promotions" width="560"><br>
+  <sub>Memory page: suggestions for conflicts and promotions</sub>
+</p>
 
 ## Design principles
 

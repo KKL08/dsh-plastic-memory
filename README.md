@@ -33,18 +33,20 @@
 - **灵活定制**  
 内置通用、编码、办公三种模式，也支持自定义场景与记忆类别。记什么，怎么记都可由你按需设置组合。注入预算、溯源策略与记忆健康提醒灵敏度，均可在设置页按需调节。
 
-<table>
-  <tr>
-    <td width="33%"><img src="assets/screenshots/sidebar-and-card.png" alt="对话里的记忆卡片和右侧栏"></td>
-    <td width="33%"><img src="assets/screenshots/settings.png" alt="设置页：场景和记忆类型"></td>
-    <td width="33%"><img src="assets/screenshots/memory-pending.png" alt="记忆页：冲突和全局提升的处理建议"></td>
-  </tr>
-  <tr>
-    <td align="center">对话卡片和右侧栏</td>
-    <td align="center">设置页：场景和记忆类型</td>
-    <td align="center">记忆页：冲突和全局提升的处理建议</td>
-  </tr>
-</table>
+<p align="center">
+  <img src="assets/screenshots/sidebar-and-card.png" alt="对话里的记忆卡片和右侧栏" width="560"><br>
+  <sub>对话卡片和右侧栏</sub>
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/settings.png" alt="设置页：场景和记忆类型" width="560"><br>
+  <sub>设置页：场景和记忆类型</sub>
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/memory-pending.png" alt="记忆页：冲突和全局提升的处理建议" width="560"><br>
+  <sub>记忆页：冲突和全局提升的处理建议</sub>
+</p>
 
 ## 设计理念
 
