@@ -131,6 +131,18 @@ describe('PA-28 宿主服务缺席、未注册、调用抛错时各自退化，�
     expect(boot({ llm, agentDefaultModel: { currentSelection: throwing } }).host.defaultLlm()).toBeNull()
   })
 
+  it('模型请求带会话 id：借用会话时由该会话的 id 派生（不用原 id，宿主查不到它，不会把这次请求算进那个对话），无会话的默认模型每次另起一个；路由靠它的提供方（如 OpenCode Go）缺了会拒绝请求', async () => {
+    const requests: Array<{ sessionId?: unknown }> = []
+    const llm = { stream: async function* (req: { sessionId?: unknown }) { requests.push(req); yield* [] } }
+    await boot({ llm }).host.llmOf(execOf(session('sess-a'), { provider: 'p', model: 'm' }))!.complete({ system: 's', user: 'u' })
+    expect(requests[0]?.sessionId).toBe('plastic-memory-sess-a')
+    const fallback = boot({ llm, agentDefaultModel: { currentSelection: () => ({ provider: 'p', model: 'm' }) } }).host
+    await fallback.defaultLlm()!.complete({ system: 's', user: 'u' })
+    await fallback.defaultLlm()!.complete({ system: 's', user: 'u' })
+    expect(requests[1]?.sessionId).toEqual(expect.any(String))
+    expect(requests[1]?.sessionId).not.toBe(requests[2]?.sessionId)
+  })
+
   it('没有会话：会话 id 用哨兵，证据锚全为 0，不带委派、不警告', async () => {
     const { host, warnings } = boot()
     const context = await host.contextOf(execOf())

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { SaveDelegation } from './pipeline.ts'
@@ -48,17 +49,21 @@ export function createCordisHostSession(deps: CordisHostSessionDeps): HostSessio
   // 有会话（memory_scan、借用会话的 /memory 命令）：用这个会话的模型。解析顺序对齐宿主 compaction 摘要器：
   // session.requestHeader()?.config（最近一次路由请求的配置）→ agent.options.provider/model；拿不到就是 null，
   // 体检和「让模型改」回 llm-unavailable——用户在那个会话里选的模型才是这次该用的。
+  // 会话 id 由借用会话派生、不用原 id：宿主按原 id 会把这次请求当成那个对话的一轮（附带上传它的会话日志、往里追加事件），
+  // 派生 id 查不到会话，这些都不发生；同一对话里的请求仍共用一个 id，路由和缓存照样认得。
   const llmOf = (exec: ToolRunContext): SemanticLlm | null => {
-    const session = exec.agent?.session as { requestHeader?: () => { config?: { provider?: string; model?: string } } | undefined } | undefined
+    const session = exec.agent?.session as { header?: SessionHeader; requestHeader?: () => { config?: { provider?: string; model?: string } } | undefined } | undefined
     const routed = session?.requestHeader?.()?.config
     return hostSemanticLlm(probe<HostLlmService>('llm'), {
       provider: routed?.provider ?? exec.agent?.options?.provider,
       model: routed?.model ?? exec.agent?.options?.model,
+      sessionId: session?.header?.id === undefined ? undefined : `plastic-memory-${session.header.id}`,
     })
   }
 
   // 无会话（自动体检）：用宿主的默认模型选择（agentDefaultModel 的当前选择：新建 agent 用它，
   // 用户在对话里换模型时它通常跟着变）。每次开跑现读、不缓存；服务缺席或读取抛错就是 null，自动体检记「模型用不了」。
+  // 没有会话 id 可借，每次开跑另起一个，满足要求带会话头的提供方。
   const defaultLlm = (): SemanticLlm | null => {
     let route: HostModelRoute | undefined
     try {
@@ -66,7 +71,7 @@ export function createCordisHostSession(deps: CordisHostSessionDeps): HostSessio
     } catch {
       return null
     }
-    return hostSemanticLlm(probe<HostLlmService>('llm'), route)
+    return hostSemanticLlm(probe<HostLlmService>('llm'), route && { ...route, sessionId: `plastic-memory-checkup-${randomUUID()}` })
   }
 
   /** 读不到 turnBoundary 投影一律 0（整会话锚）。证据锚终点 = session.seq - 1（seq 是下一条事件的位置）。 */
