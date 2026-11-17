@@ -6,10 +6,11 @@ export interface HostLlmService {
   stream?: (req: GenerateOptions) => AsyncIterable<StreamChunk>
 }
 
-/** 一次调用用哪个模型：宿主路由名与模型 id。两者都要有才能调。 */
+/** 一次调用用哪个模型：宿主路由名与模型 id，两者都要有才能调；sessionId 随请求交给宿主，部分提供方（如 OpenCode Go）靠它路由，缺了拒绝请求。 */
 export interface HostModelRoute {
   provider?: string
   model?: string
+  sessionId?: string
 }
 
 /**
@@ -31,6 +32,8 @@ export function isModelUnavailableCode(hostCode: string | undefined): boolean {
  *
  * 真机验证确认的宿主 llm 契约（packages/llm/llm）：
  *   1) stream(options: GenerateOptions) 的 provider/model 是必填 string；sessionId 可选，凭据不依赖会话，所以没有会话也能调。
+ *      但适配器会把 sessionId 转成提供方的路由头（OpenCode Go 的 x-opencode-session，缺了回 400），所以要带上；
+ *      带的是调用方派生的 id，不是真实会话 id（见 cordis-host-session 的 llmOf）。
  *   2) StreamChunk 是判别联合，text-delta 和 reasoning-delta 都带 .text——开启推理时不按 type 过滤会把思维链拼进输出，
  *      导致 JSON 解析失败。只累加 type === 'text-delta' 的 chunk。每条流以 finish chunk 收尾：适配器中途抛错会被宿主
  *      折成 finish.reason.kind === 'error'（或 'aborted'），此时即使已收到可解析的文本也按失败处理。
@@ -40,6 +43,7 @@ export function isModelUnavailableCode(hostCode: string | undefined): boolean {
 export function hostSemanticLlm(llm: HostLlmService | undefined, route: HostModelRoute | undefined): SemanticLlm | null {
   const provider = route?.provider
   const model = route?.model
+  const sessionId = route?.sessionId as GenerateOptions['sessionId']
   if (!provider || !model) return null
   const stream = llm?.stream
   if (stream === undefined) return null
@@ -60,6 +64,7 @@ export function hostSemanticLlm(llm: HostLlmService | undefined, route: HostMode
         model,
         system,
         signal,
+        ...(sessionId === undefined ? {} : { sessionId }),
         messages: [{ role: 'user', content: [{ type: 'text', text: user }] }],
       }
       try {

@@ -617,7 +617,8 @@ describe('自动体检接线', () => {
     await vi.waitFor(async () => expect((await new CheckupRecordStore(sidecar.checkups).list()).map(r => r.completed?.by)).toEqual(['auto']))
     expect(ctx.llmRequests).toHaveLength(1)
     expect(ctx.llmRequests[0]).toMatchObject(DEFAULT_ROUTE)
-    expect(ctx.llmRequests[0]).not.toHaveProperty('sessionId')
+    // 不借会话：请求带的是这次体检另起的 id，不是哪个对话的
+    expect(ctx.llmRequests[0]).toHaveProperty('sessionId', expect.stringMatching(/^plastic-memory-checkup-/))
     // 完成记录由执行器写；之后还要重写视图、放掉认领，认领的心跳停了只剩每 10 分钟的检查
     await vi.waitFor(() => expect(timer.timers.filter(t => t.isLive).map(t => [t.delayMs, t.every])).toEqual([[10 * 60_000, true]]))
     await ctx.dispose()
