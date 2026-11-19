@@ -524,6 +524,7 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
                 hideType={!isAll}
                 hideScope={!isAll}
                 projectName={memory.workspacePath === undefined ? undefined : baseName(memory.workspacePath)}
+                collapsible={!isSearching}
               />
             </div>
             <div className="pm-lib-result">
@@ -565,8 +566,8 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
         {selecting ? checkbox(memory, isPicked) : null}
         <div className="pm-row-body">
           {isAll
-            ? <MemoryCard memory={shown} now={now} typeLabel={typeLabel(memory.type)} scopeSlot={scopeLink(memory)} badge={badge} />
-            : <MemoryCard memory={shown} now={now} hideType hideScope badge={badge} />}
+            ? <MemoryCard memory={shown} now={now} typeLabel={typeLabel(memory.type)} scopeSlot={scopeLink(memory)} badge={badge} collapsible={!isSearching} />
+            : <MemoryCard memory={shown} now={now} hideType hideScope badge={badge} collapsible={!isSearching} />}
           {isEditing ? editPanel(editing) : null}
           {result !== undefined ? editedRow(result) : null}
           {actions.feedback(memory.id)}

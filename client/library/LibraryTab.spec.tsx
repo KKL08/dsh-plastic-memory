@@ -7,7 +7,7 @@ import type { BorrowedSession } from '../gateway.ts'
 import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
 import { createNavStore, type PageScope } from '../nav.ts'
 import { EDIT_MODE_STORAGE_KEY } from '../pending/edit-modes.tsx'
-import { memory, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
+import { memory, mockMemoryTextOverflow, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { LibraryTab, libraryTabCss } from './LibraryTab.tsx'
 import type { FoldMemory } from './groups.tsx'
 import { FLASH_MS } from './shared.tsx'
@@ -114,6 +114,20 @@ describe('全部记忆', () => {
     fireEvent.change(screen.getByRole('searchbox', { name: '搜索记忆' }), { target: { value: '没有这种东西' } })
     expect(screen.queryByRole('list')).toBeNull()
     expect(screen.getByRole('status')).toHaveTextContent('没有找到匹配的记忆')
+  })
+
+  it('很长的记忆折叠成几行、可「展开」；搜索时整段显示，命中的字不会藏在折叠里', () => {
+    mockMemoryTextOverflow()
+    try {
+      renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { library: library() } }))
+      expect(screen.getAllByRole('button', { name: '展开' })).toHaveLength(2)
+      expect(document.querySelectorAll('.pm-mc-text--clamped')).toHaveLength(2)
+      fireEvent.change(screen.getByRole('searchbox', { name: '搜索记忆' }), { target: { value: 'typecheck' } })
+      expect(screen.queryByRole('button', { name: '展开' })).toBeNull()
+      expect(document.querySelector('.pm-mc-text--clamped')).toBeNull()
+    } finally {
+      vi.restoreAllMocks()
+    }
   })
 
   it('没有版本（digest）的行尾只有「删除」（幽灵按钮）和「打开文件」（纯图标）；没有「在访达中显示」', () => {

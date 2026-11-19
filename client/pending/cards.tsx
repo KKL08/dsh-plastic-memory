@@ -164,13 +164,15 @@ function Card({ marker, title, aside, focusable = false, isResult = false, child
   )
 }
 
-function MemoryOf({ memory, session, now, typeLabel }: {
+function MemoryOf({ memory, session, now, typeLabel, collapsible = false }: {
   memory: MemoryCardData
   session: BorrowedSession
   now: number
   typeLabel: (type: string) => string
+  /** 建议卡里的记忆（pm-pending-advice-memories）固定限 3 行、不展开，不传。 */
+  collapsible?: boolean
 }) {
-  return <MemoryCard memory={memory} now={now} typeLabel={typeLabel(memory.type)} projectName={projectNameOf(session)(memory)} />
+  return <MemoryCard memory={memory} now={now} typeLabel={typeLabel(memory.type)} projectName={projectNameOf(session)(memory)} collapsible={collapsible} />
 }
 
 /** 卡片标题；处理前的卡和处理后的结果卡共用，别的项目里的提升候选两处都写项目名。 */
@@ -206,7 +208,7 @@ export function SecretCard({ item, session, now, typeLabel, onDone }: CardProps<
   const open = () => { void gateway.openPath(memory.filePath, 'open').then((ok) => { if (!ok) action.fail(t('pending.openFailed')) }) }
   return (
     <Card marker={<StatusMarker kind="secret" label={t('marker.secret')} />} title={t('pending.secret.title')}>
-      <MemoryOf session={session} memory={typeof revealed === 'string' ? { ...memory, content: revealed } : memory} now={now} typeLabel={typeLabel} />
+      <MemoryOf session={session} memory={typeof revealed === 'string' ? { ...memory, content: revealed } : memory} now={now} typeLabel={typeLabel} collapsible />
       {revealed === null ? <p className="pm-pending-text">{t('pending.secret.readFailed')}</p> : null}
       <AdviceNote>{t('pending.secret.body')}</AdviceNote>
       {confirming
@@ -670,7 +672,7 @@ export function PromoteCard({ item, session, now, typeLabel, onDone, onRefused, 
     <Card marker={<StatusMarker kind="pending" />} title={titleOf(item, t, session)}>
       {item.memory === null
         ? <p className="pm-pending-text">{t('conflict.missing')}</p>
-        : <MemoryOf session={session} memory={item.memory} now={now} typeLabel={typeLabel} />}
+        : <MemoryOf session={session} memory={item.memory} now={now} typeLabel={typeLabel} collapsible />}
       {promoteTarget !== undefined
         ? <AdviceNote>{t(promoteTarget === 'agents-md' ? 'pending.promote.agentsMdNote' : 'pending.promote.globalNote')}</AdviceNote>
         : null}
@@ -1258,9 +1260,9 @@ export function ResultCard({ item, outcome, session, now, typeLabel, onUndone, o
     : undoId !== undefined ? { cmd: 'undo', decisionId: undoId } : undefined
   return (
     <Card marker={item.kind === 'advice' ? undefined : <StatusMarker kind="done" />} title={titleOf(item, t, session)} focusable isResult>
-      {copy.memory ? <MemoryOf session={session} memory={copy.memory} now={now} typeLabel={typeLabel} /> : null}
+      {copy.memory ? <MemoryOf session={session} memory={copy.memory} now={now} typeLabel={typeLabel} collapsible /> : null}
       {copy.memories !== undefined
-        ? <div className="pm-pending-advice-group">{copy.memories.map(m => <MemoryOf key={m.id} session={session} memory={m} now={now} typeLabel={typeLabel} />)}</div>
+        ? <div className="pm-pending-advice-group">{copy.memories.map(m => <MemoryOf key={m.id} session={session} memory={m} now={now} typeLabel={typeLabel} collapsible />)}</div>
         : null}
       <ResultLine
         chip={copy.chip}

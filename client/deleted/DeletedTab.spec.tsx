@@ -5,7 +5,7 @@ import { GUI_VIEW_VERSION, type DeletedView, type LibraryView, type MemoryComman
 import type { BorrowedSession } from '../gateway.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
 import { createNavStore } from '../nav.ts'
-import { memory, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
+import { memory, mockMemoryTextOverflow, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { DeletedTab } from './DeletedTab.tsx'
 import { FLASH_MS } from '../library/shared.tsx'
 import { createTranslator } from '../i18n.tsx'
@@ -67,6 +67,18 @@ describe('最近删除剩余天数', () => {
 })
 
 describe('最近删除', () => {
+  it('很长的记忆折叠、可「展开」；搜索时整段显示', () => {
+    mockMemoryTextOverflow()
+    try {
+      renderInShell(<DeletedTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { deleted } }))
+      expect(screen.getAllByRole('button', { name: '展开' })).toHaveLength(4)
+      fireEvent.change(screen.getByRole('searchbox', { name: '搜索已删除的记忆' }), { target: { value: 'pnpm' } })
+      expect(screen.queryByRole('button', { name: '展开' })).toBeNull()
+    } finally {
+      vi.restoreAllMocks()
+    }
+  })
+
   it('只列范围里的；搜索框下一行写保留规则；每行写何时删，行尾依次是「还能恢复 N 天 · 彻底删除… · 恢复」', () => {
     renderInShell(<DeletedTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { deleted } }))
     expect(screen.getAllByRole('listitem')).toHaveLength(4)
