@@ -17,6 +17,9 @@ import { InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 
+// 出厂类型都不是 passive：只带标题的判据用一个 passive 自定义类型来测
+const withPassive = buildTypeRegistry({ template: 'coding', customTypes: { link: { label: '链接', description: '链接', whenToSave: '链接', recall: 'passive', decayDays: null, governancePriority: 'medium' } } })
+
 // 本文件默认时间戳为 0。
 const record = (partial: Partial<MemoryRecord> = {}) => baseRecord({ createdAt: 0, updatedAt: 0, lastConfirmedAt: 0, ...partial })
 // assembleSnapshot 吃预读的可见记录：按调用方（runtime）的口径从 store 预读
@@ -33,8 +36,8 @@ describe('assembleSnapshot', () => {
   it('core 类型正文出现在 core 区（带 id），且不在索引区重复；passive 只显示 name', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_core', name: 'mock 禁令', type: 'preference', content: '不要 mock 数据库', summary: '测试不 mock 数据库' }))
-    await store.put(record({ id: 'mem_ref', name: '看板', type: 'reference', content: '看板在 https://x.dev', summary: '团队看板的地址' }))
-    const { text } = assembleSnapshot({ ...base, records: await visible(store) })
+    await store.put(record({ id: 'mem_ref', name: '看板', type: 'link', content: '看板在 https://x.dev', summary: '团队看板的地址' }))
+    const { text } = assembleSnapshot({ ...base, registry: withPassive, records: await visible(store) })
     expect(text).toContain('不要 mock 数据库')
     expect(text).toMatch(/\[mem_core\]【记忆·[^】]+】不要 mock 数据库/) // ⑤+id：core 区带 id 与归属前缀
     expect(text.match(/mem_core/g)?.length).toBe(1)                    // core 只出现一次（索引区不重复）
@@ -46,13 +49,13 @@ describe('assembleSnapshot', () => {
   it('titleOnlyIds：索引行只带名称和标签（不带摘要）的那些，与索引行格式器同一个判据', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_core', type: 'preference', content: '不要 mock 数据库' }))
-    await store.put(record({ id: 'mem_ref', name: '看板', type: 'reference', summary: '团队看板的地址' }))
+    await store.put(record({ id: 'mem_ref', name: '看板', type: 'link', summary: '团队看板的地址' }))
     await store.put(record({ id: 'mem_k', name: '报销', type: 'knowledge', summary: '报销截止每月 25 日' }))
-    const r = assembleSnapshot({ ...base, records: await visible(store) })
+    const r = assembleSnapshot({ ...base, registry: withPassive, records: await visible(store) })
     expect(r.titleOnlyIds).toEqual(['mem_ref'])
     expect(r.text).toContain('[mem_k] 报销（报销截止每月 25 日）')
     expect(r.text).not.toContain('团队看板的地址')
-    expect(assembleSnapshot({ ...base, records: [] }).titleOnlyIds).toEqual([])
+    expect(assembleSnapshot({ ...base, registry: withPassive, records: [] }).titleOnlyIds).toEqual([])
   })
 
   it('⑧ 磁盘路径只透 global + 当前项目，不透其他 workspace（跨项目隔离）', async () => {
@@ -247,9 +250,9 @@ describe('索引与引导', () => {
   describe('MEMORY.md 行与注入索引行末尾带文件名（同源格式，passive 不带 summary；磁盘侧不带陈旧度，注入侧带）', () => {
     it('注入索引行以 · 相对记忆根目录的文件路径收尾，与 MEMORY.md 同一个格式器；陈旧度在文件名之前', () => {
       const stale = record({ id: 'mem_p', name: '冻结', type: 'project', lastConfirmedAt: 0, summary: '冻结到三月' })
-      const ref = record({ id: 'mem_ref', name: '看板', type: 'reference', summary: '团队看板的地址' })
+      const ref = record({ id: 'mem_ref', name: '看板', type: 'link', summary: '团队看板的地址' })
       const files = new Map([['mem_p', 'myproj-1234abcd/冻结.md'], ['mem_ref', 'global/看板.md']])
-      const lines = assembleSnapshot({ ...base, records: [stale, ref], files }).text.split('\n')
+      const lines = assembleSnapshot({ ...base, registry: withPassive, records: [stale, ref], files }).text.split('\n')
       expect(lines).toContain(formatIndexLine(stale, { passive: false, file: 'myproj-1234abcd/冻结.md', note: STALENESS_NOTE(10) }))
       expect(lines).toContain('- [mem_p] 冻结（冻结到三月）' + STALENESS_NOTE(10) + ' · myproj-1234abcd/冻结.md')
       expect(lines).toContain('- [mem_ref] 看板 · global/看板.md')   // passive 不带 summary

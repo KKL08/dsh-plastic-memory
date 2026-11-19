@@ -46,7 +46,7 @@
 | `search`  | **索引注入**：名称和摘要以一行索引进入概览，模型按需调取 | 详细流程规范与业务知识 |
 | `passive` | **静默索引**：索引里只列名称和标签，最大化节约 Token | 低频调用的参考信息   |
 
-内置类型的默认模式：`profile`、`preference` 是 `core`；`knowledge`、`project`、`procedure`、`decision` 是 `search`；`reference` 是 `passive`。
+内置类型的默认模式：`profile`、`preference` 是 `core`；`knowledge`、`project`、`reference`、`procedure`、`decision` 是 `search`；`passive` 留给自定义类型选用。
 
 
 
