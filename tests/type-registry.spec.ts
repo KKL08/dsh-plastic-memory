@@ -107,6 +107,13 @@ describe('出厂类型的定义', () => {
     }
   })
 
+  it('参考引用只管项目外部资料的位置；对接人归项目信息', () => {
+    const def = (name: string) => BUILTIN_TYPES.find(t => t.name === name)!
+    expect(def('reference').description.split('。')[0]).toMatch(/外部资料/)
+    expect(`${def('reference').description}${def('reference').whenToSave}${def('reference').howToUse}`).not.toMatch(/对接人|问谁|物品|实物/)
+    expect(def('project').description.split('。')[0]).toMatch(/对接人/)
+  })
+
   it('例子记下的内容守通用写法：相对时间已换成具体日期', () => {
     for (const t of [...BUILTIN_TYPES, ...PRESET_TYPES]) {
       expect(t.description.split('→')[1], t.name).not.toMatch(/今天|明天|昨天|这周|下周|上周|月底|今年|明年|去年|最近/)
