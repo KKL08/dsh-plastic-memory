@@ -20,7 +20,7 @@ import { executeHealth } from '../src/tools/health.ts'
 import { RETENTION_MS } from '../src/retention.ts'
 import {
   GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, PENDING_ITEM_KINDS, checkupViewSchema, deletedViewSchema, healthViewSchema,
-  libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema, workspaceMapViewSchema, type CheckupView, type GlobalViewName, type PendingItem,
+  checkupKey, libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema, workspaceMapViewSchema, type CheckupView, type GlobalViewName, type PendingItem,
 } from '../src/gui/contract.ts'
 import { GLOBAL_VIEW_NAMES, buildCheckupView, buildSessionView } from '../src/gui/views.ts'
 import { VIEW_REPLACE_GAP_MS, ViewWriter, collectGlobalViews } from '../src/gui/view-writer.ts'
@@ -780,6 +780,25 @@ describe('健康视图', () => {
   })
 })
 
+describe('体检视图：没有活跃记忆的项目', () => {
+  it('照样列出（单独设置、上次体检照旧），但标成不可体检：不到期、没有下次时间，旧的失败和「模型用不了」不再写', () => {
+    const empty = { kind: 'workspace' as const, workspacePath: WS }
+    const cause = { kind: 'model-error' as const }
+    const view = buildCheckupView({
+      now: T0, governanceEnabled: true, settings: new Map([[checkupKey(empty), 1]]), scopes: [{ kind: 'global' }, empty],
+      isCheckable: scope => scope.kind === 'global',
+      lastCheckupAt: scope => scope.kind === 'global' ? null : T0 - 3 * 86_400_000, isInProgress: () => false,
+      record: scope => scope.kind === 'global' ? undefined : { id: checkupKey(empty), failure: { count: 1, failedAt: T0 - 1000, cause }, modelUnavailable: cause },
+      allRecord: undefined,
+    })
+    expect(checkupViewSchema.parse(view)).toEqual(view)
+    expect(view.scopes.map(s => [s.scope.kind, s.isCheckable])).toEqual([['global', true], ['workspace', false]])
+    expect(view.scopes[1]).toMatchObject({
+      frequency: 1, isOwn: true, lastCheckupAt: T0 - 3 * 86_400_000, isDue: false, nextCheckupAt: null, failure: null, modelUnavailable: null,
+    })
+  })
+})
+
 describe('会话视图', () => {
   it('带 frozenAt、来历与三段用量，只存时间戳', () => {
     const view = buildSessionView({
@@ -968,7 +987,7 @@ describe('视图写入', () => {
   const checkupOnly = (view: () => CheckupView, opts: { now?: () => number; sleep?: (ms: number) => Promise<void> } = {}) =>
     new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') }, collectCheckups: async () => view(), ...noWait, ...opts })
   const checkupAt = (now: number, governanceEnabled = true): CheckupView => buildCheckupView({
-    now, governanceEnabled, settings: new Map(), scopes: [{ kind: 'global' }],
+    now, governanceEnabled, settings: new Map(), scopes: [{ kind: 'global' }], isCheckable: () => true,
     lastCheckupAt: () => null, isInProgress: () => false, record: () => undefined, allRecord: undefined,
   })
   const readCheckup = async () => checkupViewSchema.parse(JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_CHECKUP_VIEW_FILE), 'utf8')))
@@ -1151,8 +1170,8 @@ describe('视图写入', () => {
     expect(await readMap()).toEqual({ '/w/old': '/w/old', '/w/new': '/w/new' })
   })
 
-  it('PA-16 视图版本为 15，健康视图不含健康页拆掉后的残留字段', async () => {
-    expect(GUI_VIEW_VERSION).toBe(15)
+  it('PA-16 视图版本为 16，健康视图不含健康页拆掉后的残留字段', async () => {
+    expect(GUI_VIEW_VERSION).toBe(16)
     const h = harness()
     await h.store.create(w({ id: 'mem_old', name: '过期', validTo: EXPIRED_AT }))
     await h.decisions.syncOverflow(WS, { mode: 'relax', tier: 1 }, T0, '超限')

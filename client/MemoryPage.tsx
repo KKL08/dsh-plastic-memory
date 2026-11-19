@@ -151,8 +151,8 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
   })) as [SegmentedTab<MemoryView>, ...SegmentedTab<MemoryView>[]]
   const scopeHealth = scope.kind === 'all' ? undefined : health?.layers.find(l => sameScope(l.layer, scope))
   const isGovernanceEnabled = (checkups ?? health)?.governanceEnabled !== false
-  // 「全部」体检实际会查的项目数（有活跃记忆的项目，健康视图和体检视图同一批作用域）；左栏还列只剩最近删除、只有待处理的项目，不算
-  const checkupScopes = health?.layers.map(l => l.layer) ?? checkups?.scopes.map(s => s.scope)
+  // 「全部」体检实际会查的项目数（有活跃记忆的项目：健康视图的作用域、体检视图里可体检的）；左栏还列只剩最近删除、只有待处理的项目，不算
+  const checkupScopes = health?.layers.map(l => l.layer) ?? checkups?.scopes.filter(s => s.isCheckable).map(s => s.scope)
   const checkupProjectCount = checkupScopes?.filter(s => s.kind === 'workspace').length ?? projectCount
 
   return (

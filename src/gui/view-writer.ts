@@ -139,11 +139,15 @@ export interface CheckupSourceDeps {
   now?: () => number
 }
 
-/** 体检视图：只读目录清单、两张小侧表、各范围的认领文件和缓存的时间，不读记忆文件，调度器每次检查都可以读。 */
+/**
+ * 体检视图：只读目录清单、两张小侧表、各范围的认领文件和缓存的时间，不读记忆文件，调度器每次检查都可以读。
+ * 列目录里的全部项目（同全局视图的读取范围），体检清单之外的标成不可体检。
+ */
 export async function collectCheckupView(deps: CheckupSourceDeps): Promise<CheckupView> {
   const now = deps.now?.() ?? Date.now()
   const listing = await deps.store.listWorkspaceDirs()
-  const scopes: Scope[] = [{ kind: 'global' }, ...checkupWorkspaces(listing).map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
+  const checkable = new Set(checkupWorkspaces(listing))
+  const scopes: Scope[] = [{ kind: 'global' }, ...[...new Set(listing.entries.map(e => e.workspacePath))].sort().map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
   const [settings, records] = await Promise.all([deps.autoCheckups.read(), deps.checkups.list()])
   const byKey = new Map(records.map(r => [r.id, r]))
   const last = new Map<Scope, number | null>()
@@ -155,6 +159,7 @@ export async function collectCheckupView(deps: CheckupSourceDeps): Promise<Check
   }
   return buildCheckupView({
     now, governanceEnabled: deps.isGovernanceEnabled?.() ?? true, settings, scopes,
+    isCheckable: scope => scope.kind === 'global' || checkable.has(scope.workspacePath),
     lastCheckupAt: scope => last.get(scope) ?? null, isInProgress: scope => inProgress.has(scope), record: scope => byKey.get(checkupKey(scope)),
     allRecord: byKey.get(SCOPE_KEYS.all),
   })

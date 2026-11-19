@@ -26,7 +26,7 @@ export { detectSecrets } from '../secrets.ts'
  */
 
 /** 视图 schema 的版本号：视图是派生缓存，形状变了就换号，客户端读到不认识的号按「需要刷新」处理。 */
-export const GUI_VIEW_VERSION = 15
+export const GUI_VIEW_VERSION = 16
 
 /** 视图文件所在目录（相对记忆根目录，POSIX 分隔）。 */
 export const GUI_VIEW_DIR = '.state/gui'
@@ -658,9 +658,14 @@ export const checkupViewSchema = z.object({
   defaultFrequency: autoCheckupFrequencySchema,
   /** 「全部」手动体检的最近一次结果（体检记录表键 all 的那条）；没做过为 null。 */
   allResult: checkupResultSchema.nullable(),
-  /** 全局在前，项目按路径排序（与健康视图同一批作用域）。 */
+  /** 全局在前，项目按路径排序：目录里的全部项目，含没有活跃记忆的（它们的设置和上次体检照样给界面看）。 */
   scopes: z.array(z.object({
     scope: scopeSchema,
+    /**
+     * 可体检：全局总是，项目要有活跃记忆（同健康视图、memory_health 的体检清单）。
+     * 不可体检的不到期、没有下次时间，旧的失败和「模型用不了」也不写（不会再试）；「全部」体检不查它。
+     */
+    isCheckable: z.boolean(),
     /** 有效频率（见 resolveAutoCheckup）。 */
     frequency: autoCheckupFrequencySchema,
     /** 单独设置；false = 跟随「全部」。 */

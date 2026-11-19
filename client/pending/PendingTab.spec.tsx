@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { GUI_VIEW_VERSION, type AdviceType, type HealthView, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type PendingItem, type PendingView, type Suggestion } from '../../src/gui/contract.ts'
+import { GUI_VIEW_VERSION, type AdviceType, type CheckupView, type HealthView, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type PendingItem, type PendingView, type Suggestion } from '../../src/gui/contract.ts'
 import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
 import { useGateway, type PluginConfig } from '../gateway.ts'
 import { FLASH_MS } from '../library/shared.tsx'
@@ -714,6 +714,37 @@ describe('待处理：两态与空状态', () => {
     unmount()
     renderInShell(<PendingTab nav={createNavStore()} session={SESSION} scope={ALL_SCOPE} workspacePath={undefined} now={NOW} />, gateway)
     expect(screen.getByRole('status')).toHaveTextContent('上次体检 10 月 16 日')
+  })
+
+  it('项目记忆删光了（健康视图不列它）：上次体检取体检视图，不写成「还没体检过」', () => {
+    const old = { kind: 'workspace' as const, workspacePath: '/w/old' }
+    const checkups: CheckupView = {
+      version: GUI_VIEW_VERSION, governanceEnabled: true, defaultFrequency: 'manual', allResult: null,
+      scopes: [{
+        scope: old, isCheckable: false, frequency: 7, isOwn: true, lastCheckupAt: new Date(2026, 9, 5, 9).getTime(), nextCheckupAt: null, isDue: false,
+        isInProgress: false, failure: null, modelUnavailable: null, lastResult: null,
+      }],
+    }
+    const gateway = createFakeGateway({ session: SESSION, config, views: { pending: view(), health: scannedHealth(null), checkups } })
+    renderInShell(<PendingTab nav={createNavStore()} session={SESSION} scope={old} workspacePath="/w/app" now={NOW} />, gateway)
+    expect(screen.getByRole('status')).toHaveTextContent('上次体检 10 月 5 日')
+  })
+
+  it('体检视图还在读：先不写上次体检，读到了再写（不闪「还没体检过」）', () => {
+    const old = { kind: 'workspace' as const, workspacePath: '/w/old' }
+    const checkups: CheckupView = {
+      version: GUI_VIEW_VERSION, governanceEnabled: true, defaultFrequency: 'manual', allResult: null,
+      scopes: [{
+        scope: old, isCheckable: false, frequency: 7, isOwn: true, lastCheckupAt: new Date(2026, 9, 5, 9).getTime(), nextCheckupAt: null, isDue: false,
+        isInProgress: false, failure: null, modelUnavailable: null, lastResult: null,
+      }],
+    }
+    const gateway = createFakeGateway({ session: SESSION, config, views: { pending: view(), health: scannedHealth(null), checkups: { status: 'loading' } } })
+    renderInShell(<PendingTab nav={createNavStore()} session={SESSION} scope={old} workspacePath="/w/app" now={NOW} />, gateway)
+    expect(screen.getByRole('status')).not.toHaveTextContent('还没体检过')
+    expect(screen.getByRole('status')).not.toHaveTextContent('上次体检')
+    act(() => { gateway.setView('checkups', checkups) })
+    expect(screen.getByRole('status')).toHaveTextContent('上次体检 10 月 5 日')
   })
 
   it('配置文件关掉体检：写明在配置文件里关闭，没有可点的东西（界面上不提供打开体检）', () => {

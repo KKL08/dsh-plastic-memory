@@ -70,7 +70,7 @@ function checkups({ all = 'manual', scopes = {}, allResult = null, governanceEna
   governanceEnabled?: boolean
 } = {}): CheckupView {
   const entry = (scope: Scope): ScopeEntry => ({
-    scope, frequency: all, isOwn: false, lastCheckupAt: NOW - DAY, nextCheckupAt: null, isDue: false,
+    scope, isCheckable: true, frequency: all, isOwn: false, lastCheckupAt: NOW - DAY, nextCheckupAt: null, isDue: false,
     isInProgress: false, failure: null, modelUnavailable: null, lastResult: null,
     ...scopes[scope.kind === 'global' ? 'global' : scope.workspacePath],
   })
