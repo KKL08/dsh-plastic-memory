@@ -1,5 +1,5 @@
 /**
- * 「记忆查看」：选中范围里的记忆卡列表。搜索框 → 项目和全局下一行存储说明（每条一个文件 · 目录 · 打开目录）→ 目录问题（来自视图，
+ * 「记忆查看」：选中范围里的记忆卡列表。搜索框 → 项目和全局下一行存储说明（每条一个文件 · 打开目录，不显示目录路径，免得截图露出本机目录）→ 目录问题（来自视图，
  * 不在这里重算）→ 列表。单个范围按类型分组，每组先露 3 条；「全部」跨范围按更新时间分四段，卡片上的范围名点了下钻到那个范围。
  * 行尾「修改」·「删除」（先原位确认「删除这条？ 删除 · 取消」，再软删）·「打开文件」（纯图标）；
  * 删掉的那行原位换成结果行，可撤销（发 restore）；含密钥的再确认一次彻底删除，不可恢复。别处正在处理这一条时列表上方写明没有生效。
@@ -654,7 +654,6 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
           <p className="pm-lib-storage">
             <span>{t('library.storage.oneFile')}</span>
             <i className="pm-sep" aria-hidden="true">·</i>
-            <span className="pm-lib-path" title={dir}>{dir}</span>
             <button type="button" className="pm-link" onClick={() => { void actions.open(dir) }}>{t('library.storage.openDir')}</button>
           </p>
         )
@@ -712,8 +711,7 @@ export const libraryTabCss = `
 .pm-lib { display: flex; flex-direction: column; gap: 12px; }
 .pm-lib-storage { display: flex; align-items: center; min-width: 0; margin: 0; padding: 0 16px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-lib-storage > span:first-child { flex-shrink: 0; white-space: nowrap; }
-.pm-lib-storage .pm-link { margin-left: 8px; flex-shrink: 0; font-size: 12px; }
-.pm-lib-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 12px; }
+.pm-lib-storage .pm-link { flex-shrink: 0; font-size: 12px; }
 .pm-lib-issues { margin: 0; padding: 0 16px; list-style: none; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); overflow-wrap: anywhere; }
 .pm-lib > .pm-notice { padding: 0 16px; }
 .pm-lib-quiet { margin: 0; padding: 0 16px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }

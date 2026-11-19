@@ -201,9 +201,9 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
             <div className="pm-head-main">
               <h2 className="pm-head-title">{scopeLabel(scope, t)}</h2>
               {isChat(scope) ? <Chip variant="neutral">{t('scope.currentChat')}</Chip> : null}
-              <span className="pm-head-path" title={scope.kind === 'workspace' ? scope.workspacePath : undefined}>
-                {scope.kind === 'all' ? allScopesSub(projectCount, t) : scope.kind === 'global' ? t('scope.global.sub') : scope.workspacePath}
-              </span>
+              {scope.kind === 'workspace'
+                ? null
+                : <span className="pm-head-path">{scope.kind === 'all' ? allScopesSub(projectCount, t) : t('scope.global.sub')}</span>}
             </div>
             <div className="pm-head-actions">
               <TitleControls

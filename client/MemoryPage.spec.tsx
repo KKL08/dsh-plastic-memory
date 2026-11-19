@@ -180,10 +180,11 @@ describe('标题行与状态条', () => {
   const heading = () => document.querySelector<HTMLElement>('.pm-head-title')!
   const statusBar = () => screen.queryByRole('region', { name: '记忆状况' })
 
-  it('标题行：项目写名称和路径，全局写「所有项目共用」，全部写「N 个项目和全局」', () => {
+  it('标题行：项目只写名称、不露路径，全局写「所有项目共用」，全部写「N 个项目和全局」', () => {
     open({ view: 'todo', scope: APP })
     expect(heading()).toHaveTextContent('app')
-    expect(heading().parentElement).toHaveTextContent('/w/app')
+    expect(heading().parentElement).not.toHaveTextContent('/w/app')
+    expect(heading().parentElement!.querySelector('[title="/w/app"]')).toBeNull()
     fireEvent.click(railRow('全局'))
     expect(heading()).toHaveTextContent('全局')
     expect(heading().parentElement).toHaveTextContent('所有项目共用')
@@ -331,7 +332,7 @@ describe('落点与旧导航目标', () => {
     open({ view: 'todo', fromChat: true })
     expect(railRow('app')).toHaveAttribute('aria-current', 'true')
     expect(tab(/^处理/)).toHaveAttribute('aria-selected', 'true')
-    expect(within(titleRow()).getAllByText(/./).map(el => el.textContent)).toEqual(['app', '当前对话', '/w/app'])
+    expect(within(titleRow()).getAllByText(/./).map(el => el.textContent)).toEqual(['app', '当前对话'])
     expect(rowParts(railRow('app')).sub).toMatch(/· 当前对话$/)
     expect(rowParts(railRow('全局')).sub).not.toMatch(/当前对话/)
   })

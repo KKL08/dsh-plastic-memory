@@ -81,20 +81,20 @@ async function remove(row: HTMLElement) {
 }
 
 describe('全部记忆', () => {
-  it('列出范围里的记忆卡；搜索框下一行存储说明「每条一个文件 · 目录 · 打开目录」，完整路径在 title 里', () => {
+  it('列出范围里的记忆卡；搜索框下一行存储说明「每条一个文件 · 打开目录」，不露目录路径', () => {
     renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { library: library() } }))
     expect(screen.getAllByRole('listitem').map(li => li.querySelector('.pm-mc-text')?.textContent))
       .toEqual(['测试里不要 mock 数据库，用 testcontainers 起真实 Postgres。', '提交前跑 typecheck'])
     expect(screen.getByRole('searchbox', { name: '搜索记忆' })).toHaveAttribute('placeholder', '搜索记忆原文')
     const storage = document.querySelector('.pm-lib-storage')!
-    expect(storage).toHaveTextContent(/^每条一个文件\s*·\s*\/m\/app-1\s*打开目录$/)
-    expect(within(storage as HTMLElement).getByText('/m/app-1')).toHaveAttribute('title', '/m/app-1')
+    expect(storage).toHaveTextContent(/^每条一个文件\s*·\s*打开目录$/)
+    expect(storage.querySelector('[title]')).toBeNull()
     expect(screen.queryByText(/MEMORY\.md/)).toBeNull()
   })
 
   it('全局写全局目录、按类型分组；「全部」不写存储说明，跨范围按更新时间分段，7 天前的收在「更早」里并说一句', () => {
     const { unmount } = renderInShell(<LibraryTab nav={createNavStore()} scope={{ kind: 'global' }} session={session} now={NOW} />, createFakeGateway({ views: { library: library() } }))
-    expect(document.querySelector('.pm-lib-storage')).toHaveTextContent('/m/global')
+    expect(document.querySelector('.pm-lib-storage')).toHaveTextContent(/^每条一个文件\s*·\s*打开目录$/)
     expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['行为偏好1'])
     expect(screen.queryByText('最近 7 天没有新记或改动的记忆。')).toBeNull()
     unmount()
