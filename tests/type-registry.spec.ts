@@ -112,6 +112,7 @@ describe('出厂类型的定义', () => {
     expect(def('reference').description.split('。')[0]).toMatch(/外部资料/)
     expect(`${def('reference').description}${def('reference').whenToSave}${def('reference').howToUse}`).not.toMatch(/对接人|问谁|物品|实物/)
     expect(def('project').description.split('。')[0]).toMatch(/对接人/)
+    expect(def('reference').recall).toBe('search')
   })
 
   it('例子记下的内容守通用写法：相对时间已换成具体日期', () => {

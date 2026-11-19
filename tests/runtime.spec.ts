@@ -14,6 +14,9 @@ import { InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 
+// 出厂类型都不是 passive：只带标题的判据用一个 passive 自定义类型来测
+const withPassive = buildTypeRegistry({ template: 'coding', customTypes: { link: { label: '链接', description: '链接', whenToSave: '链接', recall: 'passive', decayDays: null, governancePriority: 'medium' } } })
+
 // 本文件默认时间戳为 0。
 const record = (partial: Partial<MemoryRecord> = {}) => baseRecord({ createdAt: 0, updatedAt: 0, lastConfirmedAt: 0, ...partial })
 
@@ -489,7 +492,7 @@ describe('SnapshotCache 快照来历', () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const frozen: FrozenSnapshotInfo[] = []
     const cache = new SnapshotCache({
-      store, registry, budget: 4000, onFrozen: (_s, info) => { frozen.push(info) },
+      store, registry: withPassive, budget: 4000, onFrozen: (_s, info) => { frozen.push(info) },
       ...(hasEarlierTurns === undefined ? {} : { host: snapshotHost({ hasEarlierTurns }) }),
     })
     const session = {}
@@ -501,7 +504,7 @@ describe('SnapshotCache 快照来历', () => {
     const { store, cache, session, last } = makeTracked()
     await store.put(record({ id: 'mem_core', type: 'preference', content: '不要 mock 数据库' }))
     await store.put(record({ id: 'mem_idx', type: 'knowledge', content: '报销截止每月 25 日' }))
-    await store.put(record({ id: 'mem_ref', type: 'reference', content: '看板在 Linear' }))
+    await store.put(record({ id: 'mem_ref', type: 'link', content: '看板在 Linear' }))
     await cache.assemble(session)
     expect(last()).toMatchObject({ origin: 'start', coreIds: ['mem_core'], titleOnlyIds: ['mem_ref'] })
     expect(last().compactedAt).toBeUndefined()
