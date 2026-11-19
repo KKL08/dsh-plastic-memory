@@ -113,6 +113,26 @@ describe('出厂类型的定义', () => {
     }
   })
 
+  it('例子记下的内容：结论在前，原因、依据跟在句号后；不用括号补注，不用分号拼接', () => {
+    const saved = (name: string) => [...BUILTIN_TYPES, ...PRESET_TYPES].find(t => t.name === name)!.description.split('→ 记')[1]!
+    expect(saved('preference')).toMatch(/。原因：/)
+    expect(saved('project')).toMatch(/。原因：/)
+    expect(saved('knowledge')).toMatch(/。依据：/)
+    expect(saved('decision')).toMatch(/。依据：/)
+    for (const name of ['profile', 'reference']) expect(saved(name), name).not.toMatch(/(原因|依据)：/)
+    for (const t of [...BUILTIN_TYPES, ...PRESET_TYPES]) {
+      expect(saved(t.name), t.name).not.toMatch(/[；;（(]/)
+      // 说明文腔：把具体情况套成「有…的习惯」
+      expect(saved(t.name), t.name).not.toMatch(/有.{1,12}的习惯/)
+    }
+  })
+
+  it('例子记下的内容只写这件事本身：出处、记录经过不进正文', () => {
+    for (const t of [...BUILTIN_TYPES, ...PRESET_TYPES]) {
+      expect(t.description.split('→ 记')[1], t.name).not.toMatch(/用户告知|用户转述|用户说明|用户提到|用户表示/)
+    }
+  })
+
   it('事实与经验：没找到、行不通的结论限定在试过的范围，推测写明是推测', () => {
     const knowledge = BUILTIN_TYPES.find(t => t.name === 'knowledge')!
     expect(knowledge.description).toContain('没找到、行不通这类结论写明在什么范围试过')
