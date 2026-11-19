@@ -5,6 +5,18 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/) with pre-release tags while the host
 (DeepSeek Harness) is itself in pre-release.
 
+## [Unreleased]
+
+### Changed
+- Memories are saved in a clearer shape: the main point comes first, and
+  when there is a reason or a source behind it, it follows in the same
+  paragraph as "原因：" or "依据：". The text is guided to leave out
+  bracketed asides and notes such as "the user told me", since the record
+  already keeps where and when a memory came from. Existing
+  memories are not rewritten. If you edited the preset `procedure` or
+  `decision` type, your copy keeps the old examples until you restore that
+  type to its default in settings.
+
 ## [0.2.0-beta.4] - 2026-11-18
 
 ### Fixed
