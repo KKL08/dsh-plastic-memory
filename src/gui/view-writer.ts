@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { MemoryStore, MemoryLogger } from '../store.ts'
 import type { KvTable } from '../kv-table.ts'
@@ -169,7 +169,8 @@ export async function collectCheckupView(deps: CheckupSourceDeps): Promise<Check
  * 视图写入器：把视图写成 `<memoryRoot>/.state/gui/*.json`（tmp + rename 原子替换）。
  * 节流：同一 tick 内的多次请求合并成一次收集、每个受影响的文件只写一遍；写入串行，进行中再来的请求排到下一轮。
  * 同一个文件两次替换至少隔开 VIEW_REPLACE_GAP_MS：宿主的文件观察对同一文件约 50ms 内的变更只通知第一次，
- * 紧挨着的第二次替换会被漏掉，浏览器半侧就停在上一版，直到下一次变化或刷新。
+ * 紧挨着的第二次替换会被漏掉，浏览器半侧就停在上一版，直到下一次变化或刷新。上次替换取本进程记的和盘上的修改时刻中晚的，
+ * 别的进程刚替换过（几个进程同时删记忆、各自重写视图）也隔开。
  * 几个进程（桌面版与 `dsh web`）同开时：全局视图和体检视图替换前比生成时刻，早收集的不盖晚收集的（见 writeText）；
  * 归属对照每次等完替换间隔、写前重读磁盘再合并。读盘、比较到 rename 整段在记忆根写锁内，别的进程的替换插不进中间。
  * 视图是派生缓存，写失败只记日志，不影响触发它的操作。
@@ -370,22 +371,42 @@ export class ViewWriter {
   private async replace(fileName: string, render: () => Promise<string | undefined>, generatedAt?: number): Promise<void> {
     await mkdir(this.dir, { recursive: true })
     const path = join(this.dir, fileName)
-    const last = this.replacedAt.get(fileName)
-    // 封顶：时钟往回调过时 last 在此刻之后，不封顶就要多等回调的那段
-    const wait = last === undefined ? 0 : Math.min(last + VIEW_REPLACE_GAP_MS - this.now(), VIEW_REPLACE_GAP_MS)
-    if (wait > 0) await this.sleep(wait)
-    await this.lock.run(async () => {
-      const text = await render()
-      if (text === undefined) return
-      const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
-      await writeFile(tmp, text, 'utf8')
-      if (generatedAt !== undefined && await this.generatedAtOnDisk(path) > generatedAt) {
-        await rm(tmp, { force: true })
-        return
-      }
-      await rename(tmp, path)
-      this.replacedAt.set(fileName, this.now())
-    })
+    for (;;) {
+      // 上次替换：本进程记的和盘上的修改时刻取晚的，别的进程刚替换过也要隔开
+      const onDisk = await this.replacedOnDiskAt(path)
+      const last = Math.max(this.replacedAt.get(fileName) ?? -Infinity, onDisk ?? -Infinity)
+      // 封顶：时钟往回调过时 last 在此刻之后，不封顶就要多等回调的那段
+      const wait = last === -Infinity ? 0 : Math.min(last + VIEW_REPLACE_GAP_MS - this.now(), VIEW_REPLACE_GAP_MS)
+      if (wait > 0) await this.sleep(wait)
+      const isReplaced = await this.lock.run(async () => {
+        // 盘上已经是更晚生成的：这份不用写了，也不用再等
+        if (generatedAt !== undefined && await this.generatedAtOnDisk(path) > generatedAt) return true
+        // 等的时候别的进程又替换了：放开锁再等一轮（等待不占锁）
+        const latest = await this.replacedOnDiskAt(path)
+        if (latest !== undefined && latest !== onDisk && latest + VIEW_REPLACE_GAP_MS > this.now()) return false
+        const text = await render()
+        if (text === undefined) return true
+        const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
+        await writeFile(tmp, text, 'utf8')
+        if (generatedAt !== undefined && await this.generatedAtOnDisk(path) > generatedAt) {
+          await rm(tmp, { force: true })
+          return true
+        }
+        await rename(tmp, path)
+        this.replacedAt.set(fileName, this.now())
+        return true
+      })
+      if (isReplaced) return
+    }
+  }
+
+  /**
+   * 盘上那份视图最近一次被替换的时刻（修改时刻，取整到毫秒）：没有文件、读不到，或晚于此刻（时钟往回调过）的为 undefined。
+   * 取整是因为文件系统记到亚毫秒、此刻只到整毫秒，同一毫秒里刚替换的不取整就像在此刻之后。
+   */
+  private async replacedOnDiskAt(path: string): Promise<number | undefined> {
+    const at = await stat(path).then(s => Math.floor(s.mtimeMs), () => undefined)
+    return at !== undefined && at <= this.now() ? at : undefined
   }
 
   /** 盘上那份视图的生成时刻：读不到、没有这个字段、版本号不是当前的，或晚于此刻（时钟往回调过）的按 0 算。 */
