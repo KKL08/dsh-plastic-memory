@@ -886,7 +886,7 @@ describe('记忆查看：单条修改', () => {
     expect(within(li).getByRole('button', { name: '保存' })).toHaveAttribute('aria-disabled', 'true')
   })
 
-  it('故事 2d：手动改保存发 edit-memory（带层和打开时的版本），行内换成新内容、标「刚改」，结果行「已保存修改 · 撤销」', async () => {
+  it('故事 2d：手动改保存发 edit-memory（带层和打开时的版本），行内换成新内容、标「已改写」，结果行「已保存修改 · 撤销」', async () => {
     localStorage.setItem(EDIT_MODE_STORAGE_KEY, 'manual')
     const { commands } = setup()
     open()
@@ -895,7 +895,7 @@ describe('记忆查看：单条修改', () => {
     expect(commands()).toEqual([{ cmd: 'edit-memory', memoryId: 'a1', layer: app, base, content: '每周四发版。', name: '发版流程', summary: '发版的节奏', tags: ['发版'] }])
     const li = row('每周四发版。')
     expect(within(li).queryByRole('tablist')).toBeNull()
-    expect(within(li).getByText('刚改')).toHaveClass('pm-chip--neutral')
+    expect(within(li).getByText('已改写')).toHaveClass('pm-chip--neutral')
     expect(within(li).getByText('已保存修改')).toBeInTheDocument()
     expect(within(li).getByRole('button', { name: '撤销' })).toBeInTheDocument()
   })
@@ -987,7 +987,7 @@ describe('记忆查看：单条修改', () => {
     })
   })
 
-  it('故事 9：应用发 edit-memory；行内换成新内容、高亮一次、标「刚改」（中性胶囊），结果行「已按你的要求改写这条 · 撤销」；撤销发 undo，结果行和「刚改」都收起', async () => {
+  it('故事 9：应用发 edit-memory；行内换成新内容、高亮一次、标「已改写」（中性胶囊），结果行「已按你的要求改写这条 · 撤销」；撤销发 undo，结果行和「已改写」都收起', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     const { gateway, commands } = setup()
     open()
@@ -998,22 +998,22 @@ describe('记忆查看：单条修改', () => {
     // 视图还没推来：先按应用的稿子画
     const li = row('每周四发版，先跑测试再打包。')
     expect(li).toHaveClass('pm-flash')
-    expect(within(li).getByText('刚改')).toHaveClass('pm-chip--neutral')
+    expect(within(li).getByText('已改写')).toHaveClass('pm-chip--neutral')
     expect(within(li).getByText('已按你的要求改写这条')).toBeInTheDocument()
     act(() => { vi.advanceTimersByTime(FLASH_MS) })
     expect(row('每周四发版，先跑测试再打包。')).not.toHaveClass('pm-flash')
     // 视图推来新版本：照视图画
     act(() => { gateway.setView('library', view([{ ...target, content: '每周四发版，先跑测试再打包。', updatedAt: 333, digest: 'sha1:a1b' }, other])) })
-    expect(within(row('每周四发版，先跑测试再打包。')).getByText('刚改')).toBeInTheDocument()
+    expect(within(row('每周四发版，先跑测试再打包。')).getByText('已改写')).toBeInTheDocument()
 
     await act(async () => { fireEvent.click(within(row('每周四发版，先跑测试再打包。')).getByRole('button', { name: '撤销' })) })
     expect(commands().at(-1)).toEqual({ cmd: 'undo', decisionId: 'pd_e' })
     act(() => { gateway.setView('library', view()) })
     expect(within(row()).queryByText('已按你的要求改写这条')).toBeNull()
-    expect(within(row()).queryByText('刚改')).toBeNull()
+    expect(within(row()).queryByText('已改写')).toBeNull()
   })
 
-  it('故事 9：结果行在展开别的面板后收起（「刚改」留着）；撤销被拒时写明原因', async () => {
+  it('故事 9：结果行在展开别的面板后收起（「已改写」留着）；撤销被拒时写明原因', async () => {
     const { gateway } = setup({ respond: command => (command.cmd === 'undo' ? { ok: false, cmd: 'undo', code: 'stale' } : respondWith()(command)) })
     open()
     write('改成周四')
@@ -1025,7 +1025,7 @@ describe('记忆查看：单条修改', () => {
     open(row('提交前跑 typecheck'))
     expect(screen.queryByText('已按你的要求改写这条')).toBeNull()
     expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
-    expect(within(row('每周四发版，先跑测试再打包。')).getByText('刚改')).toBeInTheDocument()
+    expect(within(row('每周四发版，先跑测试再打包。')).getByText('已改写')).toBeInTheDocument()
   })
 
   it('故事 10：要求里有高危密钥：不发送，面板里写明原因', async () => {
@@ -1046,7 +1046,7 @@ describe('记忆查看：单条修改', () => {
     expect(screen.queryByRole('tablist')).toBeNull()
     expect(within(row()).getByText('这条刚被改过，已换成最新内容。要改请重新打开。')).toBeInTheDocument()
     expect(within(row()).queryByRole('button', { name: '撤销' })).toBeNull()
-    expect(within(row()).queryByText('刚改')).toBeNull()
+    expect(within(row()).queryByText('已改写')).toBeNull()
     expect(screen.queryByRole('alert')).toBeNull()
     act(() => { gateway.setView('library', view([{ ...target, content: '每周五发版。', updatedAt: 444, digest: 'sha1:a1c' }, other])) })
     expect(within(row('每周五发版。')).getByText('这条刚被改过，已换成最新内容。要改请重新打开。')).toBeInTheDocument()
@@ -1397,7 +1397,7 @@ describe('记忆查看：整理所选的应用与撤销', () => {
     })
   })
 
-  it('故事 26：应用成功回到列表、退出多选；顶部结果条「已整理 N 条……」带副行和「撤销全部」，焦点接到结果条；改写的行换成新内容、高亮一次、标「刚改」，删掉的先不画', async () => {
+  it('故事 26：应用成功回到列表、退出多选；顶部结果条「已整理 N 条……」带副行和「撤销全部」，焦点接到结果条；改写的行换成新内容、高亮一次、标「已改写」，删掉的先不画', async () => {
     setup()
     await toApply()
     await applyAll()
@@ -1409,10 +1409,10 @@ describe('记忆查看：整理所选的应用与撤销', () => {
     expect(within(bar).getByRole('button', { name: '撤销全部' })).toBeInTheDocument()
     expect(bar).toHaveFocus()
     const rewritten = row(DRAFT.content)
-    expect(within(rewritten).getByText('刚改')).toHaveClass('pm-chip--neutral')
+    expect(within(rewritten).getByText('已改写')).toHaveClass('pm-chip--neutral')
     expect(rewritten).toHaveClass('pm-flash')
     expect(row(b4.content)).not.toHaveClass('pm-flash')
-    expect(within(row(b4.content)).queryByText('刚改')).toBeNull()
+    expect(within(row(b4.content)).queryByText('已改写')).toBeNull()
     expect(hasRow(p1.content)).toBe(false)
   })
 
@@ -1434,7 +1434,7 @@ describe('记忆查看：整理所选的应用与撤销', () => {
     expect(hasRow(DRAFT.content)).toBe(false)
     fireEvent.click(screen.getAllByRole('button', { expanded: false })[0]!)
     expect(row(DRAFT.content)).not.toHaveClass('pm-flash')
-    expect(within(row(DRAFT.content)).getByText('刚改')).toBeInTheDocument()
+    expect(within(row(DRAFT.content)).getByText('已改写')).toBeInTheDocument()
   })
 
   it('故事 26：应用在途时「返回列表」「全部放弃」不可用，点了不离开工作区；结果回来后照常回到列表', async () => {
@@ -1475,7 +1475,7 @@ describe('记忆查看：整理所选的应用与撤销', () => {
     expect(resultBar()).toBeNull()
   })
 
-  it('故事 27：「撤销全部」发 undo 撤整批，成功后结果条原位换成「已撤销这次整理」（不带按钮，焦点留在结果条），「刚改」收起', async () => {
+  it('故事 27：「撤销全部」发 undo 撤整批，成功后结果条原位换成「已撤销这次整理」（不带按钮，焦点留在结果条），「已改写」收起', async () => {
     const { commands } = setup()
     await toApply()
     await applyAll()
@@ -1485,7 +1485,7 @@ describe('记忆查看：整理所选的应用与撤销', () => {
     expect(within(bar).getByRole('status')).toHaveTextContent(/^已撤销这次整理，2 条恢复原样$/)
     expect(within(bar).queryByRole('button')).toBeNull()
     expect(bar).toHaveFocus()
-    expect(screen.queryByText('刚改')).toBeNull()
+    expect(screen.queryByText('已改写')).toBeNull()
     // 删掉的那条回到列表，改写的那条按视图画
     expect(hasRow(p1.content)).toBe(true)
     expect(hasRow(DRAFT.content)).toBe(false)
@@ -1598,8 +1598,8 @@ describe('记忆查看：整理所选的应用与撤销', () => {
         '「格式化用 prettier」退回前又被别处改过，停在那边的版本，不在撤销范围',
       ])
       expect(bar).toHaveFocus()
-      // 留下的改写标「刚改」；没退回、停在别处版本的删除项照视图画，不藏
-      expect(within(row(DRAFT.content)).getByText('刚改')).toBeInTheDocument()
+      // 留下的改写标「已改写」；没退回、停在别处版本的删除项照视图画，不藏
+      expect(within(row(DRAFT.content)).getByText('已改写')).toBeInTheDocument()
       expect(hasRow(p1.content)).toBe(true)
       await act(async () => { fireEvent.click(within(bar).getByRole('button', { name: '撤销全部' })) })
       expect(commands().at(-1)).toEqual({ cmd: 'undo', decisionId: 'pd_t' })
@@ -1613,7 +1613,7 @@ describe('记忆查看：整理所选的应用与撤销', () => {
       const bar = resultBar()!
       expect(within(bar).getByRole('status')).toHaveTextContent('只应用了其中 1 条，其余没有改动「提交前检查」退回前又被别处改过，停在那边的版本，不在撤销范围')
       expect(within(bar).queryByRole('button', { name: '撤销全部' })).toBeNull()
-      expect(screen.queryByText('刚改')).toBeNull()
+      expect(screen.queryByText('已改写')).toBeNull()
     })
   })
 
