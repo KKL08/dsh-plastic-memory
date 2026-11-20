@@ -1,15 +1,15 @@
 /**
- * 「记忆查看」：选中范围里的记忆卡列表。搜索框 → 项目和全局下一行存储说明（每条一个文件 · 目录 · 打开目录）→ 目录问题（来自视图，
+ * 「记忆查看」：选中范围里的记忆卡列表。搜索框 → 项目和全局下一行存储说明（每条一个文件 · 打开目录，不显示目录路径，免得截图露出本机目录）→ 目录问题（来自视图，
  * 不在这里重算）→ 列表。单个范围按类型分组，每组先露 3 条；「全部」跨范围按更新时间分四段，卡片上的范围名点了下钻到那个范围。
  * 行尾「修改」·「删除」（先原位确认「删除这条？ 删除 · 取消」，再软删）·「打开文件」（纯图标）；
  * 删掉的那行原位换成结果行，可撤销（发 restore）；含密钥的再确认一次彻底删除，不可恢复。别处正在处理这一条时列表上方写明没有生效。
  * 「修改」在这一行下展开两段切换的面板（同待处理卡），同一时刻只展开一个，换行前有没保存的输入先原位问；
- * 应用或保存发 edit-memory，之后行内换成新内容、高亮一次、标「刚改」，结果行可撤销（发 undo）；结果行在展开别的面板或离开后收起。
+ * 应用或保存发 edit-memory，之后行内换成新内容、高亮一次、标「已改写」，结果行可撤销（发 undo）；结果行在展开别的面板或离开后收起。
  * 含密钥或没有版本的记忆不给「修改」（同待处理卡）。
  * 项目和全局范围的搜索框右侧有「选择」：进多选后每行左侧出勾选框、行尾按钮收起，勾选的行用选中行底色；列表底部浮起操作条
  * （已选条数 · 全选当前结果 · 取消 · 整理所选…）。「整理所选…」把列表换成整理工作区（batch-edit.tsx）。「全部」范围不能多选。
  * 工作区「应用全部」发 apply-edits；成功回到列表、退出多选，顶部结果条「已整理 N 条……」带「撤销全部」（发 undo，整批一起撤），
- * 改写过的行高亮一次、标「刚改」。结果条在离开记忆查看或开始下一次整理时收起。
+ * 改写过的行高亮一次、标「已改写」。结果条在离开记忆查看或开始下一次整理时收起。
  * 应用中途失败、已写的没能全部退回时同样回到列表，结果条换成「只应用了其中 k 条……」，副行写明哪几条没退回、为什么，
  * 「撤销全部」只撤仍是这次写下的；应用回 stale、not-found 时留在工作区，交给它等视图换成最新内容。
  */
@@ -190,7 +190,7 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
   /** 有没保存的输入时点了别的行的「修改」：在那一行原位问。 */
   const [asking, setAsking] = useState<string>()
   const [edited, setEdited] = useState<EditedRow>()
-  /** 这次打开期间改过的，标「刚改」。 */
+  /** 这次打开期间改过的，标「已改写」。 */
   const [fresh, setFresh] = useState<ReadonlySet<string>>(new Set())
   /** 刚改完、正在高亮的那几行（整理所选一次改写多条）。 */
   const [editFlash, setEditFlash] = useState<ReadonlySet<string>>(new Set())
@@ -262,7 +262,7 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
   const typeLabel = useTypeLabel(session)
   const folds = useFold(fold, `library|${checkupKey(scope)}`, isSearching)
   /**
-   * 应用全部：发 apply-edits；成功（含只应用了一部分）回到列表、退出多选，挂结果条，留下的改写标「刚改」、高亮一次。
+   * 应用全部：发 apply-edits；成功（含只应用了一部分）回到列表、退出多选，挂结果条，留下的改写标「已改写」、高亮一次。
    * stale、not-found：把对不上的那几条交回工作区（onBehind），由它回到写要求、等视图换成最新内容。
    */
   const applyTidy = (picked: readonly BatchItem[], application: BatchApplication, onBehind: (memoryIds: readonly string[]) => void) => {
@@ -524,6 +524,7 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
                 hideType={!isAll}
                 hideScope={!isAll}
                 projectName={memory.workspacePath === undefined ? undefined : baseName(memory.workspacePath)}
+                collapsible={!isSearching}
               />
             </div>
             <div className="pm-lib-result">
@@ -565,8 +566,8 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
         {selecting ? checkbox(memory, isPicked) : null}
         <div className="pm-row-body">
           {isAll
-            ? <MemoryCard memory={shown} now={now} typeLabel={typeLabel(memory.type)} scopeSlot={scopeLink(memory)} badge={badge} />
-            : <MemoryCard memory={shown} now={now} hideType hideScope badge={badge} />}
+            ? <MemoryCard memory={shown} now={now} typeLabel={typeLabel(memory.type)} scopeSlot={scopeLink(memory)} badge={badge} collapsible={!isSearching} />
+            : <MemoryCard memory={shown} now={now} hideType hideScope badge={badge} collapsible={!isSearching} />}
           {isEditing ? editPanel(editing) : null}
           {result !== undefined ? editedRow(result) : null}
           {actions.feedback(memory.id)}
@@ -654,7 +655,6 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
           <p className="pm-lib-storage">
             <span>{t('library.storage.oneFile')}</span>
             <i className="pm-sep" aria-hidden="true">·</i>
-            <span className="pm-lib-path" title={dir}>{dir}</span>
             <button type="button" className="pm-link" onClick={() => { void actions.open(dir) }}>{t('library.storage.openDir')}</button>
           </p>
         )
@@ -712,8 +712,7 @@ export const libraryTabCss = `
 .pm-lib { display: flex; flex-direction: column; gap: 12px; }
 .pm-lib-storage { display: flex; align-items: center; min-width: 0; margin: 0; padding: 0 16px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-lib-storage > span:first-child { flex-shrink: 0; white-space: nowrap; }
-.pm-lib-storage .pm-link { margin-left: 8px; flex-shrink: 0; font-size: 12px; }
-.pm-lib-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 12px; }
+.pm-lib-storage .pm-link { flex-shrink: 0; font-size: 12px; }
 .pm-lib-issues { margin: 0; padding: 0 16px; list-style: none; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); overflow-wrap: anywhere; }
 .pm-lib > .pm-notice { padding: 0 16px; }
 .pm-lib-quiet { margin: 0; padding: 0 16px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }

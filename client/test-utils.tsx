@@ -13,6 +13,18 @@ export function renderInShell(ui: ReactElement, gateway: FakeGateway = createFak
   return { gateway, ...render(<PanelShell gateway={gateway} t={createTranslator(zh)}>{ui}</PanelShell>) }
 }
 
+/**
+ * jsdom 不排版：让记忆卡原文（.pm-mc-text）报告内容高度超出可见高度，好测长记忆折叠。用完 vi.restoreAllMocks()。
+ */
+export function mockMemoryTextOverflow(isLong = true) {
+  vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {
+    return this.classList.contains('pm-mc-text') && isLong ? 500 : 0
+  })
+  vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
+    return this.classList.contains('pm-mc-text') ? 100 : 0
+  })
+}
+
 /** 2026-10-17 10:00（本机时区）。 */
 export const NOW = new Date(2026, 9, 17, 10, 0).getTime()
 

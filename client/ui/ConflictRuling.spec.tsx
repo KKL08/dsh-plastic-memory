@@ -1,7 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { screen, within } from '@testing-library/react'
 import { ConflictRuling, VerticalConflictRuling } from './ConflictRuling.tsx'
-import { memory, NOW, renderInShell } from '../test-utils.tsx'
+import { memory, mockMemoryTextOverflow, NOW, renderInShell } from '../test-utils.tsx'
 
 const left = memory({ id: 'a', content: '测试用真实 Postgres。' })
 const right = memory({ id: 'b', content: '测试里 mock 数据库就行。' })
@@ -30,6 +30,23 @@ describe('ConflictRuling', () => {
     const { container } = renderInShell(<ConflictRuling layout="wide" left={left} right={right} now={NOW} note="决定之前，agent 按 A 来做。" footer={footer} />)
     for (const name of ['记忆 A', '记忆 B']) expect(within(screen.getByRole('region', { name })).queryByRole('button')).toBeNull()
     expect(container.querySelector('.pm-conflict-note')).toHaveTextContent('决定之前，agent 按 A 来做。')
+  })
+
+  describe('很长的记忆', () => {
+    afterEach(() => { vi.restoreAllMocks() })
+
+    it('宽版（记忆页处理视图）：A、B 各自折叠，各有「展开」', () => {
+      mockMemoryTextOverflow()
+      renderInShell(<ConflictRuling layout="wide" left={left} right={right} now={NOW} footer={footer} />)
+      for (const name of ['记忆 A', '记忆 B']) expect(within(screen.getByRole('region', { name })).getByRole('button', { name: '展开' })).toBeInTheDocument()
+    })
+
+    it('窄版（右侧栏）：照旧限 3 行、不出展开按钮', () => {
+      mockMemoryTextOverflow()
+      const { container } = renderInShell(<ConflictRuling layout="narrow" left={left} right={right} now={NOW} footer={footer} />)
+      expect(screen.queryByRole('button')).toBeNull()
+      expect(container.querySelector('.pm-mc-text--clamped')).toBeNull()
+    })
   })
 
   it('一方找不到：那一方写说明', () => {

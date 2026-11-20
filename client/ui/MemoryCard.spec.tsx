@@ -1,11 +1,11 @@
-import { describe, expect, it } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { MemoryCard } from './MemoryCard.tsx'
 import { PanelShell } from './PanelShell.tsx'
 import { createFakeGateway } from '../gateway.fake.ts'
 import { createTranslator } from '../i18n.tsx'
 import { en } from '../locales.ts'
-import { memory, NOW, renderInShell } from '../test-utils.tsx'
+import { memory, mockMemoryTextOverflow, NOW, renderInShell } from '../test-utils.tsx'
 import type { MemoryCard as MemoryCardData } from '../../src/gui/contract.ts'
 
 describe('MemoryCard', () => {
@@ -80,5 +80,98 @@ describe('MemoryCard', () => {
     const { container } = renderInShell(<MemoryCard memory={memory({ validTo: NOW - 1 })} now={NOW} />)
     expect(container.querySelector('.pm-mc')).toHaveClass('pm-mc--expired')
     expect(screen.getByText('不再带入对话')).toBeInTheDocument()
+  })
+
+  describe('长记忆折叠（collapsible）', () => {
+    afterEach(() => { vi.restoreAllMocks() })
+    it('超出行数时限行，给「展开」；展开后整段显示、按钮换成「收起」，再点收回', () => {
+      mockMemoryTextOverflow()
+      const { container } = renderInShell(<MemoryCard memory={memory()} now={NOW} collapsible />)
+      const text = container.querySelector('.pm-mc-text')!
+      expect(text).toHaveClass('pm-mc-text--clamped')
+      const toggle = screen.getByRole('button', { name: '展开' })
+      expect(toggle).toHaveAttribute('aria-expanded', 'false')
+      expect(toggle).toHaveAttribute('aria-controls', text.id)
+      fireEvent.click(toggle)
+      expect(text).not.toHaveClass('pm-mc-text--clamped')
+      expect(screen.getByRole('button', { name: '收起' })).toHaveAttribute('aria-expanded', 'true')
+      fireEvent.click(screen.getByRole('button', { name: '收起' }))
+      expect(text).toHaveClass('pm-mc-text--clamped')
+      expect(screen.getByRole('button', { name: '展开' })).toBeInTheDocument()
+    })
+
+    it('没超出行数：不出按钮', () => {
+      mockMemoryTextOverflow(false)
+      renderInShell(<MemoryCard memory={memory()} now={NOW} collapsible />)
+      expect(screen.queryByRole('button')).toBeNull()
+    })
+
+    it('不传 collapsible：不限行、不出按钮（右侧栏、对话卡照旧）', () => {
+      mockMemoryTextOverflow()
+      const { container } = renderInShell(<MemoryCard memory={memory()} now={NOW} />)
+      expect(container.querySelector('.pm-mc-text')).not.toHaveClass('pm-mc-text--clamped')
+      expect(screen.queryByRole('button')).toBeNull()
+    })
+
+    it('按钮对齐宿主的折叠按钮：「展开」带向下箭头、「收起」带向上箭头', () => {
+      mockMemoryTextOverflow()
+      const { container } = renderInShell(<MemoryCard memory={memory()} now={NOW} collapsible />)
+      const toggle = screen.getByRole('button', { name: '展开' })
+      expect(toggle.querySelector('svg')).not.toBeNull()
+      const icon = toggle.innerHTML
+      fireEvent.click(toggle)
+      expect(screen.getByRole('button', { name: '收起' }).innerHTML).not.toBe(icon)
+      expect(container.querySelector('.pm-mc-toggle')).toBe(screen.getByRole('button', { name: '收起' }))
+    })
+
+    it('展开着的时候原文变了（改写、整理、重新遮住密钥）：回到折叠，重新量，变短了就不再给按钮', () => {
+      mockMemoryTextOverflow()
+      const { container, rerender } = renderInShell(<MemoryCard memory={memory()} now={NOW} collapsible />)
+      fireEvent.click(screen.getByRole('button', { name: '展开' }))
+      vi.restoreAllMocks()
+      mockMemoryTextOverflow(false)
+      rerender(<MemoryCard memory={memory({ content: '短了。' })} now={NOW} collapsible />)
+      expect(container.querySelector('.pm-mc-text')).toHaveClass('pm-mc-text--clamped')
+      expect(screen.queryByRole('button')).toBeNull()
+    })
+
+    it('折叠着的长记忆：标签在原文末尾会被截掉，在按钮旁边再显示一份（读屏只读原文里那份）；展开后只在原文末尾', () => {
+      mockMemoryTextOverflow()
+      const { container } = renderInShell(<MemoryCard memory={memory()} now={NOW} collapsible badge={<span>已改写</span>} />)
+      const more = container.querySelector('.pm-mc-more')!
+      expect(more).toHaveTextContent('已改写')
+      expect(more.querySelector('.pm-mc-badge')).toHaveAttribute('aria-hidden', 'true')
+      expect(container.querySelector('.pm-mc-text .pm-mc-badge')).toHaveTextContent('已改写')
+      fireEvent.click(screen.getByRole('button', { name: '展开' }))
+      expect(container.querySelector('.pm-mc-more')).not.toHaveTextContent('已改写')
+      expect(container.querySelector('.pm-mc-text .pm-mc-badge')).toHaveTextContent('已改写')
+    })
+
+    it('短记忆：标签只在原文末尾', () => {
+      mockMemoryTextOverflow(false)
+      const { container } = renderInShell(<MemoryCard memory={memory()} now={NOW} collapsible badge={<span>已改写</span>} />)
+      expect(container.querySelectorAll('.pm-mc-badge')).toHaveLength(1)
+      expect(container.querySelector('.pm-mc-text .pm-mc-badge')).toHaveTextContent('已改写')
+    })
+
+    it('加上标签才挤出第 7 行：重新量，给按钮', () => {
+      vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {
+        return this.classList.contains('pm-mc-text') && this.querySelector('.pm-mc-badge') !== null ? 500 : 0
+      })
+      vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
+        return this.classList.contains('pm-mc-text') ? 100 : 0
+      })
+      const { rerender } = renderInShell(<MemoryCard memory={memory()} now={NOW} collapsible />)
+      expect(screen.queryByRole('button')).toBeNull()
+      rerender(<MemoryCard memory={memory()} now={NOW} collapsible badge={<span>已改写</span>} />)
+      expect(screen.getByRole('button', { name: '展开' })).toBeInTheDocument()
+    })
+
+    it('英文文案', () => {
+      mockMemoryTextOverflow()
+      render(<PanelShell gateway={createFakeGateway()} t={createTranslator(en)}><MemoryCard memory={memory()} now={NOW} collapsible /></PanelShell>)
+      fireEvent.click(screen.getByRole('button', { name: 'Expand' }))
+      expect(screen.getByRole('button', { name: 'Collapse' })).toBeInTheDocument()
+    })
   })
 })

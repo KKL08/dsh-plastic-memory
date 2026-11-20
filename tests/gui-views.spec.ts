@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
@@ -20,7 +20,7 @@ import { executeHealth } from '../src/tools/health.ts'
 import { RETENTION_MS } from '../src/retention.ts'
 import {
   GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, PENDING_ITEM_KINDS, checkupViewSchema, deletedViewSchema, healthViewSchema,
-  libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema, workspaceMapViewSchema, type CheckupView, type GlobalViewName, type PendingItem,
+  checkupKey, libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema, workspaceMapViewSchema, type CheckupView, type GlobalViewName, type PendingItem,
 } from '../src/gui/contract.ts'
 import { GLOBAL_VIEW_NAMES, buildCheckupView, buildSessionView } from '../src/gui/views.ts'
 import { VIEW_REPLACE_GAP_MS, ViewWriter, collectGlobalViews } from '../src/gui/view-writer.ts'
@@ -780,6 +780,25 @@ describe('健康视图', () => {
   })
 })
 
+describe('体检视图：没有活跃记忆的项目', () => {
+  it('照样列出（单独设置、上次体检照旧），但标成不可体检：不到期、没有下次时间，旧的失败和「模型用不了」不再写', () => {
+    const empty = { kind: 'workspace' as const, workspacePath: WS }
+    const cause = { kind: 'model-error' as const }
+    const view = buildCheckupView({
+      now: T0, governanceEnabled: true, settings: new Map([[checkupKey(empty), 1]]), scopes: [{ kind: 'global' }, empty],
+      isCheckable: scope => scope.kind === 'global',
+      lastCheckupAt: scope => scope.kind === 'global' ? null : T0 - 3 * 86_400_000, isInProgress: () => false,
+      record: scope => scope.kind === 'global' ? undefined : { id: checkupKey(empty), failure: { count: 1, failedAt: T0 - 1000, cause }, modelUnavailable: cause },
+      allRecord: undefined,
+    })
+    expect(checkupViewSchema.parse(view)).toEqual(view)
+    expect(view.scopes.map(s => [s.scope.kind, s.isCheckable])).toEqual([['global', true], ['workspace', false]])
+    expect(view.scopes[1]).toMatchObject({
+      frequency: 1, isOwn: true, lastCheckupAt: T0 - 3 * 86_400_000, isDue: false, nextCheckupAt: null, failure: null, modelUnavailable: null,
+    })
+  })
+})
+
 describe('会话视图', () => {
   it('带 frozenAt、来历与三段用量，只存时间戳', () => {
     const view = buildSessionView({
@@ -856,6 +875,80 @@ describe('视图写入', () => {
     t += VIEW_REPLACE_GAP_MS
     await writer.request(['library'])
     expect(sleeps).toEqual([110])
+  })
+
+  it('别的进程刚替换过同一个视图文件（按盘上的修改时刻）：同样等够 VIEW_REPLACE_GAP_MS 再替换；等的时候它又替换了，再等一轮', async () => {
+    const h = harness()
+    await h.store.create(w({ id: 'mem_a', name: 'A' }))
+    const path = join(root, GUI_VIEW_DIR, GUI_VIEW_FILES.library)
+    await mkdir(join(root, GUI_VIEW_DIR), { recursive: true })
+    await writeFile(path, '{}')
+    // 进程边界：另一个进程的替换只留下盘上的修改时刻（秒为单位，取整秒免得浮点误差）
+    const replacedByOther = (at: number) => utimes(path, at / 1000, at / 1000)
+    let t = 5_040
+    await replacedByOther(5_000)
+    const sleeps: number[] = []
+    let wake!: () => void
+    const sleep = (ms: number) => { sleeps.push(ms); return new Promise<void>(resolve => { wake = resolve }) }
+    const writer = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews(h.sourceDeps), now: () => t, sleep, lock: viewLock() })
+
+    // 这个写入器自己没写过 library，也要等到离那次替换满 150ms
+    const done = writer.request(['library'])
+    await vi.waitFor(() => { expect(sleeps).toEqual([110]) })
+    // 等的时候那个进程又替换了一次：拿到锁后看出来，不替换，再等一轮
+    t = 6_000
+    await replacedByOther(6_000)
+    wake()
+    await vi.waitFor(() => { expect(sleeps).toEqual([110, 150]) })
+    expect(await readFile(path, 'utf8')).toBe('{}')
+    t = 6_150
+    wake()
+    await done
+    expect((await readView('library')).layers[1].items.map((i: { id: string }) => i.id)).toEqual(['mem_a'])
+  })
+
+  it('盘上修改时刻带亚毫秒（同一毫秒里刚替换）：不当成时钟往回调，照样等够 VIEW_REPLACE_GAP_MS', async () => {
+    const h = harness()
+    await h.store.create(w({ id: 'mem_a', name: 'A' }))
+    const path = join(root, GUI_VIEW_DIR, GUI_VIEW_FILES.library)
+    await mkdir(join(root, GUI_VIEW_DIR), { recursive: true })
+    await writeFile(path, '{}')
+    // 文件系统记到亚毫秒，Date.now() 只到整毫秒：另一个进程 5000.4ms 替换，这边此刻读出来是 5000
+    await utimes(path, 5.0004, 5.0004)
+    let t = 5_000
+    const sleeps: number[] = []
+    const sleep = async (ms: number) => { sleeps.push(ms); t += ms }
+    const writer = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews(h.sourceDeps), now: () => t, sleep, lock: viewLock() })
+    await writer.request(['library'])
+    expect(sleeps).toEqual([VIEW_REPLACE_GAP_MS])
+    expect((await readView('library')).layers[1].items.map((i: { id: string }) => i.id)).toEqual(['mem_a'])
+  })
+
+  it('等的时候别的进程写了更新的同一视图：拿到锁直接放弃，不再多等一轮', async () => {
+    const h = harness()
+    await h.store.create(w({ id: 'mem_a', name: 'A' }))
+    const path = join(root, GUI_VIEW_DIR, GUI_VIEW_FILES.library)
+    await mkdir(join(root, GUI_VIEW_DIR), { recursive: true })
+    await writeFile(path, '{}')
+    await utimes(path, 5, 5)
+    let t = 5_040
+    const sleeps: number[] = []
+    let wake!: () => void
+    const sleep = (ms: number) => { sleeps.push(ms); return new Promise<void>(resolve => { wake = resolve }) }
+    const writer = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews(h.sourceDeps), now: () => t, sleep, lock: viewLock() })
+
+    // 这边 5040 收集，等到 5150；期间别的进程在 5100 写了一份 5100 生成的
+    h.setClock(5_040)
+    const done = writer.request(['library'])
+    await vi.waitFor(() => { expect(sleeps).toEqual([110]) })
+    const newer = JSON.stringify({ version: GUI_VIEW_VERSION, generatedAt: 5_100 })
+    await writeFile(path, newer)
+    await utimes(path, 5.1, 5.1)
+    t = 5_150
+    wake()
+    await done
+    expect(sleeps).toEqual([110])
+    expect(await readFile(path, 'utf8')).toBe(newer)
   })
 
   it('全量重写写出四个全局视图，内容合契约', async () => {
@@ -968,7 +1061,7 @@ describe('视图写入', () => {
   const checkupOnly = (view: () => CheckupView, opts: { now?: () => number; sleep?: (ms: number) => Promise<void> } = {}) =>
     new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') }, collectCheckups: async () => view(), ...noWait, ...opts })
   const checkupAt = (now: number, governanceEnabled = true): CheckupView => buildCheckupView({
-    now, governanceEnabled, settings: new Map(), scopes: [{ kind: 'global' }],
+    now, governanceEnabled, settings: new Map(), scopes: [{ kind: 'global' }], isCheckable: () => true,
     lastCheckupAt: () => null, isInProgress: () => false, record: () => undefined, allRecord: undefined,
   })
   const readCheckup = async () => checkupViewSchema.parse(JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_CHECKUP_VIEW_FILE), 'utf8')))
@@ -1151,8 +1244,8 @@ describe('视图写入', () => {
     expect(await readMap()).toEqual({ '/w/old': '/w/old', '/w/new': '/w/new' })
   })
 
-  it('PA-16 视图版本为 15，健康视图不含健康页拆掉后的残留字段', async () => {
-    expect(GUI_VIEW_VERSION).toBe(15)
+  it('PA-16 视图版本为 16，健康视图不含健康页拆掉后的残留字段', async () => {
+    expect(GUI_VIEW_VERSION).toBe(16)
     const h = harness()
     await h.store.create(w({ id: 'mem_old', name: '过期', validTo: EXPIRED_AT }))
     await h.decisions.syncOverflow(WS, { mode: 'relax', tier: 1 }, T0, '超限')

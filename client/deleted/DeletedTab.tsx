@@ -103,6 +103,7 @@ export function DeletedTab({ nav, scope, session, fold, now = Date.now() }: {
             typeLabel={typeLabel(memory.type)}
             hideScope={scope.kind !== 'all'}
             projectName={memory.workspacePath === undefined ? undefined : baseName(memory.workspacePath)}
+            collapsible={!isSearching}
           />
           <p className="pm-del-meta">
             {meta.map((text, i) => (

@@ -369,7 +369,7 @@ function deductionsOf(health: ReturnType<typeof scoreScope>['health']): HealthVi
 
 /**
  * 体检视图：每个范围的有效频率（跟随还是单独设置）、上次体检、下次自动体检、是否到期、是否在体检、自动体检的连续失败和「模型用不了」，
- * 外加体检开关。scopes 是全局加体检清单（与健康视图同一批作用域、同一顺序）；lastCheckupAt 给出每个范围的上次体检，
+ * 外加体检开关。scopes 是全局加目录里的全部项目（含没有活跃记忆的，isCheckable 分开能不能体检）；lastCheckupAt 给出每个范围的上次体检，
  * isInProgress 给出它此刻有没有体检认领着，record 给出它在体检记录表里的那条（没有为 undefined）；allRecord 是键 all 的那条。
  */
 export function buildCheckupView(input: {
@@ -377,6 +377,7 @@ export function buildCheckupView(input: {
   governanceEnabled: boolean
   settings: ReadonlyMap<string, AutoCheckupFrequency>
   scopes: readonly Scope[]
+  isCheckable: (scope: Scope) => boolean
   lastCheckupAt: (scope: Scope) => number | null
   isInProgress: (scope: Scope) => boolean
   record: (scope: Scope) => CheckupRecord | undefined
@@ -391,16 +392,21 @@ export function buildCheckupView(input: {
     scopes: input.scopes.map(scope => {
       const { frequency, isOwn } = resolveAutoCheckup(input.settings, scope)
       const lastCheckupAt = input.lastCheckupAt(scope)
-      const { failure, modelUnavailable, lastResult } = input.record(scope) ?? {}
+      const isCheckable = input.isCheckable(scope)
+      const record = input.record(scope)
+      // 不可体检的（项目记忆删光了）不会自动跑：不到期，旧的失败和「模型用不了」不写，免得界面说「稍后再试」
+      const { failure, modelUnavailable } = isCheckable ? record ?? {} : {}
       return {
-        scope, frequency, isOwn, lastCheckupAt, ...autoCheckupDue(frequency, lastCheckupAt, input.now), isInProgress: input.isInProgress(scope),
+        scope, isCheckable, frequency, isOwn, lastCheckupAt,
+        ...isCheckable ? autoCheckupDue(frequency, lastCheckupAt, input.now) : { nextCheckupAt: null, isDue: false },
+        isInProgress: input.isInProgress(scope),
         // 重试时间按此刻的有效频率现算；仅手动时不会自动重试（不到期），按 0 天算，界面也不显示
         failure: failure === undefined ? null : {
           count: failure.count, retryAt: autoCheckupRetryAt(failure.count, failure.failedAt, frequency === 'manual' ? 0 : frequency),
           isRetryLimitReached: isRetryLimitReached(failure.count), cause: failure.cause,
         },
         modelUnavailable: modelUnavailable ?? null,
-        lastResult: lastResult ?? null,
+        lastResult: record?.lastResult ?? null,
       }
     }),
   }

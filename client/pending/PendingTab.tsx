@@ -14,7 +14,7 @@
  * 带 newItem 进来时（状态条结果行的链接）跳到第一条带「新」的条目：滚到视野中间、闪一次、接住焦点；没有就落在顶部。
  */
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactElement, type ReactNode, type RefObject } from 'react'
-import { PENDING_LEVELS, pendingItemKey, pendingItemScopes, type HealthView, type LibraryView, type PendingItem, type PendingLevel } from '../../src/gui/contract.ts'
+import { PENDING_LEVELS, pendingItemKey, pendingItemScopes, type CheckupView, type HealthView, type LibraryView, type PendingItem, type PendingLevel } from '../../src/gui/contract.ts'
 import { isNewItem, markSeen, newItemIndex, readSeen, type Seen } from '../checkup/seen.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, formatDay, formatNumber, useT } from '../i18n.tsx'
@@ -247,7 +247,7 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
             {refusedRow?.node}
             <PendingEmpty
               isOff={health.status === 'ready' && !health.data.governanceEnabled}
-              lastCheckupAt={health.status === 'ready' ? lastScanAt(healthScopes) : undefined}
+              lastCheckupAt={health.status === 'ready' && checkupState.status !== 'loading' ? lastScanAt(healthScopes, checkups?.scopes.filter(s => isInScope([s.scope], scope)) ?? []) : undefined}
               now={now}
             />
             {ignoredBlock}
@@ -441,9 +441,12 @@ function Ignored({ entries, session }: { entries: ReadonlyArray<{ item: IgnoredI
   )
 }
 
-/** 这个范围最近一次体检的时间；一个作用域都没体检过为 null。 */
-function lastScanAt(scopes: HealthView['layers']): number | null {
-  const times = scopes.map(l => l.lastCheckupAt).filter((v): v is number => v !== null)
+/**
+ * 这个范围最近一次体检的时间；一个作用域都没体检过为 null。
+ * 体检视图也算上：记忆删光的项目不在健康视图里，上次体检只在体检视图里有。
+ */
+function lastScanAt(scopes: HealthView['layers'], entries: CheckupView['scopes']): number | null {
+  const times = [...scopes, ...entries].map(l => l.lastCheckupAt).filter((v): v is number => v !== null)
   return times.length === 0 ? null : Math.max(...times)
 }
 

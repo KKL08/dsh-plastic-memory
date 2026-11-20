@@ -96,11 +96,11 @@ function RulingShell({ layout, title, headExtra, note, footer, children }: Rulin
 }
 
 /** 一方的记忆卡；定位不到时一句说明。 */
-function RulingMemory({ memory, now, typeLabel, hideScope, projectName }: RulingSharedProps & { memory: MemoryCardData | null }) {
+function RulingMemory({ layout, memory, now, typeLabel, hideScope, projectName }: RulingSharedProps & { memory: MemoryCardData | null }) {
   const t = useT()
   return memory === null
     ? <p className="pm-conflict-missing">{t('conflict.missing')}</p>
-    : <MemoryCard memory={memory} now={now} typeLabel={typeLabel?.(memory.type)} hideScope={hideScope} projectName={projectName?.(memory)} />
+    : <MemoryCard memory={memory} now={now} typeLabel={typeLabel?.(memory.type)} hideScope={hideScope} projectName={projectName?.(memory)} collapsible={layout === 'wide'} />
 }
 
 export const conflictRulingCss = `

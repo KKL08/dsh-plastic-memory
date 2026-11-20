@@ -16,6 +16,24 @@ All notable changes to this project are documented here. The format follows
   memories are not rewritten. If you edited the preset `procedure` or
   `decision` type, your copy keeps the old examples until you restore that
   type to its default in settings.
+- Long memories on the memory page (Browse, Recently deleted and the cards
+  under To do) are folded to six lines, with an "Expand" button to read the
+  rest. Search results still show the full text, so a match is never hidden.
+- A memory you edit under Browse is now marked "Rewritten" instead of "Just
+  edited", which repeated the "just now" time beside it. When the memory is
+  folded, the mark sits next to "Expand".
+
+### Fixed
+- The memory page no longer shows full local paths in the project header and
+  the storage line, which exposed your user name in screenshots and screen
+  shares.
+- With the desktop app and `dsh web` open on the same memories, a delete or
+  edit in one could leave the other's memory page stale until you refreshed
+  it. Both now pick up each other's changes.
+- After every memory in a project was deleted, its page showed automatic
+  checkups as following the "All" setting and the project as never checked.
+  It now keeps the project's own setting and last checkup time, and no
+  automatic checkup runs for it until it has memories again.
 
 ## [0.2.0-beta.4] - 2026-11-18
 

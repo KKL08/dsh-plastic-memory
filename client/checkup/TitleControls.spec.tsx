@@ -55,7 +55,7 @@ function checkups({ all = 'manual', own = {}, inProgress = [], governanceEnabled
     const key = s.kind === 'global' ? 'global' : s.workspacePath
     const isOwn = own[key] !== undefined
     return {
-      scope: s, frequency: own[key] ?? all, isOwn, lastCheckupAt: NOW - 86_400_000, nextCheckupAt: null, isDue: false,
+      scope: s, isCheckable: true, frequency: own[key] ?? all, isOwn, lastCheckupAt: NOW - 86_400_000, nextCheckupAt: null, isDue: false,
       isInProgress: inProgress.includes(key), failure: null, modelUnavailable: null, lastResult: null,
     }
   }
@@ -119,6 +119,13 @@ describe('立即体检：按范围发出的 scan 目标', () => {
     open({ kind: 'all' }, { views: { deleted: { version: GUI_VIEW_VERSION, items: [{ memory: old, deletedAt: NOW - 1000, purgeAt: NOW + 86_400_000 }] } } })
     expect(head()).toHaveTextContent('4 个项目和全局')
     expect(runButton()).toHaveAttribute('title', '逐个检查全局和 3 个项目的记忆；记忆越多，用的 token 越多')
+  })
+
+  it('健康视图还没到、按体检视图数项目时：记忆删光的项目（不可体检）不算进去', () => {
+    const base = checkups()
+    const old = { ...base.scopes[1]!, scope: { kind: 'workspace' as const, workspacePath: '/w/old' }, isCheckable: false }
+    open({ kind: 'all' }, { views: { health: undefined, checkups: { ...base, scopes: [...base.scopes, old] } } })
+    expect(runButton()).toHaveAttribute('title', '逐个检查全局和 2 个项目的记忆；记忆越多，用的 token 越多')
   })
 })
 
@@ -363,6 +370,18 @@ describe('自动体检按钮与菜单：情况表', () => {
     expect(autoButton()).toHaveAccessibleName('app 的自动体检：每天，单独设置')
     pick('blog')
     expect(autoButton()).toHaveAccessibleName('blog 的自动体检：仅手动，跟随全部')
+  })
+
+  it('项目记忆删光了（只剩最近删除）：标题行照样显示它自己的设置，不写成跟随全部', () => {
+    const OLD: Scope = { kind: 'workspace', workspacePath: '/w/old' }
+    const gone = memory({ id: 'o1', name: 'o1', workspacePath: '/w/old' })
+    const base = checkups()
+    const old = { ...base.scopes[1]!, scope: OLD, isCheckable: false, frequency: 7, isOwn: true }
+    open(OLD, { views: {
+      deleted: { version: GUI_VIEW_VERSION, items: [{ memory: gone, deletedAt: NOW - 1000, purgeAt: NOW + 86_400_000 }] },
+      checkups: { ...base, scopes: [...base.scopes, old] },
+    } })
+    expect(autoButton()).toHaveAccessibleName('old 的自动体检：每 7 天，单独设置')
   })
 
   it('项目里选「跟随全部」：发 follow；视图更新后跟随、列表清空', async () => {

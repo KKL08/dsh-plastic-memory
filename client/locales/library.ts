@@ -31,7 +31,7 @@ export const libraryZh = {
 
   'library.edit.discard': '放弃刚写的内容？',
   'library.edit.discardConfirm': '放弃',
-  'library.edit.justEdited': '刚改',
+  'library.edit.justEdited': '已改写',
   'library.edit.modelDone': '已按你的要求改写这条',
   'library.edit.manualDone': '已保存修改',
   'library.edit.stale': '这条刚被改过，已换成最新内容。要改请重新打开。',
@@ -186,7 +186,7 @@ export const libraryEn: Record<keyof typeof libraryZh, string> = {
 
   'library.edit.discard': 'Discard what you wrote?',
   'library.edit.discardConfirm': 'Discard',
-  'library.edit.justEdited': 'Just edited',
+  'library.edit.justEdited': 'Rewritten',
   'library.edit.modelDone': 'Rewritten as you asked',
   'library.edit.manualDone': 'Changes saved',
   'library.edit.stale': 'This memory was just changed elsewhere, so the latest version is shown. Reopen Edit to change it.',
