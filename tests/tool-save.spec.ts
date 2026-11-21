@@ -132,7 +132,7 @@ describe('executeSave', () => {
       expect(first).toMatchObject({ kind: 'rejected', code: 'global-update-unconfirmed' })
       const text = renderSaveResult(first)
       expect(text).toContain(`「提交规范」（${update.id}）是全局记忆`)
-      expect(text).toMatch(/confirmGlobal: "\d{2}"/)
+      expect(text).toMatch(/confirmGlobal: "\d{4}"/)
       expect(await contentOf(deps, update.id)).toBe('提交规范：提交信息用英文')
       expect(await executeSave({ ...update, confirmGlobal: confirmCodeOf(first) }, fakeExec(), deps)).toMatchObject({ kind: 'updated' })
       expect(await contentOf(deps, update.id)).toBe('提交规范：提交信息用英文，不加类型前缀')
@@ -142,7 +142,7 @@ describe('executeSave', () => {
       const deps = makeDeps()
       const update = await globalMemory(deps)
       const code = globalConfirmCode('s1', (await deps.store.get(update.id))!)
-      const wrong = String((Number(code) + 1) % 100).padStart(2, '0')
+      const wrong = String((Number(code) + 1) % 10000).padStart(4, '0')
       for (const guess of ['true', 'yes', wrong, '', `${code}0`]) {
         const r = await executeSave({ ...update, confirmGlobal: guess }, fakeExec(), deps)
         expect(r).toMatchObject({ kind: 'rejected', code: 'global-update-unconfirmed' })
@@ -152,12 +152,20 @@ describe('executeSave', () => {
       expect(await contentOf(deps, update.id)).toBe('提交规范：提交信息用英文')
     })
 
-    it('一位数的码按补零算："7" 等同 "07"', async () => {
+    it('不足四位的码按补零算："7" 等同 "0007"', async () => {
       const deps = makeDeps()
       const update = await globalMemory(deps)
       const code = globalConfirmCode('s1', (await deps.store.get(update.id))!)
-      const given = code.startsWith('0') ? code.slice(1) : code
+      const given = code.replace(/^0+(?=\d)/, '')
       expect(await executeSave({ ...update, confirmGlobal: ` ${given} ` }, fakeExec(), deps)).toMatchObject({ kind: 'updated' })
+    })
+
+    it('补零只补到四位：五位数不认，哪怕去掉开头的 0 和码相同', async () => {
+      const deps = makeDeps()
+      const update = await globalMemory(deps)
+      const code = globalConfirmCode('s1', (await deps.store.get(update.id))!)
+      const r = await executeSave({ ...update, confirmGlobal: `0${code}` }, fakeExec(), deps)
+      expect(r).toMatchObject({ kind: 'rejected', code: 'global-update-unconfirmed' })
     })
 
     it('同一轮改几条全局记忆：各回各的码，按各自的码重发全都写进去', async () => {
@@ -190,7 +198,7 @@ describe('executeSave', () => {
       expect(await executeSave({ ...update, confirmGlobal: oldCode }, fakeExec(), deps)).toMatchObject({ kind: 'updated' })
       const again = { ...update, content: '提交规范：提交信息用英文祈使句' }
       const newCode = globalConfirmCode('s1', (await deps.store.get(update.id))!)
-      // 两位数会偶然撞码：撞上时旧码恰好仍对，这个例子只在不撞时断言旧码失效
+      // 码会偶然撞：撞上时旧码恰好仍对，这个例子只在不撞时断言旧码失效
       if (newCode !== oldCode) {
         const stale = await executeSave({ ...again, confirmGlobal: oldCode }, fakeExec(), deps)
         expect(stale).toMatchObject({ kind: 'rejected', code: 'global-update-unconfirmed' })
@@ -205,7 +213,7 @@ describe('executeSave', () => {
       const inSession = (id: string): SaveToolDeps => ({ ...shared, host: { saveContextOf: async () => ({ workspacePath: '/proj', session: { id, lastSeq: 3 } }) } })
       const update = await globalMemory(inSession('a'))
       const target = (await store.get(update.id))!
-      // 找一对码不同的会话 id（两位数会撞，固定挑不撞的）
+      // 找一对码不同的会话 id（码会偶然撞，固定挑不撞的）
       const other = ['b', 'c', 'd', 'e', 'f'].find(id => globalConfirmCode(id, target) !== globalConfirmCode('a', target))!
       const guidedA = await executeSave(update, fakeExec(), inSession('a'))
       expect(await executeSave({ ...update, confirmGlobal: confirmCodeOf(guidedA) }, fakeExec(), inSession(other))).toMatchObject({ kind: 'rejected', code: 'global-update-unconfirmed' })

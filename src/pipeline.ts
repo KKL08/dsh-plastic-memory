@@ -90,8 +90,13 @@ function pruneUndefined(record: MemoryRecord): MemoryRecord {
   return toToolOutput(record) as unknown as MemoryRecord
 }
 
-/** 确认码取值个数：两位数。这道确认是让模型停一下、想清楚再改全局，不是安全边界；同一会话里同时在改的全局记忆很少，两位够分开。 */
-const CONFIRM_CODE_MODULUS = 100
+/**
+ * 确认码位数。这道确认是让模型停一下、想清楚再改全局，不是安全边界。码现算不存，不同记忆、改写前后的码可能偶然相同：
+ * 四位让抄串、用旧码这类拿错码的情况几乎碰不对。
+ */
+const CONFIRM_CODE_DIGITS = 4
+const CONFIRM_CODE_MODULUS = 10 ** CONFIRM_CODE_DIGITS
+const CONFIRM_CODE_INPUT = new RegExp(`^\\d{1,${CONFIRM_CODE_DIGITS}}$`)
 
 /** 键排序后序列化：对象字段的先后取决于构造方式（新写入的记录和从文件读回的不同），指纹只看值。 */
 function canonicalJson(value: unknown): string {
@@ -114,13 +119,13 @@ export function globalConfirmCode(sessionId: string, target: MemoryRecord): stri
     r.confidence, r.supersedes, r.source, r.createdAt, r.updatedAt, r.globalCandidate, r.delegation, r.deletedAt,
   ].map(v => v ?? null)
   const hex = createHash('sha256').update(canonicalJson([sessionId, fingerprint])).digest('hex').slice(0, 8)
-  return String(Number.parseInt(hex, 16) % CONFIRM_CODE_MODULUS).padStart(2, '0')
+  return String(Number.parseInt(hex, 16) % CONFIRM_CODE_MODULUS).padStart(CONFIRM_CODE_DIGITS, '0')
 }
 
-/** 模型填的确认码对不对：一位数按补零算（模型常把 "07" 写成 "7"），其余写法都不认。 */
+/** 模型填的确认码对不对：不足位数的按补零算（模型常把 "0007" 写成 "7"），其余写法都不认。 */
 function isConfirmCodeMatch(given: string | undefined, code: string): boolean {
   const text = typeof given === 'string' ? given.trim() : ''
-  return /^\d{1,2}$/.test(text) && text.padStart(2, '0') === code
+  return CONFIRM_CODE_INPUT.test(text) && text.padStart(CONFIRM_CODE_DIGITS, '0') === code
 }
 
 /**
