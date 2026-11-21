@@ -21,7 +21,7 @@ export type MemoryRpcHandler = (endpoint: string, payload: unknown, signal: Abor
 export interface MemoryRpcDeps {
   /** `/memory` 命令的处理器；命令服务还没就位（或已撤下）时为 undefined。 */
   command: () => MemoryCommandDefinition['handler'] | undefined
-  /** 会话 id → agent，用宿主执行命令时的同一个解析器（会话还没恢复就先恢复，子 agent 的会话拒绝）；解析不到为 undefined 或抛错。 */
+  /** 会话 id → agent，用宿主执行命令时的同一个解析器（会话还没恢复就先恢复，子 agent 的会话拒绝）；解析不到为 undefined 或抛错（宿主的错带 code）。 */
   agentOf: (sessionId: string) => Promise<unknown>
 }
 
@@ -43,7 +43,15 @@ export function createMemoryRpcHandler(deps: MemoryRpcDeps): MemoryRpcHandler {
     if (args === undefined) return fail('bad-request', 'expected { sessionId, input }')
     const command = deps.command()
     if (command === undefined) return fail('unavailable', 'memory command is not ready')
-    const agent = await deps.agentOf(args.sessionId).catch(() => undefined)
+    let agent: unknown
+    try {
+      agent = await deps.agentOf(args.sessionId)
+    } catch (err) {
+      // 宿主的解析器带错误码拒绝（会话被别处占用、agent 正忙）时原样报出，面板才说得出原因
+      const { code, message } = (err ?? {}) as { code?: unknown; message?: unknown }
+      if (typeof code === 'string' && typeof message === 'string') return { ok: false, error: { code, message, details: {} } }
+      return fail('no-session', `session ${args.sessionId} cannot run commands: ${String(err)}`)
+    }
     if (agent === undefined) return fail('no-session', `session ${args.sessionId} cannot run commands`)
     return { ok: true, value: { result: await command({ rawInput: args.input, agent }) } }
   }

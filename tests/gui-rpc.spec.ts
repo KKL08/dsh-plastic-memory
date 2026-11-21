@@ -10,7 +10,8 @@ function subject(options: { hasCommand?: boolean; agents?: Record<string, unknow
   const handler = createMemoryRpcHandler({
     command: () => options.hasCommand === false ? undefined : run,
     agentOf: async (id) => {
-      if (id === 'session-sub') throw new Error('session/agent-busy')
+      if (id === 'session-sub') throw new Error('boom')
+      if (id === 'session-held') throw Object.assign(new Error('session is open in another window'), { code: 'session/writer-held' })
       return (options.agents ?? { 'session-1': { id: 'agent-1' } })[id]
     },
   })
@@ -42,12 +43,20 @@ describe('记忆面板的 RPC 通道', () => {
     expect(run).not.toHaveBeenCalled()
   })
 
-  it('会话解析不到、或解析器拒绝（子 agent 的会话）：返回 no-session，不执行', async () => {
+  it('会话解析不到、或解析器抛的错不带错误码：返回 no-session，不执行', async () => {
     const { run, handler } = subject()
     for (const sessionId of ['session-gone', 'session-sub']) {
       const result = await handler(MEMORY_RPC_RUN, { sessionId, input: 'info' }, signal, owner)
       expect(result).toMatchObject({ ok: false, error: { code: 'plastic-memory/no-session' } })
     }
+    expect(await handler(MEMORY_RPC_RUN, { sessionId: 'session-sub', input: 'info' }, signal, owner)).toMatchObject({ error: { message: expect.stringContaining('boom') } })
+    expect(run).not.toHaveBeenCalled()
+  })
+
+  it('解析器带错误码拒绝（会话被别处占用、agent 正忙）：原样报出错误码和消息，不执行', async () => {
+    const { run, handler } = subject()
+    expect(await handler(MEMORY_RPC_RUN, { sessionId: 'session-held', input: 'info' }, signal, owner))
+      .toEqual({ ok: false, error: { code: 'session/writer-held', message: 'session is open in another window', details: {} } })
     expect(run).not.toHaveBeenCalled()
   })
 
