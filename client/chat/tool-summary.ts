@@ -54,6 +54,11 @@ export function parseSaveResult(text: string): SavedResult | undefined {
   return undefined
 }
 
+/** 项目会话改写全局记忆、要模型先确认的那段引导（服务端 globalUpdateGuide）：没写入，但不是失败，折叠行另写一句。 */
+export function isGlobalConfirmPending(text: string): boolean {
+  return /^未保存：[^\n]*是全局记忆，改动会影响所有项目/.test(text)
+}
+
 /** `renderSearchResult`：每条命中一段，段首「[id] 类型｜摘要」。 */
 export function countSearchHits(text: string): number {
   return text.split('\n\n').filter(block => /^\[[^\]\s]+\] [^\n]*｜/.test(block)).length
@@ -114,7 +119,8 @@ export function toolSummary(toolName: MemoryToolName, args: Args | undefined, re
       const name = str(args.name) || str(args.id)
       if (resultText === null) return { key: 'chat.tool.save.running', params: { name } }
       const result = parseSaveResult(resultText)
-      return { key: result === undefined ? 'chat.tool.save.notSaved' : `chat.tool.save.${result.kind}`, params: { name: str(args.name) || (result?.name ?? name) } }
+      const notSaved = isGlobalConfirmPending(resultText) ? 'chat.tool.save.confirmingGlobal' : 'chat.tool.save.notSaved'
+      return { key: result === undefined ? notSaved : `chat.tool.save.${result.kind}`, params: { name: str(args.name) || (result?.name ?? name) } }
     }
     case 'memory_search': {
       const query = str(args.query)

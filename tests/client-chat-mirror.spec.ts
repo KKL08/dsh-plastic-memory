@@ -2,8 +2,9 @@
 // 所以客户端按 renderSaveResult / renderSearchResult / forget 的 message 格式解析。
 // 这里把渲染器和解析器对着跑一遍，改任一侧格式都会在这里失败。
 import { describe, expect, it } from 'vitest'
-import { parseSaveResult, countSearchHits, toolSummary } from '../client/chat/tool-summary.ts'
+import { parseSaveResult, countSearchHits, isGlobalConfirmPending, toolSummary } from '../client/chat/tool-summary.ts'
 import { renderSaveResult } from '../src/tools/save.ts'
+import { globalUpdateGuide } from '../src/pipeline.ts'
 import { renderSearchResult } from '../src/tools/search.ts'
 import { record } from './helpers/record.ts'
 import { readFileSync } from 'node:fs'
@@ -25,6 +26,18 @@ describe('对话卡解析的文本格式与服务端渲染器一致', () => {
     expect(parseSaveResult(renderSaveResult({ kind: 'updated', record: multiline }))).toEqual({ kind: 'updated', id: 'mem_ml', name: 'service configuration' })
     expect(parseSaveResult(renderSaveResult({ kind: 'rejected', code: 'unknown-type', reason: '未知类型' }))).toBeUndefined()
     expect(parseSaveResult(renderSaveResult({ kind: 'duplicate-suspected', existing: [saved] }))).toBeUndefined()
+  })
+
+  it('memory_save：改写全局记忆等确认时，折叠行写「确认后再改」，不写「没有记住」', () => {
+    const target = record({ id: 'mem_g', name: '提交规范', scope: 'global', workspacePath: undefined })
+    const guide = (given?: string) => renderSaveResult({ kind: 'rejected', code: 'global-update-unconfirmed', reason: globalUpdateGuide(target, '37', given) })
+    for (const text of [guide(), guide('true')]) {
+      expect(isGlobalConfirmPending(text)).toBe(true)
+      expect(toolSummary('memory_save', { action: 'update', id: 'mem_g', name: '提交规范' }, text)).toMatchObject({ key: 'chat.tool.save.confirmingGlobal', params: { name: '提交规范' } })
+    }
+    const other = renderSaveResult({ kind: 'rejected', code: 'unknown-type', reason: '未知类型' })
+    expect(isGlobalConfirmPending(other)).toBe(false)
+    expect(toolSummary('memory_save', { action: 'update', id: 'mem_g', name: '提交规范' }, other)).toMatchObject({ key: 'chat.tool.save.notSaved' })
   })
 
   it('memory_save：已更新里的名称按整条记录判密钥（含跨字段的疑似密钥），遮掉再写', () => {
