@@ -89,6 +89,7 @@ export const chatZh = {
   'chat.card.folded.superseded': '替代了 {count} 条旧记忆',
 
   'chat.change.rewritten': '已改写',
+  'chat.change.rewrittenGlobal': '全局记忆，影响所有项目',
   'chat.change.compare': '改前 / 改后 ›',
   'chat.change.before': '改前',
   'chat.change.after': '改后',
@@ -188,6 +189,7 @@ export const chatEn: Record<keyof typeof chatZh, string> = {
   'chat.card.folded.superseded': 'replaced {count} older',
 
   'chat.change.rewritten': 'Rewritten',
+  'chat.change.rewrittenGlobal': 'Global memory, applies to every project',
   'chat.change.compare': 'Before / after ›',
   'chat.change.before': 'Before',
   'chat.change.after': 'After',

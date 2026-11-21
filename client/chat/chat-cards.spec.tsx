@@ -1514,6 +1514,33 @@ describe('交付卡：模型改写、替代已有记忆', () => {
     expect(row('mem_r').queryByText('已提升为全局')).toBeNull()
   })
 
+  it('改写的是全局记忆（按改前那份）：「已改写」后面写「全局记忆，影响所有项目」，「撤销修改」照常在', () => {
+    const globalBefore = { ...saved('mem_r', '改前的正文', 'global').memory, name: '改写的那条' }
+    card([rewrite()], [change({ before: globalBefore })])
+    fireEvent.click(screen.getByRole('button', { expanded: false }))
+    expect(row('mem_r').getByText('全局记忆，影响所有项目').closest('.pm-change-head')).not.toBeNull()
+    expect(row('mem_r').getByRole('button', { name: '撤销修改' })).toBeInTheDocument()
+  })
+
+  it('改写的是本项目记忆：不写「影响所有项目」（参数里填成全局也以改前那份为准）', () => {
+    card([rewrite()], [change()])
+    fireEvent.click(screen.getByRole('button', { expanded: false }))
+    expect(row('mem_r').getByText('已改写')).toBeInTheDocument()
+    expect(row('mem_r').queryByText('全局记忆，影响所有项目')).toBeNull()
+  })
+
+  it('新记下的提升候选：只有「提升为全局」那套建议，不写「影响所有项目」', () => {
+    const fresh = saved('mem_n', '新记的正文')
+    const library: LibraryView = {
+      ...libraryWith([]),
+      layers: [{ layer: { kind: 'global' }, items: [] }, { layer: { kind: 'workspace', workspacePath: WS }, items: [{ ...fresh.memory, promotion: 'candidate' }] }],
+    }
+    renderInShell(<SavedMemoriesCard sessionId="s1" cwd={WS} saved={[fresh]} now={NOW} openDetail={() => {}} />, createFakeGateway({ views: { library } }))
+    fireEvent.click(screen.getByRole('button', { expanded: false }))
+    expect(row('mem_n').getByRole('button', { name: '提升为全局' })).toBeInTheDocument()
+    expect(row('mem_n').queryByText('全局记忆，影响所有项目')).toBeNull()
+  })
+
   it('「撤销修改」按这次改动发 undo（不用原位确认），成功后换成「已撤销」', async () => {
     const gateway = card([rewrite()], [change()])
     fireEvent.click(screen.getByRole('button', { expanded: false }))

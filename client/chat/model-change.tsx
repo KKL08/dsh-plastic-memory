@@ -1,6 +1,7 @@
 /**
  * 模型用 memory_save 改写、替代已有记忆的就地撤销（对话交付卡、右侧栏「这次新写入的」共用），数据是全部记忆视图的 modelChanges。
- * 改写：记忆卡下方一行开头写「已改写」，后面「改前 / 改后」展开对照；替代：一行「替代了「旧名」」。两种都带「撤销修改」，
+ * 改写：记忆卡下方一行开头写「已改写」，改的是全局记忆时（对话卡按改前那份判断）后接次文字「全局记忆，影响所有项目」，
+ * 再后面「改前 / 改后」展开对照；替代：一行「替代了「旧名」」。两种都带「撤销修改」，
  * 按这次改动的 decisionId 发 undo，服务端按改前快照恢复（替代的是让旧记忆回到在用，替代它的那条不动）。撤销不删任何记忆，不用原位确认。
  * 之后又被改过（手改、模型再改、删除）的不覆盖：视图标 changed、或撤销回 stale（命令往返的显式选项：不当失败显示），按钮换成「之后又改过，没法直接撤销」；
  * 改前快照过了 14 天（视图里已不列、调用时刻超出保留窗口）换成「改前版本已超过 14 天，无法恢复」；撤销过的写「已撤销」。
@@ -22,9 +23,9 @@ const UNDO = 'undo'
 /**
  * 一次改动的就地说明与撤销。change 为 'expired' 时只写过期说明（对话卡认不出自己那次改动、调用时刻已超出保留窗口）。
  * after：改写后的那份（对话卡取工具参数，右侧栏取全部记忆视图），改前 / 改后对照用；bySubject：右侧栏替代行写明是谁替代的；
- * count：过期的替代不知道旧记忆叫什么，按条数写。
+ * count：过期的替代不知道旧记忆叫什么，按条数写；isGlobal：改写的是全局记忆，提醒这次改动所有项目都会带入。
  */
-export function ModelChangeLine({ session, change, kind, after, bySubject, count = 1 }: {
+export function ModelChangeLine({ session, change, kind, after, bySubject, count = 1, isGlobal = false }: {
   session: BorrowedSession
   change: ModelChange | 'expired'
   /** change 为 'expired' 时这是哪一种改动。 */
@@ -32,6 +33,7 @@ export function ModelChangeLine({ session, change, kind, after, bySubject, count
   after?: MemoryCard | undefined
   bySubject?: string | undefined
   count?: number
+  isGlobal?: boolean
 }) {
   const t = useT()
   const runner = useCommandRunner(session)
@@ -75,6 +77,7 @@ export function ModelChangeLine({ session, change, kind, after, bySubject, count
           ? (
             <span className="pm-change-lead">
               <span className="pm-change-text">{t('chat.change.rewritten')}</span>
+              {isGlobal ? <span className="pm-change-scope">{t('chat.change.rewrittenGlobal')}</span> : null}
               {before !== undefined && after !== undefined
                 ? (
                   <button type="button" className="pm-link pm-link--muted pm-change-toggle" aria-expanded={isOpen} aria-controls={diffId} onClick={() => { setOpen(!isOpen) }}>
@@ -108,6 +111,7 @@ export const modelChangeCss = `
 .pm-change-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
 .pm-change-lead { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .pm-change-text { min-width: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text); overflow-wrap: anywhere; }
+.pm-change-scope { min-width: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); overflow-wrap: anywhere; }
 .pm-change-toggle { font-size: 12px; }
 .pm-change-note { flex: none; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-change-diff[hidden] { display: none; }
