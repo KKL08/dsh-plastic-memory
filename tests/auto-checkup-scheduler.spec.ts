@@ -413,6 +413,26 @@ describe('自动体检调度：项目记忆删光', () => {
       scope: ws(OTHER_A), frequency: 1, isOwn: true, isCheckable: false, lastCheckupAt: checkedAt, isDue: false, nextCheckupAt: null,
     })
   })
+
+  it('删光记忆的项目重新有了记忆：按原来的单独设置恢复自动体检，体检视图又列为可体检', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_a', content: '项目 a 的记忆', scope: 'workspace', workspacePath: OTHER_A }))
+    await e.set(ws(OTHER_A), 1)
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    expect(e.llm.requests.map(scopeOfRequest)).toEqual([OTHER_A])
+
+    await e.store.softDelete({ id: 'mem_a', workspacePath: OTHER_A })
+    await e.advance(DAY + AUTO_CHECKUP_INTERVAL_MS)
+    expect(e.llm.requests.map(scopeOfRequest)).toEqual([OTHER_A])
+
+    await e.store.create(record({ id: 'mem_a2', content: '重新写入的项目 a 的记忆', scope: 'workspace', workspacePath: OTHER_A }))
+    await e.advance(AUTO_CHECKUP_INTERVAL_MS)
+    expect(e.llm.requests.map(scopeOfRequest)).toEqual([OTHER_A, OTHER_A])
+    const entry = (await e.readView()).scopes.find(s => s.scope.kind === 'workspace')
+    expect(entry).toMatchObject({ scope: ws(OTHER_A), frequency: 1, isOwn: true, isCheckable: true, isDue: false })
+    expect(entry?.lastCheckupAt).toBe((await e.completed())[checkupKey(ws(OTHER_A))]?.completedAt)
+  })
 })
 
 describe('自动体检调度：按范围认领', () => {
