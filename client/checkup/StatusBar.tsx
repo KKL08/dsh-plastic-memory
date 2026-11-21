@@ -130,7 +130,8 @@ export function StatusBar({ scope, view, nav, runs, seen, health, checkups, isGo
   }
   const result = <ResultRow scope={scope} isTodoView={view === 'todo'} nav={nav} runs={runs} seen={seen} checkups={checkups} now={now} />
   if (scope.kind === 'all') {
-    const lastAt = Math.max(...(checkups?.scopes ?? health.layers).map(s => s.lastCheckupAt ?? -Infinity))
+    // 「全部」体检不查记忆删光的项目（不可体检），它们的上次体检不算进来
+    const lastAt = Math.max(...(checkups?.scopes.filter(s => s.isCheckable) ?? health.layers).map(s => s.lastCheckupAt ?? -Infinity))
     const meta = [allCount()]
     if (Number.isFinite(lastAt)) meta.push(t('checkup.status.last', { date: formatDay(lastAt, now, t) }))
     const auto = checkups === undefined ? undefined : autoSummary(checkups, t)
@@ -247,9 +248,9 @@ function AllHeadline({ needs }: { needs: ReadonlyArray<{ scope: Scope; todo: num
   )
 }
 
-/** 「全部」第二行的自动体检概况；全是仅手动且没有单独设置时不写。 */
+/** 「全部」第二行的自动体检概况；全是仅手动且没有单独设置时不写。不可体检的项目不在「全部」体检里，它的单独设置不写。 */
 function autoSummary(view: CheckupView, t: Translate): string | undefined {
-  const own = view.scopes.filter(s => s.isOwn).map(s => scopeLabel(s.scope, t))
+  const own = view.scopes.filter(s => s.isCheckable && s.isOwn).map(s => scopeLabel(s.scope, t))
   const frequency = view.defaultFrequency
   if (own.length === 0) return frequency === 'manual' ? undefined : t('checkup.status.all.auto', { frequency: frequencyText(frequency, t) })
   const names = own.join(t('checkup.status.listSep'))
