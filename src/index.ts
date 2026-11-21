@@ -43,6 +43,8 @@ import type { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import { createInstructionReader } from './governance/instructions.ts'
 import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { createMemoryCommand, type MemoryCommandDefinition } from './gui/commands.ts'
+import { MEMORY_RPC_CHANNEL } from './gui/contract.ts'
+import { createMemoryRpcHandler, type MemoryRpcHandler } from './gui/rpc.ts'
 import { ViewWriter, collectCheckupView, collectGlobalViews } from './gui/view-writer.ts'
 import { AutoCheckupScheduler, type AutoCheckupTimer } from './gui/auto-checkup.ts'
 import { CheckupSuggestions } from './gui/checkup-suggestions.ts'
@@ -366,6 +368,22 @@ export async function apply(ctx: Context, config: Config) {
     store, decisions, snapshots, cache: scanCache, ignores, checkups, autoCheckups, registry, memoryRoot, isGovernanceEnabled: () => config.governance.enabled.get(), bootedAt, log: ctx.logger,
     generatingSuggestions: () => checkupSuggestions.generatingIds(),
   })
+  // 面板动作的通道：宿主有连接服务（挂在 web 服务上）时才有。面板经它调命令处理器，不借会话执行命令，会话日志里不留记录
+  let guiCommand: MemoryCommandDefinition['handler'] | undefined
+  ctx.inject(['connection', 'webServer', 'typert'], child => {
+    // 连接服务把通道挂到「读它的那个上下文」的 web 服务上，而可选注入的子上下文读不到 webServer（宿主报 without inject）：
+    // 派生一个自带 webServer 的上下文再读 connection。通道随这个子上下文释放
+    const scoped = (child as unknown as {
+      get(name: string): unknown
+      extend(members: object): { connection: { rpc: { handle(channel: string, handler: MemoryRpcHandler): unknown } } }
+      typert: { lookups: { get(key: string): { resolve(value: string): Promise<unknown> } | undefined } }
+    })
+    const { lookups } = scoped.typert
+    scoped.extend({ webServer: scoped.get('webServer') }).connection.rpc.handle(MEMORY_RPC_CHANNEL, createMemoryRpcHandler({
+      command: () => guiCommand,
+      agentOf: async id => await lookups.get('agent')?.resolve(id),
+    }))
+  })
   ctx.inject(['commands'], child => {
     const commands = (child as unknown as { commands: { register(def: MemoryCommandDefinition): () => void } }).commands
     const writer = new ViewWriter({
@@ -378,7 +396,7 @@ export async function apply(ctx: Context, config: Config) {
     earlyWorkspaces.clear()
     // 卸载时取消手动体检之后还在跑的后续段（不等在途的模型调用）
     const unload = new AbortController()
-    commands.register(createMemoryCommand({
+    const command = createMemoryCommand({
       memoryRoot, store, decisions, snapshots, cache: scanCache, checkups, autoCheckups, ignores, registry, agentsMd, views: writer, instructions,
       onAutoCheckupChanged: () => void scheduler?.recheck(),
       suggestions: checkupSuggestions, signal: unload.signal,
@@ -386,10 +404,13 @@ export async function apply(ctx: Context, config: Config) {
       isGovernanceEnabled: () => config.governance.enabled.get(),
       isLegacyImportSettled: () => sidecar.isLegacyImportSettled(),
       getReadEvent,
-    }))
+    })
+    commands.register(command)
+    guiCommand = command.handler
     // 卸载时（插件重载、commands 服务撤下）停写视图：cordis 卸载会 await 这个 disposer，
     // 进行中的写入落完才轮到新实例加载，旧实例的迟到写入不会盖掉新视图
     return async () => {
+      if (guiCommand === command.handler) guiCommand = undefined
       unload.abort(new DOMException('plugin unloaded', 'AbortError'))
       // 被取消的后续段要到之后的微任务才收尾，那时写入器已撤下：这里先清标记、重写一次待处理视图，文件里不留「正在生成」
       checkupSuggestions.clearMarks()

@@ -779,6 +779,15 @@ const editFields = {
 export const MEMORY_COMMAND_NAME = 'memory'
 
 /**
+ * 面板动作的通道：插件在宿主连接上注册的逻辑通道，不经过会话，不往会话日志里写命令记录。
+ * `run` 的参数是 `{ sessionId, input }`，input 是命令名之后的原文（子命令加 JSON 参数，同宿主交给命令处理器的那段），结果的形状同命令执行结果（`{ result: { kind, text } }`）；
+ * `ping` 只确认通道通着。
+ */
+export const MEMORY_RPC_CHANNEL = '/plastic-memory'
+export const MEMORY_RPC_RUN = 'run'
+export const MEMORY_RPC_PING = 'ping'
+
+/**
  * `/memory` 子命令的参数。文本编码：`/memory <cmd> <其余字段的 JSON 对象>`，没有其余字段时只写子命令，
  * 如 `/memory info`、`/memory resolve {"decisionId":"pd_x","verdict":"keep-left"}`（见 encodeMemoryCommand）。
  */
