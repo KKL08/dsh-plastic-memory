@@ -34,18 +34,14 @@
 内置通用、编码、办公三种模式，也支持自定义场景与记忆类别。记什么，怎么记都可由你按需设置组合。注入预算、溯源策略与记忆健康提醒灵敏度，均可在设置页按需调节。
 
 <table align="center">
-  <tr><td><img src="assets/screenshots/sidebar-and-card.png" alt="对话里的记忆卡片和右侧栏" width="560"></td></tr>
-  <tr><td align="center">对话卡片和右侧栏</td></tr>
-</table>
-
-<table align="center">
-  <tr><td><img src="assets/screenshots/settings.png" alt="设置页：场景和记忆类型" width="560"></td></tr>
-  <tr><td align="center">设置页：场景和记忆类型</td></tr>
-</table>
-
-<table align="center">
-  <tr><td><img src="assets/screenshots/memory-pending.png" alt="记忆页：记忆优化建议" width="560"></td></tr>
-  <tr><td align="center">记忆页：记忆优化建议</td></tr>
+  <tr>
+    <td align="center" width="50%"><img src="assets/screenshots/chat-card-quiet-open.png" alt="回复下方的记忆卡片" width="100%"><br>对话卡片：这轮记了什么、改了什么</td>
+    <td align="center" width="50%"><img src="assets/screenshots/sidebar-memory.png" alt="右侧栏的记忆页签" width="100%"><br>右侧栏：这次对话带入的记忆</td>
+  </tr>
+  <tr>
+    <td align="center" width="50%"><img src="assets/screenshots/memory-page.png" alt="记忆页的处理视图" width="100%"><br>记忆页：体检发现的问题等你决定</td>
+    <td align="center" width="50%"><img src="assets/screenshots/settings-scenes.png" alt="设置页的场景和记忆类型" width="100%"><br>设置页：场景和记忆类型</td>
+  </tr>
 </table>
 
 ## 设计理念
@@ -58,6 +54,17 @@
 与 Agent 协作的核心在于人的注意力如何合理分配。绝大多数时候，插件与模型会在后台处理好记忆的写入、检索与自动体检，无需人工干预；对话中的提示卡片默认收起，配合右侧栏状态与左上角的管理入口，提供轻度的记忆机制感知，不打断对话任务节奏，当你认为需要查看或介入时又能快速展开、直接下钻。当健康机制监测到质量问题时，待处理事项会按优先级自动排序，让你的精力花在最关键的决策上。随着模型能力的不断提升，后续记忆插件会主动承担更多任务，进一步减少需要人为确认的环节。
 - **可塑性记忆**  
 每个人与 Agent 协作的方式都不尽相同，记忆不该是一套死板的预设模板。插件在提供开箱即用的基础模式之外，也支持通过自定义场景与类别以及设置页选项按需调整记忆的运行策略。目前插件仍处于早期阶段，很多地方有待进一步优化，后续会设计更多可组合的模块，增强自由可塑性，帮你搭建最契合自己的个性化记忆。
+
+<table align="center">
+  <tr>
+    <td align="center" width="50%"><img src="assets/screenshots/memory-status.png" alt="健康分和扣分明细" width="100%"><br>记忆健康与待办处理</td>
+    <td align="center" width="50%"><img src="assets/screenshots/conflict-compare.png" alt="改写建议和原文的对照" width="100%"><br>模型给优化建议，由你来拍板</td>
+  </tr>
+  <tr>
+    <td align="center" width="50%"><img src="assets/screenshots/chat-card-quiet.png" alt="收起成一行的记忆卡片" width="100%"><br>卡片默认收起，不打断对话心流，需要时可展开</td>
+    <td align="center" width="50%"><img src="assets/screenshots/settings-type-dialog.png" alt="自己加的记忆类型" width="100%"><br>可自定义记忆类型、场景组合</td>
+  </tr>
+</table>
 
 ## 安装
 
