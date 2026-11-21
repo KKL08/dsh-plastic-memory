@@ -233,6 +233,19 @@ describe('runSavePipeline', () => {
     expect((await store.get(old.record.id))!.status).toBe('superseded')
   })
 
+  it('新记忆替代一条相近的旧记忆：不拿要被替代的这条报重复，不用 force 就写；别的相近记忆照常拦下', async () => {
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
+    const old = await runSavePipeline(candidate({ name: '部署端口', content: '服务部署在 `deploy.sh` 指定的 3000 端口' }), deps(store))
+    if (old.kind !== 'saved') throw new Error(old.kind)
+    const next = candidate({ name: '部署端口', content: '服务部署改用 `deploy.sh` 指定的 8080 端口', supersedes: [old.record.id] })
+    const r = await runSavePipeline(next, deps(store))
+    expect(r.kind).toBe('saved')
+    expect((await store.get(old.record.id))!.status).toBe('superseded')
+    // 同一实体的另一条在用记忆不在 supersedes 里：照常回疑似重复
+    const again = await runSavePipeline(candidate({ name: '部署端口', content: '服务部署再改用 `deploy.sh` 指定的 9090 端口', supersedes: [old.record.id] }), deps(store))
+    expect(again.kind).toBe('duplicate-suspected')
+  })
+
   it('PA-01：替代目标里有已删除的：它仍是已删除、仍在最近删除、deletedAt 不变；同批在用的目标照常变成被取代', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const gone = await runSavePipeline(candidate({ name: '删掉的', content: '删掉的说法' }), deps(store))

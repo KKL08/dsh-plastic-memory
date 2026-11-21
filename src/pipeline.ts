@@ -494,8 +494,9 @@ export async function runSavePipeline(
       scope: { kind: 'workspace', workspacePath: deps.workspacePath! }, // create 必有 workspace 作用域（前置已拒无 cwd）
       status: ['active'],
     })
-    // 子 agent 只和主档比：待确认记录之间的分歧留给主会话接受时裁决，两条并存
-    const hits = peers.filter(p => !(deps.delegation && isPendingDelegated(p))).filter(p => {
+    // 子 agent 只和主档比：待确认记录之间的分歧留给主会话接受时裁决，两条并存。这次要替代的旧记忆随即失效，不算重复
+    const replacedIds = new Set(replaced.map(r => r.id))
+    const hits = peers.filter(p => !replacedIds.has(p.id) && !(deps.delegation && isPendingDelegated(p))).filter(p => {
       const peerText = `${p.content}\n${p.summary}`
       if (entities.length > 0) return extractEntities(peerText).some(e => entities.includes(e))
       return textSimilarity(text, peerText) >= DUPLICATE_SIMILARITY_THRESHOLD
