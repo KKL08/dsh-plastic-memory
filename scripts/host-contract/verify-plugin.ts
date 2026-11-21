@@ -354,6 +354,31 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       return { ok: r.record.scope === 'workspace' && r.record.globalCandidate === true && before.promoteCandidates === 1 && (p.dismissed ?? []).includes(r.record.id) && after.promoteCandidates === 0, detail: `scope=${r.record.scope} candidate=${r.record.globalCandidate} candidatesBefore=${before.promoteCandidates} dismissed=${JSON.stringify(p.dismissed)} candidatesAfter=${after.promoteCandidates}` }
     })
 
+    // H21 项目会话里改写全局记忆要先回引导：建一条、经 memory_promote 提升到全局；第一次 update 预先带上 confirmGlobal
+    // 也回 global-update-unconfirmed、全局文件不变（引导记在插件里，不能靠预填参数跳过），收到引导后带 confirmGlobal 重发才写进去。
+    // 顺带核对宿主参数 DSL 把这个布尔参数原样交给插件。
+    await attempt('H21-GLOBAL-UPDATE-CONFIRM', async () => {
+      const created = await call('memory_save', { action: 'create', name: 'h21-global', summary: '全局规范', content: 'H21 提交信息用英文', ...MEMORY_BASE }, execA) as { kind: string; record?: { id: string } }
+      if (created.kind !== 'saved' || !created.record) return { ok: false, detail: `create kind=${created.kind}` }
+      const id = created.record.id
+      const promoted = await call('memory_promote', { ids: [id] }, execA) as { promoted?: Array<{ id: string }> }
+      const globalText = () => {
+        const dir = join(memoriesRoot, 'global')
+        const file = existsSync(dir) ? readdirSync(dir).find(f => f.endsWith('.md') && readFileSync(join(dir, f), 'utf8').includes(`id: ${id}`)) : undefined
+        return file === undefined ? undefined : readFileSync(join(dir, file), 'utf8')
+      }
+      const update = { action: 'update', id, name: 'h21-global', summary: '全局规范', content: 'H21 所有项目的提交信息都用英文', ...MEMORY_BASE, scope: 'global', confirmGlobal: true }
+      const first = await call('memory_save', update, execA) as { kind: string; code?: string }
+      const keptOld = globalText()?.includes('H21 提交信息用英文') ?? false
+      const confirmed = await call('memory_save', update, execA) as { kind: string; record?: { scope: string } }
+      const wroteNew = globalText()?.includes('H21 所有项目的提交信息都用英文') ?? false
+      return {
+        ok: (promoted.promoted ?? []).some(p => p.id === id) && first.kind === 'rejected' && first.code === 'global-update-unconfirmed' && keptOld
+          && confirmed.kind === 'updated' && confirmed.record?.scope === 'global' && wroteNew,
+        detail: `promoted=${JSON.stringify(promoted.promoted)} first=${first.kind}/${first.code} keptOld=${keptOld} confirmed=${confirmed.kind}/${confirmed.record?.scope} wroteNew=${wroteNew}`,
+      }
+    })
+
     // H9a 证据锚悬空：记忆文件是用户可编辑的 markdown——真 Session 正常保存后，把磁盘上那条记录的
     // sessionId 改成不存在的会话 id（磁盘是唯一真相，下一次工具调用直接读到），memory_source 须优雅降级不抛
     await attempt('H9a-SOURCE-DANGLING-ANCHOR', async () => {

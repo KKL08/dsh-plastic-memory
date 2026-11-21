@@ -291,9 +291,11 @@ export async function apply(ctx: Context, config: Config) {
   // 子 agent 写入随治理开关：待确认记录的接受入口 memory_confirm 随开关注册，关着时子 agent 照旧只读（每次调用现读）；
   // 说明里的子 agent 段按注册时的开关写，开关热更新时也重注册
   const allowSubagentSave = () => config.governance.enabled.get()
+  // 放在重注册之外：类型配置热更新重建工具时，已回过的全局改写引导不丢
+  const globalUpdateGuided = new Map<string, string>()
   const registerSave = () => registerWrite(
     createSaveTool({
-      store, registry, host, snapshots, decisions, onSaved,
+      store, registry, host, snapshots, decisions, onSaved, globalUpdateGuided,
       maxSubagentSaves: () => config.subagent.maxSavesPerSession.get(),
     }, { allowSubagent: allowSubagentSave() }),
     allowSubagentSave,

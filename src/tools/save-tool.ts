@@ -54,6 +54,7 @@ export function createSaveTool(deps: SaveToolDeps, options: { allowSubagent?: bo
       validFrom: { type: 'string', description: `生效起始，本机时间。只有用户说了从什么时候开始才填；只有截止时间的，填 validTo 就够。用户说了具体时刻写 "${VALIDITY_FORMAT}"，没说就只写日期 "${VALIDITY_DATE_FORMAT}"，插件补上现在的时分。` },
       validTo: { type: 'string', description: `失效截止，本机时间。只有用户明确给了截止时间，或信息本身有确定的到期日（一次活动、临时方案）才填，其余不填。用户说了具体时刻写 "${VALIDITY_FORMAT}"（如「今天下午三点前」写 "2026-10-29 15:00"），没说就只写日期 "${VALIDITY_DATE_FORMAT}"，插件补上现在的时分；截止在今天的必须写时刻。必须晚于现在和 validFrom。到点后这条记忆不再带入新对话，也搜不到；已带入当前对话的，到下个会话或上下文压缩后才去掉。` },
       force: { type: 'boolean', description: '跳过结构去重与疑似密钥拦截（用户已确认）' },
+      confirmGlobal: { type: 'boolean', description: 'memory_save 回了「这条是全局记忆」的提示之后用：确认这次改动对所有项目都成立，填 true 重发。' },
     },
     output: {
       schema: { type: 'json' },

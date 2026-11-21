@@ -75,6 +75,7 @@ describe('memory_save 绑定', () => {
   const makeTool = (store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())) => createSaveTool({
     store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()),
     host: { saveContextOf: async () => ({ workspacePath: '/proj', session: { id: 's', lastSeq: 1 } }) },
+    globalUpdateGuided: new Map(),
   })
   const legal = { action: 'create', name: '标题', type: 'preference', scope: 'global', content: '内容', summary: '摘要', sourceMode: 'user-explicit' }
 
@@ -91,6 +92,10 @@ describe('memory_save 绑定', () => {
   it('summary 与 tags 分工：summary 一句话说清讲什么，tags 只写文本里没有的检索词', () => {
     expect(describedParam('summary')).toBe('一句话说清这条记忆讲什么，显示在索引里，供人和模型判断相关不相关；不复述 name，不堆关键词。create 和整条 update 必填；用 edits 时不传就保留原值。')
     expect(describedParam('tags')).toBe('只写正文、name、summary 里都没出现、但以后可能被拿来搜它的词：同义词、中英文别名、缩写。不写泛化概念。用 edits 时不传就保留原标签。')
+  })
+
+  it('confirmGlobal 的参数说明：收到全局记忆提示之后用，确认对所有项目都成立才填 true 重发', () => {
+    expect(describedParam('confirmGlobal')).toBe('memory_save 回了「这条是全局记忆」的提示之后用：确认这次改动对所有项目都成立，填 true 重发。')
   })
 
   it('sourceMode 的参数说明逐一定义五种来源，推断链上有一步是推出来的就填 agent-inferred', () => {

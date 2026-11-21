@@ -30,6 +30,8 @@ export interface SaveCandidate {
   validFrom?: string
   validTo?: string
   force?: boolean
+  /** update 的目标是全局记忆时，模型确认这次改动对所有项目都成立；项目会话里不带就回引导、不写入。 */
+  confirmGlobal?: boolean
 }
 
 export type { SaveEdit } from './edits.ts'
@@ -86,6 +88,11 @@ export type SaveWarning = CodedNote<WarningCode>
 function pruneUndefined(record: MemoryRecord): MemoryRecord {
   return toToolOutput(record) as unknown as MemoryRecord
 }
+
+/** 项目会话里改全局记忆、没带 confirmGlobal 时回给模型的引导（renderSaveResult 前面接「未保存：」）。 */
+export const GLOBAL_UPDATE_GUIDE =
+  '这条是全局记忆，改动会带进所有项目的会话，这次先没有写入。看一眼要加的内容：对所有项目都成立的，带上 confirmGlobal=true 重发这次 update；'
+  + '只对当前项目成立的（比如用户说「这个仓库」「这个项目」），改用 action=create、scope=workspace 新建一条项目记忆，全局这条保持原样。'
 
 type ValidityKey = 'validFrom' | 'validTo'
 
@@ -349,10 +356,20 @@ export async function runSavePipeline(
     maxSubagentSaves?: number
     /** 写入时刻（createdAt、updatedAt、有效期、快照与撤销记录）的时钟，缺省取当前时间。 */
     now?: () => number
+    /**
+     * 会话 id → 上一次 memory_save 刚回过全局改写引导的记忆 id。项目会话里改全局记忆，先回引导并记下；
+     * 紧接着的下一次调用带 confirmGlobal 重发同一条才写。每次调用一开始就把本会话这一笔取走，
+     * 中间隔了别的保存、或写入失败要重来，都重新回引导：模型不能靠预先填 confirmGlobal 跳过引导。
+     * 生产接线经 executeSave 传进来；直接调管线的单测缺省，只看 confirmGlobal。
+     */
+    globalUpdateGuided?: Map<string, string>
   },
 ): Promise<PipelineResult> {
   const { store, registry, session } = deps
   const now = deps.now?.() ?? Date.now()
+  // 在第一个 await 之前取走：引导只对紧接着的这一次调用有效
+  const guidedId = deps.globalUpdateGuided?.get(session.id)
+  deps.globalUpdateGuided?.delete(session.id)
 
   // 0. 入参补成完整候选（精确修改在这里读目标、算出新正文），再过子 agent 写入约束（主会话没有 delegation，原样往下走）
   const resolved = await resolveInput(input, deps)
@@ -381,6 +398,15 @@ export async function runSavePipeline(
     // scope 不随 update 变更——否则例行内容更新会把用户确认提升过的 global 记忆
     // 静默拉回当前项目（提升闸被写入链绕过）。降级同样没有免确认通道。
     scope = target.scope
+    // 全局记忆注入所有项目的会话：项目会话里改它，先要模型判断这次的内容对所有项目都成立（带 confirmGlobal 重发），
+    // 只对当前项目成立的改存项目记忆。没有工作目录的会话没有项目记忆可选，全局是唯一去处，不拦。
+    if (target.scope === 'global' && deps.workspacePath !== undefined) {
+      const guided = deps.globalUpdateGuided
+      if (candidate.confirmGlobal !== true || (guided !== undefined && guidedId !== target.id)) {
+        guided?.set(session.id, target.id)
+        return { kind: 'rejected', code: 'global-update-unconfirmed', reason: GLOBAL_UPDATE_GUIDE }
+      }
+    }
     if (candidate.scope === 'global' && target.scope === 'workspace') {
       // 模型对 workspace 记录重申 global 意图：转成提升候选（已是候选则静默幂等）
       if (!target.globalCandidate) {

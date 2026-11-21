@@ -123,7 +123,7 @@ describe('runSavePipeline', () => {
     if (created.kind !== 'saved') throw new Error(created.kind)
     await store.put({ ...created.record, scope: 'global', workspacePath: undefined } as never)
     const updated = await runSavePipeline(
-      candidate({ action: 'update', id: created.record.id, scope: 'global', content: '例行内容更新' }),
+      candidate({ action: 'update', id: created.record.id, confirmGlobal: true, scope: 'global', content: '例行内容更新' }),
       deps(store),
     )
     if (updated.kind !== 'updated') throw new Error(updated.kind)
@@ -138,7 +138,7 @@ describe('runSavePipeline', () => {
     if (created.kind !== 'saved') throw new Error(created.kind)
     await store.put({ ...created.record, scope: 'global', workspacePath: undefined } as never)
     const updated = await runSavePipeline(
-      candidate({ action: 'update', id: created.record.id, scope: 'workspace', content: '想拉回项目' }),
+      candidate({ action: 'update', id: created.record.id, confirmGlobal: true, scope: 'workspace', content: '想拉回项目' }),
       deps(store),
     )
     if (updated.kind !== 'updated') throw new Error(updated.kind)
@@ -317,7 +317,7 @@ describe('runSavePipeline', () => {
     if (created.kind !== 'saved') throw new Error(created.kind)
     await store.put({ ...created.record, scope: 'global', workspacePath: undefined, content: '旧的全局内容' } as never)
     const updated = await runSavePipeline(
-      candidate({ action: 'update', id: created.record.id, scope: 'global', content: '新的全局内容' }),
+      candidate({ action: 'update', id: created.record.id, confirmGlobal: true, scope: 'global', content: '新的全局内容' }),
       { ...deps(store), snapshots: snaps })
     if (updated.kind !== 'updated') throw new Error(updated.kind)
     const list = await snaps.list()
@@ -334,7 +334,7 @@ describe('runSavePipeline', () => {
     if (created.kind !== 'saved') throw new Error(created.kind)
     await store.put({ ...created.record, scope: 'global', workspacePath: undefined } as never)
     const updated = await runSavePipeline(
-      candidate({ action: 'update', id: created.record.id, scope: 'global', content: '新内容' }), deps(store))
+      candidate({ action: 'update', id: created.record.id, confirmGlobal: true, scope: 'global', content: '新内容' }), deps(store))
     expect(updated.kind).toBe('updated')
   })
 
@@ -401,7 +401,7 @@ describe('runSavePipeline', () => {
     // 目标是真正的 global 记录（B1b 允许维护 global；跨 workspace 才拒绝）
     await store.put({ ...created.record, scope: 'global', workspacePath: undefined } as never)
     const updated = await runSavePipeline(
-      candidate({ action: 'update', id: created.record.id, scope: 'global' }), deps(store))
+      candidate({ action: 'update', id: created.record.id, confirmGlobal: true, scope: 'global' }), deps(store))
     if (updated.kind !== 'updated') throw new Error(updated.kind)
     expect(Object.values(updated.record).filter(v => v === undefined)).toEqual([])
   })
@@ -1095,5 +1095,94 @@ describe('runSavePipeline：子 agent 写入约束', () => {
       expect(old.status).toBe('superseded')
       expect(old.delegation).toEqual(before.delegation)
     })
+  })
+})
+
+// 改写全局记忆要模型确认：全局记忆注入所有项目的会话，项目会话里的 update 先回一段引导、不写入，
+// 模型判断内容对所有项目都成立、带 confirmGlobal 重发才写（例：「这个仓库的提交不加前缀」被并进全局的提交规范）。
+describe('runSavePipeline：改写全局记忆要确认', () => {
+  async function seedGlobal(store: MemoryStore) {
+    const created = await runSavePipeline(candidate({ scope: 'workspace', content: '提交信息用英文祈使句' }), deps(store))
+    if (created.kind !== 'saved') throw new Error(created.kind)
+    const global = { ...created.record, scope: 'global', workspacePath: undefined } as never
+    await store.put(global)
+    return created.record.id
+  }
+  // 和生产接线一样带上引导记录：引导只对紧接着的下一次调用有效
+  const guidedDeps = (store: MemoryStore) => ({ ...deps(store), globalUpdateGuided: new Map<string, string>() })
+
+  it('项目会话里 update 全局记忆、没带 confirmGlobal：不写入，回引导', async () => {
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
+    const id = await seedGlobal(store)
+    const result = await runSavePipeline(candidate({ action: 'update', id, scope: 'global', content: '提交信息用英文祈使句，不加 feat: 前缀' }), deps(store))
+    if (result.kind !== 'rejected') throw new Error(result.kind)
+    expect(result.code).toBe('global-update-unconfirmed')
+    expect((await store.get(id))?.content).toBe('提交信息用英文祈使句')
+    const text = renderSaveResult(result)
+    expect(text).toContain('所有项目')
+    expect(text).toContain('confirmGlobal')
+    expect(text).toContain('action=create')
+  })
+
+  it('收到引导后带 confirmGlobal 重发：照常改写，作用域不变；第一次就预填 confirmGlobal 照样先回引导', async () => {
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
+    const id = await seedGlobal(store)
+    const d = guidedDeps(store)
+    const update = candidate({ action: 'update', id, scope: 'global', content: '所有项目的提交信息都用英文祈使句', confirmGlobal: true })
+    expect(await runSavePipeline(update, d)).toMatchObject({ kind: 'rejected', code: 'global-update-unconfirmed' })
+    const result = await runSavePipeline(update, d)
+    if (result.kind !== 'updated') throw new Error(result.kind)
+    expect(result.record.scope).toBe('global')
+    expect(result.record.content).toBe('所有项目的提交信息都用英文祈使句')
+  })
+
+  it('只传 edits 的改写同样要确认', async () => {
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
+    const id = await seedGlobal(store)
+    const edits = [{ oldString: '英文祈使句', newString: '英文祈使句，不加前缀' }]
+    const d = guidedDeps(store)
+    const unconfirmed = await runSavePipeline({ action: 'update', id, sourceMode: 'user-explicit', edits }, d)
+    if (unconfirmed.kind !== 'rejected') throw new Error(unconfirmed.kind)
+    expect(unconfirmed.code).toBe('global-update-unconfirmed')
+    expect((await store.get(id))?.content).toBe('提交信息用英文祈使句')
+    const confirmed = await runSavePipeline({ action: 'update', id, sourceMode: 'user-explicit', edits, confirmGlobal: true }, d)
+    if (confirmed.kind !== 'updated') throw new Error(confirmed.kind)
+    expect(confirmed.record.content).toBe('提交信息用英文祈使句，不加前缀')
+  })
+
+  it('引导之后先存了别的：再带 confirmGlobal 改全局，重新回引导（隔了一次调用，引导不再算数）', async () => {
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
+    const id = await seedGlobal(store)
+    const d = guidedDeps(store)
+    const update = candidate({ action: 'update', id, scope: 'global', content: '提交信息用英文祈使句，不加前缀', confirmGlobal: true })
+    await runSavePipeline(update, d)
+    expect(await runSavePipeline(candidate({ scope: 'workspace', name: '本仓库提交不加前缀', content: '这个仓库的提交不加前缀' }), d)).toMatchObject({ kind: 'saved' })
+    expect(await runSavePipeline(update, d)).toMatchObject({ kind: 'rejected', code: 'global-update-unconfirmed' })
+    expect((await store.get(id))?.content).toBe('提交信息用英文祈使句')
+  })
+
+  it('引导之后改的是另一条全局记忆：不算数，这条也先回引导', async () => {
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
+    const first = await seedGlobal(store)
+    const second = await seedGlobal(store)
+    const d = guidedDeps(store)
+    await runSavePipeline(candidate({ action: 'update', id: first, scope: 'global', content: '改第一条', confirmGlobal: true }), d)
+    expect(await runSavePipeline(candidate({ action: 'update', id: second, scope: 'global', content: '改第二条', confirmGlobal: true }), d))
+      .toMatchObject({ kind: 'rejected', code: 'global-update-unconfirmed' })
+  })
+
+  it('改写项目记忆不用确认', async () => {
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
+    const created = await runSavePipeline(candidate({ scope: 'workspace', content: '本项目用 pnpm' }), deps(store))
+    if (created.kind !== 'saved') throw new Error(created.kind)
+    const result = await runSavePipeline(candidate({ action: 'update', id: created.record.id, scope: 'workspace', content: '本项目用 pnpm 10' }), deps(store))
+    expect(result.kind).toBe('updated')
+  })
+
+  it('没有工作目录的会话：全局是唯一去处，不用确认', async () => {
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
+    const id = await seedGlobal(store)
+    const result = await runSavePipeline(candidate({ action: 'update', id, scope: 'global', content: '提交信息用英文祈使句，标题不超过 50 字' }), { ...deps(store), workspacePath: undefined })
+    expect(result.kind).toBe('updated')
   })
 })

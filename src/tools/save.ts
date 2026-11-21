@@ -32,6 +32,8 @@ export interface SaveToolDeps {
   onSaved?: (sessionId: string, memoryId: string) => void
   /** 子会话新建配额（配置 subagent.maxSavesPerSession），每次调用现读；缺省按管线的默认值。 */
   maxSubagentSaves?: () => number
+  /** 各会话刚回过全局改写引导的记忆（见管线同名参数）；插件生命周期内一份，工具因配置热更新重注册时沿用。 */
+  globalUpdateGuided: Map<string, string>
 }
 
 /** 成功保存、改写时附在第一行末：记录是过程动作，界面已展示写入的记忆，回复里不必再报。 */
@@ -108,6 +110,7 @@ export async function executeSave(
     // 委派信息只从上下文来：args 里同名字段不进候选、也不传到这里
     delegation: context.delegation,
     maxSubagentSaves: deps.maxSubagentSaves?.(),
+    globalUpdateGuided: deps.globalUpdateGuided,
   })
   if (result.kind === 'saved') deps.onSaved?.(context.session.id, result.record.id)
   return result

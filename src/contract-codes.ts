@@ -9,6 +9,7 @@ export type RejectCode =
   | 'target-missing'    // update 目标不存在或已删除；或这次保存期间被别处删掉、改写（内部子码 changed-after-read，见 pipeline.ts）
   | 'cross-workspace'   // update 指向其他 workspace 的记忆
   | 'no-workspace'      // 无工作目录的会话 create（无处归属）
+  | 'global-update-unconfirmed' // 项目会话里 update 全局记忆没带 confirmGlobal：回引导、不写入；内容对所有项目都成立再带上重发
   | 'schema-invalid'    // 字段校验失败
   | 'secret-critical'   // 明确厂商特征的密钥，拒存不落盘
   | 'secret-suspected'  // 疑似密钥（无厂商特征），未带 force 时拒存；用户确认后带 force: true 重发

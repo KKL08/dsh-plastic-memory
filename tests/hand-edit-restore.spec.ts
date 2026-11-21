@@ -77,7 +77,7 @@ function harness() {
       cache.setWorkspacePath(s, WS)
       return cache.assemble(s)
     },
-    save: (args: Parameters<typeof executeSave>[0]) => executeSave(args, fakeExec(), { store, registry, host: { saveContextOf: ctx }, snapshots }),
+    save: (args: Parameters<typeof executeSave>[0]) => executeSave(args, fakeExec(), { store, registry, host: { saveContextOf: ctx }, snapshots, globalUpdateGuided: new Map() }),
     snapshot: (args: Parameters<typeof executeSnapshotTool>[0]) => executeSnapshotTool(args, { workspacePath: WS }, { store, snapshots }),
   }
 }

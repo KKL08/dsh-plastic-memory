@@ -224,7 +224,7 @@ describe('必填字段按 action 校验', () => {
 
 describe('工具层', () => {
   function toolDeps(store: MemoryStore): SaveToolDeps {
-    return { store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), host: { saveContextOf: async () => ({ workspacePath: WS, session }) } }
+    return { store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), host: { saveContextOf: async () => ({ workspacePath: WS, session }) }, globalUpdateGuided: new Map() }
   }
 
   it('executeSave：edits 不传 tags 时保留原标签（整条更新照旧按空数组处理）', async () => {

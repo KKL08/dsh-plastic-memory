@@ -110,7 +110,7 @@ function harness(opts: { readEvent?: ReadEventFn; now?: number } = {}) {
     source: (memoryId: string, ws: string | null = WS) =>
       executeSource({ memoryId }, { workspacePath: ws ?? undefined }, { store, getReadEvent: () => opts.readEvent ?? null }),
     save: (args: Parameters<typeof executeSave>[0], ws: string | null = WS) =>
-      executeSave(args, fakeExec(), { store, registry, host: { saveContextOf: ctx(ws) }, snapshots }),
+      executeSave(args, fakeExec(), { store, registry, host: { saveContextOf: ctx(ws) }, snapshots, globalUpdateGuided: new Map() }),
     forget: (ids: string[]) => executeForget({ ids, reason: '测试' }, { workspacePath: WS }, { store, snapshots, decisions }),
   }
 }

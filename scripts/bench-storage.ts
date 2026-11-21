@@ -283,7 +283,7 @@ try {
       const r = await executeSave({
         action: 'create', name: `bench-save-${round + 1}-${words[0]}`, type: 'knowledge', scope: 'workspace',
         content: words.join(' '), summary: words.slice(0, 2).join(' '), sourceMode: 'user-explicit',
-      }, exec, { store, registry, snapshots, host: { saveContextOf: contextOf } })
+      }, exec, { store, registry, snapshots, host: { saveContextOf: contextOf }, globalUpdateGuided: new Map() })
       if (r.kind !== 'saved') throw new Error(`memory_save 未落盘：${r.kind}`)
     }),
     await bench('memory_save（update）', async round => {
@@ -291,7 +291,7 @@ try {
       const r = await executeSave({
         action: 'update', id: target.id, name: target.name, type: target.type, scope: 'workspace',
         content: `${target.content}（第 ${round + 2} 次更新）`, summary: target.summary, sourceMode: 'user-explicit',
-      }, exec, { store, registry, snapshots, host: { saveContextOf: contextOf } })
+      }, exec, { store, registry, snapshots, host: { saveContextOf: contextOf }, globalUpdateGuided: new Map() })
       if (r.kind !== 'updated') throw new Error(`update 未落盘：${r.kind}`)
     }),
     await bench('memory_health 单层（当前项目）', async () => {
