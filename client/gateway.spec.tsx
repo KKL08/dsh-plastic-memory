@@ -1046,6 +1046,68 @@ describe('面板动作的通道', () => {
     expect(call).toHaveBeenCalledTimes(1)
   })
 
+  it('探活被中断、请求没发出去、或宿主回了临时的错误状态码：不借会话执行命令，当场再探一次，探通了照常走通道', async () => {
+    for (const failure of [new DOMException('The operation was aborted.', 'AbortError'), new TypeError('Failed to fetch'), new Error('transport failure: HTTP 503'), new Error('transport failure: HTTP 401')]) {
+      const execute = commandExecute()
+      let pings = 0
+      const call = rpcOf(
+        ({ input }) => ({ ok: true, value: { result: { kind: 'success', text: okText(input.split(' ')[0]!) } } }),
+        () => { if (pings++ === 0) throw failure; return { ok: true, value: { ok: true } } },
+      )
+      const gateway = createHostGateway(fakeHostContext({ remote: { commands: { execute } }, connection: { rpc: { call } } }))(props)
+      expect(await gateway.execute('s1', { cmd: 'forget', memoryId: 'm1', layer })).toEqual({ ok: true, cmd: 'forget' })
+      expect(await gateway.execute('s1', { cmd: 'restore', memoryId: 'm1', layer })).toEqual({ ok: true, cmd: 'restore' })
+      expect(pings).toBe(2)
+      expect(execute).not.toHaveBeenCalled()
+    }
+  })
+
+  it('再探一次还是没走完（页面正在卸载、断线）：这一次失败，不发命令，也不记成探不通，下一条动作重新探', async () => {
+    const execute = commandExecute()
+    let pings = 0
+    const call = rpcOf(
+      ({ input }) => ({ ok: true, value: { result: { kind: 'success', text: okText(input.split(' ')[0]!) } } }),
+      () => { if (pings++ < 2) throw new TypeError('Failed to fetch'); return { ok: true, value: { ok: true } } },
+    )
+    const gateway = createHostGateway(fakeHostContext({ remote: { commands: { execute } }, connection: { rpc: { call } } }))(props)
+    expect(await gateway.execute('s1', { cmd: 'forget', memoryId: 'm1', layer })).toMatchObject({ ok: false, code: 'failed' })
+    expect(pings).toBe(2)
+    expect(await gateway.execute('s1', { cmd: 'restore', memoryId: 'm1', layer })).toEqual({ ok: true, cmd: 'restore' })
+    expect(pings).toBe(3)
+    expect(execute).not.toHaveBeenCalled()
+  })
+
+  it('探活回了失败（宿主那一半拒绝）：和探不通一样，之后都借会话执行命令，只探一次', async () => {
+    const execute = commandExecute()
+    const call = rpcOf(() => { throw new Error('unreachable') }, () => ({ ok: false, error: { code: 'plastic-memory/forbidden', message: 'no', details: {} } }))
+    const gateway = createHostGateway(fakeHostContext({ remote: { commands: { execute } }, connection: { rpc: { call } } }))(props)
+    expect(await gateway.execute('s1', { cmd: 'forget', memoryId: 'm1', layer })).toEqual({ ok: true, cmd: 'forget' })
+    expect(await gateway.execute('s1', { cmd: 'restore', memoryId: 'm1', layer })).toEqual({ ok: true, cmd: 'restore' })
+    expect(execute).toHaveBeenCalledTimes(2)
+    expect(call).toHaveBeenCalledTimes(1)
+  })
+
+  it('两条动作等同一次没走完的探活：都失败、不发命令，一共只探两次，下一条动作重新探', async () => {
+    const execute = commandExecute()
+    let pings = 0
+    const call = rpcOf(
+      ({ input }) => ({ ok: true, value: { result: { kind: 'success', text: okText(input.split(' ')[0]!) } } }),
+      () => { if (pings++ < 2) throw new TypeError('Failed to fetch'); return { ok: true, value: { ok: true } } },
+    )
+    const gateway = createHostGateway(fakeHostContext({ remote: { commands: { execute } }, connection: { rpc: { call } } }))(props)
+    const [first, second] = await Promise.all([
+      gateway.execute('s1', { cmd: 'forget', memoryId: 'm1', layer }),
+      gateway.execute('s1', { cmd: 'forget', memoryId: 'm2', layer }),
+    ])
+    expect(first).toMatchObject({ ok: false, code: 'failed' })
+    expect(second).toMatchObject({ ok: false, code: 'failed' })
+    expect(pings).toBe(2)
+    expect(await gateway.execute('s1', { cmd: 'restore', memoryId: 'm1', layer })).toEqual({ ok: true, cmd: 'restore' })
+    expect(await gateway.execute('s1', { cmd: 'restore', memoryId: 'm2', layer })).toEqual({ ok: true, cmd: 'restore' })
+    expect(pings).toBe(3)
+    expect(execute).not.toHaveBeenCalled()
+  })
+
   it('宿主没有连接服务：借会话执行命令', async () => {
     const execute = commandExecute()
     const gateway = createHostGateway(fakeHostContext({ remote: { commands: { execute } } }))(props)

@@ -323,6 +323,12 @@ function createModelStore(run: RunLine) {
 
 interface ReadState<V> { key: string; trigger: string; view: ViewState<V> }
 
+/**
+ * 宿主的调用方把非 2xx 的回应抛成错误，消息以 `: HTTP <状态码>` 结尾。404、405 是宿主那一半没注册上；
+ * 别的状态码（登录失效、宿主正在重启、处理出错）和别的抛错（请求被中断、没发出去，或回应解不开）说明不了它在不在。
+ */
+const NOT_SERVED = /: HTTP 40[45]$/
+
 /** 网关绑定函数：插槽根组件用自己的标准 props 绑定一份网关。 */
 export type BindGateway = (props: RootStandardProps) => MemoryGateway
 
@@ -338,10 +344,19 @@ export function createHostGateway(ctx: HostContext): BindGateway {
       return { ok: false, error: { code: 'thrown', message: String(err) } }
     }
   }
-  // 连接服务是可选的：就位时记下，离开时清掉（同下面的 configForms）。每个连接只探一次通道通不通：
-  // 宿主那一半没注册上时请求得到 405、调用抛错，同样算探不通，这个连接之后都借会话执行命令
+  // 连接服务是可选的：就位时记下，离开时清掉（同下面的 configForms）。每个连接探一次通道通不通，探出结论才记住：
+  // 宿主那一半没注册上时请求得到 404 或 405、调用抛错，和回了失败一样算探不通，这个连接之后都借会话执行命令；
+  // 请求被中断、没发出去（页面正在卸载、断线）、回了别的状态码或回应解不开，说明不了通不通：当场再探一次，还是没走完就不记、也不改走命令，下一次动作重新探
   let rpc: RpcCaller | undefined
-  let reachable: Promise<boolean> | undefined
+  let reachable: Promise<'up' | 'down' | 'unknown'> | undefined
+  const ping = (caller: RpcCaller) => caller.call(MEMORY_RPC_CHANNEL, MEMORY_RPC_PING, {}).then(
+    r => r.ok ? 'up' as const : 'down' as const,
+    (err: unknown) => err instanceof Error && NOT_SERVED.test(err.message) ? 'down' as const : 'unknown' as const,
+  )
+  const probe = async (caller: RpcCaller) => {
+    const first = await ping(caller)
+    return first === 'unknown' ? await ping(caller) : first
+  }
   ctx.inject(['connection'], (scope) => {
     scope.effect(() => {
       const caller = scope.connection.rpc
@@ -357,8 +372,13 @@ export function createHostGateway(ctx: HostContext): BindGateway {
   const run: RunLine = async (sessionId, line) => {
     const caller = rpc
     if (caller === undefined) return await viaCommand(sessionId, line)
-    reachable ??= caller.call(MEMORY_RPC_CHANNEL, MEMORY_RPC_PING, {}).then(r => r.ok, () => false)
-    if (!(await reachable)) return await viaCommand(sessionId, line)
+    const probing = reachable ??= probe(caller)
+    const channel = await probing
+    if (channel === 'unknown') {
+      if (reachable === probing) reachable = undefined
+      return { ok: false, error: { code: 'thrown', message: 'memory channel probe did not complete' } }
+    }
+    if (channel === 'down') return await viaCommand(sessionId, line)
     try {
       return decodeRpc(await caller.call(MEMORY_RPC_CHANNEL, MEMORY_RPC_RUN, { sessionId, input: line.slice(COMMAND_PREFIX.length).trimStart() }))
     } catch (err) {
