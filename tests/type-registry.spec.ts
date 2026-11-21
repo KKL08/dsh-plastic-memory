@@ -115,6 +115,13 @@ describe('出厂类型的定义', () => {
     expect(def('reference').recall).toBe('search')
   })
 
+  it('参考引用的用法：直接用索引摘要里的位置，摘要不够才去检索全文', () => {
+    const howToUse = BUILTIN_TYPES.find(t => t.name === 'reference')!.howToUse!
+    expect(howToUse).toMatch(/摘要里的位置/)
+    expect(howToUse).not.toMatch(/先用 memory_search/)
+    expect(howToUse).toMatch(/摘要不够.*memory_search/)
+  })
+
   it('例子记下的内容守通用写法：相对时间已换成具体日期', () => {
     for (const t of [...BUILTIN_TYPES, ...PRESET_TYPES]) {
       expect(t.description.split('→')[1], t.name).not.toMatch(/今天|明天|昨天|这周|下周|上周|月底|今年|明年|去年|最近/)

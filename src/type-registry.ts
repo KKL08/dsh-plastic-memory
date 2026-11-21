@@ -51,7 +51,7 @@ export const BUILTIN_TYPES: readonly MemoryTypeDefinition[] = [
     name: 'reference', label: '参考引用',
     description: '与项目相关的外部资料在哪里：文件路径、网页链接、外部文档，或系统、看板里的资料入口，以及简要概括里面有什么。正文：写位置、里面有什么、什么时候该去看；标题写清是什么资料（如「支付接口文档」），摘要里写上位置。例：用户说「接口文档在仓库的 docs/api 目录，第三方支付的接口说明看 https://pay.example.com/docs」→ 记两条：「项目接口文档在仓库 docs/api 目录，改接口前先看这里」「第三方支付接口说明在 https://pay.example.com/docs，对接支付时查这里」',
     whenToSave: '用户指明某份与项目有关的资料文件在哪里（路径、链接、系统入口等）；或者你在分析任务过程中找到一个以后项目中会反复用到的资料入口',
-    howToUse: '用户提到相关的资料或问题时，先用 memory_search 按 id 取出这条记下的位置，再去那里查；你去不了的位置（如别人的系统）告诉用户去哪里找。',
+    howToUse: '用户提到相关的资料或问题时，直接按摘要里的位置去查；摘要不够用时，再用 memory_search 按 id 取出全文；你去不了的位置（如别人的系统）告诉用户去哪里找。',
     recall: 'search', decayDays: null, governancePriority: 'medium',
   },
 ]
