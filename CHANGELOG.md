@@ -2,70 +2,43 @@
 
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
-[Semantic Versioning](https://semver.org/) with pre-release tags while the host
-(DeepSeek Harness) is itself in pre-release.
+[Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] - 2026-11-21
+
+First stable release of the 0.2 line. It includes every change from the
+0.2.0-beta.1 to 0.2.0-beta.4 releases, plus the changes below. Requires
+DeepSeek Harness v0.2.2-rc.1 or later.
 
 ### Changed
-- Memories are saved in a clearer shape: the main point comes first, and
-  when there is a reason or a source behind it, it follows in the same
-  paragraph as "原因：" or "依据：". The text is guided to leave out
-  bracketed asides and notes such as "the user told me", since the record
-  already keeps where and when a memory came from. A related memory is
-  referred to by its name rather than its id. Existing
-  memories are not rewritten. If you edited the preset `procedure` or
-  `decision` type, your copy keeps the old examples until you restore that
-  type to its default in settings.
-- The `reference` type now covers where project materials live: file
-  paths, links, documents and system entries. Who to ask about something is
-  saved as project info instead. Reference memories now show their summary
-  in the conversation, and the model goes straight to the location in it,
-  searching for the full text only when the summary is not enough.
-- Long memories on the memory page (Browse, Recently deleted and the cards
-  under To do) are folded to six lines, with an "Expand" button to read the
-  rest. Search results still show the full text, so a match is never hidden.
-- A memory you edit under Browse is now marked "Rewritten" instead of "Just
-  edited", which repeated the "just now" time beside it. When the memory is
-  folded, the mark sits next to "Expand".
-- Development and CI now test against DeepSeek Harness v0.2.2-rc.5, the
-  latest release. The oldest supported version is still v0.2.2-rc.1, and CI
-  keeps testing it too.
+- Memories are saved in a clearer shape: the main point first, then the
+  reason or source in the same paragraph, and other memories referred to by
+  name. Existing memories are not rewritten. If you edited the preset
+  `procedure` or `decision` type, your copy keeps the old examples until you
+  restore it in settings.
+- The `reference` type now covers where project materials live (paths,
+  links, documents). Its summary is shown in the conversation, so the model
+  can go straight to the location.
+- Long memories on the memory page are folded to six lines, with "Expand"
+  to read the rest.
+- A memory you edit under Browse is marked "Rewritten".
+- Development and CI test against DeepSeek Harness v0.2.2-rc.5; v0.2.2-rc.1
+  is still the oldest supported version.
 
 ### Fixed
-- Opening the memory page or acting on it no longer adds a "memory" row
-  to the conversation for every action. The panel now reaches the plugin
-  over its own channel instead of running `/memory` commands in the
-  session, so nothing is written to the session log either.
-- The model could fold a rule meant for one project, such as "this repo
-  doesn't use commit prefixes", into a global memory that applies to every
-  project. Now when it tries to change a global memory from a project,
-  nothing is written at first; it is reminded that the change will reach
-  every project, and saves project-only rules as a project memory instead.
-  The reminder names the memory and gives a short confirmation code; the
-  global memory is written only when the change is resent with that code.
-  Each memory has its own code, so several can be confirmed in one go, and
-  the model can ask you first and confirm in the next message. Conversations
-  outside a project are not affected. While a change waits for
-  confirmation, the chat card says so instead of "Did not remember"; once
-  written, it is marked "Global memory, applies to every project".
-- The memory page no longer shows full local paths in the project header and
-  the storage line, which exposed your user name in screenshots and screen
-  shares.
-- With the desktop app and `dsh web` open on the same memories, a delete or
-  edit in one could leave the other's memory page stale until you refreshed
-  it. Both now pick up each other's changes.
-- After every memory in a project was deleted, its page showed automatic
-  checkups as following the "All" setting and the project as never checked.
-  It now keeps the project's own setting and last checkup time, and no
-  automatic checkup runs for it until it has memories again. The status line
-  under "All" no longer counts such a project.
-- "Move to project…" under To do lists projects by name instead of full
-  local paths; two projects with the same name are told apart by their
-  parent folder.
-- Saving a memory that replaces an older one (`supersedes`) was flagged as
-  a duplicate of the very memory it replaces. The memory being replaced is
-  now left out of the duplicate check.
+- The memory page no longer adds a "memory" row to the conversation for
+  each action.
+- From a project, the model can no longer turn a project-only rule into a
+  global memory unnoticed: changing a global memory first returns a
+  reminder, and is written only when resent with the code it gives.
+- The memory page no longer shows full local paths, including in
+  "Move to project…".
+- With the desktop app and `dsh web` open on the same memories, each now
+  picks up the other's changes without a refresh.
+- A project whose memories were all deleted keeps its own checkup setting
+  and is left out of the "All" status line.
+- A memory that replaces an older one (`supersedes`) is no longer flagged as
+  a duplicate of it.
 
 ## [0.2.0-beta.4] - 2026-11-18
 
