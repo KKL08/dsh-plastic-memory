@@ -33,6 +33,10 @@ All notable changes to this project are documented here. The format follows
   keeps testing it too.
 
 ### Fixed
+- Opening the memory page or acting on it no longer adds a "memory" row
+  to the conversation for every action. The panel now reaches the plugin
+  over its own channel instead of running `/memory` commands in the
+  session, so nothing is written to the session log either.
 - The model could fold a rule meant for one project, such as "this repo
   doesn't use commit prefixes", into a global memory that applies to every
   project. Now when it tries to change a global memory from a project,

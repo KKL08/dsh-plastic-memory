@@ -151,6 +151,10 @@ export interface OptionalServices {
   }
   /** ui-settings：插件配置（profile 行 id 即 entryId）。 */
   configForms: { get(entryId: string): ConfigForm }
+  /** dsh-client-connection：按逻辑通道调宿主那一半注册的处理函数，不绑会话；传输失败 reject。 */
+  connection: {
+    rpc: { call(channel: string, endpoint: string, payload: unknown, signal?: AbortSignal): Promise<RemoteResult<unknown>> }
+  }
 }
 export type OptionalServiceName = keyof OptionalServices
 

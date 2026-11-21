@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
 import { useSyncExternalStore } from 'react'
-import { GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, type CheckupView, type PendingItem, type PendingView } from '../src/gui/contract.ts'
+import { GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, MEMORY_RPC_CHANNEL, MEMORY_RPC_PING, MEMORY_RPC_RUN, type CheckupView, type PendingItem, type PendingView } from '../src/gui/contract.ts'
 import { createHostGateway, decodeExecution, fileAddress, MEMORY_ROOT_CONFIG_KEY, MEMORY_ROOT_KEY, parseView, viewPath, type BorrowedSession } from './gateway.ts'
 import { createFakeConfigForm, DEFAULT_SECTION } from './settings/config-form.fake.ts'
 import { ENTRY_ID } from './settings/config.ts'
@@ -12,7 +12,7 @@ import { ALL_SCOPE, createNavStore } from './nav.ts'
 import { PendingTab } from './pending/PendingTab.tsx'
 import { fakeHostContext, levelCountsOf, memory } from './test-utils.tsx'
 import { PanelShell } from './ui/PanelShell.tsx'
-import type { ConfigFormSnapshot, HostContext, ResourceSnapshot, SessionListState, SessionSummary, WorkspaceFileStat } from './host.ts'
+import type { ConfigFormSnapshot, HostContext, RemoteResult, ResourceSnapshot, SessionListState, SessionSummary, WorkspaceFileStat } from './host.ts'
 
 function summary(id: string, patch: Partial<SessionSummary> = {}): SessionSummary {
   return { id, displayTitle: id, running: false, updatedAt: 0, retainedBy: {}, ...patch }
@@ -996,5 +996,60 @@ describe('createHostGateway', () => {
     expect(openWorkspacePath.mock.calls).toEqual([[{ path: '/m/a.md' }], [{ path: '/m/a.md', action: 'reveal' }]])
     expect(await gateway.readFile('s1', '/m/a.md')).toBe('---\nname: a\n---\n正文')
     expect(await gateway.readFile('s1', '/m/none.md')).toBeUndefined()
+  })
+})
+
+describe('面板动作的通道', () => {
+  const okText = (cmd: string) => JSON.stringify({ ok: true, cmd })
+  const props = {
+    useSessions: <S,>(selector: (s: SessionListState) => S) => selector(list(summary('s1', { cwd: '/w/app', retainedBy: { mainView: 1 } }))),
+    useResource: () => ({ status: 'none' as const, value: undefined, failure: undefined }),
+  }
+  const layer = { kind: 'workspace', workspacePath: '/w/app' } as const
+  const commandExecute = () => vi.fn(async (_sid: string, line: string) => ({ ok: true as const, value: { commandId: 'c', result: { kind: 'success' as const, text: okText(line.split(' ')[1]!) } } }))
+  type Call = (channel: string, endpoint: string, payload: unknown) => Promise<RemoteResult<unknown>>
+  const rpcOf = (run: (payload: { sessionId: string; input: string }) => unknown, ping: () => unknown = () => ({ ok: true, value: { ok: true } })) =>
+    // 返回值故意不收紧：要喂形状不对的回应
+    vi.fn<Call>(async (_channel, endpoint, payload) => (endpoint === MEMORY_RPC_PING ? ping() : run(payload as { sessionId: string; input: string })) as RemoteResult<unknown>)
+
+  it('宿主有连接服务：动作走插件自己的通道，不借会话执行命令', async () => {
+    const execute = commandExecute()
+    const call = rpcOf(({ input }) => ({ ok: true, value: { result: { kind: 'success', text: okText(input.split(' ')[0]!) } } }))
+    const gateway = createHostGateway(fakeHostContext({ remote: { commands: { execute } }, connection: { rpc: { call } } }))(props)
+    expect(await gateway.execute('s1', { cmd: 'forget', memoryId: 'm1', layer })).toEqual({ ok: true, cmd: 'forget' })
+    expect(call).toHaveBeenCalledWith(MEMORY_RPC_CHANNEL, MEMORY_RPC_RUN, { sessionId: 's1', input: expect.stringMatching(/^forget \{/) })
+    await gateway.execute('s1', { cmd: 'restore', memoryId: 'm1', layer })
+    expect(call.mock.calls.filter(c => c[1] === MEMORY_RPC_PING)).toHaveLength(1)
+    expect(execute).not.toHaveBeenCalled()
+  })
+
+  it('通道上的失败照常变成失败结果，不改走命令再执行一次', async () => {
+    const execute = commandExecute()
+    const call = rpcOf(() => ({ ok: false, error: { code: 'plastic-memory/no-session', message: 'gone', details: {} } }))
+    const gateway = createHostGateway(fakeHostContext({ remote: { commands: { execute } }, connection: { rpc: { call } } }))(props)
+    expect(await gateway.execute('s1', { cmd: 'forget', memoryId: 'm1', layer })).toMatchObject({ ok: false, code: 'failed', detail: 'plastic-memory/no-session: gone' })
+    const thrown = createHostGateway(fakeHostContext({ remote: { commands: { execute } }, connection: { rpc: { call: rpcOf(() => { throw new Error('offline') }) } } }))(props)
+    expect(await thrown.execute('s1', { cmd: 'forget', memoryId: 'm1', layer })).toMatchObject({ ok: false, code: 'failed' })
+    const odd = createHostGateway(fakeHostContext({ remote: { commands: { execute } }, connection: { rpc: { call: rpcOf(() => ({ ok: true, value: 'what' })) } } }))(props)
+    expect(await odd.execute('s1', { cmd: 'forget', memoryId: 'm1', layer })).toMatchObject({ ok: false, code: 'failed' })
+    expect(execute).not.toHaveBeenCalled()
+  })
+
+  it('通道探不通（宿主那一半没注册上）：这个页面之后都借会话执行命令，只探一次', async () => {
+    const execute = commandExecute()
+    // 宿主那一半没注册时请求得到 HTTP 405，宿主的调用方把非 2xx 一律抛错
+    const call = rpcOf(() => { throw new Error('unreachable') }, () => { throw new Error('transport failure: HTTP 405') })
+    const gateway = createHostGateway(fakeHostContext({ remote: { commands: { execute } }, connection: { rpc: { call } } }))(props)
+    expect(await gateway.execute('s1', { cmd: 'forget', memoryId: 'm1', layer })).toEqual({ ok: true, cmd: 'forget' })
+    expect(await gateway.execute('s1', { cmd: 'restore', memoryId: 'm1', layer })).toEqual({ ok: true, cmd: 'restore' })
+    expect(execute).toHaveBeenCalledTimes(2)
+    expect(call).toHaveBeenCalledTimes(1)
+  })
+
+  it('宿主没有连接服务：借会话执行命令', async () => {
+    const execute = commandExecute()
+    const gateway = createHostGateway(fakeHostContext({ remote: { commands: { execute } } }))(props)
+    expect(await gateway.execute('s1', { cmd: 'forget', memoryId: 'm1', layer })).toEqual({ ok: true, cmd: 'forget' })
+    expect(execute).toHaveBeenCalledTimes(1)
   })
 })

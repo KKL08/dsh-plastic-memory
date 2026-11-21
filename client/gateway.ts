@@ -11,7 +11,7 @@
  */
 import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import {
-  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, encodeMemoryCommand, sessionViewFile,
+  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, MEMORY_COMMAND_NAME, MEMORY_RPC_CHANNEL, MEMORY_RPC_PING, MEMORY_RPC_RUN, encodeMemoryCommand, sessionViewFile,
   checkupViewSchema, deletedViewSchema, healthViewSchema, libraryViewSchema, pendingViewSchema, sessionViewSchema, workspaceMapViewSchema,
   memoryCommandResultSchema, VIEW_BEHIND_CODES,
   type CheckupView, type DeletedView, type HealthView, type LibraryView, type MemoryCommand, type MemoryCommandResult,
@@ -180,6 +180,19 @@ type ConfigFormsService = NonNullable<HostContext['configForms']>
 interface RootState { memoryRoot?: string; error?: string; refreshes: number; isRefreshFailed?: boolean }
 
 type RunLine = (sessionId: string, line: string) => Promise<RemoteResult<CommandExecution | undefined>>
+type RpcCaller = NonNullable<HostContext['connection']>['rpc']
+
+const COMMAND_PREFIX = `/${MEMORY_COMMAND_NAME}`
+
+/** 通道的返回 → 命令执行结果的形状（之后和借会话执行命令走同一套解码）。形状不对按失败。 */
+function decodeRpc(r: RemoteResult<unknown>): RemoteResult<CommandExecution | undefined> {
+  if (!r.ok) return r
+  const result = (r.value as { result?: { kind?: unknown; text?: unknown } } | null)?.result
+  if ((result?.kind !== 'success' && result?.kind !== 'error') || (result.text !== undefined && typeof result.text !== 'string')) {
+    return { ok: false, error: { code: 'bad-response', message: 'unexpected response from the memory channel' } }
+  }
+  return { ok: true, value: { commandId: '', result: result as CommandExecution['result'] } }
+}
 
 /**
  * memoryRoot：localStorage 有就用；没有就借会话发一次 info（并发请求合并成一条），再发一次 refresh-views。
@@ -318,9 +331,36 @@ export type BindGateway = (props: RootStandardProps) => MemoryGateway
  * 每个插槽根组件用自己的标准 props 绑定：`const gateway = useMemo(() => bind(props), [props.useSessions, props.useResource])`。
  */
 export function createHostGateway(ctx: HostContext): BindGateway {
-  const run: RunLine = async (sessionId, line) => {
+  const viaCommand: RunLine = async (sessionId, line) => {
     try {
       return await ctx.remote.commands.execute(sessionId, line, [])
+    } catch (err) {
+      return { ok: false, error: { code: 'thrown', message: String(err) } }
+    }
+  }
+  // 连接服务是可选的：就位时记下，离开时清掉（同下面的 configForms）。每个连接只探一次通道通不通：
+  // 宿主那一半没注册上时请求得到 405、调用抛错，同样算探不通，这个连接之后都借会话执行命令
+  let rpc: RpcCaller | undefined
+  let reachable: Promise<boolean> | undefined
+  ctx.inject(['connection'], (scope) => {
+    scope.effect(() => {
+      const caller = scope.connection.rpc
+      rpc = caller
+      reachable = undefined
+      return () => { if (rpc !== caller) return; rpc = undefined; reachable = undefined }
+    })
+  })
+  /**
+   * 面板的动作走插件自己的通道：不经过会话，对话里不留命令记录。宿主没有连接服务、或通道探不通时才借会话执行命令。
+   * 通道通着之后的失败不改走命令：那一次可能已经在服务端执行了。
+   */
+  const run: RunLine = async (sessionId, line) => {
+    const caller = rpc
+    if (caller === undefined) return await viaCommand(sessionId, line)
+    reachable ??= caller.call(MEMORY_RPC_CHANNEL, MEMORY_RPC_PING, {}).then(r => r.ok, () => false)
+    if (!(await reachable)) return await viaCommand(sessionId, line)
+    try {
+      return decodeRpc(await caller.call(MEMORY_RPC_CHANNEL, MEMORY_RPC_RUN, { sessionId, input: line.slice(COMMAND_PREFIX.length).trimStart() }))
     } catch (err) {
       return { ok: false, error: { code: 'thrown', message: String(err) } }
     }
