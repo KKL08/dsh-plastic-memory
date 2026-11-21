@@ -10,7 +10,7 @@
 
 **简体中文** · [English](README.en.md)
 
-![Version](https://img.shields.io/badge/version-0.2.0--beta.4-yellow)
+![Version](https://img.shields.io/badge/version-0.2.0-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-DeepSeek%20Harness%20%E2%89%A5v0.2.2--rc.1-4D6BFF)
 
@@ -70,14 +70,14 @@
 
 需要 DeepSeek Harness v0.2.2-rc.1 及以上版本。桌面版和 web 版都支持，目前桌面版的体验最佳。
 
-**桌面版（推荐）**：打开侧边栏的「插件」页，点「添加插件」，输入 `dsh-plastic-memory@0.2.0-beta.4`，确认后安装。
+**桌面版（推荐）**：打开侧边栏的「插件」页，点「添加插件」，输入 `dsh-plastic-memory`，确认后安装。
 
 **web 版**：同样在「插件」页添加，需要本机装有 pnpm。
 
 **命令行**：把 `web` 换成你要装进的 Profile 名，装完重启。
 
 ```bash
-dsh plugin --profile web add dsh-plastic-memory@0.2.0-beta.4
+dsh plugin --profile web add dsh-plastic-memory
 ```
 
 安装细节和升级说明
