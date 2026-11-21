@@ -34,18 +34,14 @@ When a chat adds or updates memories, a card appears under the reply so you can 
 General, Coding and Office modes are built in, and you can define your own scenes and memory types, choosing what gets remembered and how. The injection budget, source lookup and health reminder sensitivity are all adjustable on the settings page.
 
 <table align="center">
-  <tr><td><img src="assets/screenshots/sidebar-and-card.png" alt="Memory card in a chat and the right sidebar" width="560"></td></tr>
-  <tr><td align="center">Chat card and right sidebar</td></tr>
-</table>
-
-<table align="center">
-  <tr><td><img src="assets/screenshots/settings.png" alt="Settings page: scenes and memory types" width="560"></td></tr>
-  <tr><td align="center">Settings page: scenes and memory types</td></tr>
-</table>
-
-<table align="center">
-  <tr><td><img src="assets/screenshots/memory-pending.png" alt="Memory page: memory optimization suggestions" width="560"></td></tr>
-  <tr><td align="center">Memory page: memory optimization suggestions</td></tr>
+  <tr>
+    <td align="center" width="50%"><img src="assets/screenshots/chat-card-quiet-open.png" alt="Memory card under a reply" width="100%"><br>Chat card: what was saved or changed this turn</td>
+    <td align="center" width="50%"><img src="assets/screenshots/sidebar-memory.png" alt="Memory tab in the right sidebar" width="100%"><br>Right sidebar: memories brought into this chat</td>
+  </tr>
+  <tr>
+    <td align="center" width="50%"><img src="assets/screenshots/memory-page.png" alt="Handle view on the memory page" width="100%"><br>Memory page: checkup findings waiting for your call</td>
+    <td align="center" width="50%"><img src="assets/screenshots/settings-scenes.png" alt="Scenes and memory types on the settings page" width="100%"><br>Settings: scenes and memory types</td>
+  </tr>
 </table>
 
 ## Design principles
@@ -58,6 +54,17 @@ The model proposes how to maintain and improve your memories, and nothing is car
 Working with an agent comes down to where your attention goes. Most of the time the plugin and the model handle saving, searching and automatic checkups in the background without you. The cards in the chat start folded, and together with the right sidebar and the Memory entry at the top left they keep memory in view without breaking your flow, ready to expand and drill into whenever you want to look or step in. When a checkup finds problems, the items that need you are sorted by priority, so your effort goes to the decisions that matter most. As models get more capable, the plugin will take on more of the work and ask for confirmation less often.
 - **Plastic memories**  
 Everyone works with agents in their own way, and memory shouldn't be a rigid preset template. Beyond the ready-to-use base modes, the plugin lets you adjust how memory runs through custom scenes and types and the options on the settings page. The plugin is still at an early stage and many parts still need work; more combinable modules are planned to make it more freely plastic and help you build the memory that fits you best.
+
+<table align="center">
+  <tr>
+    <td align="center" width="50%"><img src="assets/screenshots/memory-status.png" alt="Health score and its breakdown" width="100%"><br>Memory health and items to handle</td>
+    <td align="center" width="50%"><img src="assets/screenshots/conflict-compare.png" alt="A suggested rewrite next to the originals" width="100%"><br>The model suggests improvements; you make the call</td>
+  </tr>
+  <tr>
+    <td align="center" width="50%"><img src="assets/screenshots/chat-card-quiet.png" alt="Memory card folded into one line" width="100%"><br>Cards stay folded so your flow isn't broken; expand when needed</td>
+    <td align="center" width="50%"><img src="assets/screenshots/settings-type-dialog.png" alt="A memory type of your own" width="100%"><br>Customize memory types and scene combinations</td>
+  </tr>
+</table>
 
 ## Installation
 
