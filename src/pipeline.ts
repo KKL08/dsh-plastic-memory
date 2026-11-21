@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { applyEdits, type SaveEdit } from './edits.ts'
 import type { MemoryRecord, SourceMode } from './record-schema.ts'
@@ -11,7 +12,7 @@ import { detectSecrets, maskSecretSurface } from './secrets.ts'
 import { RecordNotFoundError } from './errors.ts'
 import { extractEntities, textSimilarity, DUPLICATE_SIMILARITY_THRESHOLD } from './text.ts'
 import { toToolOutput } from './output.ts'
-import { VALIDITY_DATE_FORMAT, VALIDITY_FORMAT, formatValidity, parseValidityInput } from './validity.ts'
+import { VALIDITY_DATE_FORMAT, VALIDITY_FORMAT, formatValidity, parseValidityInput, roundValidity } from './validity.ts'
 import { ledgerLabel, scopeOfMemory } from './scope.ts'
 
 export interface SaveCandidate {
@@ -30,8 +31,8 @@ export interface SaveCandidate {
   validFrom?: string
   validTo?: string
   force?: boolean
-  /** update 的目标是全局记忆时，模型确认这次改动对所有项目都成立；项目会话里不带就回引导、不写入。 */
-  confirmGlobal?: boolean
+  /** update 的目标是全局记忆时，模型确认这次改动对所有项目都成立：填引导里给的确认码（见 globalConfirmCode）；项目会话里不带或不对就回引导、不写入。 */
+  confirmGlobal?: string
 }
 
 export type { SaveEdit } from './edits.ts'
@@ -89,10 +90,49 @@ function pruneUndefined(record: MemoryRecord): MemoryRecord {
   return toToolOutput(record) as unknown as MemoryRecord
 }
 
-/** 项目会话里改全局记忆、没带 confirmGlobal 时回给模型的引导（renderSaveResult 前面接「未保存：」）。 */
-export const GLOBAL_UPDATE_GUIDE =
-  '这条是全局记忆，改动会带进所有项目的会话，这次先没有写入。看一眼要加的内容：对所有项目都成立的，带上 confirmGlobal=true 重发这次 update；'
-  + '只对当前项目成立的（比如用户说「这个仓库」「这个项目」），改用 action=create、scope=workspace 新建一条项目记忆，全局这条保持原样。'
+/** 确认码取值个数：两位数。这道确认是让模型停一下、想清楚再改全局，不是安全边界；同一会话里同时在改的全局记忆很少，两位够分开。 */
+const CONFIRM_CODE_MODULUS = 100
+
+/** 键排序后序列化：对象字段的先后取决于构造方式（新写入的记录和从文件读回的不同），指纹只看值。 */
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, v: unknown) => v !== null && typeof v === 'object' && !Array.isArray(v)
+    ? Object.fromEntries(Object.entries(v as Record<string, unknown>).filter(([, x]) => x !== undefined).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+    : v)
+}
+
+/**
+ * 项目会话改写全局记忆的确认码：按会话 id 和目标记录现算，不存。引导里给出，模型带着它重发才写。
+ * 指纹覆盖改写和手改会动的字段；召回统计和 lastConfirmedAt 不算，召回、确认不让码失效。改写成功后 updatedAt 变了，
+ * 同一条再改要新码；换了会话（包括压缩后开的新会话）码也跟着换。不同记忆的码撞上无所谓：每次只和这一条的码比。
+ */
+export function globalConfirmCode(sessionId: string, target: MemoryRecord): string {
+  const r = target
+  const fingerprint = [
+    r.id, r.name, r.summary, r.content.replace(/\r\n/g, '\n'), r.tags, r.type, r.scope, r.workspacePath, r.status,
+    r.validFrom === undefined ? undefined : roundValidity('validFrom', r.validFrom),
+    r.validTo === undefined ? undefined : roundValidity('validTo', r.validTo),
+    r.confidence, r.supersedes, r.source, r.createdAt, r.updatedAt, r.globalCandidate, r.delegation, r.deletedAt,
+  ].map(v => v ?? null)
+  const hex = createHash('sha256').update(canonicalJson([sessionId, fingerprint])).digest('hex').slice(0, 8)
+  return String(Number.parseInt(hex, 16) % CONFIRM_CODE_MODULUS).padStart(2, '0')
+}
+
+/** 模型填的确认码对不对：一位数按补零算（模型常把 "07" 写成 "7"），其余写法都不认。 */
+function isConfirmCodeMatch(given: string | undefined, code: string): boolean {
+  const text = typeof given === 'string' ? given.trim() : ''
+  return /^\d{1,2}$/.test(text) && text.padStart(2, '0') === code
+}
+
+/**
+ * 项目会话里改全局记忆、确认码缺省或不对时回给模型的引导（renderSaveResult 前面接「未保存：」）。点名这条记忆、带上它现在的码，
+ * 同时改几条时模型分得清哪个码给哪条；码不对时先说明，模型照着新码重发一次就能写。
+ */
+export function globalUpdateGuide(target: MemoryRecord, code: string, given: string | undefined): string {
+  const name = maskSecretSurface(target, { severity: 'suspected' }).name.replace(/\s+/g, ' ').trim()
+  const stale = given === undefined ? '' : `确认码 ${JSON.stringify(given)} 不是这条记忆现在的码（码按会话和记忆的当前内容生成，改过或换了会话就会变）。`
+  return `${stale}「${name}」（${target.id}）是全局记忆，改动会影响所有项目。只适用于本项目的内容，改用 action=create、scope=workspace 另存一条项目记忆，全局这条保持原样；`
+    + `确认仍适用于所有项目，对这条记忆重发这次 update，并填写 confirmGlobal: "${code}"。`
+}
 
 type ValidityKey = 'validFrom' | 'validTo'
 
@@ -356,20 +396,10 @@ export async function runSavePipeline(
     maxSubagentSaves?: number
     /** 写入时刻（createdAt、updatedAt、有效期、快照与撤销记录）的时钟，缺省取当前时间。 */
     now?: () => number
-    /**
-     * 会话 id → 上一次 memory_save 刚回过全局改写引导的记忆 id。项目会话里改全局记忆，先回引导并记下；
-     * 紧接着的下一次调用带 confirmGlobal 重发同一条才写。每次调用一开始就把本会话这一笔取走，
-     * 中间隔了别的保存、或写入失败要重来，都重新回引导：模型不能靠预先填 confirmGlobal 跳过引导。
-     * 生产接线经 executeSave 传进来；直接调管线的单测缺省，只看 confirmGlobal。
-     */
-    globalUpdateGuided?: Map<string, string>
   },
 ): Promise<PipelineResult> {
   const { store, registry, session } = deps
   const now = deps.now?.() ?? Date.now()
-  // 在第一个 await 之前取走：引导只对紧接着的这一次调用有效
-  const guidedId = deps.globalUpdateGuided?.get(session.id)
-  deps.globalUpdateGuided?.delete(session.id)
 
   // 0. 入参补成完整候选（精确修改在这里读目标、算出新正文），再过子 agent 写入约束（主会话没有 delegation，原样往下走）
   const resolved = await resolveInput(input, deps)
@@ -398,13 +428,13 @@ export async function runSavePipeline(
     // scope 不随 update 变更——否则例行内容更新会把用户确认提升过的 global 记忆
     // 静默拉回当前项目（提升闸被写入链绕过）。降级同样没有免确认通道。
     scope = target.scope
-    // 全局记忆注入所有项目的会话：项目会话里改它，先要模型判断这次的内容对所有项目都成立（带 confirmGlobal 重发），
-    // 只对当前项目成立的改存项目记忆。没有工作目录的会话没有项目记忆可选，全局是唯一去处，不拦。
+    // 全局记忆注入所有项目的会话：项目会话里改它，先要模型判断这次的内容对所有项目都成立（带引导里的确认码重发），
+    // 只对当前项目成立的改存项目记忆。码按改写前的这份目标算，和锁内复核比的是同一份。没有工作目录的会话没有项目记忆可选，
+    // 全局是唯一去处，不拦。码对了之后别的检查没过，照常回那条检查的原因
     if (target.scope === 'global' && deps.workspacePath !== undefined) {
-      const guided = deps.globalUpdateGuided
-      if (candidate.confirmGlobal !== true || (guided !== undefined && guidedId !== target.id)) {
-        guided?.set(session.id, target.id)
-        return { kind: 'rejected', code: 'global-update-unconfirmed', reason: GLOBAL_UPDATE_GUIDE }
+      const code = globalConfirmCode(session.id, target)
+      if (!isConfirmCodeMatch(candidate.confirmGlobal, code)) {
+        return { kind: 'rejected', code: 'global-update-unconfirmed', reason: globalUpdateGuide(target, code, candidate.confirmGlobal) }
       }
     }
     if (candidate.scope === 'global' && target.scope === 'workspace') {
@@ -464,8 +494,9 @@ export async function runSavePipeline(
       scope: { kind: 'workspace', workspacePath: deps.workspacePath! }, // create 必有 workspace 作用域（前置已拒无 cwd）
       status: ['active'],
     })
-    // 子 agent 只和主档比：待确认记录之间的分歧留给主会话接受时裁决，两条并存
-    const hits = peers.filter(p => !(deps.delegation && isPendingDelegated(p))).filter(p => {
+    // 子 agent 只和主档比：待确认记录之间的分歧留给主会话接受时裁决，两条并存。这次要替代的旧记忆随即失效，不算重复
+    const replacedIds = new Set(replaced.map(r => r.id))
+    const hits = peers.filter(p => !replacedIds.has(p.id) && !(deps.delegation && isPendingDelegated(p))).filter(p => {
       const peerText = `${p.content}\n${p.summary}`
       if (entities.length > 0) return extractEntities(peerText).some(e => entities.includes(e))
       return textSimilarity(text, peerText) >= DUPLICATE_SIMILARITY_THRESHOLD

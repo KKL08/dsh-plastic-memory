@@ -13,7 +13,7 @@ import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { executeConfirm } from '../src/tools/confirm.ts'
 import { executePromote } from '../src/tools/promote.ts'
-import { runSavePipeline } from '../src/pipeline.ts'
+import { globalConfirmCode, runSavePipeline } from '../src/pipeline.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { MemorySnapshot, PendingDecision } from '../src/governance/schema.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
@@ -395,7 +395,7 @@ describe('memory_save update：读到目标之后、写入之前目标被改过�
   it.each(changes)('PA-02：%s：回拒绝，记录保持改过之后那一版', async (_label, text, code) => {
     const path = await seed('mem_race.md', record())
     changeAfterRead(path, text, AFTER_LOCATE)
-    const r = await runSavePipeline(candidate({ action: 'update', id: 'mem_race', confirmGlobal: true, name: '竞态', type: 'preference', content: '模型想改成这样' }), saveDeps(new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())))
+    const r = await runSavePipeline(candidate({ action: 'update', id: 'mem_race', confirmGlobal: globalConfirmCode('s1', record()), name: '竞态', type: 'preference', content: '模型想改成这样' }), saveDeps(new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())))
     expect(r).toMatchObject({ kind: 'rejected', code, subcode: 'changed-after-read' })
     expect(await readFile(path, 'utf8').catch(() => undefined)).toBe(text)
   })
@@ -405,7 +405,7 @@ describe('memory_save update：读到目标之后、写入之前目标被改过�
     const text = encodeRecord(record({ content: '端口 3000，超时 30 秒', updatedAt: later }), {})
     changeAfterRead(path, text, AFTER_LOCATE)
     const r = await runSavePipeline(
-      { action: 'update', id: 'mem_race', confirmGlobal: true, sourceMode: 'user-explicit', edits: [{ oldString: '端口 3000', newString: '端口 8080' }] },
+      { action: 'update', id: 'mem_race', confirmGlobal: globalConfirmCode('s1', record({ content: '端口 3000，超时 5 秒' })), sourceMode: 'user-explicit', edits: [{ oldString: '端口 3000', newString: '端口 8080' }] },
       saveDeps(new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())),
     )
     expect(r).toMatchObject({ kind: 'rejected', code: 'target-missing', subcode: 'changed-after-read' })
@@ -415,12 +415,12 @@ describe('memory_save update：读到目标之后、写入之前目标被改过�
   it('PA-02：界面改过：拒绝原因带用户那一版的内容', async () => {
     const path = await seed('mem_race.md', record())
     changeAfterRead(path, encodeRecord(record({ content: '用户改的', updatedAt: later }), {}), AFTER_LOCATE)
-    const r = await runSavePipeline(candidate({ action: 'update', id: 'mem_race', confirmGlobal: true, name: '竞态', type: 'preference', content: '模型想改成这样' }), saveDeps(new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())))
+    const r = await runSavePipeline(candidate({ action: 'update', id: 'mem_race', confirmGlobal: globalConfirmCode('s1', record()), name: '竞态', type: 'preference', content: '模型想改成这样' }), saveDeps(new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())))
     if (r.kind !== 'rejected') throw new Error(r.kind)
     expect(r.reason).toContain('用户改的')
   })
 
-  const update = () => candidate({ action: 'update', id: 'mem_race', confirmGlobal: true, name: '竞态', type: 'preference', content: '模型想改成这样' })
+  const update = () => candidate({ action: 'update', id: 'mem_race', confirmGlobal: globalConfirmCode('s1', record()), name: '竞态', type: 'preference', content: '模型想改成这样' })
 
   it('PA-02：候选标记被清掉、updatedAt 没变：回拒绝，标记不被盖回', async () => {
     const store = new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())
@@ -463,7 +463,7 @@ describe('memory_save update：读到目标之后、写入之前目标被改过�
   it('读到之后没人动过：照常写入', async () => {
     await seed('mem_race.md', record())
     const store = new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())
-    const r = await runSavePipeline(candidate({ action: 'update', id: 'mem_race', confirmGlobal: true, name: '竞态', type: 'preference', content: '模型想改成这样' }), saveDeps(store))
+    const r = await runSavePipeline(candidate({ action: 'update', id: 'mem_race', confirmGlobal: globalConfirmCode('s1', record()), name: '竞态', type: 'preference', content: '模型想改成这样' }), saveDeps(store))
     expect(r.kind).toBe('updated')
     expect((await store.get('mem_race'))!.content).toBe('模型想改成这样')
   })

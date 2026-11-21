@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { fakeExec } from './helpers/exec.ts'
 import { record } from './helpers/record.ts'
 import { executeSave, renderSaveResult, type SaveToolDeps } from '../src/tools/save.ts'
+import { globalConfirmCode } from '../src/pipeline.ts'
+import { confirmCodeOf } from './helpers/global-confirm.ts'
 import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
@@ -18,7 +20,6 @@ function makeDeps(store = new MemoryStore(new InMemoryTable(), undefined, new In
     registry,
     snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()),
     host: { saveContextOf: async () => ({ workspacePath: '/proj', session: { id: 's1', lastSeq: 3 } }) },
-    globalUpdateGuided: new Map(),
   }
 }
 
@@ -104,9 +105,9 @@ describe('executeSave', () => {
     if (created.kind !== 'saved') throw new Error(created.kind)
     // 降级成了 workspace 候选，手工提到 global 模拟 promote 后
     await store.put({ ...created.record, scope: 'global', workspacePath: undefined } as never)
-    const update = { ...base, action: 'update' as const, confirmGlobal: true, id: created.record.id, name: '全局偏好', content: '新全局内容', summary: 'pref' }
-    await executeSave(update, fakeExec(), deps) // 第一次回引导
-    const updated = await executeSave(update, fakeExec(), deps)
+    const update = { ...base, action: 'update' as const, id: created.record.id, name: '全局偏好', content: '新全局内容', summary: 'pref' }
+    const guided = await executeSave(update, fakeExec(), deps) // 第一次回引导，带确认码
+    const updated = await executeSave({ ...update, confirmGlobal: confirmCodeOf(guided) }, fakeExec(), deps)
     if (updated.kind !== 'updated') throw new Error(updated.kind)
     const list = await snapshots.list()
     expect(list).toHaveLength(1)
@@ -114,61 +115,124 @@ describe('executeSave', () => {
     expect(list[0].data[0].content).toBe('旧全局内容')
   })
 
-  // 项目会话里改全局记忆：引导要真的回到模型面前，预先填 confirmGlobal 跳不过去
+  // 项目会话里改全局记忆：引导要真的回到模型面前。确认码在引导里给出、按会话和这条记忆的当前内容现算，预先填的猜不中
   describe('改写全局记忆先回引导', () => {
-    async function globalMemory(deps: SaveToolDeps) {
-      const created = await executeSave({ ...base, name: '提交规范', content: '提交信息用英文', summary: '提交规范' }, fakeExec(), deps)
+    async function globalMemory(deps: SaveToolDeps, name = '提交规范') {
+      const created = await executeSave({ ...base, name, content: `${name}：提交信息用英文`, summary: name }, fakeExec(), deps)
       if (created.kind !== 'saved') throw new Error(created.kind)
       await deps.store.put({ ...created.record, scope: 'global', workspacePath: undefined } as never)
-      return { ...base, action: 'update' as const, id: created.record.id, name: '提交规范', content: '提交信息用英文，不加类型前缀', summary: '提交规范', confirmGlobal: true }
+      return { ...base, action: 'update' as const, id: created.record.id, name, content: `${name}：提交信息用英文，不加类型前缀`, summary: name }
     }
     const contentOf = async (deps: SaveToolDeps, id: string) => (await deps.store.get(id))?.content
 
-    it('第一次就带 confirmGlobal：照样先回引导、不写入；收到引导后重发才写', async () => {
+    it('引导点名这条记忆、给出确认码；带码重发才写', async () => {
       const deps = makeDeps()
       const update = await globalMemory(deps)
       const first = await executeSave(update, fakeExec(), deps)
       expect(first).toMatchObject({ kind: 'rejected', code: 'global-update-unconfirmed' })
-      expect(await contentOf(deps, update.id)).toBe('提交信息用英文')
-      expect(await executeSave(update, fakeExec(), deps)).toMatchObject({ kind: 'updated' })
-      expect(await contentOf(deps, update.id)).toBe('提交信息用英文，不加类型前缀')
+      const text = renderSaveResult(first)
+      expect(text).toContain(`「提交规范」（${update.id}）是全局记忆`)
+      expect(text).toMatch(/confirmGlobal: "\d{2}"/)
+      expect(await contentOf(deps, update.id)).toBe('提交规范：提交信息用英文')
+      expect(await executeSave({ ...update, confirmGlobal: confirmCodeOf(first) }, fakeExec(), deps)).toMatchObject({ kind: 'updated' })
+      expect(await contentOf(deps, update.id)).toBe('提交规范：提交信息用英文，不加类型前缀')
     })
 
-    it('收到引导后不带 confirmGlobal 重发：仍回引导', async () => {
+    it('第一次就预填确认：填 "true" 或猜错的码照样回引导，引导里说明码不对、给出现在的码', async () => {
       const deps = makeDeps()
       const update = await globalMemory(deps)
-      await executeSave(update, fakeExec(), deps)
-      const { confirmGlobal: _, ...unconfirmed } = update
-      expect(await executeSave(unconfirmed, fakeExec(), deps)).toMatchObject({ kind: 'rejected', code: 'global-update-unconfirmed' })
-      expect(await executeSave(update, fakeExec(), deps)).toMatchObject({ kind: 'updated' })
+      const code = globalConfirmCode('s1', (await deps.store.get(update.id))!)
+      const wrong = String((Number(code) + 1) % 100).padStart(2, '0')
+      for (const guess of ['true', 'yes', wrong, '', `${code}0`]) {
+        const r = await executeSave({ ...update, confirmGlobal: guess }, fakeExec(), deps)
+        expect(r).toMatchObject({ kind: 'rejected', code: 'global-update-unconfirmed' })
+        expect(renderSaveResult(r)).toContain(`确认码 ${JSON.stringify(guess)} 不是这条记忆现在的码`)
+        expect(confirmCodeOf(r)).toBe(code)
+      }
+      expect(await contentOf(deps, update.id)).toBe('提交规范：提交信息用英文')
     })
 
-    it('引导只抵一次改写：写成后再改同一条，重新回引导', async () => {
+    it('一位数的码按补零算："7" 等同 "07"', async () => {
       const deps = makeDeps()
       const update = await globalMemory(deps)
-      await executeSave(update, fakeExec(), deps)
-      await executeSave(update, fakeExec(), deps)
-      const again = { ...update, content: '提交信息用英文祈使句' }
-      expect(await executeSave(again, fakeExec(), deps)).toMatchObject({ kind: 'rejected', code: 'global-update-unconfirmed' })
-      expect(await executeSave(again, fakeExec(), deps)).toMatchObject({ kind: 'updated' })
+      const code = globalConfirmCode('s1', (await deps.store.get(update.id))!)
+      const given = code.startsWith('0') ? code.slice(1) : code
+      expect(await executeSave({ ...update, confirmGlobal: ` ${given} ` }, fakeExec(), deps)).toMatchObject({ kind: 'updated' })
     })
 
-    it('收到引导后改存项目记忆，同一会话再预填 confirmGlobal 改全局：重新回引导', async () => {
+    it('同一轮改几条全局记忆：各回各的码，按各自的码重发全都写进去', async () => {
+      const deps = makeDeps()
+      const updates = [await globalMemory(deps, '提交规范'), await globalMemory(deps, '回复语言'), await globalMemory(deps, '代码风格')]
+      const guided = []
+      for (const u of updates) guided.push(await executeSave(u, fakeExec(), deps))
+      for (const [i, u] of updates.entries()) {
+        expect(renderSaveResult(guided[i]!)).toContain(`「${u.name}」（${u.id}）`)
+        expect(await executeSave({ ...u, confirmGlobal: confirmCodeOf(guided[i]!) }, fakeExec(), deps)).toMatchObject({ kind: 'updated' })
+      }
+    })
+
+    it('引导之后隔了别的保存、隔了用户的下一轮：码不变，带码重发照样写', async () => {
       const deps = makeDeps()
       const update = await globalMemory(deps)
-      await executeSave(update, fakeExec(), deps)
-      expect(await executeSave({ ...base, name: '本仓库提交不加前缀', content: '这个仓库的提交不加类型前缀', summary: '本仓库提交规范' }, fakeExec(), deps)).toMatchObject({ kind: 'saved' })
-      expect(await executeSave(update, fakeExec(), deps)).toMatchObject({ kind: 'rejected', code: 'global-update-unconfirmed' })
-      expect(await contentOf(deps, update.id)).toBe('提交信息用英文')
+      const guided = await executeSave(update, fakeExec(), deps)
+      expect(await executeSave({ ...base, scope: 'workspace', name: '本仓库提交不加前缀', content: '这个仓库的提交不加类型前缀', summary: '本仓库提交规范' }, fakeExec(), deps)).toMatchObject({ kind: 'saved' })
+      const nextTurn: SaveToolDeps = { ...deps, host: { saveContextOf: async () => ({ workspacePath: '/proj', session: { id: 's1', lastSeq: 9, turnStartSeq: 8 } }) } }
+      expect(await executeSave({ ...update, confirmGlobal: confirmCodeOf(guided) }, fakeExec(), nextTurn)).toMatchObject({ kind: 'updated' })
     })
 
-    it('引导按会话算：别的会话回过引导，这个会话照样先回引导', async () => {
+    it('召回统计变了码不变；写成后同一条再改要新码，旧码不再管用', async () => {
+      const deps = makeDeps()
+      const update = await globalMemory(deps)
+      const guided = await executeSave(update, fakeExec(), deps)
+      const current = (await deps.store.get(update.id))!
+      await deps.store.put({ ...current, recallCount: current.recallCount + 3, lastRecalledAt: current.updatedAt + 1 })
+      const oldCode = confirmCodeOf(guided)
+      expect(await executeSave({ ...update, confirmGlobal: oldCode }, fakeExec(), deps)).toMatchObject({ kind: 'updated' })
+      const again = { ...update, content: '提交规范：提交信息用英文祈使句' }
+      const newCode = globalConfirmCode('s1', (await deps.store.get(update.id))!)
+      // 两位数会偶然撞码：撞上时旧码恰好仍对，这个例子只在不撞时断言旧码失效
+      if (newCode !== oldCode) {
+        const stale = await executeSave({ ...again, confirmGlobal: oldCode }, fakeExec(), deps)
+        expect(stale).toMatchObject({ kind: 'rejected', code: 'global-update-unconfirmed' })
+        expect(confirmCodeOf(stale)).toBe(newCode)
+      }
+      expect(await executeSave({ ...again, confirmGlobal: newCode }, fakeExec(), deps)).toMatchObject({ kind: 'updated' })
+    })
+
+    it('码绑会话：同一条记忆在两个会话里的码按会话各算', async () => {
       const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
       const shared = makeDeps(store)
       const inSession = (id: string): SaveToolDeps => ({ ...shared, host: { saveContextOf: async () => ({ workspacePath: '/proj', session: { id, lastSeq: 3 } }) } })
       const update = await globalMemory(inSession('a'))
-      await executeSave(update, fakeExec(), inSession('a'))
-      expect(await executeSave(update, fakeExec(), inSession('b'))).toMatchObject({ kind: 'rejected', code: 'global-update-unconfirmed' })
+      const target = (await store.get(update.id))!
+      // 找一对码不同的会话 id（两位数会撞，固定挑不撞的）
+      const other = ['b', 'c', 'd', 'e', 'f'].find(id => globalConfirmCode(id, target) !== globalConfirmCode('a', target))!
+      const guidedA = await executeSave(update, fakeExec(), inSession('a'))
+      expect(await executeSave({ ...update, confirmGlobal: confirmCodeOf(guidedA) }, fakeExec(), inSession(other))).toMatchObject({ kind: 'rejected', code: 'global-update-unconfirmed' })
+      expect(await contentOf(shared, update.id)).toBe('提交规范：提交信息用英文')
+    })
+
+    it('引导和重发之间被手改过：多回一次引导，用新码重发就写', async () => {
+      const deps = makeDeps()
+      const update = await globalMemory(deps)
+      const guided = await executeSave(update, fakeExec(), deps)
+      const current = (await deps.store.get(update.id))!
+      await deps.store.put({ ...current, content: '提交规范：提交信息用英文（手改）', updatedAt: current.updatedAt + 1000 })
+      const newCode = globalConfirmCode('s1', (await deps.store.get(update.id))!)
+      let result = await executeSave({ ...update, confirmGlobal: confirmCodeOf(guided) }, fakeExec(), deps)
+      if (newCode !== confirmCodeOf(guided)) {
+        expect(result).toMatchObject({ kind: 'rejected', code: 'global-update-unconfirmed' })
+        expect(confirmCodeOf(result)).toBe(newCode)
+        result = await executeSave({ ...update, confirmGlobal: newCode }, fakeExec(), deps)
+      }
+      expect(result).toMatchObject({ kind: 'updated' })
+    })
+
+    it('没有工作目录的会话改全局记忆不用确认', async () => {
+      const deps = makeDeps()
+      const update = await globalMemory(deps)
+      const noWorkspace: SaveToolDeps = { ...deps, host: { saveContextOf: async () => ({ workspacePath: undefined, session: { id: 's1', lastSeq: 3 } }) } }
+      expect(await executeSave(update, fakeExec(), noWorkspace)).toMatchObject({ kind: 'updated' })
     })
   })
 

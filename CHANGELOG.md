@@ -12,15 +12,16 @@ All notable changes to this project are documented here. The format follows
   when there is a reason or a source behind it, it follows in the same
   paragraph as "原因：" or "依据：". The text is guided to leave out
   bracketed asides and notes such as "the user told me", since the record
-  already keeps where and when a memory came from. Existing
+  already keeps where and when a memory came from. A related memory is
+  referred to by its name rather than its id. Existing
   memories are not rewritten. If you edited the preset `procedure` or
   `decision` type, your copy keeps the old examples until you restore that
   type to its default in settings.
 - The `reference` type now covers where project materials live: file
   paths, links, documents and system entries. Who to ask about something is
   saved as project info instead. Reference memories now show their summary
-  in the conversation, so the model sees where a document is without looking
-  it up first.
+  in the conversation, and the model goes straight to the location in it,
+  searching for the full text only when the summary is not enough.
 - Long memories on the memory page (Browse, Recently deleted and the cards
   under To do) are folded to six lines, with an "Expand" button to read the
   rest. Search results still show the full text, so a match is never hidden.
@@ -37,10 +38,13 @@ All notable changes to this project are documented here. The format follows
   project. Now when it tries to change a global memory from a project,
   nothing is written at first; it is reminded that the change will reach
   every project, and saves project-only rules as a project memory instead.
-  It writes the global memory only if it resends the change right after
-  that reminder. Conversations outside a project are not affected. In the
-  chat card, a rewritten global memory is marked "Global memory, applies to
-  every project".
+  The reminder names the memory and gives a short confirmation code; the
+  global memory is written only when the change is resent with that code.
+  Each memory has its own code, so several can be confirmed in one go, and
+  the model can ask you first and confirm in the next message. Conversations
+  outside a project are not affected. While a change waits for
+  confirmation, the chat card says so instead of "Did not remember"; once
+  written, it is marked "Global memory, applies to every project".
 - The memory page no longer shows full local paths in the project header and
   the storage line, which exposed your user name in screenshots and screen
   shares.
@@ -50,7 +54,14 @@ All notable changes to this project are documented here. The format follows
 - After every memory in a project was deleted, its page showed automatic
   checkups as following the "All" setting and the project as never checked.
   It now keeps the project's own setting and last checkup time, and no
-  automatic checkup runs for it until it has memories again.
+  automatic checkup runs for it until it has memories again. The status line
+  under "All" no longer counts such a project.
+- "Move to project…" under To do lists projects by name instead of full
+  local paths; two projects with the same name are told apart by their
+  parent folder.
+- Saving a memory that replaces an older one (`supersedes`) was flagged as
+  a duplicate of the very memory it replaces. The memory being replaced is
+  now left out of the duplicate check.
 
 ## [0.2.0-beta.4] - 2026-11-18
 

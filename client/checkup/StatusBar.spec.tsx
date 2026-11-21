@@ -203,6 +203,21 @@ describe('「全部」的状态条', () => {
     act(() => { gateway.setView('checkups', checkups()) })
     expect(second()).toHaveTextContent(/^2 个项目和全局，共 5 条记忆\s*·\s*上次体检 10 月 16 日$/)
   })
+
+  it('记忆删光的项目（不可体检）不进第二行：不写它的单独设置，也不拿它的体检时间当最近一次', () => {
+    const OLD: Scope = { kind: 'workspace', workspacePath: '/w/old' }
+    const withOld = (base: CheckupView): CheckupView => ({
+      ...base,
+      scopes: [...base.scopes, { ...base.scopes[1]!, scope: OLD, isCheckable: false, isOwn: true, frequency: 1, lastCheckupAt: NOW - HOUR }],
+    })
+    const { gateway } = open({ view: 'todo', scope: { kind: 'all' } }, { views: { checkups: withOld(checkups({ all: 7 })) } })
+    expect(second()).toHaveTextContent(/^2 个项目和全局，共 5 条记忆\s*·\s*上次体检 10 月 16 日\s*·\s*每 7 天自动体检全部记忆$/)
+    expect(second()).not.toHaveTextContent('old')
+    // 可体检的项目照常：单独设置写出来，更晚的体检时间当最近一次
+    act(() => { gateway.setView('checkups', withOld(checkups({ all: 7, scopes: { '/w/app': { isOwn: true, frequency: 3, lastCheckupAt: NOW - HOUR } } }))) })
+    expect(second()).toHaveTextContent(/上次体检 10 月 17 日\s*·\s*每 7 天自动体检，app 单独设置$/)
+    expect(second()).not.toHaveTextContent('old')
+  })
 })
 
 describe('体检在配置文件里关闭', () => {
