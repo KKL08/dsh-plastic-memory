@@ -250,7 +250,7 @@ async function runMemOp(w: MemoryWorld, op: MemOp, index: number, hooks: OpHooks
     }
     case 'modelRewrite': {
       const r = await runSavePipeline(
-        candidate({ action: 'update', id: IDS[op.id], name: NAMES[op.id], type: 'knowledge', scope: 'workspace', content: `模型改写 ${index}`, summary: `模型改写 ${index}`, ...(op.isForced ? { force: true } : {}) }),
+        candidate({ action: 'update', id: IDS[op.id], confirmGlobal: true, name: NAMES[op.id], type: 'knowledge', scope: 'workspace', content: `模型改写 ${index}`, summary: `模型改写 ${index}`, ...(op.isForced ? { force: true } : {}) }),
         { store: withCommitPoint(w.store, hooks), registry, workspacePath: W, session: { id: 's-model', lastSeq: 1 }, snapshots: w.snapshots, decisions: w.decisions, now: () => t },
       )
       return r

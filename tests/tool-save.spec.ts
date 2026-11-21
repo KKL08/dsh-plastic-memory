@@ -18,6 +18,7 @@ function makeDeps(store = new MemoryStore(new InMemoryTable(), undefined, new In
     registry,
     snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()),
     host: { saveContextOf: async () => ({ workspacePath: '/proj', session: { id: 's1', lastSeq: 3 } }) },
+    globalUpdateGuided: new Map(),
   }
 }
 
@@ -103,14 +104,72 @@ describe('executeSave', () => {
     if (created.kind !== 'saved') throw new Error(created.kind)
     // 降级成了 workspace 候选，手工提到 global 模拟 promote 后
     await store.put({ ...created.record, scope: 'global', workspacePath: undefined } as never)
-    const updated = await executeSave(
-      { ...base, action: 'update', id: created.record.id, name: '全局偏好', content: '新全局内容', summary: 'pref' },
-      fakeExec(), deps)
+    const update = { ...base, action: 'update' as const, confirmGlobal: true, id: created.record.id, name: '全局偏好', content: '新全局内容', summary: 'pref' }
+    await executeSave(update, fakeExec(), deps) // 第一次回引导
+    const updated = await executeSave(update, fakeExec(), deps)
     if (updated.kind !== 'updated') throw new Error(updated.kind)
     const list = await snapshots.list()
     expect(list).toHaveLength(1)
     expect(list[0].operation).toBe('pre-update')
     expect(list[0].data[0].content).toBe('旧全局内容')
+  })
+
+  // 项目会话里改全局记忆：引导要真的回到模型面前，预先填 confirmGlobal 跳不过去
+  describe('改写全局记忆先回引导', () => {
+    async function globalMemory(deps: SaveToolDeps) {
+      const created = await executeSave({ ...base, name: '提交规范', content: '提交信息用英文', summary: '提交规范' }, fakeExec(), deps)
+      if (created.kind !== 'saved') throw new Error(created.kind)
+      await deps.store.put({ ...created.record, scope: 'global', workspacePath: undefined } as never)
+      return { ...base, action: 'update' as const, id: created.record.id, name: '提交规范', content: '提交信息用英文，不加类型前缀', summary: '提交规范', confirmGlobal: true }
+    }
+    const contentOf = async (deps: SaveToolDeps, id: string) => (await deps.store.get(id))?.content
+
+    it('第一次就带 confirmGlobal：照样先回引导、不写入；收到引导后重发才写', async () => {
+      const deps = makeDeps()
+      const update = await globalMemory(deps)
+      const first = await executeSave(update, fakeExec(), deps)
+      expect(first).toMatchObject({ kind: 'rejected', code: 'global-update-unconfirmed' })
+      expect(await contentOf(deps, update.id)).toBe('提交信息用英文')
+      expect(await executeSave(update, fakeExec(), deps)).toMatchObject({ kind: 'updated' })
+      expect(await contentOf(deps, update.id)).toBe('提交信息用英文，不加类型前缀')
+    })
+
+    it('收到引导后不带 confirmGlobal 重发：仍回引导', async () => {
+      const deps = makeDeps()
+      const update = await globalMemory(deps)
+      await executeSave(update, fakeExec(), deps)
+      const { confirmGlobal: _, ...unconfirmed } = update
+      expect(await executeSave(unconfirmed, fakeExec(), deps)).toMatchObject({ kind: 'rejected', code: 'global-update-unconfirmed' })
+      expect(await executeSave(update, fakeExec(), deps)).toMatchObject({ kind: 'updated' })
+    })
+
+    it('引导只抵一次改写：写成后再改同一条，重新回引导', async () => {
+      const deps = makeDeps()
+      const update = await globalMemory(deps)
+      await executeSave(update, fakeExec(), deps)
+      await executeSave(update, fakeExec(), deps)
+      const again = { ...update, content: '提交信息用英文祈使句' }
+      expect(await executeSave(again, fakeExec(), deps)).toMatchObject({ kind: 'rejected', code: 'global-update-unconfirmed' })
+      expect(await executeSave(again, fakeExec(), deps)).toMatchObject({ kind: 'updated' })
+    })
+
+    it('收到引导后改存项目记忆，同一会话再预填 confirmGlobal 改全局：重新回引导', async () => {
+      const deps = makeDeps()
+      const update = await globalMemory(deps)
+      await executeSave(update, fakeExec(), deps)
+      expect(await executeSave({ ...base, name: '本仓库提交不加前缀', content: '这个仓库的提交不加类型前缀', summary: '本仓库提交规范' }, fakeExec(), deps)).toMatchObject({ kind: 'saved' })
+      expect(await executeSave(update, fakeExec(), deps)).toMatchObject({ kind: 'rejected', code: 'global-update-unconfirmed' })
+      expect(await contentOf(deps, update.id)).toBe('提交信息用英文')
+    })
+
+    it('引导按会话算：别的会话回过引导，这个会话照样先回引导', async () => {
+      const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
+      const shared = makeDeps(store)
+      const inSession = (id: string): SaveToolDeps => ({ ...shared, host: { saveContextOf: async () => ({ workspacePath: '/proj', session: { id, lastSeq: 3 } }) } })
+      const update = await globalMemory(inSession('a'))
+      await executeSave(update, fakeExec(), inSession('a'))
+      expect(await executeSave(update, fakeExec(), inSession('b'))).toMatchObject({ kind: 'rejected', code: 'global-update-unconfirmed' })
+    })
   })
 
   it('改写记下撤销记录：会话取上下文、调用 id 取这次工具调用', async () => {
@@ -272,6 +331,10 @@ describe('renderSaveDescription（memory_save 工具描述来源）', () => {
 
   it('不再交代手改保护：改写用户改过的记忆不用先问', () => {
     expect(registry.renderSaveDescription()).not.toContain('手改')
+  })
+
+  it('保存说明交代更新全局记忆的边界：只并入对所有项目都成立的，只对当前项目成立的新建项目记忆', () => {
+    expect(registry.renderSaveDescription()).toContain('更新全局记忆时，只并入对所有项目都成立的内容；只对当前项目成立的（用户说「这个仓库」「这个项目」），新建一条 workspace 记忆，全局那条保持原样。')
   })
 
   it('交代记录是过程动作：回复不特意说记下了，用户明确要求记住时才应一句', () => {

@@ -75,13 +75,14 @@ describe('memory_save 绑定', () => {
   const makeTool = (store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())) => createSaveTool({
     store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()),
     host: { saveContextOf: async () => ({ workspacePath: '/proj', session: { id: 's', lastSeq: 1 } }) },
+    globalUpdateGuided: new Map(),
   })
   const legal = { action: 'create', name: '标题', type: 'preference', scope: 'global', content: '内容', summary: '摘要', sourceMode: 'user-explicit' }
 
   const describedParam = (name: string) => (schemaOf(makeTool()) as { properties: Record<string, { description?: string }> }).properties[name]!.description
 
   it('content 的参数说明：结论在前、原因依据接在句号后、第三人称陈述标明主体、概括不搬原话、出处和经过不进正文、只写有依据的内容、具体名称和数值照写、不写很快过时的细节', () => {
-    expect(describedParam('content')).toBe('整条正文，会替换原来的全部正文；只改其中几处用 edits。按所选类型说明里的「正文」写法组织：结论在前，类型说明里的「原因：」「依据：」「背景：」接在句号后面，同一段写完、不换行（类型说明没写正文写法的，写清事实和它的依据或情境）。用第三人称陈述句并标明主体（「用户…」「项目定了…」），提到用户时每次都写「用户」，不用「他」「她」代称，日后读到时能和用户当下的话分开。用自己的话概括清楚，去掉口语和语气词；补充说明直接写进句子，正文里不加括号补注：别名和缩写放进 tags，日期按对话里的精度写，对话里没提到的细节直接略过；人名、地名、数字、单位、命令和路径照原样写，不概括成类别；适用范围和确定程度照对话里的写。正文只写这件事本身：这条是用户告诉你的、什么时候记的，记录会自动保存；第三方出处（同事、文档、通知）照常写进正文或「依据：」；写记忆时的操作经过（写入被拒、重试）留在会话里。只写对话或资料里有依据的内容，不替用户编理由。怎么用由类型统一交代，正文里不另列泛泛的使用场景和注意事项；不写行号、临时路径这类很快过时的细节，改用稳定的位置描述。完整经过可以用 memory_source 回查，不用抄进正文。create 和整条 update 必填；用 edits 时不传就保留原值。')
+    expect(describedParam('content')).toBe('整条正文，会替换原来的全部正文；只改其中几处用 edits。按所选类型说明里的「正文」写法组织：结论在前，类型说明里的「原因：」「依据：」「背景：」接在句号后面，同一段写完、不换行（类型说明没写正文写法的，写清事实和它的依据或情境）。用第三人称陈述句并标明主体（「用户…」「项目定了…」），提到用户时每次都写「用户」，不用「他」「她」代称，日后读到时能和用户当下的话分开。用自己的话概括清楚，去掉口语和语气词；补充说明直接写进句子，正文里不加括号补注：别名和缩写放进 tags，日期按对话里的精度写，对话里没提到的细节直接略过；人名、地名、数字、单位、命令和路径照原样写，不概括成类别；适用范围和确定程度照对话里的写。正文只写这件事本身：这条是用户告诉你的、什么时候记的，记录会自动保存；第三方出处（同事、文档、通知）照常写进正文或「依据：」；写记忆时的操作经过（写入被拒、重试）留在会话里。只写对话或资料里有依据的内容，不替用户编理由。怎么用由类型统一交代，正文里不另列泛泛的使用场景和注意事项；不写行号、临时路径这类很快过时的细节，改用稳定的位置描述。完整经过可以用 memory_source 回查，不用抄进正文。提到别的记忆时写它的名称，不写记忆 id。create 和整条 update 必填；用 edits 时不传就保留原值。')
   })
 
   it('supersedes 的参数说明：填被取代的旧记忆 id，和 update 分工', () => {
@@ -91,6 +92,10 @@ describe('memory_save 绑定', () => {
   it('summary 与 tags 分工：summary 一句话说清讲什么，tags 只写文本里没有的检索词', () => {
     expect(describedParam('summary')).toBe('一句话说清这条记忆讲什么，显示在索引里，供人和模型判断相关不相关；不复述 name，不堆关键词。create 和整条 update 必填；用 edits 时不传就保留原值。')
     expect(describedParam('tags')).toBe('只写正文、name、summary 里都没出现、但以后可能被拿来搜它的词：同义词、中英文别名、缩写。不写泛化概念。用 edits 时不传就保留原标签。')
+  })
+
+  it('confirmGlobal 的参数说明：收到全局记忆提示之后用，确认对所有项目都成立才填 true 重发', () => {
+    expect(describedParam('confirmGlobal')).toBe('memory_save 回了「这条是全局记忆」的提示之后用：确认这次改动对所有项目都成立，填 true 重发。')
   })
 
   it('sourceMode 的参数说明逐一定义五种来源，推断链上有一步是推出来的就填 agent-inferred', () => {

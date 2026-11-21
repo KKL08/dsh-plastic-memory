@@ -462,7 +462,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
               ? (
                 <div key={change.decisionId} className="pm-side-change" data-memory-id={change.memoryId}>
                   {card(byId.get(change.memoryId) ?? change.before)}
-                  <ModelChangeLine session={session} change={change} kind="rewrite" after={byId.get(change.memoryId)} />
+                  <ModelChangeLine session={session} change={change} kind="rewrite" after={byId.get(change.memoryId)} isGlobal={change.before.scope === 'global'} />
                 </div>
               )
               : (

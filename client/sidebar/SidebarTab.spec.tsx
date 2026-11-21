@@ -1,6 +1,6 @@
 // 右侧栏「记忆」tab：四种状态、用量条口径与两种超限、就地裁决与撤销、新记的实时增加、底部入口跳转。全部对内存假网关。
 import { describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import {
   GUI_VIEW_VERSION,
   type HealthView, type LibraryView, type MemoryCard, type ModelChange, type PendingItem, type PendingView, type ProposalAction, type ProposalOp, type SessionView,
@@ -458,6 +458,16 @@ describe('SidebarTab 这次新写入的：模型改写、替代', () => {
     await act(async () => { fireEvent.click(group.getByRole('button', { name: '撤销修改' })) })
     expect(gateway.executed).toEqual([{ sessionId: 's1', command: { cmd: 'undo', decisionId: 'pd_r' } }])
     expect(group.getByText('已撤销')).toBeInTheDocument()
+  })
+
+  it('改写的是全局记忆（按改前那份）：「已改写」后面写「全局记忆，影响所有项目」；本项目记忆不写', () => {
+    const globalRewrite = { ...rewrite, before: { ...pref, scope: 'global' as const, workspacePath: undefined } }
+    setup({ library: withChanges([globalRewrite]), session: snapshot(), pending: pending() })
+    const group = within(screen.getByRole('region', { name: '这次新写入的' }))
+    expect(group.getByText('全局记忆，影响所有项目').closest('.pm-change-head')).not.toBeNull()
+    cleanup()
+    setup({ library: withChanges([rewrite]), session: snapshot(), pending: pending() })
+    expect(within(screen.getByRole('region', { name: '这次新写入的' })).queryByText('全局记忆，影响所有项目')).toBeNull()
   })
 
   it('同一条改写了几次只列最近那次；这次对话里新记的那条又被改写，不另列（新写入那行已经是它）', () => {

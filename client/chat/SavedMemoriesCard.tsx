@@ -11,6 +11,7 @@
  * 模型标成全局提升候选的（全部记忆视图里的 promotion）：折叠行末尾「· N 条可提升为全局」，展开后那条元信息带「可提升为全局」，
  * 下方「留在本项目」「提升为全局」，处理过的换成结果文字（见 promote-in-place.tsx）。
  * 模型改写已有记忆（update）的也列在这里：折叠行写「改写了 N 条」，展开后那条元信息带「已改写」，下方「改前 / 改后」对照与「撤销修改」；
+ * 改写的是全局记忆（按改前那份，参数里的作用域可能填错）时「已改写」后接「全局记忆，影响所有项目」，过期认不出改前那份的不写；
  * 这次调用替代了旧记忆的，那条下方一行「替代了「旧名」」与「撤销修改」，折叠行末尾「· 替代了 N 条旧记忆」（见 model-change.tsx）。
  * 改动按工具调用 id 认领全部记忆视图的 modelChanges，会话结束后照样认得；视图里没有、且调用已超出保留窗口的改写写「已超过 14 天」。
  * 只传 edits 的改写，参数里没有改后的整条：卡片和「改后」按改前快照应用这次的 edits 算出来（同整条改写只认自己这次调用，之后再被改、撤销也不变），
@@ -94,7 +95,9 @@ function SavedRow({ session, item, scope, promotion, rewrite, superseded, expire
   const isBusy = runner.stateOf(ROW).kind === 'busy'
   const changes = (
     <>
-      {rewrite !== undefined ? <ModelChangeLine session={session} change={rewrite} kind="rewrite" after={item.memory} /> : null}
+      {rewrite !== undefined
+        ? <ModelChangeLine session={session} change={rewrite} kind="rewrite" after={item.memory} isGlobal={rewrite !== 'expired' && rewrite.before.scope === 'global'} />
+        : null}
       {superseded.map(c => <ModelChangeLine key={c.decisionId} session={session} change={c} kind="supersede" />)}
       {expiredSupersedes > 0 ? <ModelChangeLine session={session} change="expired" kind="supersede" count={expiredSupersedes} /> : null}
     </>

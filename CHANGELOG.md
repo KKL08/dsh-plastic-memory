@@ -16,6 +16,11 @@ All notable changes to this project are documented here. The format follows
   memories are not rewritten. If you edited the preset `procedure` or
   `decision` type, your copy keeps the old examples until you restore that
   type to its default in settings.
+- The `reference` type now covers where project materials live: file
+  paths, links, documents and system entries. Who to ask about something is
+  saved as project info instead. Reference memories now show their summary
+  in the conversation, so the model sees where a document is without looking
+  it up first.
 - Long memories on the memory page (Browse, Recently deleted and the cards
   under To do) are folded to six lines, with an "Expand" button to read the
   rest. Search results still show the full text, so a match is never hidden.
@@ -27,6 +32,15 @@ All notable changes to this project are documented here. The format follows
   keeps testing it too.
 
 ### Fixed
+- The model could fold a rule meant for one project, such as "this repo
+  doesn't use commit prefixes", into a global memory that applies to every
+  project. Now when it tries to change a global memory from a project,
+  nothing is written at first; it is reminded that the change will reach
+  every project, and saves project-only rules as a project memory instead.
+  It writes the global memory only if it resends the change right after
+  that reminder. Conversations outside a project are not affected. In the
+  chat card, a rewritten global memory is marked "Global memory, applies to
+  every project".
 - The memory page no longer shows full local paths in the project header and
   the storage line, which exposed your user name in screenshots and screen
   shares.
