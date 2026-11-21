@@ -302,7 +302,7 @@ describe('密钥硬删', () => {
     if (updated.kind !== 'updated') throw new Error(updated.kind)
     expect(updated.warnings?.map(w => w.code)).toEqual([SECRET_SUSPECTED_WARNING])
 
-    const tool = createSaveTool({ store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), host: { saveContextOf: async () => ({ workspacePath: WS, session: { id: 's', lastSeq: 1 } }) }, globalUpdateGuided: new Map() })
+    const tool = createSaveTool({ store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), host: { saveContextOf: async () => ({ workspacePath: WS, session: { id: 's', lastSeq: 1 } }) } })
     const params = (tool.parameters as unknown as { properties: Record<string, { description?: string }> }).properties
     expect(params.force.description).toBe('跳过结构去重与疑似密钥拦截（用户已确认）')
   })

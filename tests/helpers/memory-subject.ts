@@ -2,6 +2,7 @@
  * 记忆写路径的交错测试对象：接线层同款的真实模块（文件表、侧表、存储、快照、账本、界面命令处理器）建在临时目录里，
  * 操作走真实入口。用它的测试文件要像 write-interleavings.spec.ts 那样把 node:fs/promises 换成夹具包过的那份。
  */
+import { confirmCodeOf } from './global-confirm.ts'
 import { readdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import fc from 'fast-check'
@@ -249,10 +250,15 @@ async function runMemOp(w: MemoryWorld, op: MemOp, index: number, hooks: OpHooks
       })
     }
     case 'modelRewrite': {
-      const r = await runSavePipeline(
-        candidate({ action: 'update', id: IDS[op.id], confirmGlobal: true, name: NAMES[op.id], type: 'knowledge', scope: 'workspace', content: `模型改写 ${index}`, summary: `模型改写 ${index}`, ...(op.isForced ? { force: true } : {}) }),
-        { store: withCommitPoint(w.store, hooks), registry, workspacePath: W, session: { id: 's-model', lastSeq: 1 }, snapshots: w.snapshots, decisions: w.decisions, now: () => t },
-      )
+      // 像模型一样：改的是全局记忆就先收到引导，抄引导里的确认码重发；其间被别处改过、码变了，就照新引导再发一次
+      const args = candidate({ action: 'update', id: IDS[op.id], name: NAMES[op.id], type: 'knowledge', scope: 'workspace', content: `模型改写 ${index}`, summary: `模型改写 ${index}`, ...(op.isForced ? { force: true } : {}) })
+      const deps = { store: withCommitPoint(w.store, hooks), registry, workspacePath: W, session: { id: 's-model', lastSeq: 1 }, snapshots: w.snapshots, decisions: w.decisions, now: () => t }
+      let r = await runSavePipeline(args, deps)
+      for (let attempt = 0; attempt < 3 && r.kind === 'rejected' && r.code === 'global-update-unconfirmed'; attempt++) {
+        r = await runSavePipeline({ ...args, confirmGlobal: confirmCodeOf(r) }, deps)
+      }
+      // 重发几次还在等确认，说明确认环节卡住了：当场失败，不让串行和交错两边一起停在这里而对上
+      if (r.kind === 'rejected' && r.code === 'global-update-unconfirmed') throw new Error(`全局改写重发 3 次仍未写入：${r.reason}`)
       return r
     }
     case 'external':
