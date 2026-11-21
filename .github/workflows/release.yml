@@ -1,8 +1,10 @@
 name: release
 
-# Publishes the GitHub Release when a v* tag is pushed. Notes come from the
-# matching CHANGELOG section; a version with a pre-release suffix (-beta, -rc)
-# is marked as a pre-release. npm publishing stays manual.
+# Checks every pushed v* tag against package.json and the CHANGELOG, and
+# publishes the GitHub Release for stable versions only. A version with a
+# pre-release suffix (-beta, -rc) gets no Release unless one is created by
+# hand. Notes come from the matching CHANGELOG section. npm publishing stays
+# manual.
 on:
   push:
     tags: ['v*']
@@ -43,11 +45,11 @@ jobs:
             exit 1
           fi
       - name: Create the GitHub Release
+        if: steps.v.outputs.prerelease == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
             --title "${{ steps.v.outputs.version }}" \
             --notes-file notes.md \
-            --verify-tag \
-            ${{ steps.v.outputs.prerelease == 'true' && '--prerelease' || '' }}
+            --verify-tag
