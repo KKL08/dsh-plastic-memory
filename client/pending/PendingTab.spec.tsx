@@ -2073,13 +2073,29 @@ describe('待处理：放错层只给挪层', () => {
     const group = within(cardOf()).getByRole('group', { name: '移到哪个项目' })
     expect(within(group).getAllByRole('radio').map(r => (r as HTMLInputElement).value)).toEqual(['/w/app', '/w/blog'])
     expect(within(group).getByRole('radio', { name: /^app/ })).toBeChecked()
-    // 路径会截断：悬停看全文
-    expect(within(group).getByText('/w/blog')).toHaveAttribute('title', '/w/blog')
+    // 只写项目名，不露本机路径（截图、共享屏幕时会带出用户名和目录）
+    expect(within(group).getAllByRole('radio').map(r => r.closest('label')!.textContent)).toEqual(['app', 'blog'])
     expect(within(cardOf()).queryByRole('button', { name: '不再提醒' })).toBeNull()
     fireEvent.click(within(cardOf()).getByRole('button', { name: '取消' }))
     expect(within(cardOf()).queryByRole('group', { name: '移到哪个项目' })).toBeNull()
     expect(within(cardOf()).getByRole('button', { name: '移到项目…' })).toBeInTheDocument()
     expect(commands()).toEqual([])
+  })
+
+  it('项目同名时加上一级目录区分；面板的文字和悬停提示里都没有绝对路径', () => {
+    const layer = (workspacePath: string) => ({ layer: { kind: 'workspace', workspacePath }, items: [] })
+    setupMove([toProject], {
+      views: {
+        pending: view(toProject), health: scannedHealth(NOW),
+        library: { version: GUI_VIEW_VERSION, layers: [{ layer: { kind: 'global' }, items: [] }, layer('/w/clients/web'), layer('/w/admin/web')] } as never,
+      },
+    })
+    openPicker()
+    const group = within(cardOf()).getByRole('group', { name: '移到哪个项目' })
+    const labels = Object.fromEntries(within(group).getAllByRole('radio').map(r => [(r as HTMLInputElement).value, r.closest('label')!.textContent]))
+    expect(labels).toEqual({ '/w/app': 'app', '/w/blog': 'blog', '/w/admin/web': 'admin/web', '/w/clients/web': 'clients/web' })
+    expect(group.textContent).not.toMatch(/\/w\//)
+    for (const el of group.querySelectorAll('[title]')) expect(el.getAttribute('title')).not.toMatch(/\/w\//)
   })
 
   it('页面在全局：默认选借来的会话所在的项目；全部记忆里有记忆的项目也列出来', () => {
