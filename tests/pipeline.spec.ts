@@ -1185,14 +1185,14 @@ describe('runSavePipeline：改写全局记忆要确认', () => {
 
   it('不同记忆、不同会话、改写前后：码按各自现算（固定挑不撞的例子）', () => {
     const a = record({ id: 'mem_a', scope: 'global', workspacePath: undefined })
-    expect(globalConfirmCode('s1', a)).toMatch(/^\d{2}$/)
+    expect(globalConfirmCode('s1', a)).toMatch(/^\d{4}$/)
     expect(globalConfirmCode('s1', a)).toBe(globalConfirmCode('s1', { ...a }))
     const variants = [
       globalConfirmCode('s1', a),
       ...['s2', 's3', 's4'].map(id => globalConfirmCode(id, a)),
       ...[1, 2, 3].map(n => globalConfirmCode('s1', { ...a, updatedAt: a.updatedAt + n })),
     ]
-    // 七个码里至少有不同的：码确实随会话和改写变化（两位数会偶然撞，不断言两两不同）
+    // 七个码里至少有不同的：码确实随会话和改写变化（码会偶然撞，不断言两两不同）
     expect(new Set(variants).size).toBeGreaterThan(1)
   })
 

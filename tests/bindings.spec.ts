@@ -93,8 +93,9 @@ describe('memory_save 绑定', () => {
     expect(describedParam('tags')).toBe('只写正文、name、summary 里都没出现、但以后可能被拿来搜它的词：同义词、中英文别名、缩写。不写泛化概念。用 edits 时不传就保留原标签。')
   })
 
-  it('confirmGlobal 的参数说明：填这条记忆最近一次未保存提示里的确认码，第一次调用不填', () => {
-    expect(describedParam('confirmGlobal')).toBe('确认改写全局记忆时用：填这条记忆最近一次未保存提示里给的确认码（如 "37"）；第一次调用不填。')
+  it('confirmGlobal 的参数说明：原样填这条记忆最近一次未保存提示里的确认码，第一次调用不填；不举具体的码，免得模型直接填示例', () => {
+    expect(describedParam('confirmGlobal')).toBe('确认改写全局记忆时用：原样填这条记忆最近一次未保存提示里给的确认码；第一次调用不填。')
+    expect(describedParam('confirmGlobal')).not.toMatch(/\d/)
   })
 
   it('sourceMode 的参数说明逐一定义五种来源，推断链上有一步是推出来的就填 agent-inferred', () => {
