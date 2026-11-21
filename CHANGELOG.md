@@ -22,6 +22,9 @@ All notable changes to this project are documented here. The format follows
 - A memory you edit under Browse is now marked "Rewritten" instead of "Just
   edited", which repeated the "just now" time beside it. When the memory is
   folded, the mark sits next to "Expand".
+- Development and CI now test against DeepSeek Harness v0.2.2-rc.5, the
+  latest release. The oldest supported version is still v0.2.2-rc.1, and CI
+  keeps testing it too.
 
 ### Fixed
 - The memory page no longer shows full local paths in the project header and
