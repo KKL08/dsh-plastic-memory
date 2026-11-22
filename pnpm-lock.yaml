@@ -72,6 +72,9 @@ importers:
       diff:
         specifier: ^9.0.0
         version: 9.0.0
+      dsh-plastic-memory-0.2.0:
+        specifier: npm:dsh-plastic-memory@0.2.0
+        version: dsh-plastic-memory@0.2.0(93f55d2b0be3a5bf75de38f7a5c3b663)
       esbuild:
         specifier: ^0.28.2
         version: 0.28.2
@@ -1122,6 +1125,17 @@ packages:
 
   dom-accessibility-api@0.6.3:
     resolution: {integrity: sha512-7ZgogeTnjuHbo+ct10G9Ffp0mif17idi0IyWNVA/wcwcm7NPOD/WEHVP3n7n3MhXqxoIYm8d6MuZohYWIZ4T3w==}
+
+  dsh-plastic-memory@0.2.0:
+    resolution: {integrity: sha512-nz5lb/nxmj3yT6Qa+psrjtDcI8PuRoEPI7Zn6PmfZOXF7ypgZvsBCiTc8H0yUSjdswuxmZ69eI1spev7DxhRaw==}
+    engines: {node: ^22.19.0 || >=24.0.0}
+    peerDependencies:
+      '@deepseek-ai/cordis': '*'
+      '@deepseek-ai/dsh-agent-instructions': '>=0.2.2-rc.1'
+      '@deepseek-ai/dsh-llm': '>=0.2.2-rc.1'
+      '@deepseek-ai/dsh-storage-domain': '>=0.2.2-rc.1'
+      '@deepseek-ai/dsh-tools': '>=0.2.2-rc.1'
+      '@deepseek-ai/schemastery': '*'
 
   eastasianwidth@0.2.0:
     resolution: {integrity: sha512-I88TYZWc9XiYHRQ4/3c5rjjfgkjhLyW2luGIheGERbNQ6OY7yTybanSpDXZa8y7VUP9YmDcYa+eyq4ca7iLqWA==}
@@ -2395,6 +2409,19 @@ snapshots:
   dom-accessibility-api@0.5.16: {}
 
   dom-accessibility-api@0.6.3: {}
+
+  dsh-plastic-memory@0.2.0(93f55d2b0be3a5bf75de38f7a5c3b663):
+    dependencies:
+      '@deepseek-ai/cordis': 4.1.0
+      '@deepseek-ai/dsh-agent-instructions': 0.2.2-rc.5(c267fae00e9875d75a66995cf122c544)
+      '@deepseek-ai/dsh-llm': 0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))
+      '@deepseek-ai/dsh-storage-domain': 0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-storage@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))
+      '@deepseek-ai/dsh-tools': 0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-agent@0.2.2-rc.5(ace02401f24bb9eeec7666ff73a939e9))(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-session@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-system-prompt@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-llm@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-scope@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-user-approval@0.2.2-rc.5(6bc0df7c1c6241d2c25432bbef8b9e21))
+      '@deepseek-ai/schemastery': 3.19.0
+      yaml: 2.9.0
+      zod: 4.6.6
+    optionalDependencies:
+      '@node-rs/jieba': 2.0.4
 
   eastasianwidth@0.2.0: {}
 

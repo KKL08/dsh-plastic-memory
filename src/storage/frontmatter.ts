@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { parse as parseYaml, stringify as stringifyYaml, YAMLParseError } from 'yaml'
 import { FrontmatterError } from '../errors.ts'
-import { memoryRecordSchema, CONFIDENCE_BY_SOURCE, type MemoryRecord } from '../record-schema.ts'
+import { memoryRecordSchema, CONFIDENCE_BY_SOURCE, isDateMs, type MemoryRecord } from '../record-schema.ts'
 import type { CodedNote, DirectoryNoteCode } from '../contract-codes.ts'
 import type { QuarantineEntry } from './table.ts'
 import { deriveFileId } from './paths.ts'
@@ -12,7 +12,7 @@ const RESERVED_KEYS = new Set(['scope', 'workspacePath', 'recallCount', 'lastRec
 /** 停用的键：旧版本写下的 handEdited（手改标记）。读取时丢掉、不进 extras，下次回写时随之消失。 */
 const RETIRED_KEYS = new Set(['handEdited'])
 /** 时间戳字段：文件面 ISO 8601（写出 UTC 毫秒；有效期键例外，见 VALIDITY_KEYS），内存面 epoch ms。 */
-const TIME_KEYS = new Set(['createdAt', 'updatedAt', 'lastConfirmedAt', 'deletedAt', 'validFrom', 'validTo'])
+const TIME_KEYS = new Set(['createdAt', 'updatedAt', 'lastConfirmedAt', 'deletedAt', 'validFrom', 'validTo', 'stateSince', 'lockedUntil'])
 /**
  * 有效期键：写出本机时间 YYYY-MM-DD HH:mm，用户打开文件能直接看懂、照着改（其余时间键的毫秒要给事件排先后，仍写 UTC 毫秒 ISO）。
  * 读取认所有时间键的写法，旧版本的毫秒按分钟向外取整（roundValidity），维护点的重新 encode 回写即把旧文件转成新写法。
@@ -24,11 +24,16 @@ const isValidityKey = (k: string): k is 'validFrom' | 'validTo' => VALIDITY_KEYS
 const MTIME_DEFAULT_KEYS = ['createdAt', 'updatedAt', 'lastConfirmedAt'] as const
 /** 无 source（手编/无出处）时的缺省置信度：按用户亲写的档位。 */
 const HAND_WRITTEN_CONFIDENCE = 0.9
-/** frontmatter 输出的稳定字段序（diff 友好）；digest 不是记录字段，写出时重算。 */
+/**
+ * frontmatter 输出的稳定字段序（diff 友好）；digest 不是记录字段，写出时重算。
+ * 0.2.1 的新键排在 digest 之后：0.2.0 把不认识的键按原顺序写在 digest 后面，两边排法一致，
+ * 新旧版本交替维护同一个文件时字节不变，不会来回改写。
+ */
 const FILE_KEY_ORDER = [
   'id', 'name', 'type', 'tags', 'status', 'confidence', 'source',
   'createdAt', 'updatedAt', 'lastConfirmedAt', 'deletedAt', 'validFrom', 'validTo',
   'supersedes', 'summary', 'globalCandidate', 'delegation', 'digest',
+  'sourceTrail', 'stateSince', 'factTime', 'related', 'premises', 'recall', 'locked', 'lockedUntil', 'lastChange', 'lastWriteOp',
 ] as const
 const KNOWN_FILE_KEYS = new Set<string>(FILE_KEY_ORDER)
 
@@ -108,9 +113,12 @@ export function digestMismatch(fileDigest: unknown, r: Pick<MemoryRecord, 'name'
     && fileDigest !== computeDigest(r.name, r.summary, r.content)
 }
 
+/** Date 能表示的最大毫秒数（ECMAScript 规定 ±8.64e15）。 */
+const MAX_DATE_MS = 8.64e15
+
 function parseTimestamp(key: string, value: unknown, mtimeMs: number | undefined): number {
   if (typeof value === 'number') {
-    if (Number.isFinite(value)) return value                       // 数字毫秒（epoch ms）
+    if (Number.isFinite(value) && Math.abs(value) <= MAX_DATE_MS) return value   // 数字毫秒（epoch ms）；超出日期范围的写不回去
     throw new FrontmatterError('timestamp-parse', `时间戳无法解析：${key}=${value}`)
   }
   const text = String(value)
@@ -146,10 +154,22 @@ export function decodeRecord(parsed: ParsedMemoryFile, loc: FileLocation, opts: 
   }
   for (const k of TIME_KEYS) {
     if (src[k] === undefined) continue
-    const ms = parseTimestamp(k, src[k], opts.mtimeMs)
+    let ms: number
+    try {
+      // 锁到期只认字符串和数字的写法：数组、对象不拿去转成文字再猜日期
+      if (k === 'lockedUntil' && typeof src[k] !== 'string' && typeof src[k] !== 'number') continue
+      ms = parseTimestamp(k, src[k], opts.mtimeMs)
+    } catch (e) {
+      if (k === 'lockedUntil') continue   // 锁到期写坏：原样保留，按不过期读（record-schema 的 isLocked）
+      throw e
+    }
     src[k] = isValidityKey(k) ? roundValidity(k, ms) : ms
   }
-  if (src.delegation !== undefined) src.delegation = mapReviewedAt(src.delegation, at => parseTimestamp('delegation.reviewed.at', at, undefined))
+  for (const [k, mapNested] of NESTED_TIME_KEYS) {
+    if (src[k] !== undefined) src[k] = mapNested(src[k], (at, label) => parseTimestamp(label, at, undefined))
+  }
+  // YAML 把只写年份的事实时间读成数字：按用户写下的字面还原成字符串
+  if (typeof src.factTime === 'number' && Number.isInteger(src.factTime)) src.factTime = String(src.factTime)
   for (const k of MTIME_DEFAULT_KEYS) {
     if (src[k] === undefined && opts.mtimeMs !== undefined) src[k] = opts.mtimeMs
   }
@@ -178,13 +198,18 @@ export function decodeRecord(parsed: ParsedMemoryFile, loc: FileLocation, opts: 
 }
 
 /**
- * 委派块里唯一的时间戳 reviewed.at：文件面同其他时间键写 UTC 毫秒 ISO，内存面 epoch ms。
+ * 嵌在对象里的时间戳（委派块的 reviewed.at、最近一次内容改动的 at、每个出处锚的 at）：文件面同其他时间键写 UTC 毫秒 ISO，内存面 epoch ms。
  * 形状不对的原样返回，交给 schema 报错；不改动传入的对象（它来自解析结果或记录本身）。
  */
-function mapReviewedAt(delegation: unknown, map: (at: unknown) => unknown): unknown {
-  if (!isObject(delegation) || !isObject(delegation.reviewed) || delegation.reviewed.at === undefined) return delegation
-  return { ...delegation, reviewed: { ...delegation.reviewed, at: map(delegation.reviewed.at) } }
-}
+type MapTime = (at: unknown, label: string) => unknown
+const NESTED_TIME_KEYS: ReadonlyArray<readonly [string, (value: unknown, map: MapTime) => unknown]> = [
+  ['delegation', (v, map) => isObject(v) && isObject(v.reviewed) && v.reviewed.at !== undefined
+    ? { ...v, reviewed: { ...v.reviewed, at: map(v.reviewed.at, 'delegation.reviewed.at') } } : v],
+  ['lastChange', (v, map) => isObject(v) && v.at !== undefined ? { ...v, at: map(v.at, 'lastChange.at') } : v],
+  ['sourceTrail', (v, map) => Array.isArray(v)
+    ? v.map((a: unknown, i) => isObject(a) && a.at !== undefined ? { ...a, at: map(a.at, `sourceTrail.${i}.at`) } : a) : v],
+]
+const NESTED_TIME_MAP = new Map(NESTED_TIME_KEYS)
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
 
 /** 不抛的读取入口：围栏、YAML、schema、时间戳任一失败都收成隔离条目。 */
@@ -214,9 +239,11 @@ export function encodeRecord(record: MemoryRecord, extras: Record<string, unknow
     if (k === 'digest') { fm.digest = computeDigest(record.name, record.summary, record.content); continue }
     const v = (record as unknown as Record<string, unknown>)[k]
     if (v === undefined) continue                     // 可选键缺省 = 键不存在
-    fm[k] = isValidityKey(k) ? encodeValidity(k, v as number)
+    const isKeptRaw = k === 'lockedUntil' && !isDateMs(v)   // 锁到期写坏时读进来的原值，原样写回
+    fm[k] = isKeptRaw ? v
+      : isValidityKey(k) ? encodeValidity(k, v as number)
       : TIME_KEYS.has(k) ? new Date(v as number).toISOString()
-      : k === 'delegation' ? mapReviewedAt(v, at => new Date(at as number).toISOString()) : v
+      : NESTED_TIME_MAP.get(k)?.(v, at => new Date(at as number).toISOString()) ?? v
   }
   for (const [k, v] of Object.entries(extras)) {
     if (!KNOWN_FILE_KEYS.has(k) && !RESERVED_KEYS.has(k)) fm[k] = v  // schema 键胜出

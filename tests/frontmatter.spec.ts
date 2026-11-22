@@ -115,6 +115,20 @@ describe('malformed 判定', () => {
     expect(err).toMatchObject({ code: 'timestamp-parse' })
   })
 
+  it.each([
+    ['deletedAt', /createdAt: \S+/, 'createdAt: 2026-08-19T00:00:00.000Z\ndeletedAt: 8640000000000001'],
+    ['updatedAt', /updatedAt: \S+/, 'updatedAt: -8640000000000001'],
+  ])('数字时间戳超出日期范围（%s）→ FrontmatterError(timestamp-parse)：读时就拦下，不等写回时报错', (_key, at, line) => {
+    const bad = encodeRecord(record({}), {}).replace(at, line)
+    const err = captureError(() => decodeRecord(splitFrontmatter(bad), { scope: 'global' }))
+    expect(err).toMatchObject({ code: 'timestamp-parse' })
+  })
+
+  it('数字时间戳正好在日期范围边上：照常读入', () => {
+    const text = encodeRecord(record({}), {}).replace(/updatedAt: \S+/, 'updatedAt: 8640000000000000')
+    expect(decodeRecord(splitFrontmatter(text), { scope: 'global' }).record.updatedAt).toBe(8.64e15)
+  })
+
   // 0.2.0 契约放宽：日期-only 按 UTC 零点、无时区日期时间按本地时间接受（手写文件最常见的写法）
   it('无时区的日期时间：接受并按本地时间解析', () => {
     const text = encodeRecord(record({}), {}).replace(/createdAt: \S+/, 'createdAt: 2026-08-19T10:00:00')

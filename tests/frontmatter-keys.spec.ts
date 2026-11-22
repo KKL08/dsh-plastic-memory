@@ -30,6 +30,9 @@ const fullRecord: MemoryRecord = {
   validFrom: 6, validTo: 7, status: 'active', confidence: 0.9,
   supersedes: ['mem_old'], globalCandidate: true, deletedAt: 8,
   delegation: { sessionId: 'child', depth: 2, parentSessionId: 'mid', rootSessionId: 'main', reviewed: { by: 'main', at: 9 } },
+  sourceTrail: [{ sessionId: 's1', eventRange: [0, 42], sourceMode: 'user-explicit', at: 10, initiator: 'user', evidence: { user: true, tool: false }, change: 'refine', by: 'main' }],
+  stateSince: 11, factTime: '2026-11', lastChange: { kind: 'refine', at: 12, op: 'op_1', by: 'main' }, lastWriteOp: 'op_1',
+  related: ['mem_rel'], premises: [{ id: 'mem_pre', digest: 'd1:abc' }], recall: 'search-only', locked: true, lockedUntil: 13,
 }
 
 const schemaKeys = Object.keys(memoryRecordSchema.shape)

@@ -4,6 +4,28 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- Memory files can hold new optional keys that upcoming features will use:
+  when a fact took effect, which sessions a memory came from and how it last
+  changed, related memories, the memories a decision depends on, a
+  per-memory recall setting and a lock. This version reads and keeps them
+  but does not write them yet.
+- A memory folder can be shared with 0.2.0: 0.2.0 keeps the new keys when
+  it edits a file, and files without them read and write exactly as before.
+- Testing: `pnpm host:contract` also checks the host interfaces upcoming
+  features rely on: session queries, idle and archive state, sessions from
+  an earlier host process, forked sub-agents and messages delivered by the
+  plugin.
+- Testing: the test suite runs the published 0.2.0 package on the same
+  memory folder as this version.
+
+### Fixed
+- A memory file whose timestamp was a number outside the range of a date was
+  read as normal, and the next change to that memory failed. Such files now go
+  to quarantine, like other malformed files.
+
 ## [0.2.0] - 2026-11-21
 
 First stable release of the 0.2 line. It includes every change from the

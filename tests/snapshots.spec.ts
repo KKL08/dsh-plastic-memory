@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { SnapshotStore, SNAPSHOT_RETENTION_MS } from '../src/governance/snapshots.ts'
+import { SnapshotStore, SNAPSHOT_RETENTION_MS, editFingerprint, isConflicting, restoreProjection } from '../src/governance/snapshots.ts'
 import { memorySnapshotSchema, type MemorySnapshot } from '../src/governance/schema.ts'
 import { isPendingDelegated, type MemoryRecord } from '../src/record-schema.ts'
 import { record } from './helpers/record.ts'
@@ -67,6 +67,34 @@ describe('SnapshotStore.diff / restore', () => {
     const r2 = await s.restore(snap, undefined, store, { ...restoring, overwrite: true })
     expect(r2.restored).toEqual(['mem_a'])
     expect((await store.get('mem_a'))?.content).toBe('原文')
+  })
+
+  it.each<[string, Partial<MemoryRecord>]>([
+    ['事实时间', { factTime: '2026-12' }], ['关联', { related: ['mem_other'] }], ['前提', { premises: [{ id: 'mem_p', digest: 'd1' }] }],
+    ['单条注入档位', { recall: 'search-only' }], ['锁', { locked: true }], ['锁到期', { lockedUntil: 5000 }],
+  ])('快照之后只改了%s：默认恢复跳过这条，不把改动盖掉', async (_label, change) => {
+    const s = makeStore()
+    const original = record({ id: 'mem_a', content: '原文', updatedAt: 50, factTime: '2026-11' })
+    const snap = await s.capture({ operation: 'pre-forget', description: 'd', records: [original] }, 100)
+    const store = await memoryStore({ ...original, ...change })
+
+    const r = await s.restore(snap, undefined, store, restoring)
+    expect(r.skipped).toEqual(['mem_a'])
+    expect(await store.get('mem_a')).toMatchObject(change)
+  })
+
+  it('开放取值里的对象只换了键的顺序：深比较和指纹都视为没改', () => {
+    const a = record({ id: 'mem_a', locked: { a: 1, b: { c: 1, d: 2 } }, premises: [{ id: 'mem_p', digest: 'd1', later: 1 }] })
+    const b = record({ id: 'mem_a', locked: { b: { d: 2, c: 1 }, a: 1 }, premises: [{ later: 1, digest: 'd1', id: 'mem_p' }] })
+    expect(isConflicting(a, b)).toBe(false)
+    expect(editFingerprint(a)).toBe(editFingerprint(b))
+  })
+
+  it('没有新键的记录：恢复比较的投影和加新键之前一样（账本里存过的指纹照样对得上）', () => {
+    const plain = record({ id: 'mem_a', content: '原文', validFrom: 60_000, source: { sessionId: 's1', eventRange: [1, 2], sourceMode: 'user-explicit' } })
+    expect(Object.keys(JSON.parse(JSON.stringify(restoreProjection(plain))))).toEqual([
+      'name', 'type', 'tags', 'summary', 'content', 'validFrom', 'confidence', 'source',
+    ].filter(k => k !== 'summary' || plain.summary !== undefined))
   })
 
   it('restore 可指定 ids 只恢复部分；已消失的记录直接恢复', async () => {
