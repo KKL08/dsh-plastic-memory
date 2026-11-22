@@ -108,9 +108,12 @@ export function digestMismatch(fileDigest: unknown, r: Pick<MemoryRecord, 'name'
     && fileDigest !== computeDigest(r.name, r.summary, r.content)
 }
 
+/** Date 能表示的最大毫秒数（ECMAScript 规定 ±8.64e15）。 */
+const MAX_DATE_MS = 8.64e15
+
 function parseTimestamp(key: string, value: unknown, mtimeMs: number | undefined): number {
   if (typeof value === 'number') {
-    if (Number.isFinite(value)) return value                       // 数字毫秒（epoch ms）
+    if (Number.isFinite(value) && Math.abs(value) <= MAX_DATE_MS) return value   // 数字毫秒（epoch ms）；超出日期范围的写不回去
     throw new FrontmatterError('timestamp-parse', `时间戳无法解析：${key}=${value}`)
   }
   const text = String(value)
