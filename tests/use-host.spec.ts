@@ -33,6 +33,9 @@ async function run(...args: string[]) {
   }
 }
 
+// 脚本里再起子进程跑假 npm，单例约 0.4 秒都花在起进程上；整套并行、机器负载高时会超过默认的 5 秒。
+const PROCESS_TIMEOUT_MS = 15_000
+
 describe.skipIf(process.platform === 'win32')('use-host.cjs 改写宿主开发依赖', () => {
   it('所有 @deepseek-ai/dsh-* 开发依赖（不论运行时还是只取类型）都换成目标版本；cordis、schemastery 取该版本宿主的依赖并去掉范围前缀；其余依赖与 peer 不动', async () => {
     const before = JSON.parse(await readFile(REPO_PACKAGE, 'utf8')) as PackageJson
@@ -48,7 +51,7 @@ describe.skipIf(process.platform === 'win32')('use-host.cjs 改写宿主开发�
       Object.fromEntries(Object.entries(deps).filter(([name]) => !name.startsWith('@deepseek-ai/')))
     expect(untouched(pkg.devDependencies)).toEqual(untouched(before.devDependencies))
     expect(pkg.peerDependencies).toEqual(before.peerDependencies)
-  })
+  }, PROCESS_TIMEOUT_MS)
 
   it('不给版本时取 peer 下界（dsh-tools 的 >= 去掉）', async () => {
     const before = JSON.parse(await readFile(REPO_PACKAGE, 'utf8')) as PackageJson
@@ -56,5 +59,5 @@ describe.skipIf(process.platform === 'win32')('use-host.cjs 改写宿主开发�
     const { pkg, npmArgs } = await run()
     expect(npmArgs).toBe(`view @deepseek-ai/dsh@${floor} dependencies --json`)
     expect(pkg.devDependencies['@deepseek-ai/dsh-tools']).toBe(floor)
-  })
+  }, PROCESS_TIMEOUT_MS)
 })
