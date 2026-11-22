@@ -1,3 +1,4 @@
+import { sidecarSchemas } from './sidecar-schemas.ts'
 /**
  * 视图写入接锁的双进程子进程脚本（tests/root-lock-wiring.spec.ts 的 RL-11 起两份，模拟同开的两个 dsh 进程各自的视图写入器）。
  * 存储按接线层的方式搭：一把真写锁注入文件表、侧表；视图写入器拿的是同一把锁外面套的屏障装饰器（lock-barrier.ts），
@@ -18,7 +19,6 @@ import { createRootLock } from '../../src/storage/root-lock.ts'
 import { MemoryStore } from '../../src/store.ts'
 import { buildTypeRegistry } from '../../src/type-registry.ts'
 import { PendingDecisionsStore } from '../../src/governance/decisions.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../../src/governance/schema.ts'
 import { ViewWriter, collectGlobalViews } from '../../src/gui/view-writer.ts'
 import { barrierLock } from './lock-barrier.ts'
 import { signal, waitForSignal } from './signal-files.ts'
@@ -35,7 +35,7 @@ const toStderr = (message: string) => { process.stderr.write(`${message}\n`) }
 const log = { info: toStderr, warn: toStderr, error: toStderr }
 const lock = createRootLock({ root, log })
 const sidecar = new SidecarStore({
-  root, lock, log, now, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema },
+  root, lock, log, now, schemas: sidecarSchemas,
 })
 const store = new MemoryStore(new FileTable({ root, lock, stats: sidecar.recallStats, log, now }), log, sidecar.recallStats)
 const decisions = new PendingDecisionsStore(sidecar.pending, lock)

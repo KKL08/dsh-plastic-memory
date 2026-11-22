@@ -1,3 +1,4 @@
+import { sidecarSchemas } from './helpers/sidecar-schemas.ts'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { once } from 'node:events'
@@ -13,7 +14,6 @@ import { MemoryStore } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
-import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../src/governance/schema.ts'
 import { GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, checkupViewSchema } from '../src/gui/contract.ts'
 import { record } from './helpers/record.ts'
 import { DAY, NOW } from './helpers/clock.ts'
@@ -22,7 +22,7 @@ import { DAY, NOW } from './helpers/clock.ts'
 // 子进程脚本见 helpers/auto-checkup-worker.ts；时钟、计时服务和模型调用由测试经 stdin 推进，不靠 sleep。
 
 const WORKER = fileURLToPath(new URL('./helpers/auto-checkup-worker.ts', import.meta.url))
-const schemas = { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }
+const schemas = sidecarSchemas
 
 let root: string
 let workers: ChildProcess[] = []

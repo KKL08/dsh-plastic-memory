@@ -1,3 +1,4 @@
+import { sidecarSchemas, createPluginEnv } from './helpers/plugin-env.ts'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { chmod, mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -6,29 +7,21 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
-import { FileTable } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { STATE_DIR } from '../src/storage/paths.ts'
 import { createAgentsMdWriter } from '../src/storage/agents-md.ts'
-import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
-import { PendingDecisionsStore } from '../src/governance/decisions.ts'
-import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
-import { AdviceIgnoreStore } from '../src/governance/advice-ignores.ts'
 import { resolveHealthThresholds } from '../src/governance/health-presets.ts'
 import { BLOAT_THRESHOLD } from '../src/governance/rule-scan.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type AdviceIgnore, type Finding } from '../src/governance/schema.ts'
+import { type AdviceIgnore, type Finding } from '../src/governance/schema.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { RETENTION_MS } from '../src/retention.ts'
 import { computeDigest } from '../src/storage/frontmatter.ts'
 import { ViewWriter, collectGlobalViews } from '../src/gui/view-writer.ts'
 import { createMemoryCommand } from '../src/gui/commands.ts'
-import {
-  GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, encodeMemoryCommand, healthViewSchema, memoryCommandResultSchema, pendingViewSchema, scopeOfMemory,
-  type IgnorableAdviceType, type MemoryCommand, type MemoryCommandResult,
-} from '../src/gui/contract.ts'
+import { GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, encodeMemoryCommand, healthViewSchema, memoryCommandResultSchema, pendingViewSchema, scopeOfMemory, type IgnorableAdviceType, type MemoryCommand, type MemoryCommandResult } from '../src/gui/contract.ts'
 import { executeHealth, renderHealthResult, type SingleHealthResult, type CheckupHealthResult } from '../src/tools/health.ts'
 import { executeScan, renderScanResult, type SingleScanResult } from '../src/tools/scan.ts'
 import { fakeExec } from './helpers/exec.ts'
@@ -50,11 +43,8 @@ afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
 /** 一个宿主实例：各自的侧表、FileTable、视图写入器，共用同一个根。 */
 function env(opts: { llm?: SemanticLlm } = {}) {
-  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
-  const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => NOW }), undefined, sidecar.recallStats)
-  const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
-  const snapshots = new SnapshotStore(sidecar.snapshots)
-  const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
+  const sidecar = new SidecarStore({ root, schemas: sidecarSchemas })
+  const { store, decisions, snapshots, ignores } = createPluginEnv(sidecar, { root, stats: sidecar.recallStats, now: () => NOW })
   const cache = sidecar.scanCache
   const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, cache, ignores, registry, memoryRoot: root, now: () => NOW }), now: () => NOW, sleep: async () => {}, lock: sidecar.lock })
   const host = {

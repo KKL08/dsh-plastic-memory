@@ -1,19 +1,12 @@
+import { sidecarSchemas, createPluginEnv } from './helpers/plugin-env.ts'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { chmod, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
-import { FileTable } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { STATE_DIR } from '../src/storage/paths.ts'
-import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
-import { PendingDecisionsStore } from '../src/governance/decisions.ts'
-import { SnapshotStore } from '../src/governance/snapshots.ts'
-import { AdviceIgnoreStore } from '../src/governance/advice-ignores.ts'
-import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
-import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../src/governance/schema.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { RETENTION_MS } from '../src/retention.ts'
 import { ViewWriter, collectCheckupView, collectGlobalViews } from '../src/gui/view-writer.ts'
@@ -42,7 +35,7 @@ const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 const quietLog = { info() {}, warn() {}, error() {} }
 /** 超过长度上限、只留了前面一部分的指令文件。 */
 const TRUNCATED = { kind: 'found' as const, texts: ['只检查前面的部分'], isTruncated: true }
-const schemas = { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }
+const schemas = sidecarSchemas
 
 let root: string
 beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pm-checkup-run-')) })
@@ -70,13 +63,8 @@ function env(opts: {
   const clock = { now: NOW }
   const lock = opts.lock !== undefined ? { lock: opts.lock } : {}
   const sidecar = new SidecarStore({ root, schemas, now: () => clock.now, log: quietLog, ...lock })
-  const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => clock.now, ...lock }), quietLog, sidecar.recallStats)
-  const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
-  const snapshots = new SnapshotStore(sidecar.snapshots)
+  const { store, decisions, snapshots, ignores, checkups, autoCheckups } = createPluginEnv(sidecar, { root, stats: sidecar.recallStats, now: () => clock.now, ...lock }, { log: quietLog })
   const cache = sidecar.scanCache
-  const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
-  const checkups = new CheckupRecordStore(sidecar.checkups)
-  const autoCheckups = new AutoCheckupSettingStore(sidecar.autoCheckups)
   const checkupView = () => collectCheckupView({ store, checkups, autoCheckups, cache, now: () => clock.now })
   const writer = new ViewWriter({
     memoryRoot: root, log: quietLog,

@@ -107,25 +107,3 @@ describe('裁决过的冲突不再重报', () => {
     expect(changed.pendingDecisions.created).toBe(1)
   })
 })
-
-describe('PendingDecisionsStore 的已裁决条目', () => {
-  it('已裁决条目对 get / list 不可见；removeByMemoryIds 一并清掉但只计未决条目', async () => {
-    const s = new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>())
-    const { entry } = await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '1', fingerprint: 'fp1' }, 1)
-    expect(await s.settle(entry.id, 'keep-both', 2)).toBe(true)
-    await s.upsert({ memoryIds: ['mem_a', 'mem_c'], summary: '2', fingerprint: 'fp2' }, 3)
-    expect(await s.get(entry.id)).toBeUndefined()
-    expect((await s.list()).map(e => e.summary)).toEqual(['2'])
-    expect(await s.removeByMemoryIds(['mem_a'])).toBe(1)
-    const again = await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '1', fingerprint: 'fp1' }, 4)
-    expect(again.created).toBe(true)
-  })
-
-  it('旧条目没有指纹：settle 退回直接移除，返回 false', async () => {
-    const s = new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>())
-    const { entry } = await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '旧' }, 1)
-    expect(await s.settle(entry.id, 'dismiss', 2)).toBe(false)
-    const again = await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '旧' }, 3)
-    expect(again.created).toBe(true)
-  })
-})

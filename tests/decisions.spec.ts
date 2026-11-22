@@ -1,10 +1,12 @@
+import { sidecarSchemas } from './helpers/sidecar-schemas.ts'
+import { editFingerprint } from '../src/governance/snapshots.ts'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PendingDecisionsStore, baselineBasisOf, baselineFingerprint, conflictFingerprint, dedupKey, isBaselineCurrent, isBasisCurrent, suggestionBasis } from '../src/governance/decisions.ts'
-import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, verdictLoser, type PendingDecision, type StoredSuggestion } from '../src/governance/schema.ts'
-import { editFingerprint } from '../src/governance/snapshots.ts'
+import { pendingDecisionSchema, verdictLoser, type PendingDecision, type StoredSuggestion } from '../src/governance/schema.ts'
+
 import type { MemoryRecord } from '../src/record-schema.ts'
 import type { CasKvTable, ClaimKvTable, KvTable } from '../src/kv-table.ts'
 import { RETENTION_MS } from '../src/retention.ts'
@@ -136,7 +138,7 @@ describe('同一对冲突并发挂账', () => {
     beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pm-decisions-')) })
     afterEach(async () => { await rm(root, { recursive: true, force: true }) })
     const openPending = () => new SidecarStore({
-      root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema },
+      root, schemas: sidecarSchemas,
     }).pending
 
     for (const { label, first, second } of SAME_PAIR_INPUTS) {
@@ -607,5 +609,198 @@ describe('账本清理与条目重开交错', () => {
     reopen = async () => { expect(await s.unsettle(entry.id)).toBe(true) }
     await s.sweep(2 + RETENTION_MS + 1)
     expect(await s.get(entry.id)).toMatchObject({ id: entry.id, memoryIds: ['mem_a', 'mem_b'] })
+  })
+})
+
+let root: string
+
+function ledger() {
+  const sidecar = new SidecarStore({ root, schemas: sidecarSchemas })
+  return new PendingDecisionsStore(sidecar.pending, sidecar.lock)
+}
+
+describe('账本 schema 向后兼容', () => {
+  beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pm-gui-ledger-')) })
+  afterEach(async () => { await rm(root, { recursive: true, force: true }) })
+
+  it('旧条目（无 kind、settled 无 snapshotId）原样解析，kind 缺省即冲突', () => {
+    const old = { id: 'pd_1', memoryIds: ['mem_a', 'mem_b'], summary: 's', firstSeenAt: 1, fingerprint: 'fp', settled: { verdict: 'keep-both', at: 2 } }
+    expect(pendingDecisionSchema.parse(old)).toEqual(old)
+  })
+
+  it('新字段：kind、删一方的 verdict、settled.snapshotId', () => {
+    const entry = { id: 'pd_2', kind: 'promote-candidate', memoryIds: ['mem_a'], summary: '', firstSeenAt: 1, fingerprint: 'fp' }
+    expect(pendingDecisionSchema.parse(entry)).toEqual(entry)
+    const settled = { id: 'pd_3', memoryIds: ['mem_a', 'mem_b'], summary: '', firstSeenAt: 1, settled: { verdict: 'keep-right', at: 2, snapshotId: 'snap_1' } }
+    expect(pendingDecisionSchema.parse(settled)).toEqual(settled)
+    expect(() => pendingDecisionSchema.parse({ ...entry, kind: 'other' })).toThrow()
+  })
+})
+
+describe('删一方的裁决留在账本里', () => {
+  beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pm-gui-ledger-')) })
+  afterEach(async () => { await rm(root, { recursive: true, force: true }) })
+
+  it('settle 记下快照 id；get / list 看不到，listSettled 看得到', async () => {
+    const s = ledger()
+    const { entry } = await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '矛盾', fingerprint: 'fp' }, 1)
+    expect(await s.settle(entry.id, 'keep-left', 2, { snapshotId: 'snap_x' })).toBe(true)
+    expect(await s.get(entry.id)).toBeUndefined()
+    expect(await s.list()).toEqual([])
+    expect(await s.listSettled()).toEqual([{ ...entry, settled: { verdict: 'keep-left', at: 2, snapshotId: 'snap_x' } }])
+  })
+
+  it('没有指纹的条目也留：删一方的裁决留账是为了撤销，不靠指纹', async () => {
+    const s = ledger()
+    const { entry } = await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '旧' }, 1)
+    expect(await s.settle(entry.id, 'keep-right', 2, { snapshotId: 'snap_y' })).toBe(true)
+    expect((await s.listSettled()).map(e => e.id)).toEqual([entry.id])
+  })
+
+  it('同一对冲突再次被扫到（败方回来了）：回到待处理，沿用原条目，不多出第二条', async () => {
+    const s = ledger()
+    const { entry } = await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '矛盾', fingerprint: 'fp' }, 1)
+    await s.settle(entry.id, 'keep-left', 2, { snapshotId: 'snap_x' })
+    const again = await s.upsert({ memoryIds: ['mem_b', 'mem_a'], summary: '又矛盾', fingerprint: 'fp' }, 3)
+    expect(again.settled).toBeUndefined()
+    expect(again.entry.id).toBe(entry.id)
+    expect((await s.list()).map(e => [e.id, e.summary, e.settled])).toEqual([[entry.id, '又矛盾', undefined]])
+    expect(await s.listSettled()).toEqual([])
+  })
+
+  it('条目正被认领（裁决进行中）：体检的 upsert 不动它，返回 isSkipped', async () => {
+    const s = ledger()
+    const { entry } = await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '矛盾', fingerprint: 'fp' }, 1)
+    const inner = await s.withClaim(entry.id, () => s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '改写', fingerprint: 'fp' }, 2))
+    expect(inner).toMatchObject({ isClaimed: true, value: { created: false, isSkipped: true } })
+    expect((await s.list()).map(e => e.summary)).toEqual(['矛盾'])
+  })
+
+  it('删一方的裁决：给了 read 且败方此刻不在，不当成「败方回来了」重开；败方真回来了照旧重开', async () => {
+    const s = ledger()
+    const { entry } = await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '矛盾', fingerprint: 'fp' }, 1)
+    await s.settle(entry.id, 'keep-left', 2, { snapshotId: 'snap_x' })
+    const status: Record<string, 'active' | 'deleted'> = { mem_a: 'active', mem_b: 'deleted' }
+    const read = async (id: string) => record({ id, status: status[id] })
+    expect((await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '又矛盾', fingerprint: 'fp' }, 3, read)).isSkipped).toBe(true)
+    expect((await s.listSettled()).map(e => e.id)).toEqual([entry.id])
+    status.mem_b = 'active'
+    expect((await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '又矛盾', fingerprint: 'fp' }, 4, read)).entry.id).toBe(entry.id)
+    expect((await s.list()).map(e => e.id)).toEqual([entry.id])
+  })
+
+  it('提升候选同步：扫描数据还把它当候选、记忆此刻已提升为全局，已提升的条目不被重开', async () => {
+    const s = ledger()
+    const { entry } = await s.upsert({ kind: 'promote-candidate', memoryIds: ['mem_p'], summary: '', workspaces: ['/w'], fingerprint: 'c1' }, 1)
+    await s.settle(entry.id, 'promoted', 2, { snapshotId: 'snap_p' })
+    const read = async (id: string) => record({ id, scope: 'global' })
+    await s.syncPromoteCandidates('/w', [{ id: 'mem_p', summary: '', fingerprint: 'c1' }], new Set(['mem_p']), 3, read)
+    expect((await s.listSettled()).map(e => [e.id, e.settled?.verdict])).toEqual([[entry.id, 'promoted']])
+    expect(await s.list()).toEqual([])
+  })
+
+  it('removeByMemoryIds 可以留下指定条目（裁决刚记下的那条）', async () => {
+    const s = ledger()
+    const { entry } = await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '1', fingerprint: 'f1' }, 1)
+    await s.upsert({ memoryIds: ['mem_b', 'mem_c'], summary: '2', fingerprint: 'f2' }, 2)
+    await s.settle(entry.id, 'keep-left', 3, { snapshotId: 'snap' })
+    expect(await s.removeByMemoryIds(['mem_b'], entry.id)).toBe(1)
+    expect((await s.listSettled()).map(e => e.id)).toEqual([entry.id])
+    expect(await s.list()).toEqual([])
+  })
+})
+
+describe('GUI 条目：提升候选与超限提醒', () => {
+  beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pm-gui-ledger-')) })
+  afterEach(async () => { await rm(root, { recursive: true, force: true }) })
+
+  it('提升候选带内容指纹：留在本项目后 settled，指纹不变不再提示，内容变了重新提示', async () => {
+    const s = ledger()
+    const { entry } = await s.upsert({ kind: 'promote-candidate', memoryIds: ['mem_p'], summary: '', fingerprint: 'c1' }, 1)
+    expect(entry.kind).toBe('promote-candidate')
+    expect(await s.settle(entry.id, 'keep-local', 2)).toBe(true)
+    expect(await s.list()).toEqual([])
+    expect((await s.upsert({ kind: 'promote-candidate', memoryIds: ['mem_p'], summary: '', fingerprint: 'c1' }, 3)).settled).toBe(true)
+    const changed = await s.upsert({ kind: 'promote-candidate', memoryIds: ['mem_p'], summary: '', fingerprint: 'c2' }, 4)
+    expect(changed.created).toBe(true)
+    expect((await s.list()).map(e => e.kind)).toEqual(['promote-candidate'])
+  })
+
+  it('超限提醒以档位号为指纹：忽略只确认这一档，进入下一档再提醒', async () => {
+    const s = ledger()
+    const { entry } = await s.upsert({ kind: 'overflow', memoryIds: [], summary: '', fingerprint: '1' }, 1)
+    expect(await s.settle(entry.id, 'dismiss', 2)).toBe(true)
+    expect((await s.upsert({ kind: 'overflow', memoryIds: [], summary: '', fingerprint: '1' }, 3)).settled).toBe(true)
+    const next = await s.upsert({ kind: 'overflow', memoryIds: [], summary: '', fingerprint: '2' }, 4)
+    expect(next.created).toBe(true)
+    expect((await s.list()).map(e => [e.kind, e.fingerprint])).toEqual([['overflow', '2']])
+  })
+
+  it('不同 kind 的条目不同键：提升候选与同一记忆的垂直冲突各自成条', async () => {
+    const s = ledger()
+    await s.upsert({ kind: 'promote-candidate', memoryIds: ['mem_x'], summary: '', fingerprint: 'c' }, 1)
+    await s.upsert({ memoryIds: ['mem_x'], baselineRef: 'AGENTS.md：规则', summary: '与基线矛盾', fingerprint: 'v' }, 2)
+    expect((await s.list()).map(e => e.kind ?? 'conflict')).toEqual(['promote-candidate', 'conflict'])
+  })
+})
+
+describe('整理所选的应用（batch-edited）', () => {
+  beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pm-gui-ledger-')) })
+  afterEach(async () => { await rm(root, { recursive: true, force: true }) })
+
+  it('旧条目没有回执照常解析；新条目带逐项回执往返', () => {
+    const entry = {
+      id: 'pd_b', kind: 'edit', memoryIds: ['mem_d', 'mem_e'], summary: 's', firstSeenAt: 1, workspaces: ['global', 'global'],
+      receipts: [
+        { memoryId: 'mem_d', op: 'forget', fingerprint: 'fp-d', expectedStatus: 'deleted' },
+        { memoryId: 'mem_e', op: 'edit', fingerprint: 'fp-e', expectedStatus: 'active' },
+      ],
+      settled: { verdict: 'batch-edited', at: 2, snapshotId: 'snap_b' },
+    }
+    expect(pendingDecisionSchema.parse(entry)).toEqual(entry)
+    expect(() => pendingDecisionSchema.parse({ ...entry, receipts: [{ ...entry.receipts[0], expectedStatus: 'superseded' }] })).toThrow()
+  })
+
+  it('addBatchEdit：一条已结清的条目，memoryIds 按写入顺序，回执指纹取实际提交的那份，删除项期望在最近删除', async () => {
+    const s = ledger()
+    const edited = record({ id: 'mem_e', content: '改写后' })
+    const deleted = record({ id: 'mem_d', content: '删掉的', status: 'deleted' })
+    const entry = await s.addBatchEdit(
+      [{ memoryId: 'mem_d', op: 'forget', written: deleted }, { memoryId: 'mem_e', op: 'edit', written: edited }],
+      { summary: '整理所选 2 条', workspaces: ['global', 'global'] }, 'snap_b', 5,
+    )
+    expect(await s.list()).toEqual([])
+    expect(await s.listSettled()).toEqual([entry])
+    expect(entry).toMatchObject({
+      kind: 'edit', memoryIds: ['mem_d', 'mem_e'], summary: '整理所选 2 条', workspaces: ['global', 'global'],
+      receipts: [
+        { memoryId: 'mem_d', op: 'forget', fingerprint: editFingerprint(deleted), expectedStatus: 'deleted' },
+        { memoryId: 'mem_e', op: 'edit', fingerprint: editFingerprint(edited), expectedStatus: 'active' },
+      ],
+      settled: { verdict: 'batch-edited', at: 5, snapshotId: 'snap_b' },
+    })
+    expect(entry.fingerprint).toBeUndefined()
+  })
+})
+
+describe('PendingDecisionsStore 的已裁决条目', () => {
+  it('已裁决条目对 get / list 不可见；removeByMemoryIds 一并清掉但只计未决条目', async () => {
+    const s = new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>())
+    const { entry } = await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '1', fingerprint: 'fp1' }, 1)
+    expect(await s.settle(entry.id, 'keep-both', 2)).toBe(true)
+    await s.upsert({ memoryIds: ['mem_a', 'mem_c'], summary: '2', fingerprint: 'fp2' }, 3)
+    expect(await s.get(entry.id)).toBeUndefined()
+    expect((await s.list()).map(e => e.summary)).toEqual(['2'])
+    expect(await s.removeByMemoryIds(['mem_a'])).toBe(1)
+    const again = await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '1', fingerprint: 'fp1' }, 4)
+    expect(again.created).toBe(true)
+  })
+
+  it('旧条目没有指纹：settle 退回直接移除，返回 false', async () => {
+    const s = new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>())
+    const { entry } = await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '旧' }, 1)
+    expect(await s.settle(entry.id, 'dismiss', 2)).toBe(false)
+    const again = await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '旧' }, 3)
+    expect(again.created).toBe(true)
   })
 })

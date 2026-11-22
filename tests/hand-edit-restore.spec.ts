@@ -1,3 +1,4 @@
+import { sidecarSchemas } from './helpers/sidecar-schemas.ts'
 import { describe, expect, it, beforeEach, afterEach } from 'vitest'
 import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -17,7 +18,7 @@ import { executePromote } from '../src/tools/promote.ts'
 import { createAgentsMdWriter } from '../src/storage/agents-md.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore, restoreProjection } from '../src/governance/snapshots.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type MemorySnapshot } from '../src/governance/schema.ts'
+import { type MemorySnapshot } from '../src/governance/schema.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
@@ -62,7 +63,7 @@ const frontmatter = async (path: string) => splitFrontmatter(await readFile(path
 const iso = (ms: number) => new Date(ms).toISOString()
 
 function harness() {
-  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
+  const sidecar = new SidecarStore({ root, schemas: sidecarSchemas })
   const table = new FileTable({ root, stats: sidecar.recallStats })
   const store = new MemoryStore(table, undefined, sidecar.recallStats)
   const snapshots = new SnapshotStore(sidecar.snapshots)

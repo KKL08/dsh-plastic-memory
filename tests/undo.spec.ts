@@ -1,3 +1,4 @@
+import { sidecarSchemas } from './helpers/sidecar-schemas.ts'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { chmod, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -11,7 +12,7 @@ import { buildTypeRegistry } from '../src/type-registry.ts'
 import { PendingDecisionsStore, candidateFingerprint } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { AdviceIgnoreStore } from '../src/governance/advice-ignores.ts'
-import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, type PendingDecision } from '../src/governance/schema.ts'
+import { type PendingDecision } from '../src/governance/schema.ts'
 import { asUndoable, undoStateOf } from '../src/governance/undo-rules.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
 import { executeConfirm } from '../src/tools/confirm.ts'
@@ -40,7 +41,7 @@ afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 function env() {
   const clock = { now: NOW }
   const now = () => clock.now
-  const sidecar = new SidecarStore({ root, log: quietLog, now, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
+  const sidecar = new SidecarStore({ root, log: quietLog, now, schemas: sidecarSchemas })
   const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, log: quietLog, now }), quietLog, sidecar.recallStats)
   const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
   const snapshots = new SnapshotStore(sidecar.snapshots)

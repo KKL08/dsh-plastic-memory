@@ -1,3 +1,4 @@
+import { sidecarSchemas } from './helpers/sidecar-schemas.ts'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
@@ -7,7 +8,6 @@ import { join } from 'node:path'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { createRootLock } from '../src/storage/root-lock.ts'
 import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../src/governance/schema.ts'
 import { checkupKey } from '../src/gui/contract.ts'
 import { holdCheckups, type IntervalTimer } from '../src/gui/checkup-run.ts'
 import type { Scope } from '../src/scope.ts'
@@ -30,7 +30,7 @@ vi.mock('node:fs/promises', async importOriginal => {
   }
 })
 
-const schemas = { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }
+const schemas = sidecarSchemas
 const quietLog = { info() {}, warn() {}, error() {} }
 const G: Scope = { kind: 'global' }
 const A: Scope = { kind: 'workspace', workspacePath: '/w/a' }

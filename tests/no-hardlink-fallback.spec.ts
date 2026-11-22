@@ -1,3 +1,4 @@
+import { sidecarSchemas } from './helpers/sidecar-schemas.ts'
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat, link } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -7,7 +8,7 @@ import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { GLOBAL_DIR } from '../src/storage/paths.ts'
 import { SidecarStore, STATE_DIR } from '../src/storage/sidecar.ts'
 import { KV_IMPORT_MARKER } from '../src/storage/legacy-kv-import.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type MemorySnapshot } from '../src/governance/schema.ts'
+import { type MemorySnapshot } from '../src/governance/schema.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import { record } from './helpers/record.ts'
 import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
@@ -23,7 +24,7 @@ function fsError(code: string): NodeJS.ErrnoException {
   return Object.assign(new Error(`${code}: operation failed, link`), { code })
 }
 
-const schemas = { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }
+const schemas = sidecarSchemas
 const snap = (id: string, description = id): MemorySnapshot =>
   ({ id, createdAt: 1, operation: 'manual', description, memoryIds: [], data: [] })
 

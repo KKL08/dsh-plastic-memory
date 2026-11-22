@@ -1,20 +1,15 @@
+import { sidecarSchemas, createPluginEnv } from './helpers/plugin-env.ts'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { FileTable } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { INDEX_FILE, workspaceDirName } from '../src/storage/paths.ts'
 import { createAgentsMdWriter } from '../src/storage/agents-md.ts'
-import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
-import { PendingDecisionsStore } from '../src/governance/decisions.ts'
-import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
-import { AdviceIgnoreStore } from '../src/governance/advice-ignores.ts'
-import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../src/governance/schema.ts'
 import { ViewWriter, collectGlobalViews } from '../src/gui/view-writer.ts'
 import { createMemoryCommand } from '../src/gui/commands.ts'
 import { MEMORY_COMMAND_NAME, encodeMemoryCommand, type MemoryCommand } from '../src/gui/contract.ts'
@@ -54,12 +49,9 @@ afterEach(async () => {
 
 function env() {
   const now = () => NOW
-  const sidecar = new SidecarStore({ root, log: quietLog, now, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
-  const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, log: quietLog, now }), quietLog, sidecar.recallStats)
-  const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
-  const snapshots = new SnapshotStore(sidecar.snapshots)
+  const sidecar = new SidecarStore({ root, log: quietLog, now, schemas: sidecarSchemas })
+  const { store, decisions, snapshots, ignores } = createPluginEnv(sidecar, { root, stats: sidecar.recallStats, log: quietLog, now }, { log: quietLog })
   const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
-  const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
   const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, snapshots, cache: sidecar.scanCache, ignores, registry, memoryRoot: root, now }), now, sleep: async () => {}, lock: sidecar.lock })
   const command = createMemoryCommand({
     memoryRoot: root, store, decisions, snapshots, cache: sidecar.scanCache, registry, views, ignores,

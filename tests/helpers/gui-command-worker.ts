@@ -1,3 +1,4 @@
+import { sidecarSchemas } from './sidecar-schemas.ts'
 /**
  * 双进程界面命令测试的子进程脚本（tests/gui-advice-ignore.spec.ts 起两份，模拟同时开着的两个 dsh 进程各自的界面命令）。
  * 用法：node gui-command-worker.ts <memoryRoot> <workspacePath> <标签> <nowMs>
@@ -19,7 +20,6 @@ import { SnapshotStore } from '../../src/governance/snapshots.ts'
 import { CheckupRecordStore } from '../../src/governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from '../../src/governance/auto-checkups.ts'
 import { AdviceIgnoreStore } from '../../src/governance/advice-ignores.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../../src/governance/schema.ts'
 import { ViewWriter, collectGlobalViews } from '../../src/gui/view-writer.ts'
 import { createMemoryCommand } from '../../src/gui/commands.ts'
 import { noInstructions } from './instructions.ts'
@@ -38,7 +38,7 @@ const log = {
   error: (message: string) => { process.stderr.write(`${message}\n`) },
 }
 const sidecar = new SidecarStore({
-  root, log, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema },
+  root, log, schemas: sidecarSchemas,
 })
 const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, log, now }), log, sidecar.recallStats)
 const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)

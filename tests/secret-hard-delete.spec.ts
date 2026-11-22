@@ -1,3 +1,4 @@
+import { sidecarSchemas } from './helpers/sidecar-schemas.ts'
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { chmod, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -8,9 +9,7 @@ import { ARCHIVE_DIR, GLOBAL_DIR, INDEX_FILE, STATE_DIR, workspaceDirName } from
 import { MemoryStore, type MemoryLogger } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
-import {
-  REDACTED_PLACEHOLDER, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type MemorySnapshot,
-} from '../src/governance/schema.ts'
+import { REDACTED_PLACEHOLDER, memorySnapshotSchema, type MemorySnapshot } from '../src/governance/schema.ts'
 import { runRuleScan } from '../src/governance/rule-scan.ts'
 import { executeForget } from '../src/tools/forget.ts'
 import { executeSnapshotTool } from '../src/tools/snapshot.ts'
@@ -80,7 +79,7 @@ const wsRec = (partial: Partial<MemoryRecord> = {}) => baseRecord({
 })
 
 function harness() {
-  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
+  const sidecar = new SidecarStore({ root, schemas: sidecarSchemas })
   const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats }), undefined, sidecar.recallStats)
   // 同接线层：快照落盘后按副本复核
   const snapshots = new SnapshotStore(sidecar.snapshots, { findGone: goneCopies(store) })

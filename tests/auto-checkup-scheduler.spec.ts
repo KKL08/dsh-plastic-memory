@@ -1,19 +1,17 @@
+import { sidecarSchemas, createPluginEnv } from './helpers/plugin-env.ts'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
-import { FileTable } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
-import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { AdviceIgnoreStore } from '../src/governance/advice-ignores.ts'
 import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
 import { hostSemanticLlm, type HostModelRoute } from '../src/governance/host-llm.ts'
-import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../src/governance/schema.ts'
 import { GLOBAL_CACHE_KEY } from '../src/governance/scope-health.ts'
 import { ViewWriter, collectCheckupView, collectGlobalViews } from '../src/gui/view-writer.ts'
 import { AUTO_CHECKUP_FIRST_CHECK_MS, AUTO_CHECKUP_INTERVAL_MS, AutoCheckupScheduler, type AutoCheckupTimer } from '../src/gui/auto-checkup.ts'
@@ -160,18 +158,14 @@ function env(opts: {
 } = {}) {
   const clock = { now: NOW }
   // 侧表也用这个时钟：认领的时间和是否残留按它算
-  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }, now: () => clock.now })
-  const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => clock.now }), undefined, sidecar.recallStats)
-  const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
-  const checkups = new CheckupRecordStore(sidecar.checkups)
-  const autoCheckups = new AutoCheckupSettingStore(sidecar.autoCheckups)
+  const sidecar = new SidecarStore({ root, schemas: sidecarSchemas, now: () => clock.now })
+  const { store, decisions, ignores, checkups, autoCheckups } = createPluginEnv(sidecar, { root, stats: sidecar.recallStats, now: () => clock.now })
   const cache = sidecar.scanCache
   const llm = opts.llm ?? fakeHostLlm()
   const governance = { isEnabled: opts.governanceEnabled ?? true }
   // 宿主默认模型选择的当前值（用例中途可以改）
   const route = { current: 'defaultModel' in opts ? opts.defaultModel : DEFAULT_ROUTE }
   const source = { store, checkups, autoCheckups, cache, isGovernanceEnabled: () => governance.isEnabled, now: () => clock.now }
-  const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
   const collectViews = () => collectGlobalViews({ store, decisions, cache, ignores, checkups, registry, memoryRoot: root, now: () => clock.now })
   const writer = new ViewWriter({ memoryRoot: root, collect: collectViews, collectCheckups: () => collectCheckupView(source), now: () => clock.now, sleep: async () => {}, lock: sidecar.lock })
   const timers = fakeTimer(clock)
@@ -204,7 +198,7 @@ function env(opts: {
 }
 
 const ws = (path: string) => ({ kind: 'workspace' as const, workspacePath: path })
-const schemas = { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }
+const schemas = sidecarSchemas
 /** 范围的认领文件（体检记录旁边）。 */
 const claimFile = (key: string) => join(root, '.state', 'checkups', `${createHash('sha1').update(key).digest('hex')}.claim`)
 const readClaim = async (key: string) => JSON.parse(await readFile(claimFile(key), 'utf8')) as { pid: number; at: number; id: string }
@@ -330,7 +324,7 @@ describe('自动体检调度：到期就在后台体检一次', () => {
     await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
     expect(e.llm.requests).toEqual([])
     // 另一个宿主进程：同一个记忆根上的另一份侧表
-    const other = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
+    const other = new SidecarStore({ root, schemas: sidecarSchemas })
     await new AutoCheckupSettingStore(other.autoCheckups).set({ kind: 'global' }, 30)
     await e.advance(AUTO_CHECKUP_INTERVAL_MS)
     expect(e.llm.requests.map(scopeOfRequest)).toEqual(['global'])

@@ -1,3 +1,4 @@
+import { sidecarSchemas } from './helpers/sidecar-schemas.ts'
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -7,10 +8,7 @@ import { spawnSync } from 'node:child_process'
 import { SidecarStore, STATE_DIR, RECALL_STATS_FILE } from '../src/storage/sidecar.ts'
 import { KV_IMPORT_MARKER, KV_IMPORT_LOCK, type LegacyKvTables } from '../src/storage/legacy-kv-import.ts'
 import { kvImportMarkerSchema } from '../src/storage/schema.ts'
-import {
-  memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema,
-  type MemorySnapshot, type PendingDecision, type ScanCacheEntry,
-} from '../src/governance/schema.ts'
+import { memorySnapshotSchema, type MemorySnapshot, type PendingDecision, type ScanCacheEntry } from '../src/governance/schema.ts'
 import { record } from './helpers/record.ts'
 
 // 进程边界的失败注入与观察：记录写文件 / 改名的路径，按条件让一次 writeFile（写到一半）或 rename 失败。
@@ -54,7 +52,7 @@ vi.mock('node:fs/promises', async importOriginal => {
 })
 afterEach(() => { fsLog.fault = undefined; fsLog.writes = []; fsLog.renames = [] })
 
-const schemas = { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }
+const schemas = sidecarSchemas
 
 function snap(id: string, partial: Partial<MemorySnapshot> = {}): MemorySnapshot {
   return { id, createdAt: 1, operation: 'manual', description: id, memoryIds: [], data: [], ...partial }

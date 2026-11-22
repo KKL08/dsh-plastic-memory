@@ -1,3 +1,4 @@
+import { sidecarSchemas } from './sidecar-schemas.ts'
 /**
  * 自动体检跨进程测试的子进程脚本（tests/auto-checkup-two-process.spec.ts 起两份）：一个子进程就是一个宿主进程里的自动体检调度。
  * 用法：node auto-checkup-worker.ts <memoryRoot> <起始时刻> <模型报的发现：conflict | none>
@@ -23,7 +24,6 @@ import { AdviceIgnoreStore } from '../../src/governance/advice-ignores.ts'
 import { CheckupRecordStore } from '../../src/governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from '../../src/governance/auto-checkups.ts'
 import { hostSemanticLlm } from '../../src/governance/host-llm.ts'
-import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../../src/governance/schema.ts'
 import { ViewWriter, collectCheckupView, collectGlobalViews } from '../../src/gui/view-writer.ts'
 import { AutoCheckupScheduler, type AutoCheckupTimer } from '../../src/gui/auto-checkup.ts'
 import { CheckupSuggestions } from '../../src/gui/checkup-suggestions.ts'
@@ -77,7 +77,7 @@ const llm = {
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 const quiet = { warn() {}, error() {} }
 const sidecar = new SidecarStore({
-  root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema },
+  root, schemas: sidecarSchemas,
   now: () => clock.now, log: { ...quiet, info() {} },
 })
 const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => clock.now }), undefined, sidecar.recallStats)

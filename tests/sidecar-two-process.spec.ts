@@ -1,3 +1,4 @@
+import { sidecarSchemas } from './helpers/sidecar-schemas.ts'
 import { describe, expect, it, beforeEach, afterEach } from 'vitest'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
@@ -8,7 +9,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { STATE_DIR, RECALL_STATS_FILE, SidecarStore } from '../src/storage/sidecar.ts'
 import { recallStatsSchema } from '../src/storage/schema.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../src/governance/schema.ts'
+import { memorySnapshotSchema } from '../src/governance/schema.ts'
 import { FileTable } from '../src/storage/file-table.ts'
 import { MemoryStore } from '../src/store.ts'
 import { PendingDecisionsStore, dedupKey } from '../src/governance/decisions.ts'
@@ -74,7 +75,7 @@ describe('双进程工具调用', () => {
   const WS = '/home/dev/proj-two'
   const wsDir = () => join(root, workspaceDirName(WS))
   const openStore = () => {
-    const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
+    const sidecar = new SidecarStore({ root, schemas: sidecarSchemas })
     return new MemoryStore(new FileTable({ root, stats: sidecar.recallStats }), undefined, sidecar.recallStats)
   }
 
@@ -158,7 +159,7 @@ describe('双进程工具调用', () => {
     for (const w of [a, b]) w.child.stdin!.end()
     expect((await Promise.all([a.exited, b.exited])).map(([code]) => code)).toEqual([0, 0])
 
-    const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
+    const sidecar = new SidecarStore({ root, schemas: sidecarSchemas })
     const entries = await new PendingDecisionsStore(sidecar.pending, sidecar.lock).list()
     expect(entries.map(e => dedupKey(e.memoryIds)).sort()).toEqual(pairs.map(p => dedupKey(p)).sort())
     expect(ra.created + rb.created).toBe(pairs.length)
