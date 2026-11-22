@@ -1,3 +1,4 @@
+import { isAbsolute } from 'node:path'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { MemoryStore } from '../store.ts'
 import type { CheckupInitiator, CodedNote, ScanNoteCode } from '../contract-codes.ts'
@@ -18,6 +19,7 @@ import { applyIgnores, type AdviceIgnoreStore } from '../governance/advice-ignor
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
 import { prereadScopes, listingNotes, checkupWorkspaces, renderDirectoryNotes } from './scope-preread.ts'
 import type { DirectoryNote } from '../storage/table.ts'
+import { isWorkspaceGone } from '../storage/project-folder.ts'
 import { runCrossWsScan, findEntityDuplicates, type CrossWsDuplicate } from '../governance/cross-ws.ts'
 import { decisionWorkspaces, decisionWorkspacesNote, workspaceLabel } from './workspace-gate.ts'
 import { scopeCacheKey, scopeKey, type Scope } from '../scope.ts'
@@ -585,12 +587,16 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
       }
     }
 
-    // 体检收尾：清理孤儿语义缓存条目（废弃 workspace 的、历史遗留键）——体检本就是全库视角，
-    // 天然的清扫时机；合法缓存键按"库里现存的全部 workspace"算，不受本次 scopes 子集影响
+    // 体检收尾：清理孤儿语义缓存条目（真正删掉的项目的、历史遗留键）——体检本就是全库视角，天然的清扫时机，不受本次 scopes 子集影响。
+    // 项目键按「真正删掉」判断（同体检记录、自动体检设置的清理口径）：在这次目录清单里、或项目文件夹判为还在，就留——
+    // 记忆全在最近删除、还没有自己记忆、列完目录才建的项目都留着；不是项目路径的历史遗留键照旧清
     signal?.throwIfAborted()
-    const validKeys = new Set([GLOBAL_CACHE_KEY, ...checkupWorkspaces(listing).map(workspacePath => scopeCacheKey({ kind: 'workspace', workspacePath }))])
+    const listed = new Set(listing.entries.map(e => e.workspacePath))
     for (const key of scored.cache.keys()) {
-      if (!validKeys.has(key)) await deps.cache.delete(key)
+      if (key === GLOBAL_CACHE_KEY) continue
+      const workspacePath = key.slice(scopeCacheKey({ kind: 'workspace', workspacePath: '' }).length)
+      const isProjectKey = isAbsolute(workspacePath) && scopeCacheKey({ kind: 'workspace', workspacePath }) === key
+      if (!isProjectKey || await isWorkspaceGone(listed, workspacePath)) await deps.cache.delete(key)
     }
 
     signal?.throwIfAborted()
