@@ -1,3 +1,4 @@
+import { sidecarSchemas } from './helpers/sidecar-schemas.ts'
 import { afterEach, describe, expect, it } from 'vitest'
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -21,7 +22,7 @@ import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
 import { checkupKey } from '../src/gui/contract.ts'
 import type { CheckupRecord } from '../src/storage/schema.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
-import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, type PendingDecision, type ScanCacheEntry } from '../src/governance/schema.ts'
+import { type PendingDecision, type ScanCacheEntry } from '../src/governance/schema.ts'
 import { SECRET_MASK } from '../src/secrets.ts'
 import { record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
@@ -1124,7 +1125,7 @@ describe('体检说明文字里的密钥：落进账本、缓存和输出前遮�
   }
   async function sidecarDeps(llm: SemanticLlm | null) {
     const { root, store } = await fileBackedStore({})
-    const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
+    const sidecar = new SidecarStore({ root, schemas: sidecarSchemas })
     const deps = makeDeps({
       store, decisions: new PendingDecisionsStore(sidecar.pending, sidecar.lock), cache: sidecar.scanCache, checkups: new CheckupRecordStore(sidecar.checkups),
       host: { llmOf: () => llm },

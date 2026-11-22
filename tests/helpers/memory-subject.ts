@@ -1,3 +1,4 @@
+import { sidecarSchemas } from './sidecar-schemas.ts'
 /**
  * 记忆写路径的交错测试对象：接线层同款的真实模块（文件表、侧表、存储、快照、账本、界面命令处理器）建在临时目录里，
  * 操作走真实入口。用它的测试文件要像 write-interleavings.spec.ts 那样把 node:fs/promises 换成夹具包过的那份。
@@ -17,7 +18,6 @@ import { PendingDecisionsStore } from '../../src/governance/decisions.ts'
 import { CheckupRecordStore } from '../../src/governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from '../../src/governance/auto-checkups.ts'
 import { AdviceIgnoreStore } from '../../src/governance/advice-ignores.ts'
-import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../../src/governance/schema.ts'
 import { goneCopies } from '../../src/tools/workspace-gate.ts'
 import { executePromote, type PromoteResult } from '../../src/tools/promote.ts'
 import { executeSnapshotTool } from '../../src/tools/snapshot.ts'
@@ -99,7 +99,7 @@ export interface MemoryWorld {
 const newSidecar = (root: string, lock: RootLock) => new SidecarStore({
   root,
   lock,
-  schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema },
+  schemas: sidecarSchemas,
   log: silent,
   now: () => STORE_NOW,
 })

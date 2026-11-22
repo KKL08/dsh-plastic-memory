@@ -1,16 +1,12 @@
+import { sidecarSchemas, createPluginEnv } from './helpers/plugin-env.ts'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { FileTable } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
-import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
-import { PendingDecisionsStore, conflictFingerprint } from '../src/governance/decisions.ts'
+import { conflictFingerprint } from '../src/governance/decisions.ts'
 import { AdviceIgnoreStore } from '../src/governance/advice-ignores.ts'
-import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
-import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
-import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../src/governance/schema.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { RETENTION_MS } from '../src/retention.ts'
@@ -35,7 +31,7 @@ const GLOBAL = { kind: 'global' as const }
 const PROJECT = { kind: 'workspace' as const, workspacePath: WS }
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 const quietLog = { info() {}, warn() {}, error() {} }
-const schemas = { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }
+const schemas = sidecarSchemas
 
 let root: string
 beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pm-checkup-sg-')) })
@@ -91,12 +87,8 @@ const LIMIT = 2
 function env(opts: { readEvent?: ReadEventFn; autoLimit?: number } = {}) {
   const clock = { now: NOW }
   const sidecar = new SidecarStore({ root, schemas, now: () => clock.now, log: quietLog })
-  const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => clock.now }), quietLog, sidecar.recallStats)
-  const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
+  const { store, decisions, ignores, checkups, autoCheckups } = createPluginEnv(sidecar, { root, stats: sidecar.recallStats, now: () => clock.now }, { log: quietLog })
   const cache = sidecar.scanCache
-  const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
-  const checkups = new CheckupRecordStore(sidecar.checkups)
-  const autoCheckups = new AutoCheckupSettingStore(sidecar.autoCheckups)
   let suggestions!: CheckupSuggestions
   const writer = new ViewWriter({
     memoryRoot: root, log: quietLog,

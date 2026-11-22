@@ -1,18 +1,11 @@
+import { sidecarSchemas, createPluginEnv } from './helpers/plugin-env.ts'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { FileTable } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { createAgentsMdWriter } from '../src/storage/agents-md.ts'
-import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
-import { PendingDecisionsStore } from '../src/governance/decisions.ts'
-import { SnapshotStore } from '../src/governance/snapshots.ts'
-import { AdviceIgnoreStore } from '../src/governance/advice-ignores.ts'
-import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
-import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../src/governance/schema.ts'
 import { RETENTION_MS } from '../src/retention.ts'
 import { ViewWriter, collectCheckupView, collectGlobalViews } from '../src/gui/view-writer.ts'
 import { createMemoryCommand } from '../src/gui/commands.ts'
@@ -45,15 +38,10 @@ function env(answer?: (input: { system: string; user: string }) => string) {
   const now = () => NOW
   const sidecar = new SidecarStore({
     root, lock, log: quietLog, now,
-    schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema },
+    schemas: sidecarSchemas,
   })
-  const store = new MemoryStore(new FileTable({ root, lock, stats: sidecar.recallStats, now, log: quietLog }), quietLog, sidecar.recallStats)
-  const decisions = new PendingDecisionsStore(sidecar.pending, lock)
-  const snapshots = new SnapshotStore(sidecar.snapshots)
+  const { store, decisions, snapshots, ignores, checkups, autoCheckups } = createPluginEnv(sidecar, { root, lock, stats: sidecar.recallStats, now, log: quietLog }, { log: quietLog, lock })
   const cache = sidecar.scanCache
-  const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
-  const checkups = new CheckupRecordStore(sidecar.checkups)
-  const autoCheckups = new AutoCheckupSettingStore(sidecar.autoCheckups)
   const views = new ViewWriter({
     memoryRoot: root, log: quietLog, now, sleep: async () => {}, lock,
     collect: () => collectGlobalViews({ store, decisions, snapshots, cache, ignores, checkups, autoCheckups, registry, memoryRoot: root, now }),

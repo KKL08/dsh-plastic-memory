@@ -1,3 +1,4 @@
+import { sidecarSchemas } from './helpers/sidecar-schemas.ts'
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
@@ -26,16 +27,10 @@ import { BUILTIN_TYPES, PRESET_SCENES } from '../src/type-registry.ts'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { scopeCacheKey } from '../src/scope.ts'
 import { IN_SNAPSHOT_NOTE } from '../src/tools/search.ts'
-import {
-  memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema,
-  type MemorySnapshot, type PendingDecision, type ScanCacheEntry,
-} from '../src/governance/schema.ts'
+import { type MemorySnapshot, type PendingDecision, type ScanCacheEntry } from '../src/governance/schema.ts'
 import { INSTRUCTION_MAX_BYTES } from '../src/governance/instructions.ts'
 import { EVIDENCE_GUIDANCE } from '../src/evidence-guidance.ts'
-import {
-  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_WORKSPACE_MAP_FILE, deletedViewSchema, libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema,
-  workspaceMapViewSchema, type LibraryView, type PendingView,
-} from '../src/gui/contract.ts'
+import { GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_WORKSPACE_MAP_FILE, deletedViewSchema, libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema, workspaceMapViewSchema, type LibraryView, type PendingView } from '../src/gui/contract.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
@@ -203,7 +198,7 @@ afterEach(async () => {
 
 /** 同一 memoryRoot 上的另一个侧表实例：用例经它预置或读回插件落在 .state/ 的数据（文件是唯一真相）。 */
 function sidecarAt(memoryRoot: string) {
-  return new SidecarStore({ root: memoryRoot, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
+  return new SidecarStore({ root: memoryRoot, schemas: sidecarSchemas })
 }
 
 describe('apply', () => {

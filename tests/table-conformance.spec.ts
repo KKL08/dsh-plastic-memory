@@ -1,3 +1,4 @@
+import { sidecarSchemas } from './helpers/sidecar-schemas.ts'
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -15,10 +16,7 @@ import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
-import {
-  memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema,
-  type MemorySnapshot, type PendingDecision,
-} from '../src/governance/schema.ts'
+import { type MemorySnapshot, type PendingDecision } from '../src/governance/schema.ts'
 import { record } from './helpers/record.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { RecordNotFoundError } from '../src/errors.ts'
@@ -87,7 +85,7 @@ function fileTableBackend(name: string, parseCache?: () => ParseCache<never>): B
     make: async () => {
       const root = await mkdtemp(join(tmpdir(), 'pm-conf-'))
       const { recallStats: stats } = new SidecarStore({
-        root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema },
+        root, schemas: sidecarSchemas,
       })
       const t = new FileTable({ root, stats, parseCache: parseCache?.() })
       return {

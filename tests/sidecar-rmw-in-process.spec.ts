@@ -1,3 +1,4 @@
+import { sidecarSchemas } from './helpers/sidecar-schemas.ts'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -9,7 +10,7 @@ import { STATE_DIR } from '../src/storage/paths.ts'
 import { MemoryStore } from '../src/store.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
-import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, type MemorySnapshot } from '../src/governance/schema.ts'
+import { type MemorySnapshot } from '../src/governance/schema.ts'
 import { executeForget } from '../src/tools/forget.ts'
 import { goneCopies } from '../src/tools/workspace-gate.ts'
 import type { RootLock } from '../src/root-lock.ts'
@@ -37,7 +38,7 @@ vi.mock('node:fs/promises', async importOriginal => {
   return { ...actual, writeFile }
 })
 
-const schemas = { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }
+const schemas = sidecarSchemas
 const quietLog = { info() {}, warn() {}, error() {} }
 const SECRET = FAKE_SECRET.sk
 

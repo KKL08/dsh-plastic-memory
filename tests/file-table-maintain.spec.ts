@@ -1,3 +1,4 @@
+import { sidecarSchemas } from './helpers/sidecar-schemas.ts'
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -12,7 +13,6 @@ import { executeHealth } from '../src/tools/health.ts'
 import { prereadScopes } from '../src/tools/scope-preread.ts'
 import { crossScopeConflicts } from '../src/governance/scope-health.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../src/governance/schema.ts'
 import { resolveHealthThresholds } from '../src/governance/health-presets.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
@@ -514,7 +514,7 @@ describe('同 id 重复副本只在写该 id 时清理', () => {
 
 describe('快照冻结是维护点', () => {
   function harness() {
-    const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
+    const sidecar = new SidecarStore({ root, schemas: sidecarSchemas })
     const table = new FileTable({ root, stats: sidecar.recallStats })
     const store = new MemoryStore(table, undefined, sidecar.recallStats)
     const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
@@ -579,7 +579,7 @@ describe('memory_health 纯读', () => {
     await writeMem(globalDir(), 'g.md', record({ id: 'mem_g' }))
     await writeRaw(globalDir(), INDEX_FILE, '# 手改\n')
     const before = await treeEntries(root)
-    const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
+    const sidecar = new SidecarStore({ root, schemas: sidecarSchemas })
     const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats }), undefined, sidecar.recallStats)
     const deps = {
       store, registry, decisions: new PendingDecisionsStore(sidecar.pending, sidecar.lock), cache: sidecar.scanCache,
@@ -602,7 +602,7 @@ describe('待决账本成员只在仅剩归档的目录里', () => {
     // proj-o 只剩归档：不进体检清单，但它的记录仍是待决条目的一方
     await writeMem(archiveOf(wsDir(OTHER)), 'b.md', wsRecord({ id: 'mem_b', status: 'deleted', deletedAt: now }, OTHER), OTHER)
     await writeFile(join(wsDir(OTHER), WORKSPACE_MARKER), OTHER + '\n')
-    const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
+    const sidecar = new SidecarStore({ root, schemas: sidecarSchemas })
     const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats }), undefined, sidecar.recallStats)
     const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
     await decisions.upsert({ memoryIds: ['mem_g1', 'mem_a'], summary: '' }, now)

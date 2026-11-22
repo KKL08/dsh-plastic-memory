@@ -1,10 +1,10 @@
+import { sidecarSchemas } from './helpers/sidecar-schemas.ts'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { createRootLock } from '../src/storage/root-lock.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../src/governance/schema.ts'
 import type { RootLock } from '../src/root-lock.ts'
 import type { RefreshableClaim } from '../src/kv-table.ts'
 
@@ -25,7 +25,7 @@ vi.mock('node:fs/promises', async importOriginal => {
   }
 })
 
-const schemas = { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }
+const schemas = sidecarSchemas
 const quietLog = { info() {}, warn() {}, error() {} }
 const T = 1_000_000
 

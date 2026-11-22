@@ -1,27 +1,19 @@
+import { sidecarSchemas, createPluginEnv } from './helpers/plugin-env.ts'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { FileTable } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { createAgentsMdWriter } from '../src/storage/agents-md.ts'
-import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
-import { PendingDecisionsStore } from '../src/governance/decisions.ts'
-import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { AdviceIgnoreStore, adviceFingerprint } from '../src/governance/advice-ignores.ts'
-import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
-import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type AdviceIgnore } from '../src/governance/schema.ts'
+import { type AdviceIgnore } from '../src/governance/schema.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { RETENTION_MS } from '../src/retention.ts'
 import { computeDigest } from '../src/storage/frontmatter.ts'
 import { ViewWriter, collectGlobalViews } from '../src/gui/view-writer.ts'
 import { createMemoryCommand } from '../src/gui/commands.ts'
-import {
-  GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, encodeMemoryCommand, healthViewSchema, memoryCommandResultSchema, pendingViewSchema,
-  type MemoryCommand, type MemoryCommandResult,
-} from '../src/gui/contract.ts'
+import { GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, encodeMemoryCommand, healthViewSchema, memoryCommandResultSchema, pendingViewSchema, type MemoryCommand, type MemoryCommandResult } from '../src/gui/contract.ts'
 import { record } from './helpers/record.ts'
 import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
 import { noInstructions } from './helpers/instructions.ts'
@@ -43,15 +35,10 @@ beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pm-promote-misplac
 afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
 function env() {
-  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
+  const sidecar = new SidecarStore({ root, schemas: sidecarSchemas })
   const clock = { now: NOW }
-  const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => clock.now }), undefined, sidecar.recallStats)
-  const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
-  const snapshots = new SnapshotStore(sidecar.snapshots)
-  const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
+  const { store, decisions, snapshots, ignores, checkups, autoCheckups } = createPluginEnv(sidecar, { root, stats: sidecar.recallStats, now: () => clock.now })
   const cache = sidecar.scanCache
-  const checkups = new CheckupRecordStore(sidecar.checkups)
-  const autoCheckups = new AutoCheckupSettingStore(sidecar.autoCheckups)
   const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, snapshots, cache, checkups, autoCheckups, ignores, registry, memoryRoot: root, now: () => clock.now }), now: () => clock.now, sleep: async () => {}, lock: sidecar.lock })
   const command = createMemoryCommand({
     memoryRoot: root, store, decisions, snapshots, cache, checkups, autoCheckups, ignores, registry, views,

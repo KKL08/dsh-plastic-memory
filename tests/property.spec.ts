@@ -1,3 +1,4 @@
+import { sidecarSchemas } from './helpers/sidecar-schemas.ts'
 import { mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -23,7 +24,6 @@ import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { AdviceIgnoreStore } from '../src/governance/advice-ignores.ts'
 import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../src/governance/schema.ts'
 import { noInstructions } from './helpers/instructions.ts'
 
 // Names mixing filesystem-forbidden chars, whitespace and CJK, long enough to
@@ -244,7 +244,7 @@ describe('子 agent 记忆的生命周期', () => {
     }
     await apply(ctx as never, new Config({ memoryRoot } as never))
     // 记忆页的「直接改」：同一记忆根目录上另一个宿主进程里的 /memory 命令（磁盘是唯一真相，多进程共用一份），借主会话、视图不写
-    const sidecar = new SidecarStore({ root: memoryRoot, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
+    const sidecar = new SidecarStore({ root: memoryRoot, schemas: sidecarSchemas })
     const command = createMemoryCommand({
       memoryRoot, store: new MemoryStore(new FileTable({ root: memoryRoot, stats: sidecar.recallStats }), undefined, sidecar.recallStats),
       decisions: new PendingDecisionsStore(sidecar.pending, sidecar.lock), snapshots: new SnapshotStore(sidecar.snapshots), cache: sidecar.scanCache,

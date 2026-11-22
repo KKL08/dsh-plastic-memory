@@ -39,9 +39,14 @@ const dir = process.argv[2]
 const file = process.argv[3]
 if (!file) throw new Error('Host exited without an evaluation report')
 const report = JSON.parse(readFileSync(join(dir, file), 'utf8'))
-console.table(report.summary.classes)
-console.log(JSON.stringify({ ...report.summary, verticalContradictions: report.verticalContradictions }))
-console.log(join(dir, file))
+if (process.env.GITHUB_ACTIONS === 'true') {
+  // In CI, print only case and failure counts; the full report stays in output/.
+  console.log(JSON.stringify({ total: report.summary.total, failures: report.summary.failures }))
+} else {
+  console.table(report.summary.classes)
+  console.log(JSON.stringify({ ...report.summary, verticalContradictions: report.verticalContradictions }))
+  console.log(join(dir, file))
+}
 JS
 
 exit "$code"

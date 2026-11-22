@@ -1,3 +1,4 @@
+import { sidecarSchemas } from './sidecar-schemas.ts'
 /**
  * 侧表读改写的双进程用例子进程脚本（tests/sidecar-read-modify-write.spec.ts 起两份）。存储按接线层的方式搭：
  * 一把真写锁注入文件表、侧表、待决账本，写锁外面套屏障装饰器（lock-barrier.ts）。
@@ -19,7 +20,6 @@ import { createRootLock } from '../../src/storage/root-lock.ts'
 import { MemoryStore } from '../../src/store.ts'
 import { SnapshotStore } from '../../src/governance/snapshots.ts'
 import { PendingDecisionsStore } from '../../src/governance/decisions.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../../src/governance/schema.ts'
 import { executeConfirm } from '../../src/tools/confirm.ts'
 import { goneCopies } from '../../src/tools/workspace-gate.ts'
 import { RecordNotFoundError } from '../../src/errors.ts'
@@ -39,7 +39,7 @@ const barrier = barrierLock(createRootLock({ root, log }), { dir: signalDir, nam
 const lock: RootLock = { run: fn => { runs++; return barrier.run(fn) } }
 
 const sidecar = new SidecarStore({
-  root, lock, log, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema },
+  root, lock, log, schemas: sidecarSchemas,
 })
 const store = new MemoryStore(new FileTable({ root, lock, stats: sidecar.recallStats, log }), log, sidecar.recallStats)
 const snapshots = new SnapshotStore(sidecar.snapshots, { findGone: goneCopies(store) })

@@ -1,3 +1,4 @@
+import { sidecarSchemas } from './sidecar-schemas.ts'
 /**
  * 双进程工具调用测试的子进程脚本（tests/sidecar-two-process.spec.ts 起两份，模拟同时开着的两个 dsh 进程）。
  * 用法：node tool-worker.ts <memoryRoot> <workspacePath> <标签>
@@ -15,7 +16,6 @@ import { SidecarStore } from '../../src/storage/sidecar.ts'
 import { MemoryStore } from '../../src/store.ts'
 import { SnapshotStore } from '../../src/governance/snapshots.ts'
 import { PendingDecisionsStore } from '../../src/governance/decisions.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../../src/governance/schema.ts'
 import { buildTypeRegistry } from '../../src/type-registry.ts'
 import { executeForget } from '../../src/tools/forget.ts'
 import { executeSearch } from '../../src/tools/search.ts'
@@ -32,7 +32,7 @@ const log = {
   error: (message: string) => { process.stderr.write(`${message}\n`) },
 }
 const sidecar = new SidecarStore({
-  root, log, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema },
+  root, log, schemas: sidecarSchemas,
 })
 const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, log }), log, sidecar.recallStats)
 const snapshots = new SnapshotStore(sidecar.snapshots)

@@ -1,3 +1,4 @@
+import { sidecarSchemas } from './helpers/sidecar-schemas.ts'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
@@ -13,7 +14,7 @@ import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { executeSearch } from '../src/tools/search.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type PendingDecision } from '../src/governance/schema.ts'
+import { type PendingDecision } from '../src/governance/schema.ts'
 import { RootLockTimeoutError } from '../src/errors.ts'
 import { collectGlobalViews } from '../src/gui/view-writer.ts'
 import { GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_WORKSPACE_MAP_FILE } from '../src/gui/contract.ts'
@@ -33,7 +34,7 @@ import { spawnWorker, type LineWorker } from './helpers/spawn-worker.ts'
 const LOCK_WORKER = fileURLToPath(new URL('./helpers/root-lock-worker.ts', import.meta.url))
 const WRITE_WORKER = fileURLToPath(new URL('./helpers/lock-write-worker.ts', import.meta.url))
 const VIEW_WORKER = fileURLToPath(new URL('./helpers/view-writer-worker.ts', import.meta.url))
-const schemas = { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }
+const schemas = sidecarSchemas
 const quietLog = { info() {}, warn() {}, error() {} }
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 

@@ -1,3 +1,4 @@
+import { sidecarSchemas } from './sidecar-schemas.ts'
 /**
  * 双进程侧表测试的子进程脚本（tests/sidecar-two-process.spec.ts 起两份）。
  * 用法：node sidecar-worker.ts <memoryRoot> <快照条数> <标签>
@@ -8,7 +9,6 @@ import { createInterface } from 'node:readline'
 import { once } from 'node:events'
 import { SidecarStore } from '../../src/storage/sidecar.ts'
 import { SnapshotStore } from '../../src/governance/snapshots.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../../src/governance/schema.ts'
 import { MemoryStore } from '../../src/store.ts'
 import { record } from './record.ts'
 import { InMemoryTable } from './in-memory-table.ts'
@@ -17,7 +17,7 @@ const [root, countArg, tag] = process.argv.slice(2)
 if (root === undefined || countArg === undefined || tag === undefined) throw new Error('usage: sidecar-worker.ts <root> <count> <tag>')
 
 const sidecar = new SidecarStore({
-  root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema },
+  root, schemas: sidecarSchemas,
 })
 const snapshots = new SnapshotStore(sidecar.snapshots)
 const store = new MemoryStore(new InMemoryTable(), undefined, sidecar.recallStats)

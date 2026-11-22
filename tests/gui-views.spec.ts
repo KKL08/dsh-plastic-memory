@@ -1,16 +1,14 @@
+import { sidecarSchemas, createPluginEnv } from './helpers/plugin-env.ts'
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { FileTable } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { defaultRootLock } from '../src/storage/root-lock.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { GLOBAL_DIR, STATE_DIR, workspaceDirName } from '../src/storage/paths.ts'
-import { MemoryStore } from '../src/store.ts'
-import { candidateFingerprint, PendingDecisionsStore, suggestionBasis } from '../src/governance/decisions.ts'
-import { SnapshotStore } from '../src/governance/snapshots.ts'
-import { SEVERITY_BY_TYPE, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type Finding, type FindingType } from '../src/governance/schema.ts'
+import { candidateFingerprint, suggestionBasis } from '../src/governance/decisions.ts'
+import { SEVERITY_BY_TYPE, type Finding, type FindingType } from '../src/governance/schema.ts'
 import { scopeCacheKey, scopeKey, type Scope } from '../src/scope.ts'
 import { resolveHealthThresholds } from '../src/governance/health-presets.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
@@ -18,10 +16,7 @@ import { executeConfirm } from '../src/tools/confirm.ts'
 import { executeForget } from '../src/tools/forget.ts'
 import { executeHealth } from '../src/tools/health.ts'
 import { RETENTION_MS } from '../src/retention.ts'
-import {
-  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, PENDING_ITEM_KINDS, checkupViewSchema, deletedViewSchema, healthViewSchema,
-  checkupKey, libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema, workspaceMapViewSchema, type CheckupView, type GlobalViewName, type PendingItem,
-} from '../src/gui/contract.ts'
+import { GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, PENDING_ITEM_KINDS, checkupViewSchema, deletedViewSchema, healthViewSchema, checkupKey, libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema, workspaceMapViewSchema, type CheckupView, type GlobalViewName, type PendingItem } from '../src/gui/contract.ts'
 import { GLOBAL_VIEW_NAMES, buildCheckupView, buildSessionView } from '../src/gui/views.ts'
 import { VIEW_REPLACE_GAP_MS, ViewWriter, collectGlobalViews } from '../src/gui/view-writer.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
@@ -59,10 +54,8 @@ afterEach(async () => { readFailures.clear(); await rm(root, { recursive: true, 
 
 function harness() {
   let clock = T0
-  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
-  const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => clock }), undefined, sidecar.recallStats)
-  const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
-  const snapshots = new SnapshotStore(sidecar.snapshots)
+  const sidecar = new SidecarStore({ root, schemas: sidecarSchemas })
+  const { store, decisions, snapshots } = createPluginEnv(sidecar, { root, stats: sidecar.recallStats, now: () => clock })
   const sourceDeps = { store, decisions, cache: sidecar.scanCache, registry, memoryRoot: root, now: () => clock }
   return {
     store, decisions, snapshots, sourceDeps, cache: sidecar.scanCache,
