@@ -18,11 +18,21 @@ import type { JsonValue } from '@deepseek-ai/dsh-util-values'
  * JsonValue 的签名所迫，另有注释）。
  */
 export function toToolOutput<T>(value: T): JsonValue {
-  return walk(value, '', new Set())
+  return walk(value, '', new Set(), false)
 }
 
-/** 递归走一遍：深剔 undefined，拒非 JSON 值（错误信息带路径），检测循环。 */
-function walk(value: unknown, path: string, ancestors: Set<object>): JsonValue {
+/** 值原样就是无损 JSON（容器里的 undefined、稀疏数组也不算）：读文件时用它把 YAML 写出的非 JSON 值挡在记录外。 */
+export function isLosslessJson(value: unknown): boolean {
+  try {
+    walk(value, '', new Set(), true)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 递归走一遍：深剔 undefined（strict 时连容器里的 undefined 也拒），拒非 JSON 值（错误信息带路径），检测循环。 */
+function walk(value: unknown, path: string, ancestors: Set<object>, strict: boolean): JsonValue {
   if (value === null) return null
 
   const type = typeof value
@@ -52,7 +62,8 @@ function walk(value: unknown, path: string, ancestors: Set<object>): JsonValue {
       for (let i = 0; i < obj.length; i++) {
         const el = (obj as unknown[])[i]
         // 数组元素 undefined → null，保持长度与下标（与 JSON.stringify 一致）
-        out[i] = el === undefined ? null : walk(el, `${path}[${i}]`, ancestors)
+        if (el === undefined && strict) throw new TypeError(`toToolOutput: 非 JSON 值（undefined）位于 ${loc(`${path}[${i}]`)}`)
+        out[i] = el === undefined ? null : walk(el, `${path}[${i}]`, ancestors, strict)
       }
       return out
     }
@@ -73,11 +84,12 @@ function walk(value: unknown, path: string, ancestors: Set<object>): JsonValue {
     const out: { [key: string]: JsonValue } = {}
     for (const key of Object.keys(obj)) {
       const child = (obj as Record<string, unknown>)[key]
+      if (child === undefined && strict) throw new TypeError(`toToolOutput: 非 JSON 值（undefined）位于 ${loc(path === '' ? key : `${path}.${key}`)}`)
       if (child === undefined) continue // 对象值为 undefined 的键：删除
       // defineProperty 而非赋值：名为 __proto__ 的自有键（JSON.parse 会产生，宿主原样接受）
       // 走赋值会改写 out 的原型并丢掉这个键
       Object.defineProperty(out, key, {
-        value: walk(child, path === '' ? key : `${path}.${key}`, ancestors),
+        value: walk(child, path === '' ? key : `${path}.${key}`, ancestors, strict),
         enumerable: true, writable: true, configurable: true,
       })
     }

@@ -40,7 +40,20 @@ export function restoreProjection(r: MemoryRecord) {
     validTo: r.validTo === undefined ? undefined : roundValidity('validTo', r.validTo),
     confidence: r.confidence, supersedes: r.supersedes,
     source: r.source && { sessionId: r.source.sessionId, eventRange: r.source.eventRange, sourceMode: r.source.sourceMode },
+    // 用户或模型会改的新键：手改之后恢复不能悄悄盖掉。缺省值不进 JSON，没有这些键的记录指纹不变
+    factTime: r.factTime, related: r.related,
+    premises: sortKeys(r.premises), recall: sortKeys(r.recall), locked: sortKeys(r.locked), lockedUntil: sortKeys(r.lockedUntil),
   }
+}
+
+/**
+ * 开放取值里的对象按键名排序：手改只换了键的顺序时，深比较和指纹（JSON 文本）一样都视为没改。
+ * 只用在新键上，旧字段照原样，账本里存过的指纹不受影响。
+ */
+function sortKeys(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(sortKeys)
+  if (v === null || typeof v !== 'object') return v
+  return Object.fromEntries(Object.keys(v).sort().map(k => [k, sortKeys((v as Record<string, unknown>)[k])]))
 }
 
 /** 恢复比较投影的指纹：直接改写完后记下它，撤销前比一下，就知道之后有没有被别处改过。 */

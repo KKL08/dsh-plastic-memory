@@ -130,10 +130,11 @@ describe('手编检测与恢复比较投影', () => {
     expect((await h.save(args)).kind).toBe('updated')
   })
 
-  it('恢复比较投影（name、type、tags、summary、正文、validFrom、validTo、confidence、supersedes、source）在比较时刻由当前文件与快照记录各算一份，不读文件里的 digest', async () => {
+  it('恢复比较投影（name、type、tags、summary、正文、validFrom、validTo、confidence、supersedes、source，以及用户会改的新键 factTime、related、premises、recall、locked、lockedUntil）在比较时刻由当前文件与快照记录各算一份，不读文件里的 digest', async () => {
     // 字段集合钉死：时间戳、status、digest、位置、召回统计都不在里面
     expect(Object.keys(restoreProjection(wsRec())).sort()).toEqual([
-      'confidence', 'content', 'name', 'source', 'summary', 'supersedes', 'tags', 'type', 'validFrom', 'validTo',
+      'confidence', 'content', 'factTime', 'locked', 'lockedUntil', 'name', 'premises', 'recall', 'related', 'source', 'summary',
+      'supersedes', 'tags', 'type', 'validFrom', 'validTo',
     ])
     const MIN = 60_000   // 有效期按分钟比（文件里写到分钟）
     const base = wsRec({ id: 'mem_p', content: '第一行\n第二行', validFrom: 10 * MIN, validTo: 20 * MIN, supersedes: ['mem_x'] })
@@ -146,6 +147,8 @@ describe('手编检测与恢复比较投影', () => {
       { name: '别名' }, { type: 'knowledge' }, { tags: ['新'] }, { summary: '新摘要' }, { content: '新正文' },
       { validFrom: 11 * MIN }, { validTo: 21 * MIN }, { confidence: 0.5 }, { supersedes: ['mem_y'] },
       { source: { sessionId: 's-other', eventRange: [1, 2], sourceMode: 'user-explicit' } },
+      { factTime: '2026-11' }, { related: ['mem_r'] }, { premises: [{ id: 'mem_q', digest: 'd1' }] }, { recall: 'search-only' },
+      { locked: true }, { lockedUntil: 5 },
     ]
     for (const c of changes) expect(same({ ...base, ...c }), JSON.stringify(c)).toBe(false)
 
