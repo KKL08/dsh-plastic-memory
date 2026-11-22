@@ -225,6 +225,11 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
   const isAutoCheckup = deps.autoCheckups !== undefined
     && resolveAutoCheckup(await deps.autoCheckups.read(), scope).frequency !== 'manual'
   const isSemanticStale = cachedAt !== null && !isAutoCheckup && now - cachedAt > th.scanStaleDays * DAY
+  // 项目还没有自己的记忆、也没体检过：可见的只有全局记忆，本项目没有可体检的内容，不说「从未做过语义扫描」、不建议首扫。
+  // 有坏文件不算（坏文件照样扣分，体检会查它，扫描也给它写完成记录）；这次有目录缺标记或读不了时也不下这个结论，
+  // 项目的记忆可能只是没读到
+  const isReadIncomplete = [...listing.directoryNotes, ...data.directoryNotes].some(n => n.code === 'marker-missing' || n.code === 'dir-unreadable')
+  const isOwnless = scope.kind === 'workspace' && records.length === 0 && health.counts.malformed === 0 && !isReadIncomplete && cachedAt === null
 
   // workspace 视图必须兜住全局的密钥——它在本会话同样生效，但归属（与修复责任）在全局，
   // 不计本作用域分数，走报警 + recommendation 置顶
@@ -262,9 +267,9 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
     if (overdue.length > 0) actions.push(`${overdue.length} 条冲突挂起超 ${th.pendingOverdueDays} 天，建议用 memory_confirm 裁决`)
     if (overflow !== null) recommendationKinds.push('budget-overflow')
     if (overflow !== null) actions.push(`${overflow.summary}（不扣分），建议整理记忆或调高 snapshotTokenBudget`)
-    if (cachedAt === null) recommendationKinds.push('semantic-never-scanned')
+    if (cachedAt === null && !isOwnless) recommendationKinds.push('semantic-never-scanned')
     else if (isSemanticStale) recommendationKinds.push('semantic-stale')
-    if (cachedAt === null) actions.push('尚未做过语义扫描，建议首次运行 memory_scan')
+    if (cachedAt === null && !isOwnless) actions.push('尚未做过语义扫描，建议首次运行 memory_scan')
     else if (isSemanticStale) actions.push(`语义扫描已是 ${Math.floor((now - cachedAt) / DAY)} 天前，建议重新运行 memory_scan`)
     if (health.freshness.staleCount > 0) recommendationKinds.push('freshness-stale')
     if (health.freshness.staleCount > 0) actions.push(`${health.freshness.staleCount} 条记忆超过衰退期，建议用 memory_confirm 确认或更新`)
@@ -284,7 +289,7 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
 
   const semanticNote = cachedAt !== null
     ? `（语义部分基于 ${Math.floor((now - cachedAt) / DAY)} 天前的扫描）`
-    : '（从未做过语义扫描，语义问题按 0 计）'
+    : isOwnless ? `（${wsPath === currentWs ? '本项目' : '这个项目'}还没有自己的记忆）` : '（从未做过语义扫描，语义问题按 0 计）'
   const scopeLabel = scope.kind === 'global' ? 'global 记忆'
     : wsPath === currentWs ? '本项目记忆'
     : `workspace ${wsPath} 记忆`

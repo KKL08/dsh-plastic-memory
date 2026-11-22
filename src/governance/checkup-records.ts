@@ -108,10 +108,10 @@ export class CheckupRecordStore {
     })
   }
 
-  /** 清掉目录已不在的项目的记录（视图生成时调用）；全局、all 等不是项目的键不动。 */
-  async removeMissingWorkspaces(workspaces: ReadonlySet<string>): Promise<void> {
+  /** 清掉真正删掉的项目的记录（视图生成时调用，isGone 判断哪些项目不在了）；全局、all 等不是项目的键不动。 */
+  async removeMissingWorkspaces(isGone: (workspacePath: string) => Promise<boolean>): Promise<void> {
     for (const r of await this.list()) {
-      if (isAbsolute(r.id) && !workspaces.has(r.id)) await this.table.delete(r.id)
+      if (isAbsolute(r.id) && await isGone(r.id)) await this.table.delete(r.id)
     }
   }
 }

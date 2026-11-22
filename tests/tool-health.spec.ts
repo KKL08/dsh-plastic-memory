@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
@@ -7,7 +7,15 @@ import { GLOBAL_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/p
 import type { RecallStats } from '../src/storage/schema.ts'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { fakeExec } from './helpers/exec.ts'
-import { executeHealth, renderHealthResult, type HealthToolDeps, type HealthArgs, type SingleHealthResult, TIER_LABEL } from '../src/tools/health.ts'
+import { executeHealth, renderHealthResult, type HealthToolDeps, type HealthArgs, type HealthToolResult, type SingleHealthResult, TIER_LABEL } from '../src/tools/health.ts'
+import { executeScan } from '../src/tools/scan.ts'
+import { encodeRecord } from '../src/storage/frontmatter.ts'
+import { scopeCacheKey } from '../src/scope.ts'
+import { collectGlobalViews } from '../src/gui/view-writer.ts'
+import { SidecarStore } from '../src/storage/sidecar.ts'
+import { resolveHealthThresholds } from '../src/governance/health-presets.ts'
+import { sidecarSchemas } from './helpers/sidecar-schemas.ts'
+import { noInstructions } from './helpers/instructions.ts'
 import { MemoryStore } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
@@ -458,5 +466,187 @@ describe('renderHealthResult', () => {
     const r = await runSingle({ scope: '/other' }, deps)
     expect(r.workspacePath).toBe('/other')
     expect(r.message).toContain('/other')
+  })
+})
+
+/**
+ * 还没有自己记忆的项目：记忆根下没有它的目录，会话可见的只有全局记忆。真实记忆根加侧表，扫描、视图生成、健康检查走接线层的那一串。
+ * 扫描不给这种项目写完成记录，健康检查说本项目还没有自己的记忆、不建议首扫；视图生成的清理就碰不到它，扫描前后口径一致。
+ */
+describe('还没有自己记忆的项目', () => {
+  const WS = '/work/proj'
+  const NOW = 100 * DAY
+  async function scanEnv() {
+    const root = await mkdtemp(join(tmpdir(), 'pm-ownless-'))
+    roots.push(root)
+    const sidecar = new SidecarStore({ root, schemas: sidecarSchemas })
+    const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats }), undefined, sidecar.recallStats)
+    const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
+    const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
+    const checkups = new CheckupRecordStore(sidecar.checkups)
+    const host = { contextOf: async () => ({ workspacePath: WS }), llmOf: () => ({ complete: async () => '{"findings":[]}' }) }
+    const now = () => NOW
+    const scan = () => executeScan({}, { store, registry, decisions, cache: sidecar.scanCache, checkups, instructions: noInstructions, host, now }, fakeExec())
+    const health = () => executeHealth({}, { store, registry, decisions, cache: sidecar.scanCache, checkups, thresholds: resolveHealthThresholds('normal'), host, now }, fakeExec())
+    const refreshViews = () => collectGlobalViews({ store, decisions, cache: sidecar.scanCache, checkups, registry, memoryRoot: root, now })
+    return { root, store, checkups, cache: sidecar.scanCache, scan, health, refreshViews }
+  }
+  const expectOwnless = (r: HealthToolResult) => {
+    expect(r.kind === 'single' && r.recommendationKinds).not.toContain('semantic-never-scanned')
+    const text = renderHealthResult(r)
+    expect(text).toContain('本项目还没有自己的记忆')
+    expect(text).not.toContain('从未做过语义扫描')
+    expect(text).not.toContain('建议首次运行 memory_scan')
+  }
+
+  it('项目会话只有全局记忆：memory_scan 做完、视图重新生成之后，memory_health 说本项目还没有自己的记忆，不说从未做过语义扫描', async () => {
+    const e = await scanEnv()
+    await e.store.create(record({ id: 'mem_g1', content: '全局一' }))
+    await e.store.create(record({ id: 'mem_g2', content: '全局二' }))
+    expect(await e.scan()).toMatchObject({ kind: 'single', layer: 'workspace', stats: { scanned: 2, issues: 0 } })
+    expectOwnless(await e.health())
+    await e.refreshViews()
+    expectOwnless(await e.health())
+  })
+
+  it('没扫描过也一样：不建议首扫', async () => {
+    const e = await scanEnv()
+    await e.store.create(record({ id: 'mem_g1' }))
+    expectOwnless(await e.health())
+  })
+
+  it('扫描不给这种项目写完成记录', async () => {
+    const e = await scanEnv()
+    await e.store.create(record({ id: 'mem_g1' }))
+    await e.scan()
+    expect(await e.checkups.list()).toEqual([])
+  })
+
+  it('项目有了自己的记忆：从没体检过照旧建议首扫；扫描写完成记录，视图重新生成后仍按这次扫描算上次体检', async () => {
+    const e = await scanEnv()
+    await e.store.create(record({ id: 'mem_g1' }))
+    await e.store.create(record({ id: 'mem_w1', scope: 'workspace', workspacePath: WS }))
+    const before = await e.health()
+    expect(before.kind === 'single' && before.recommendationKinds).toContain('semantic-never-scanned')
+    await e.scan()
+    expect((await e.checkups.list()).map(r => r.id)).toEqual([WS])
+    await e.refreshViews()
+    const after = await e.health()
+    expect(after.kind === 'single' && after.breakdown.semanticLayer.cachedAt).toBe(NOW)
+    expect(renderHealthResult(after)).not.toContain('本项目还没有自己的记忆')
+  })
+
+  const expectNeverScanned = (r: HealthToolResult) => {
+    expect(r.kind === 'single' && r.recommendationKinds).toContain('semantic-never-scanned')
+    expect(renderHealthResult(r)).toContain('从未做过语义扫描')
+  }
+
+  it('项目记忆全进了最近删除（目录还在）：扫描不写完成记录，健康检查说还没有自己的记忆；恢复后照旧建议首扫', async () => {
+    const e = await scanEnv()
+    await e.store.create(record({ id: 'mem_g1' }))
+    await e.store.create(record({ id: 'mem_w1', scope: 'workspace', workspacePath: WS }))
+    // 删除时刻取真实时间：记忆根的保留期按真实时钟算，用测试时钟会被当成早已过期清掉
+    expect(await e.store.softDelete({ id: 'mem_w1', workspacePath: WS })).toBe(true)
+    await e.scan()
+    expect(await e.checkups.list()).toEqual([])
+    expectOwnless(await e.health())
+    expect(await e.store.restoreArchived({ id: 'mem_w1', workspacePath: WS }, { at: { kind: 'workspace', workspacePath: WS } })).toBe(true)
+    expectNeverScanned(await e.health())
+  })
+
+  it('项目记忆彻底删光（目录还在）：扫描不写完成记录；再写进第一条记忆后照旧建议首扫', async () => {
+    const e = await scanEnv()
+    await e.store.create(record({ id: 'mem_g1' }))
+    await e.store.create(record({ id: 'mem_w1', scope: 'workspace', workspacePath: WS }))
+    expect(await e.store.hardDelete({ id: 'mem_w1', workspacePath: WS })).toBe(true)
+    await e.scan()
+    expect(await e.checkups.list()).toEqual([])
+    await e.store.create(record({ id: 'mem_w2', scope: 'workspace', workspacePath: WS }))
+    expectNeverScanned(await e.health())
+  })
+
+  it('扫描列完目录、还没读记忆时写进了项目的第一条记忆：这条被扫到，扫描照常写完成记录，健康检查按这次扫描算', async () => {
+    const e = await scanEnv()
+    await e.store.create(record({ id: 'mem_g1' }))
+    // 只在扫描列目录的那一次插进新建：列完之后、读记忆之前，另一个会话写进了第一条项目记忆
+    const listDirs = e.store.listWorkspaceDirs.bind(e.store)
+    e.store.listWorkspaceDirs = async () => {
+      const listing = await listDirs()
+      e.store.listWorkspaceDirs = listDirs
+      await e.store.create(record({ id: 'mem_w1', scope: 'workspace', workspacePath: WS }))
+      return listing
+    }
+    expect(await e.scan()).toMatchObject({ kind: 'single', stats: { scanned: 2 } })
+    expect((await e.checkups.list()).map(r => r.id)).toEqual([WS])
+    const r = await e.health()
+    expect(r.kind === 'single' && r.breakdown.semanticLayer.cachedAt).toBe(NOW)
+    expect(renderHealthResult(r)).not.toContain('从未做过语义扫描')
+  })
+
+  it('项目只有坏文件（进了隔离）：不算还没有自己的记忆，照旧建议首扫；扫描给它写完成记录', async () => {
+    const e = await scanEnv()
+    await e.store.create(record({ id: 'mem_g1' }))
+    const dir = join(e.root, workspaceDirName(WS))
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, WORKSPACE_MARKER), WS + '\n')
+    await writeFile(join(dir, 'broken.md'), '没有 frontmatter\n')
+    const before = await e.health()
+    expect(before.kind === 'single' && before.breakdown.ruleLayer.malformed).toBe(1)
+    expectNeverScanned(before)
+    expect(renderHealthResult(before)).not.toContain('还没有自己的记忆')
+    await e.scan()
+    expect((await e.checkups.list()).map(r => r.id)).toEqual([WS])
+  })
+
+  it('升级前只有语义缓存、没有完成记录的项目：记忆全进最近删除后扫描、再恢复，上次体检仍按那份缓存的时间算', async () => {
+    const e = await scanEnv()
+    await e.store.create(record({ id: 'mem_g1' }))
+    await e.store.create(record({ id: 'mem_w1', scope: 'workspace', workspacePath: WS }))
+    const key = scopeCacheKey({ kind: 'workspace', workspacePath: WS })
+    // 升级前写的缓存：没有「已由体检记录接管」的标记，上次体检暂按它的时间算
+    await e.cache.put(key, { id: key, scannedAt: NOW - 2 * DAY, scope: WS, findings: [] })
+    expect(await e.store.softDelete({ id: 'mem_w1', workspacePath: WS })).toBe(true)
+    await e.scan()
+    expect(await e.store.restoreArchived({ id: 'mem_w1', workspacePath: WS }, { at: { kind: 'workspace', workspacePath: WS } })).toBe(true)
+    const r = await e.health()
+    expect(r.kind === 'single' && r.breakdown.semanticLayer.cachedAt).toBe(NOW - 2 * DAY)
+  })
+
+  it('项目的记忆目录缺项目标记：这次读不全，不说还没有自己的记忆，照旧建议首扫', async () => {
+    const e = await scanEnv()
+    await e.store.create(record({ id: 'mem_g1' }))
+    const dir = join(e.root, workspaceDirName(WS))
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, 'kept.md'), encodeRecord(record({ id: 'mem_w1', scope: 'workspace', workspacePath: WS }), {}))
+    const r = await e.health()
+    expectNeverScanned(r)
+    expect(renderHealthResult(r)).not.toContain('还没有自己的记忆')
+  })
+
+  it('项目的记忆目录读不了（没权限）：这次读不全，不说还没有自己的记忆，照旧建议首扫', async () => {
+    const e = await scanEnv()
+    await e.store.create(record({ id: 'mem_g1' }))
+    await e.store.create(record({ id: 'mem_w1', scope: 'workspace', workspacePath: WS }))
+    const dir = join(e.root, workspaceDirName(WS))
+    await chmod(dir, 0o000)
+    try {
+      const r = await e.health()
+      expectNeverScanned(r)
+      expect(renderHealthResult(r)).not.toContain('还没有自己的记忆')
+    } finally {
+      await chmod(dir, 0o755)
+    }
+  })
+
+  it('从别的会话查一个还没有自己记忆的项目：括号里说「这个项目」，不说「本项目」', async () => {
+    const table = new InMemoryTable()
+    const deps = { ...makeDeps(NOW, WS), store: new MemoryStore(table, undefined, new InMemoryBatchKvTable()) }
+    // 记忆根下有这个项目的目录，顶层只有一份已删的记录：体检清单认得它，在用的记忆一条没有
+    table.seedFile({ dir: join('/in-memory', workspaceDirName('/other')), fileName: 'old.md', record: { ...record({ id: 'mem_o', scope: 'workspace', workspacePath: '/other' }), status: 'deleted', deletedAt: NOW } })
+    const r = await runSingle({ scope: '/other' }, deps)
+    expect(r.message).toContain('workspace /other 记忆')
+    expect(r.message).toContain('（这个项目还没有自己的记忆）')
+    expect(r.message).not.toContain('本项目')
+    expect(r.recommendationKinds).not.toContain('semantic-never-scanned')
   })
 })

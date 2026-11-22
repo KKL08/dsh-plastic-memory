@@ -29,10 +29,10 @@ export class AutoCheckupSettingStore {
     else await this.table.put(key, { id: key, frequency })
   }
 
-  /** 清掉目录已不在的项目的设置（视图生成时调用）；「全部」和全局不动。 */
-  async removeMissingWorkspaces(workspaces: ReadonlySet<string>): Promise<void> {
+  /** 清掉真正删掉的项目的设置（视图生成时调用，isGone 判断哪些项目不在了）；「全部」和全局不动。 */
+  async removeMissingWorkspaces(isGone: (workspacePath: string) => Promise<boolean>): Promise<void> {
     for (const key of (await this.read()).keys()) {
-      if (isAbsolute(key) && !workspaces.has(key)) await this.table.delete(key)
+      if (isAbsolute(key) && await isGone(key)) await this.table.delete(key)
     }
   }
 }

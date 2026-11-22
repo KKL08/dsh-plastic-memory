@@ -377,10 +377,10 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       return { ok: r.kind === 'rejected' && r.code === 'no-workspace', detail: `kind=${r.kind} code=${r.code}` }
     })
 
-    // H3 首次体检：从未扫描 → recommendationKinds 含 semantic-never-scanned（在任何 scan 之前）
+    // H3 全新记忆根体检：项目还没有自己的记忆，不提示做第一次语义扫描（有记忆之后的提示见 H3b）
     await attempt('H3-HEALTH-FRESH', async () => {
       const r = await call('memory_health', {}, execA) as { kind: string; score?: number; tier?: string; recommendationKinds?: string[] }
-      return { ok: r.kind === 'single' && typeof r.score === 'number' && (r.recommendationKinds ?? []).includes('semantic-never-scanned'), detail: `kind=${r.kind} score=${r.score} tier=${r.tier} kinds=${JSON.stringify(r.recommendationKinds)}` }
+      return { ok: r.kind === 'single' && typeof r.score === 'number' && !(r.recommendationKinds ?? []).includes('semantic-never-scanned'), detail: `kind=${r.kind} score=${r.score} tier=${r.tier} kinds=${JSON.stringify(r.recommendationKinds)}` }
     })
 
     // H4 有 cwd 会话 create 落到 workspace 作用域的 md 文件，不落 global；索引文件生成
@@ -395,6 +395,12 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       const inGlobal = existsSync(join(memoriesRoot, 'global')) && readdirSync(join(memoriesRoot, 'global')).some(f => f.endsWith('.md') && readFileSync(join(memoriesRoot, 'global', f), 'utf8').includes(`id: ${savedId}`))
       const index = found.length === 1 && existsSync(join(memoriesRoot, found[0], 'MEMORY.md')) && readFileSync(join(memoriesRoot, found[0], 'MEMORY.md'), 'utf8').includes(savedId)
       return { ok: r.record.scope === 'workspace' && found.length === 1 && !inGlobal && index, detail: `scope=${r.record.scope} wsDirs=${wsDirs.join(',')} foundIn=${found.join(',')} inGlobal=${inGlobal} indexed=${index}` }
+    })
+
+    // H3b 存下第一条记忆、还没扫过：提示做第一次语义扫描（在任何 scan 之前）
+    await attempt('H3b-HEALTH-NEVER-SCANNED', async () => {
+      const r = await call('memory_health', {}, execA) as { kind: string; recommendationKinds?: string[] }
+      return { ok: r.kind === 'single' && (r.recommendationKinds ?? []).includes('semantic-never-scanned'), detail: `kind=${r.kind} kinds=${JSON.stringify(r.recommendationKinds)}` }
     })
 
     // H5 九个工具的典型输出都通过宿主同款深度无损校验（snapshotJsonValue）
