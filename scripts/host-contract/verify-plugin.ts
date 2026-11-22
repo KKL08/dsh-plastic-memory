@@ -8,6 +8,8 @@
  * 宿主 grep 工具搜记忆根目录时顶层命中、.archive/ 不命中（H16）、
  * 带委派 header 的真子会话存入待确认记忆、检索排在主档后、溯源只限自己的会话、父会话接受后进新会话的注入（H19）。
  * 无 key 也跑的宿主服务契约：经宿主 commands 服务执行 `/memory` 命令，结果过 GUI 契约 schema；自动体检调度器在宿主计时服务登记了定时器。
+ * 宿主接口探针（H22–H30，无 key）：sessionQuery 的会话列举、父子追溯、标题、事件时间与过滤；当轮用户消息的来源标记；本进程的空闲信号；
+ * 指令文件的修改时间；会话存档状态（含跨进程，第二趟）；会话卸下后读事件、另一个进程写下的会话（第二趟）；fork 型子会话的快照；经插件自有来源的消息开一轮（含续接冷会话）。
  * 有 DEEPSEEK_API_KEY 且宿主能选出默认模型时再跑语义扫描与取消两项、一次真实的自动体检（H17：无会话、宿主默认模型）、
  * 一次带出处的处理建议（H20：两条记忆的出处从真会话读回，交给真模型），否则标 SKIPPED。
  * run.sh 随后用同一个 DSH_HOME 再起一次宿主（HOST_CONTRACT_PHASE=restart）：第一趟把
@@ -20,7 +22,7 @@
  *
  * 只用可擦除的 TypeScript 语法（engines 要求的 Node 22.19+/24 原生 strip-types 直接加载，不需要构建）。
  */
-import { existsSync, readdirSync, readFileSync, mkdtempSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, mkdtempSync, mkdirSync, realpathSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
@@ -46,12 +48,26 @@ type Sessions = { create(id?: string, options?: { meta?: { cwd?: string; delegat
 type SessionLike = {
   header: { id: string; cwd?: string; delegationDepth?: number; parentSession?: string }; seq: number
   append(type: string, data: unknown, opts?: unknown): { seq: number }
-  deriveMessages(): Array<{ source: { kind: string } }>
+  deriveMessages(): Array<{ source: { kind: string }; content?: Array<{ type: string; text?: string }> }>
 }
 /** H15 读 pre-step 返回的 decision：只看消息来源与正文文本。 */
 type DecisionLike = { kind: string; messages?: Array<{ source: { kind: string }; content: Array<{ type: string; text?: string }> }> }
-/** H15 用到的宿主 agent 工厂最小契约：建真 Agent 与它的会话（不跑模型），用完由持有者销毁。 */
-type Agents = { create(options: { sessionId: string; meta?: { cwd?: string } }): Promise<{ agent: { session: SessionLike }; dispose(): Promise<void> }> }
+/** 宿主真 Agent 的最小契约：H14 读状态、入队用户消息（followup）、读可见历史；H22–H30 另用 id 和等空闲。 */
+type LiveAgent = { id: string; status: string; session: SessionLike; followup(message: unknown): void; whenIdle(): Promise<void> }
+type AgentHandle = { agent: LiveAgent; dispose(): Promise<void> }
+/**
+ * 宿主 agent 工厂（agents 服务）的最小契约：建真 Agent 与它的会话，用完由持有者销毁。H14、H15、H19 只用 create；
+ * H22–H30 另用带种子的 create（fork 型子会话）、续接已落盘会话的 resume、按 id 取和列出活 agent。
+ */
+type Agents = {
+  create(options: {
+    sessionId: string; meta?: { cwd?: string; parentSession?: string; isSeeded?: boolean; origin?: 'subagent'; delegationDepth?: number }
+    seed?: readonly unknown[]; inheritedEventCount?: number; agentOptions?: ModelOpts
+  }): Promise<AgentHandle>
+  resume(options: { resumeSessionId: string; agentOptions?: ModelOpts }): Promise<AgentHandle>
+  get(id: string): LiveAgent | undefined
+  list(): LiveAgent[]
+}
 
 const MEMORY_BASE = { type: 'knowledge', scope: 'workspace', sourceMode: 'user-explicit', tags: [] as string[] }
 
@@ -60,8 +76,6 @@ type SearchHitShape = { id: string; path?: unknown }
 const hitPathsAbsolute = (hits: SearchHitShape[] | undefined) =>
   (hits ?? []).length > 0 && (hits ?? []).every(h => typeof h.path === 'string' && isAbsolute(h.path) && existsSync(h.path))
 
-/** H14 读真会话：宿主 agent 循环的状态与入队用户消息（同 followup）。 */
-type RunnableAgent = { status: string; followup(message: unknown): void; session: { deriveMessages(): Array<{ source: { kind: string }; content?: Array<{ type: string; text?: string }> }> } }
 /** 等 H14 真会话那一轮跑完的上限。 */
 const H14_TURN_WAIT_MS = 120_000
 
@@ -89,8 +103,38 @@ const CHECKUP_VIEW_PATH = ['.state', 'gui', 'checkups.json']
 const AUTO_CHECKUP_WAIT_MS = 180_000
 const AUTO_CHECKUP_POLL_MS = 500
 
-/** 第一趟写、第二趟读的交接内容：重启后要重新读取的记录与它所属的 workspace。 */
-interface Handoff { savedId: string; wsA: string; snapshotId: string | undefined }
+/**
+ * 第一趟写、第二趟读的交接内容：重启后要重新读取的记录与它所属的 workspace；
+ * H28 落盘后卸下的会话（第二趟当成另一个进程写下的会话来读，H27）；H26 存档后没取消的会话（第二趟看存档状态还在不在）。
+ */
+interface Handoff {
+  savedId: string; wsA: string; snapshotId: string | undefined
+  cold?: { sessionId: string; workspacePath: string; eventCount: number; lastEventTime: number }
+  archivedSessionId?: string
+}
+
+// —— 宿主接口探针（H22–H30）用到的宿主形状：只取探针读的字段，宿主改了形状这些用例先红 ——
+type SessionRecordShape = { header: { id: string }; live: boolean; persisted: boolean }
+type EventRecordShape = { seq: number; type: string; time: number }
+type RawEventShape = { seq: number; type: string; time: number; data: unknown }
+/** 宿主 sessionQuery 的最小契约（@deepseek-ai/dsh-session-query 的 SessionQueryEngine，0.2.2-rc.1 与 rc.5 的这些方法签名相同）。 */
+type SessionQueryShape = {
+  listSessions(signal?: AbortSignal): Promise<SessionRecordShape[]>
+  filterSessions(filters: readonly unknown[], signal?: AbortSignal): Promise<SessionRecordShape[]>
+  listEvents(sessionId: string): Promise<EventRecordShape[]>
+  filterEvents(sessionId: string, filters: readonly unknown[]): Promise<Array<EventRecordShape & { text: string }>>
+  readEvent(request: { sessionId: string; seq: number; before?: number; after?: number }): Promise<{ target: RawEventShape; events: RawEventShape[] }>
+  readSession(sessionId: string): Promise<{ events: RawEventShape[] }>
+  traceSession(sessionId: string): Promise<{ ancestors: SessionRecordShape[] }>
+  readTitle(sessionId: string): Promise<{ title: string } | undefined>
+  searchEvents(request: { sessionId: string; query: string }): Promise<unknown>
+}
+/** 宿主 SessionStore 里 H22–H30 额外用到的两项：按 id 取活会话、刷盘。 */
+type SessionStoreExtra = { get(id: string): unknown; flush(session: unknown): Promise<boolean> }
+/** 宿主 workspaceRegistry 的会话存档面（@deepseek-ai/dsh-workspace）。 */
+type WorkspaceArchive = { readonly archivedSessionIds: readonly string[]; archiveSession(id: string): Promise<void>; unarchiveSession(id: string): Promise<void> }
+const errorCode = (e: unknown): string => (e as { code?: string } | null)?.code ?? (e instanceof Error ? e.message : String(e))
+const sourceKindOf = (data: unknown): string | undefined => (data as { source?: { kind?: string } } | undefined)?.source?.kind
 
 async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
   const outcomes: Outcome[] = []
@@ -255,6 +299,62 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
         const shown = await call('memory_snapshot', { action: 'show', snapshotId: handoff.snapshotId }, exec) as { kind: string; entries?: Array<{ id: string }> }
         const snapshotKept = shown.kind === 'shown' && (shown.entries ?? []).some(e => e.id === handoff.savedId)
         return { ok: searchable && pathsOk && activeOnDisk && snapshotKept, detail: `restarted host: searchable=${searchable} pathsAbsolute=${pathsOk} activeOnDisk=${activeOnDisk} snapshotKept=${snapshotKept} (snap=${handoff.snapshotId})` }
+      })
+      // H26b 存档状态跨进程：第一趟存档后没取消的会话，重启后的宿主进程读 workspaceRegistry.archivedSessionIds 仍含它。
+      await attempt('H26b-ARCHIVE-ACROSS-RESTART', async () => {
+        const id = handoff.archivedSessionId
+        if (id === undefined) return { ok: false, detail: '第一趟没有交接 H26 存档的会话' }
+        const registry = ctx.get('workspaceRegistry') as WorkspaceArchive | undefined
+        if (!registry) return { ok: false, detail: '宿主缺 workspaceRegistry 服务' }
+        const isArchived = registry.archivedSessionIds.includes(id)
+        return { ok: isArchived, detail: `archivedAfterRestart=${isArchived} archivedCount=${registry.archivedSessionIds.length}` }
+      })
+      // H27 另一个进程写下的会话：第一趟（另一个宿主进程）落盘后退出，这一趟同一 DSH_HOME 下经 sessionQuery 读得到它的事件和时间，
+      // 但它不在本进程的 agents / sessions 里——跨进程只看得到落盘日志，看不到「正在跑」。
+      await attempt('H27-CROSS-PROCESS-SESSIONS', async () => {
+        const cold = handoff.cold
+        if (cold === undefined) return { ok: false, detail: '第一趟没有交接 H28 的会话' }
+        const sq = ctx.get('sessionQuery') as SessionQueryShape | undefined
+        if (!sq) return { ok: false, detail: '宿主缺 sessionQuery 服务' }
+        const byCwd = await sq.filterSessions([{ kind: 'cwd', values: [cold.workspacePath] }])
+        const record = byCwd.find(r => r.header.id === cold.sessionId)
+        const events = await sq.listEvents(cold.sessionId)
+        const agents = ctx.get('agents') as Agents | undefined
+        const isLiveHere = agents?.get(cold.sessionId) !== undefined || (sessions as unknown as SessionStoreExtra).get(cold.sessionId) !== undefined
+        return {
+          ok: record !== undefined && !record.live && record.persisted && events.length === cold.eventCount && events.at(-1)?.time === cold.lastEventTime && !isLiveHere,
+          detail: `record=${record === undefined ? '（按 cwd 列不出）' : `live=${record.live} persisted=${record.persisted}`} events=${events.length}/${cold.eventCount}`
+            + ` lastTime=${events.at(-1)?.time}/${cold.lastEventTime} liveInThisProcess=${isLiveHere}`,
+        }
+      })
+      // H30b 没有会话在跑时投递：把上一个进程留下、本进程从没打开过的会话经 agents.resume 续上，
+      // 插件自有来源的 user 消息经 followup 开一轮并落进它的日志。agents.create 对已落盘的 id 报 SessionAlreadyExistsError，这里一并锁住。
+      await attempt('H30b-HANDOFF-RESUMED-SESSION', async () => {
+        const cold = handoff.cold
+        const agents = ctx.get('agents') as Agents | undefined
+        const sq = ctx.get('sessionQuery') as SessionQueryShape | undefined
+        if (cold === undefined || !agents || !sq) return { ok: false, detail: `前提缺失 cold=${cold !== undefined} agents=${!!agents} sessionQuery=${!!sq}` }
+        const createOutcome = await agents.create({ sessionId: cold.sessionId, meta: { cwd: cold.workspacePath } })
+          .then(async h => { await h.dispose(); return 'created' }, (e: unknown) => (e instanceof Error ? e.name : String(e)))
+        const handle = await agents.resume({ resumeSessionId: cold.sessionId, agentOptions: { provider: 'probe-no-such-provider', model: 'probe-no-such-model' } })
+        try {
+          const before = handle.agent.session.seq
+          const probe = `H30b 交给对话处理：${Math.random().toString(36).slice(2, 8)}`
+          handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: probe }], source: { kind: 'plastic-memory', form: 'notice', summary: '交给对话处理' } as never }))
+          await handle.agent.whenIdle()
+          await (sessions as unknown as SessionStoreExtra).flush(handle.agent.session)
+          const log = (await sq.readSession(cold.sessionId)).events
+          const resumeAdded = log.slice(cold.eventCount, before).map(e => e.type).join(',') || '（无）'
+          const after = log.slice(before)
+          const delivered = after.find(e => e.type === 'user/message' && sourceKindOf(e.data) === 'plastic-memory' && JSON.stringify(e.data).includes(probe))
+          return {
+            // 续接时宿主可能先补一两条自己的事件（实测 rc.5 多 1 条），只要求原日志都在、新消息落在它们之后
+            ok: createOutcome === 'SessionAlreadyExistsError' && before >= cold.eventCount && delivered !== undefined,
+            detail: `createExisting=${createOutcome} resumedAt=${before}/${cold.eventCount} addedOnResume=${resumeAdded} newEvents=${after.map(e => e.type).join(',')} delivered=${delivered !== undefined}`,
+          }
+        } finally {
+          await handle.dispose()
+        }
       })
       finish()
       return
@@ -597,6 +697,247 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       }
     })
 
+    // —— 宿主接口探针（H22–H30）：直接读宿主接口，不经插件工具；结论写在本地报告里，这里只锁住探针依赖的形状和行为 ——
+    let cold: Handoff['cold']
+    let archivedSessionId: string | undefined
+    const sq = ctx.get('sessionQuery') as SessionQueryShape | undefined
+    const agentFactory = ctx.get('agents') as Agents | undefined
+    const store = sessions as unknown as SessionStoreExtra
+    const rand = () => Math.random().toString(36).slice(2, 8)
+    const userMessage = (text: string, source: unknown = { kind: 'user' }) => createUserMessage({ content: [{ type: 'text', text }], source: source as never })
+    const preStepOf = (agent: unknown, turn: number, step: number, messages: unknown[]) =>
+      (ctx as unknown as { waterfall(name: string, ...args: unknown[]): Promise<unknown> }).waterfall('agent/pre-step', {
+        agent, messages, turn, step, signal: new AbortController().signal,
+      }, async () => ({ kind: 'enter', messages })) as Promise<DecisionLike>
+    const pluginTextOf = (decision: DecisionLike) => (decision.messages ?? []).filter(m => m.source.kind === 'plastic-memory').flatMap(m => m.content.map(b => b.text ?? '')).join('\n')
+
+    // H22 会话查询：按工作目录列会话、按父会话列子会话、父子追溯、标题、事件时间、按序号范围 / 类型 / 时间过滤（只覆盖带文本的事件）；
+    // 读窗口上限 50（翻页靠序号范围自己分段），全文搜索默认关着（base 包 openAt: never）。
+    let probeParent: SessionLike | undefined
+    await attempt('H22-SESSION-QUERY', async () => {
+      if (!sq) return { ok: false, detail: '宿主缺 sessionQuery 服务' }
+      const ws = mkWs('probe')
+      const parent = sessions.create(undefined, { meta: { cwd: ws } })
+      probeParent = parent
+      parent.append('turn/start', { turn: 1 })
+      parent.append('user/message', userMessage('H22 用户本人发的消息'), { surfaceOp: 'append' })
+      parent.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+      parent.append('turn/start', { turn: 2 })
+      parent.append('user/message', userMessage('H22 定时任务发的消息', { kind: 'schedule' }), { surfaceOp: 'append' })
+      parent.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
+      const child = sessions.create(undefined, { meta: { cwd: ws, delegationDepth: 1, parentSession: parent.header.id } })
+      let titleNote = ''
+      try {
+        (ctx.get('sessionTitle') as { rename(session: unknown, title: string): unknown } | undefined)?.rename(parent, 'H22 标题')
+      } catch (e) { titleNote = ` renameThrew=${errorCode(e)}` }
+      const pid = parent.header.id
+      const byCwd = (await sq.filterSessions([{ kind: 'cwd', values: [ws] }])).map(r => r.header.id)
+      const byParent = (await sq.filterSessions([{ kind: 'parent', values: [pid] }])).map(r => r.header.id)
+      const listed = (await sq.listSessions()).some(r => r.header.id === child.header.id)
+      const trace = await sq.traceSession(child.header.id)
+      const title = (await sq.readTitle(pid))?.title
+      const events = await sq.listEvents(pid)
+      const hasTimes = events.length === parent.seq && events.every((e, i) => e.seq === i && Number.isFinite(e.time))
+      // filterEvents 只过滤带语义文本的事件文档（turn/start、turn/end 这类结构事件不在里面），全量元数据用 listEvents
+      const range = (await sq.filterEvents(pid, [{ kind: 'seq', from: 0, to: 4 }])).map(e => e.seq)
+      const typed = (await sq.filterEvents(pid, [{ kind: 'type', values: ['user/message'] }])).map(e => e.seq)
+      const timed = await sq.filterEvents(pid, [{ kind: 'time', from: events[0]?.time ?? 0, to: Date.now() }])
+      const beforeFirst = await sq.filterEvents(pid, [{ kind: 'time', to: (events[0]?.time ?? 0) - 1 }])
+      const windowCode = await sq.readEvent({ sessionId: pid, seq: 0, after: 51 }).then(() => 'accepted', errorCode)
+      const searchCode = await sq.searchEvents({ sessionId: pid, query: 'H22' }).then(() => 'search-enabled', errorCode)
+      const ok = byCwd.includes(pid) && byCwd.includes(child.header.id) && byParent.length === 1 && byParent[0] === child.header.id && listed
+        && trace.ancestors[0]?.header.id === pid && title === 'H22 标题' && hasTimes
+        && JSON.stringify(range) === '[1,4]' && JSON.stringify(typed) === '[1,4]' && timed.length === typed.length && beforeFirst.length === 0 && windowCode === 'SESSION_QUERY_INVALID_WINDOW'
+      return {
+        ok,
+        detail: `byCwd=${byCwd.length} byParent=${JSON.stringify(byParent.map(id => id === child.header.id ? 'child' : id))} listSessions=${listed} ancestors=${trace.ancestors.map(a => a.header.id === pid ? 'parent' : a.header.id).join(',')}`
+          + ` title=${title}${titleNote} events=${events.length} times=${hasTimes} seqRange=${JSON.stringify(range)} typeUserMessage=${JSON.stringify(typed)} timeRange=${timed.length} beforeFirstEvent=${beforeFirst.length}`
+          + ` readEvent(after:51)=${windowCode} searchEvents=${searchCode}`,
+      }
+    })
+
+    // H23 当轮起点用户消息的来源标记：宿主把 user 消息的 source 原样落进日志，sessionQuery 读回的事件带着它；
+    // 用户本人是 { kind: 'user' }（界面发的另带 rpcId），定时任务是 { kind: 'schedule' }。过滤用的事件文档不带来源，要读事件本体。
+    await attempt('H23-TURN-SOURCE-KIND', async () => {
+      if (!sq || probeParent === undefined) return { ok: false, detail: '前提缺失：H22 没建出会话' }
+      const pid = probeParent.header.id
+      const docs = await sq.filterEvents(pid, [{ kind: 'type', values: ['user/message'] }])
+      const kinds: string[] = []
+      for (const d of docs) kinds.push(sourceKindOf((await sq.readEvent({ sessionId: pid, seq: d.seq })).target.data) ?? '（无）')
+      const docHasSource = docs.some(d => 'source' in (d as object))
+      return { ok: JSON.stringify(kinds) === '["user","schedule"]' && !docHasSource, detail: `turnOpenerKinds=${JSON.stringify(kinds)} filterDocCarriesSource=${docHasSource}` }
+    })
+
+    // H24 空闲信号：宿主没有「工作目录空闲」事件；本进程内能拿到的是 agents.list() 每个 agent 的 status（idle / running）、
+    // agent/status 事件，以及归档前问「这个会话还有什么在跑」的 workspace/session-activity。这里锁住空闲一侧（空闲 agent 的活动为空）；
+    // 跑着时 status、agent/status 和 session-activity 回 { kind: 'turn' } 在 H30 里验。
+    await attempt('H24-IDLE-SIGNALS', async () => {
+      if (!agentFactory) return { ok: false, detail: '宿主缺 agents 服务' }
+      const ws = mkWs('probe-idle')
+      const handle = await agentFactory.create({ sessionId: `probe-idle-${rand()}`, meta: { cwd: ws } })
+      try {
+        const listed = agentFactory.list().some(a => a.id === handle.agent.id)
+        const activity = await (ctx as unknown as { waterfall(name: string, ...args: unknown[]): Promise<readonly { kind: string }[]> })
+          .waterfall('workspace/session-activity', { sessionId: handle.agent.id }, () => Promise.resolve([]))
+        return { ok: listed && handle.agent.status === 'idle' && Array.isArray(activity) && activity.length === 0, detail: `listed=${listed} status=${handle.agent.status} sessionActivity=${JSON.stringify(activity)}` }
+      } finally {
+        await handle.dispose()
+      }
+    })
+
+    // H25 指令文件的修改时间：宿主导出 discoverBaselineInstructionFiles，给出每个指令文件的绝对路径（宿主接口本身不带修改时间），
+    // 插件对路径 stat 拿 mtime。这里把 AGENTS.md 的 mtime 设成固定值，比对读回的。
+    await attempt('H25-INSTRUCTION-MTIME', async () => {
+      const ws = mkWs('probe-instructions')
+      mkdirSync(join(ws, '.git'), { recursive: true })
+      const path = join(ws, 'AGENTS.md')
+      writeFileSync(path, '探针 指令文件\n')
+      const fixed = new Date('2026-01-02T03:04:05Z')
+      utimesSync(path, fixed, fixed)
+      const mod = await import('@deepseek-ai/dsh-agent-instructions') as { discoverBaselineInstructionFiles?: (options: { cwd: string; maxBytes: number }) => Promise<Array<{ absolutePath: string; displayPath: string }>> }
+      if (typeof mod.discoverBaselineInstructionFiles !== 'function') return { ok: false, detail: '宿主指令文件包没有导出 discoverBaselineInstructionFiles' }
+      const files = await mod.discoverBaselineInstructionFiles({ cwd: ws, maxBytes: INSTRUCTION_MAX_BYTES })
+      const own = files.find(f => realpathSync(f.absolutePath) === realpathSync(path))
+      const mtimeMs = own === undefined ? undefined : statSync(own.absolutePath).mtimeMs
+      return { ok: own !== undefined && mtimeMs === fixed.getTime(), detail: `files=${JSON.stringify(files.map(f => f.displayPath))} mtime=${mtimeMs === undefined ? '（没找到）' : new Date(mtimeMs).toISOString()}` }
+    })
+
+    // H26 会话存档状态：workspaceRegistry.archivedSessionIds 可读；存档、取消存档后跟着变（存档写在 DSH_HOME 的 storages 里，各进程共用）。
+    await attempt('H26-ARCHIVE-STATE', async () => {
+      const registry = ctx.get('workspaceRegistry') as WorkspaceArchive | undefined
+      if (!registry) return { ok: false, detail: '宿主缺 workspaceRegistry 服务' }
+      const session = sessions.create(undefined, { meta: { cwd: mkWs('probe-archive') } })
+      const id = session.header.id
+      const before = registry.archivedSessionIds.includes(id)
+      await registry.archiveSession(id)
+      const archived = registry.archivedSessionIds.includes(id)
+      await registry.unarchiveSession(id)
+      const after = registry.archivedSessionIds.includes(id)
+      // 另存档一个不取消的会话交给第二趟：重启后的宿主进程读回的存档状态里还有它（H26b）
+      const kept = sessions.create(undefined, { meta: { cwd: mkWs('probe-archive-kept') } }).header.id
+      await registry.archiveSession(kept)
+      if (registry.archivedSessionIds.includes(kept)) archivedSessionId = kept
+      return {
+        ok: Array.isArray(registry.archivedSessionIds) && !before && archived && !after && archivedSessionId === kept,
+        detail: `before=${before} afterArchive=${archived} afterUnarchive=${after} keptForRestart=${archivedSessionId === kept}`,
+      }
+    })
+
+    // H28 会话没打开时读事件：经 agents.create 建会话、写一轮、刷盘、卸下；不在 sessions 里之后，sessionQuery 从落盘日志读回
+    // 记录（live=false、persisted=true）、事件和来源。卸下的会话交接给第二趟（H27：另一个进程写下的会话）。
+    await attempt('H28-COLD-SESSION-READ', async () => {
+      if (!sq || !agentFactory) return { ok: false, detail: `前提缺失 sessionQuery=${!!sq} agents=${!!agentFactory}` }
+      const ws = mkWs('probe-cold')
+      const id = `probe-cold-${rand()}`
+      const handle = await agentFactory.create({ sessionId: id, meta: { cwd: ws } })
+      const session = handle.agent.session
+      session.append('turn/start', { turn: 1 })
+      session.append('user/message', userMessage('探针 冷读：会话卸下后还要读得到'), { surfaceOp: 'append' })
+      session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+      const flushed = await store.flush(session)
+      await handle.dispose()
+      const isDetached = store.get(id) === undefined && agentFactory.get(id) === undefined
+      const record = (await sq.filterSessions([{ kind: 'id', values: [id] }]))[0]
+      const events = await sq.listEvents(id)
+      const userSeq = events.find(e => e.type === 'user/message')?.seq
+      const kind = userSeq === undefined ? undefined : sourceKindOf((await sq.readEvent({ sessionId: id, seq: userSeq })).target.data)
+      // 读事件不会把会话重新打开
+      const stillDetached = store.get(id) === undefined && agentFactory.get(id) === undefined
+      const lastEventTime = events.at(-1)?.time
+      if (lastEventTime !== undefined) cold = { sessionId: id, workspacePath: ws, eventCount: events.length, lastEventTime }
+      return {
+        ok: flushed && isDetached && stillDetached && record !== undefined && !record.live && record.persisted && events.length > 0 && kind === 'user',
+        detail: `flushed=${flushed} detached=${isDetached} detachedAfterRead=${stillDetached} record=${record === undefined ? '（无）' : `live=${record.live} persisted=${record.persisted}`} events=${events.map(e => e.type).join(',')} userSource=${kind}`,
+      }
+    })
+
+    // H29 fork 型子会话的快照：子 agent 带父会话已完成的那段日志当种子（同 fork 后端），它的第一步照样走 agent/pre-step、
+    // 插件照样组装快照。种子里已有的快照和组装结果逐字相同就不再发；中间记忆变了，子会话第一步补发新的一份。
+    await attempt('H29-FORK-SNAPSHOT', async () => {
+      if (!sq || !agentFactory) return { ok: false, detail: `前提缺失 sessionQuery=${!!sq} agents=${!!agentFactory}` }
+      const ws = mkWs('probe-fork')
+      await call('memory_save', { action: 'create', name: 'probe-fork-base', summary: '探针 fork 基线记忆', content: '探针 fork 基线记忆', ...MEMORY_BASE }, mkExec(ws))
+      const parent = await agentFactory.create({ sessionId: `probe-fork-parent-${rand()}`, meta: { cwd: ws } })
+      const children: AgentHandle[] = []
+      try {
+        const ps = parent.agent.session
+        const said = userMessage('探针 父会话第一轮')
+        ps.append('turn/start', { turn: 1 })
+        const first = await preStepOf(parent.agent, 1, 1, [said])
+        ps.append('step/start', { turn: 1, step: 1 })
+        ps.append('system/message', { turn: 1, step: 1, message: createSystemMessage('探针 系统提示词') }, { surfaceOp: 'append' })
+        for (const m of first.messages ?? []) ps.append('user/message', m, { surfaceOp: 'append' })
+        ps.append('step/end', { turn: 1, step: 1 })
+        ps.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+        const parentSnapshot = pluginTextOf(first)
+        const seed = (await sq.readSession(ps.header.id)).events
+        const fork = async () => {
+          const handle = await agentFactory.create({
+            sessionId: `probe-fork-child-${rand()}`, seed, inheritedEventCount: seed.length,
+            meta: { cwd: ws, parentSession: ps.header.id, isSeeded: true, origin: 'subagent', delegationDepth: 1 },
+          })
+          children.push(handle)
+          return pluginTextOf(await preStepOf(handle.agent, 1, 1, [userMessage('探针 子会话的任务')]))
+        }
+        const unchanged = await fork()
+        const dir = readdirSync(memoriesRoot).map(d => join(memoriesRoot, d))
+          .find(d => existsSync(join(d, '.workspace')) && readFileSync(join(d, '.workspace'), 'utf8').trim() === ws)
+        if (dir === undefined) return { ok: false, detail: `找不到 ${ws} 的记忆目录` }
+        const probe = `探针 fork 之后新写的记忆 ${rand()}`
+        writeFileSync(join(dir, 'probe-fork-added.md'), `---\nname: probe-fork-added\ntype: preference\n---\n\n${probe}\n`)
+        const changed = await fork()
+        return {
+          ok: parentSnapshot.includes('探针 fork 基线记忆') && unchanged === '' && changed.includes(probe),
+          detail: `parentSnapshot=${parentSnapshot.length}字 seed=${seed.length} childUnchanged=${unchanged === '' ? '不重发' : `重发${unchanged.length}字`} childAfterChange=${changed.includes(probe) ? '补发含新记忆' : `没带上（${changed.length}字）`}`,
+        }
+      } finally {
+        for (const c of children) await c.dispose()
+        await parent.dispose()
+      }
+    })
+
+    // H30 经插件自有消息通道交给主模型：插件来源的 user 消息经 agent.followup 投给一个会话，宿主开一轮、把它作为当轮起点落进日志，
+    // 这一步的 agent/pre-step 照常经过，插件的记忆快照落在投递的消息前面。跑着的这一轮里 workspace/session-activity 回 { kind: 'turn' }。
+    // 路由指向不存在的提供方，模型调用在请求时失败，不出网；真模型收到后怎么处理不在这里验。
+    await attempt('H30-HANDOFF-OWN-CHANNEL', async () => {
+      if (!sq || !agentFactory) return { ok: false, detail: `前提缺失 sessionQuery=${!!sq} agents=${!!agentFactory}` }
+      const ws = mkWs('probe-handoff')
+      await call('memory_save', { action: 'create', name: 'probe-handoff-base', summary: '探针 投递前已有的记忆', content: '探针 投递前已有的记忆', ...MEMORY_BASE }, mkExec(ws))
+      const handle = await agentFactory.create({ sessionId: `probe-handoff-${rand()}`, meta: { cwd: ws }, agentOptions: { provider: 'probe-no-such-provider', model: 'probe-no-such-model' } })
+      const statuses: string[] = []
+      const off = (ctx as unknown as { on(name: string, fn: (payload: { agent: unknown; status: string }) => void): () => void })
+        .on('agent/status', ({ agent, status }) => { if (agent === handle.agent) statuses.push(status) })
+      try {
+        const probe = `探针 交给对话处理：把 AGENTS.md 第 3 行改成 pnpm ${rand()}`
+        handle.agent.followup(userMessage(probe, { kind: 'plastic-memory', form: 'notice', summary: '交给对话处理' }))
+        // followup 之后、等空闲之前同步发起：这一刻 agent 在跑，宿主的 turn 存档准入回 { kind: 'turn' }
+        const statusAfterFollowup = handle.agent.status
+        const activityPending = (ctx as unknown as { waterfall(name: string, ...args: unknown[]): Promise<readonly { kind: string }[]> })
+          .waterfall('workspace/session-activity', { sessionId: handle.agent.id }, () => Promise.resolve([]))
+        const activity = await activityPending
+        await handle.agent.whenIdle()
+        await store.flush(handle.agent.session)
+        const events = (await sq.readSession(handle.agent.id)).events
+        const turnStart = events.find(e => e.type === 'turn/start')?.seq ?? -1
+        const formOf = (data: unknown) => (data as { source?: { form?: string } } | undefined)?.source?.form
+        const isPluginMessage = (e: RawEventShape) => e.type === 'user/message' && sourceKindOf(e.data) === 'plastic-memory'
+        const delivered = events.find(e => isPluginMessage(e) && JSON.stringify(e.data).includes(probe))?.seq ?? -1
+        const snapshot = events.find(e => isPluginMessage(e) && formOf(e.data) === 'snapshot')?.seq ?? -1
+        const turnEnd = events.find(e => e.type === 'turn/end')?.data as { reason?: { kind?: string } } | undefined
+        const hasTurnActivity = activity.some(a => a.kind === 'turn')
+        return {
+          ok: statuses.includes('running') && statuses.at(-1) === 'idle' && hasTurnActivity
+            && turnStart >= 0 && delivered > turnStart && snapshot >= 0 && snapshot < delivered,
+          detail: `statuses=${statuses.join('→')} statusAfterFollowup=${statusAfterFollowup} sessionActivity=${JSON.stringify(activity)}`
+            + ` events=${events.map(e => `${e.seq}:${e.type}${isPluginMessage(e) ? `(${formOf(e.data)})` : ''}`).join(',')}`
+            + ` turnStartSeq=${turnStart} snapshotSeq=${snapshot} deliveredSeq=${delivered} turnEnd=${turnEnd?.reason?.kind}`,
+        }
+      } finally {
+        off()
+        await handle.dispose()
+      }
+    })
+
     // 语义层两项：需要凭证 + 宿主可选默认模型
     const sel = readDefaultModel()
     const llmReady = hasKey && !!sel.provider && !!sel.model
@@ -744,7 +1085,7 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
     // 也和插件记下的基线指纹对得上（插件对照的就是模型在这个项目里读到的那份）。
     await attempt('H14-INSTRUCTIONS-MODEL-INPUT', async () => {
       const gate = semanticGate(); if (gate) return gate
-      const agents = ctx.get('agents') as { create(options: { sessionId: string; meta?: { cwd?: string }; agentOptions?: ModelOpts }): Promise<{ agent: RunnableAgent; dispose(): Promise<void> }> } | undefined
+      const agents = ctx.get('agents') as Agents | undefined
       if (!agents) return { ok: false, detail: 'agents service unavailable' }
       // 建 agent 不带模型时这一轮在第一步之前就以「没有 provider/model」结束，指令文件也就不会进会话：用宿主默认模型
       const handle = await agents.create({ sessionId: `h14-${Math.random().toString(36).slice(2, 8)}`, meta: { cwd: wsH14 }, agentOptions: sel })
@@ -775,7 +1116,7 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
     // H18 在第三趟（凭据换成无效 key）跑；没有 key 时第三趟不起，结果在这里标 SKIPPED
     if (!hasKey) push({ id: 'H18-AUTH-ERROR-MASKED', ok: true, skipped: true, detail: 'SKIPPED: 无 DEEPSEEK_API_KEY' })
     // 交接给第二趟（重启验证）：恢复过的记录 id、它的 workspace、H7 拍的快照 id
-    if (handoffPath) writeFileSync(handoffPath, JSON.stringify({ savedId, wsA, snapshotId } satisfies Handoff))
+    if (handoffPath) writeFileSync(handoffPath, JSON.stringify({ savedId, wsA, snapshotId, cold, archivedSessionId } satisfies Handoff))
   } catch (e) {
     push({ id: 'FATAL', ok: false, detail: `顶层异常: ${e instanceof Error ? e.stack : String(e)}` })
   }
