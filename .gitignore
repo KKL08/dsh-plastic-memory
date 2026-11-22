@@ -3,3 +3,5 @@ lib/
 coverage/
 *.log
 .DS_Store
+
+output/conflict-eval/
