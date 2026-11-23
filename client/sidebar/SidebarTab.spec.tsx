@@ -111,7 +111,7 @@ describe('SidebarTab 四种状态', () => {
     expect(screen.getByText('全部带入')).toBeInTheDocument()
     const groups = within(screen.getByRole('region', { name: '带入的记忆' }))
     expect(groups.getByRole('heading', { name: '行为偏好 1 全文' })).toBeInTheDocument()
-    expect(groups.getByRole('heading', { name: '项目信息 1 只带摘要' })).toBeInTheDocument()
+    expect(groups.getByRole('heading', { name: '项目信息 1 摘要' })).toBeInTheDocument()
     expect(groups.getByRole('heading', { name: '用户画像 1 全文' })).toBeInTheDocument()
     expect(screen.queryByText('本项目还没有记忆，这次带入的都是全局记忆。')).toBeNull()
     expect(screen.queryByText(/处待处理/)).toBeNull()
@@ -136,7 +136,7 @@ describe('SidebarTab 四种状态', () => {
   it('自定义类型的分组标题写注册表显示名（待处理视图的 typeLabels）', () => {
     const note = memory({ id: 'n1', type: 'domain-term', content: '「灰度」指先放给一小部分用户。' })
     setup({ library: library(note), session: snapshot({ injectedIds: ['n1'] }), pending: { ...pending(), typeLabels: { 'domain-term': '术语' } } })
-    expect(within(screen.getByRole('region', { name: '带入的记忆' })).getByRole('heading', { name: '术语 1 只带摘要' })).toBeInTheDocument()
+    expect(within(screen.getByRole('region', { name: '带入的记忆' })).getByRole('heading', { name: '术语 1 摘要' })).toBeInTheDocument()
   })
 
   it('会话视图还没有（这次对话没组装过快照）：说明发出第一条消息后才有', () => {
@@ -222,16 +222,16 @@ describe('SidebarTab 快照来历与分组', () => {
     expect(screen.queryByText('对话开始时带入的记忆')).toBeNull()
   })
 
-  it('带入的记忆按组标出全文（core 区）与只带摘要（索引行）', () => {
+  it('带入的记忆按组标出全文（core 区）与摘要（索引行）', () => {
     const { container } = setup({ library: library(pref, proj, glob), session: snapshot(), pending: pending() })
     const marks = [...container.querySelectorAll('.pm-side-group-title')].map(h => h.textContent)
-    expect(marks).toEqual(['行为偏好 1 ·全文', '项目信息 1 ·只带摘要', '用户画像 1 ·全文'])
+    expect(marks).toEqual(['行为偏好 1 ·全文', '项目信息 1 ·摘要', '用户画像 1 ·全文'])
   })
 
-  it('索引行不带摘要的类型（如参考引用）标「只带标题」', () => {
+  it('索引行不带摘要的类型（如参考引用）标「简单索引」', () => {
     const ref = memory({ id: 'r1', type: 'reference', content: '看板在 Linear 的 INGEST 项目。' })
     const { container } = setup({ library: library(pref, ref), session: snapshot({ injectedIds: ['p1', 'r1'], titleOnlyIds: ['r1'] }), pending: pending() })
-    expect([...container.querySelectorAll('.pm-side-group-title')].map(h => h.textContent)).toEqual(['行为偏好 1 ·全文', '参考引用 1 ·只带标题'])
+    expect([...container.querySelectorAll('.pm-side-group-title')].map(h => h.textContent)).toEqual(['行为偏好 1 ·全文', '参考引用 1 ·简单索引'])
   })
 
   it('一组里带入方式不一致（全文与索引行混着）时不标', () => {
@@ -253,8 +253,8 @@ describe('SidebarTab 快照来历与分组', () => {
     expect(savedAfter.queryByText('报销截止每月 25 日。')).toBeNull()
     expect(savedAfter.getByText('周五不发版。')).toBeInTheDocument()
     const injected = within(screen.getByRole('region', { name: '带入的记忆' }))
-    expect(injected.getByRole('heading', { name: '事实与经验 1 只带摘要' })).toBeInTheDocument()
-    fireEvent.click(injected.getByRole('button', { name: '事实与经验 1 只带摘要' }))
+    expect(injected.getByRole('heading', { name: '事实与经验 1 摘要' })).toBeInTheDocument()
+    fireEvent.click(injected.getByRole('button', { name: '事实与经验 1 摘要' }))
     expect(screen.getAllByText('报销截止每月 25 日。')).toHaveLength(1)
 
     act(() => { gateway.setView('session', snapshot({ origin: 'compacted', injectedIds: ['p1', 'j1', 'g1', 'n1', 'n2'], savedIds: ['n1', 'n2'] })) })
@@ -1242,7 +1242,7 @@ describe('SidebarTab 折叠与「等你决定」', () => {
     fireEvent.click(toggle)
     expect(toggle).toHaveAttribute('aria-expanded', 'true')
     expect(within(body).getByText('测试用真实 Postgres。').closest('.pm-arrive')).not.toBeNull()
-    expect(screen.getByRole('button', { name: '项目信息 1 只带摘要' })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByRole('button', { name: '项目信息 1 摘要' })).toHaveAttribute('aria-expanded', 'false')
 
     fireEvent.click(toggle)
     expect(toggle).toHaveAttribute('aria-expanded', 'false')

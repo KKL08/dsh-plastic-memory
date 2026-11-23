@@ -14,7 +14,7 @@ import { InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 
-// 出厂类型都不是 passive：只带标题的判据用一个 passive 自定义类型来测
+// 出厂类型都不是 passive：简单索引的判据用一个 passive 自定义类型来测
 const withPassive = buildTypeRegistry({ template: 'coding', customTypes: { link: { label: '链接', description: '链接', whenToSave: '链接', recall: 'passive', decayDays: null, governancePriority: 'medium' } } })
 
 // 本文件默认时间戳为 0。
@@ -500,7 +500,7 @@ describe('SnapshotCache 快照来历', () => {
     return { store, cache, session, frozen, last: () => frozen.at(-1)! }
   }
 
-  it('首次冻结的来历是对话开始时，带出带入全文的 core id 与只带标题的 id', async () => {
+  it('首次冻结的来历是对话开始时，带出带入全文的 core id 与简单索引的 id', async () => {
     const { store, cache, session, last } = makeTracked()
     await store.put(record({ id: 'mem_core', type: 'preference', content: '不要 mock 数据库' }))
     await store.put(record({ id: 'mem_idx', type: 'knowledge', content: '报销截止每月 25 日' }))
