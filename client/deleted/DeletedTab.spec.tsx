@@ -165,14 +165,14 @@ describe('最近删除', () => {
     expect(await screen.findByText('已恢复。')).toBeInTheDocument()
   })
 
-  it('融合时并入删掉的：离开处理视图、刷新后，这一行仍能「撤销融合」，发 undo 带这次融合的条目和改前快照，成功后说两条回到融合前', async () => {
+  it('融合时并入删掉的：离开处理视图、刷新后，这一行仍能「撤销本次融合」，发 undo 带这次融合的条目和改前快照，成功后说两条回到融合前', async () => {
     const view: DeletedView = { version: GUI_VIEW_VERSION, items: [{ ...ruledB, cause: { decisionId: 'pd2', verdict: 'plan-applied', counterpartId: 'm9', snapshotId: 'snap2' } }] }
     const gateway = createFakeGateway({ views: { deleted: view, library }, respond: command => ({ ok: true, cmd: command.cmd, memoryIds: ['m9', 'd3'], snapshotId: 'snap2' }) })
     // 新挂载即刷新后的样子：入口只靠视图里的来源，不靠处理视图留在本地的结果卡
     renderInShell(<DeletedTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
     const row = rowOf('缩进用 tab')
-    expect(row.querySelector('.pm-del-hint')).toHaveTextContent('恢复只带回这一条，「postgres-in-tests」保持融合后的样子。撤销融合会把两条都退回融合前。')
-    const undo = within(row).getByRole('button', { name: '撤销融合' })
+    expect(row.querySelector('.pm-del-hint')).toHaveTextContent('恢复只带回这一条，「postgres-in-tests」保持融合后的样子。撤销本次融合会把两条都退回融合前。')
+    const undo = within(row).getByRole('button', { name: '撤销本次融合' })
     expect(undo).toHaveClass('pm-btn--ghost')
     await act(async () => { fireEvent.click(undo) })
     expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'undo', decisionId: 'pd2', snapshotId: 'snap2' }])
@@ -184,23 +184,23 @@ describe('最近删除', () => {
     const gateway = createFakeGateway({ views: { deleted: view, library }, respond: command => ({ ok: false, cmd: command.cmd, code: 'stale', detail: '记忆之后又被改过，未做任何改动' }) })
     renderInShell(<DeletedTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
     const row = rowOf('缩进用 tab')
-    await act(async () => { fireEvent.click(within(row).getByRole('button', { name: '撤销融合' })) })
+    await act(async () => { fireEvent.click(within(row).getByRole('button', { name: '撤销本次融合' })) })
     expect(screen.getByRole('alert')).toHaveTextContent('没有成功：「postgres-in-tests」在融合之后又被改过，或这条冲突已经重新处理，没有撤销。这一条仍可单独恢复。')
     expect(within(row).getByRole('button', { name: '恢复' })).not.toHaveAttribute('aria-disabled')
   })
 
-  it('体检关闭时：融合时并入删掉的那一行不给「撤销融合」，提示也不提撤销融合，照旧可以单独恢复', () => {
+  it('体检关闭时：融合时并入删掉的那一行不给「撤销本次融合」，提示也不提撤销融合，照旧可以单独恢复', () => {
     const view: DeletedView = { version: GUI_VIEW_VERSION, items: [{ ...ruledB, cause: { decisionId: 'pd2', verdict: 'plan-applied', counterpartId: 'm9', snapshotId: 'snap2' } }] }
     renderInShell(<DeletedTab nav={createNavStore()} scope={app} session={session} now={NOW} isGovernanceEnabled={false} />, createFakeGateway({ views: { deleted: view, library } }))
     const row = rowOf('缩进用 tab')
     expect(row.querySelector('.pm-del-hint')).toHaveTextContent(/^恢复只带回这一条，「postgres-in-tests」保持融合后的样子。$/)
-    expect(within(row).queryByRole('button', { name: '撤销融合' })).toBeNull()
+    expect(within(row).queryByRole('button', { name: '撤销本次融合' })).toBeNull()
     expect(within(row).getByRole('button', { name: '恢复' })).toBeInTheDocument()
   })
 
-  it('删一方的裁决删掉的：恢复就等于撤销那次裁决，不另给「撤销融合」', () => {
+  it('删一方的裁决删掉的：恢复就等于撤销那次裁决，不另给「撤销本次融合」', () => {
     renderInShell(<DeletedTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { deleted, library } }))
-    expect(screen.queryByRole('button', { name: '撤销融合' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '撤销本次融合' })).toBeNull()
   })
 
   it('胜方哪里都找不到时写它的 id；没记对方是谁（旧条目）时按裁决写 A / B', () => {
