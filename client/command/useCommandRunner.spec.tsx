@@ -1,9 +1,13 @@
-import { act, fireEvent, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import type { MemoryCommand, MemoryCommandResult } from '../../src/gui/contract.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
-import { renderInShell } from '../test-utils.tsx'
+import { PROBE_INCOMPLETE, type MemoryGateway } from '../gateway.ts'
+import { createTranslator } from '../i18n.tsx'
+import { en, zh } from '../locales.ts'
+import { gatewayViaChannel, gatewayViaCommand, PING_OK, renderInShell } from '../test-utils.tsx'
+import { PanelShell } from '../ui/PanelShell.tsx'
 import { CommandFeedback } from './confirm.tsx'
 import { SAMPLE_COMMANDS } from './test-commands.ts'
 import { ItemSending, useCommandRunner, type CommandRunner, type RunHandlers } from './useCommandRunner.ts'
@@ -199,5 +203,59 @@ describe('useCommandRunner', () => {
     await act(async () => {})
     expect(screen.getAllByRole('button', { name: '删除' })).toHaveLength(1)
     expect(document.activeElement).toBe(screen.getByRole('button', { name: '删除' }))
+  })
+})
+
+describe('什么都没执行的失败：按界面语言说原因，不显示错误码和原话', () => {
+
+  async function alertOf(gateway: MemoryGateway, dict: typeof zh | typeof en): Promise<string> {
+    render(<PanelShell gateway={gateway} t={createTranslator(dict)}><Rows /></PanelShell>)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '删除 a' })) })
+    return (await screen.findByRole('alert')).textContent ?? ''
+  }
+
+  const cases = [
+    {
+      name: '会话在别的窗口打开着（借会话执行命令时宿主拒绝）',
+      gateway: () => gatewayViaCommand({ code: 'session/writer-held', message: 'session s1 is held by another writer' }),
+      zh: '会话正在别的窗口使用，到那个窗口操作，或关掉那个窗口再试。',
+      en: 'The session is open in another window. Use that window, or close it and try again.',
+      raw: ['session/writer-held', 'session s1 is held by another writer'],
+    },
+    {
+      name: '会话正忙（通道上宿主拒绝）',
+      gateway: () => gatewayViaChannel(PING_OK, async () => ({ ok: false, error: { code: 'session/agent-busy', message: 'agent is busy' } })),
+      zh: '会话正忙，等这一轮结束再试。',
+      en: 'The session is busy. Try again when the current turn finishes.',
+      raw: ['session/agent-busy', 'agent is busy'],
+    },
+    {
+      name: '通道探活连着两次没走完',
+      gateway: () => gatewayViaChannel(async () => { throw new TypeError('Failed to fetch') }),
+      zh: '连接中断，还没发出去，请重试。',
+      en: 'The connection was interrupted before anything was sent. Try again.',
+      raw: [PROBE_INCOMPLETE, 'probe did not complete'],
+    },
+  ]
+
+  for (const c of cases) {
+    it(`${c.name}：中文界面`, async () => {
+      const text = await alertOf(c.gateway(), zh)
+      expect(text).toBe(`没有成功：${c.zh}`)
+      for (const raw of c.raw) expect(text).not.toContain(raw)
+    })
+    it(`${c.name}：英文界面`, async () => {
+      const text = await alertOf(c.gateway(), en)
+      expect(text).toBe(`Did not work: ${c.en}`)
+      for (const raw of c.raw) expect(text).not.toContain(raw)
+    })
+  }
+
+  it('别的失败照旧显示原话', async () => {
+    expect(await alertOf(gatewayViaChannel(PING_OK, async () => ({ ok: false, error: { code: 'plastic-memory/no-session', message: 'session s1 cannot run commands' } })), zh))
+      .toBe('没有成功：plastic-memory/no-session: session s1 cannot run commands')
+    cleanup()
+    expect(await alertOf(gatewayViaCommand({ code: 'session/not-found', message: 'no such session' }), en))
+      .toBe('Did not work: session/not-found: no such session')
   })
 })

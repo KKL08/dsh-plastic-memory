@@ -5,13 +5,15 @@
  * - 直接改、直接合并、整理所选、按要求应用的新内容像密钥（secret-suspected，什么都没动）：确认不是密钥后带 force 重发；
  * - 条目正被别处认领（claimed），或待决项已不在（契约 OPEN_ITEM_COMMANDS 的 not-found）：别处已处理；
  * - 服务端原话只有中文的几种（stale、not-found、secret-critical、target-taken、缺基线、拿不到模型、模型输出不合格式）换本地文案，其余显示原话；
- *   stale、not-found 分单条、整理所选两种口径，失败结果里的 memoryIds 照传。
+ *   stale、not-found 分单条、整理所选两种口径，失败结果里的 memoryIds 照传；
+ * - 什么都没执行的几种（会话在别的窗口打开着、会话正忙、通道探活没走完，见网关的 notRun）换本地文案，不显示错误码和原话。
  * 确认类 Outcome 自带要重发的命令，面板不碰命令形状。
  */
 import {
   CROSS_WORKSPACE_COMMANDS, detectSecrets, OPEN_ITEM_COMMANDS,
   type CrossWorkspaceCommand, type GuiErrorCode, type MemoryCommand, type MemoryCommandResult,
 } from '../../src/gui/contract.ts'
+import type { ExecutionResult, NotRunReason } from '../gateway.ts'
 import type { LocaleKey } from '../locales.ts'
 
 export type Ok = Extract<MemoryCommandResult, { ok: true }>
@@ -44,6 +46,13 @@ export const LLM_FAILURE_KEYS = {
   'llm-invalid-output': 'pending.model.invalid',
 } as const satisfies Partial<Record<GuiErrorCode, LocaleKey>>
 
+/** 什么都没执行的几种失败的本地文案；体检状态条的结果行也用。 */
+export const NOT_RUN_KEYS = {
+  'writer-held': 'command.notRun.writerHeld',
+  'agent-busy': 'command.notRun.agentBusy',
+  'probe-incomplete': 'command.notRun.probeIncomplete',
+} as const satisfies Record<NotRunReason, LocaleKey>
+
 const local = (code: GuiErrorCode | undefined, detail: LocaleKey): Failure => ({ kind: 'failed', ...(code === undefined ? {} : { code }), detail, isLocalized: true })
 
 /** 整理所选的三条命令：stale、not-found 都说「计划要重新生成」。 */
@@ -74,9 +83,10 @@ function localKeyOf(command: MemoryCommand, code: GuiErrorCode): LocaleKey | und
 
 const isCrossWorkspace = (command: MemoryCommand): command is CrossWorkspaceCommand => CROSS_WORKSPACE_COMMANDS.has(command.cmd as CrossWorkspaceCommand['cmd'])
 
-export function interpret(command: MemoryCommand, result: MemoryCommandResult): Outcome {
+export function interpret(command: MemoryCommand, result: ExecutionResult): Outcome {
   if (result.ok) return { kind: 'ok', result }
   const { code } = result
+  if (result.notRun !== undefined) return local(code, NOT_RUN_KEYS[result.notRun])
   if (code === 'cross-workspace' && isCrossWorkspace(command) && command.allowCrossWorkspace !== true) {
     const workspacePath = result.rejected?.[0]?.workspacePath
     if (workspacePath !== undefined) {

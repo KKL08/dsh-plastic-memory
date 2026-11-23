@@ -8,9 +8,9 @@
  */
 import { diffWords, type Change } from 'diff'
 import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
-import { scopeOfMemory, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type ModelEditAdviceType } from '../../src/gui/contract.ts'
+import { scopeOfMemory, type MemoryCard, type MemoryCommand, type ModelEditAdviceType } from '../../src/gui/contract.ts'
 import { interpret, LLM_FAILURE_KEYS, refuseBeforeSend } from '../command/protocol.ts'
-import { useGateway, type BorrowedSession, type ModelState } from '../gateway.ts'
+import { useGateway, type BorrowedSession, type ExecutionResult, type ModelState } from '../gateway.ts'
 import { formatNumber, useT, type Translate } from '../i18n.tsx'
 import { INTENT_BLANK, SINGLE_INTENTS, type Intent } from '../library/intents.ts'
 import type { LocaleKey } from '../locales.ts'
@@ -35,7 +35,7 @@ const diffOf = (before: string, after: string) => diffWords(before, after, { int
  * 让模型改、整理所选这几条命令失败的文案：模型出错带原话，其余按命令协议（拿不到模型、输出不合格式、stale、not-found 等换本地文案）。
  * 单条修改的生成和整理的计划、出稿、应用共用。
  */
-export function modelFailureOf(command: MemoryCommand, r: Extract<MemoryCommandResult, { ok: false }>, t: Translate): string {
+export function modelFailureOf(command: MemoryCommand, r: Extract<ExecutionResult, { ok: false }>, t: Translate): string {
   if (r.code === 'llm-failed') return t(LLM_FAILURE_KEYS[r.code], { detail: r.detail ?? '' })
   const outcome = interpret(command, r)
   if (outcome.kind !== 'failed') return t('command.failed', { detail: r.detail ?? r.code })

@@ -10,11 +10,11 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import { checkupKey, type CheckupView, type GuiErrorCode, type MemoryCommand } from '../../src/gui/contract.ts'
-import { useGateway, type BorrowedSession } from '../gateway.ts'
+import { useGateway, type BorrowedSession, type NotRunReason } from '../gateway.ts'
 import { ALL_SCOPE, type PageScope } from '../nav.ts'
 
-/** 本窗口发起的手动体检没做成（busy 之外的错误）：错误码和宿主或执行器的原话。 */
-export interface RunFailure { code: GuiErrorCode; detail: string | undefined }
+/** 本窗口发起的手动体检没做成（busy 之外的错误）：错误码和宿主或执行器的原话；什么都没执行的几种另带 notRun（见网关）。 */
+export interface RunFailure { code: GuiErrorCode; detail: string | undefined; notRun?: NotRunReason }
 
 export interface CheckupRuns {
   /** 让 scope 显示「体检中…」的那个范围：本窗口发起的「全部」是 ALL_SCOPE；scope 是「全部」时取第一个在体检的。没有为 undefined。 */
@@ -69,7 +69,10 @@ export function useCheckupRuns(session: BorrowedSession, checkups: CheckupView |
         const next = new Map(prev)
         if (result.ok) next.delete(key)
         else if (result.code === 'busy') next.set(key, { scope, state: 'busy' })
-        else next.set(key, { scope, state: 'failed', failure: { code: result.code, detail: result.detail }, failedAt: Date.now() })
+        else {
+          const failure: RunFailure = { code: result.code, detail: result.detail, ...(result.notRun === undefined ? {} : { notRun: result.notRun }) }
+          next.set(key, { scope, state: 'failed', failure, failedAt: Date.now() })
+        }
         return next
       })
     })

@@ -71,8 +71,11 @@ export interface MemoryGateway {
    * 同一次打开只发一次；根还没问到时不另发，拿到根之后那次刷新就算这次的。
    */
   useFreshViews(session: BorrowedSession): void
-  /** 执行一条 `/memory` 命令，结果按契约解析；宿主或解析层面的失败折成 `failed`。删除、恢复成功后记进删除状态（见 useDeletions）。 */
-  execute(sessionId: string, command: MemoryCommand): Promise<MemoryCommandResult>
+  /**
+   * 执行一条 `/memory` 命令，结果按契约解析；宿主或解析层面的失败折成 `failed`，什么都没执行的几种另带 notRun。
+   * 删除、恢复成功后记进删除状态（见 useDeletions）。
+   */
+  execute(sessionId: string, command: MemoryCommand): Promise<ExecutionResult>
   /** hook：删过的记忆（见 createDeletionStore），各处显示同一条记忆时读它。 */
   useDeletions(): Deletions
   /**
@@ -105,13 +108,34 @@ export function useGateway(): MemoryGateway {
 
 // —— 纯函数（宿主实现用，单测直接测） ——
 
-function failed(detail: string, cmd?: string): MemoryCommandResult {
+/** 通道探活连着两次没走完时，这一次失败用的错误码（客户端自己给的，宿主不会回）。 */
+export const PROBE_INCOMPLETE = 'client/probe-incomplete'
+
+/** 什么都没执行的几种失败：会话在别的窗口打开着、会话正忙（宿主拒绝时带的错误码），通道探活没走完。界面换成本地说法。 */
+export type NotRunReason = 'writer-held' | 'agent-busy' | 'probe-incomplete'
+
+/** 按错误码认，不看原话。 */
+const NOT_RUN_CODES: ReadonlyMap<string, NotRunReason> = new Map([
+  ['session/writer-held', 'writer-held'],
+  ['session/agent-busy', 'agent-busy'],
+  [PROBE_INCOMPLETE, 'probe-incomplete'],
+])
+
+type FailedResult = Extract<MemoryCommandResult, { ok: false }>
+
+/** 网关给界面的结果：契约结果；什么都没执行的失败另带 notRun（只在客户端，不进契约）。 */
+export type ExecutionResult = Extract<MemoryCommandResult, { ok: true }> | (FailedResult & { notRun?: NotRunReason })
+
+function failed(detail: string, cmd?: string): FailedResult {
   return { ok: false, code: 'failed', detail, ...(cmd === undefined ? {} : { cmd }) }
 }
 
 /** 宿主执行结果 → 契约结果。命令处理器成功、失败都回契约 JSON；不是契约 JSON 的原文进 detail。 */
-export function decodeExecution(cmd: string, r: RemoteResult<CommandExecution | undefined>): MemoryCommandResult {
-  if (!r.ok) return failed(`${r.error.code}: ${r.error.message}`, cmd)
+export function decodeExecution(cmd: string, r: RemoteResult<CommandExecution | undefined>): ExecutionResult {
+  if (!r.ok) {
+    const notRun = NOT_RUN_CODES.get(r.error.code)
+    return { ...failed(`${r.error.code}: ${r.error.message}`, cmd), ...(notRun === undefined ? {} : { notRun }) }
+  }
   if (r.value === undefined) return failed('no command result', cmd)
   const text = r.value.result.text ?? ''
   let json: unknown
@@ -376,7 +400,7 @@ export function createHostGateway(ctx: HostContext): BindGateway {
     const channel = await probing
     if (channel === 'unknown') {
       if (reachable === probing) reachable = undefined
-      return { ok: false, error: { code: 'thrown', message: 'memory channel probe did not complete' } }
+      return { ok: false, error: { code: PROBE_INCOMPLETE, message: 'memory channel probe did not complete' } }
     }
     if (channel === 'down') return await viaCommand(sessionId, line)
     try {

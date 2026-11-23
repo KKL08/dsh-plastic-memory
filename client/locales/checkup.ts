@@ -104,6 +104,7 @@ export const checkupZh = {
   'checkup.result.modelUnavailable': '默认模型现在用不了（{cause}），自动体检先暂停。',
   'checkup.result.llmUnavailable': '这次没能体检：借用的会话拿不到模型。可以在对话里让 agent 体检。',
   'checkup.result.failed': '体检没有完成：{detail}',
+  'checkup.result.notRun': '这次没能体检：{reason}',
 
   'checkup.cause.noDefaultModel': 'dsh 还没有可用的默认模型',
   'checkup.cause.signIn': '账号没登录',
@@ -228,6 +229,7 @@ export const checkupEn: Record<CheckupLocaleKey, string> = {
   'checkup.result.modelUnavailable': 'The default model is unavailable right now ({cause}), so auto checkups are paused.',
   'checkup.result.llmUnavailable': 'Could not run the checkup: the borrowed session has no model. You can ask the agent to run a checkup in a chat.',
   'checkup.result.failed': 'The checkup did not finish: {detail}',
+  'checkup.result.notRun': 'Could not run the checkup. {reason}',
 
   'checkup.cause.noDefaultModel': 'dsh has no default model yet',
   'checkup.cause.signIn': 'not signed in',

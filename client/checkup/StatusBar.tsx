@@ -14,6 +14,7 @@ import {
   checkupKey, sameScope, SCOPE_KEYS,
   type CheckupCause, type CheckupResult, type CheckupView, type HealthView, type Scope,
 } from '../../src/gui/contract.ts'
+import { NOT_RUN_KEYS } from '../command/protocol.ts'
 import { baseName, formatDay, formatDayTime, formatNumber, useT, type Translate } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
 import { allScopesSub, scopeLabel, type MemoryView, type NavStore, type NewItemJump, type PageScope } from '../nav.ts'
@@ -266,6 +267,8 @@ function runningText(scope: PageScope, t: Translate): string {
 }
 
 function failureText(failure: RunFailure, t: Translate): string {
+  // 什么都没执行的几种：和面板同一句原因，前面写「这次没能体检」，不写错误码和原话
+  if (failure.notRun !== undefined) return t('checkup.result.notRun', { reason: t(NOT_RUN_KEYS[failure.notRun]) })
   return failure.code === 'llm-unavailable' ? t('checkup.result.llmUnavailable')
     : failure.code === 'governance-disabled' ? t('settings.governanceOff')
       : t('checkup.result.failed', { detail: failure.detail ?? failure.code })
@@ -310,7 +313,7 @@ function ResultRow({ scope, isTodoView, nav, runs, seen, checkups, now }: {
     lines.push(<Line key="running" isSoft>{runningText(busy, t)}</Line>)
   } else {
     const failure = runs.failure(scope)
-    if (failure !== undefined) lines.push(<Line key="manual-failed" title={failure.detail}>{failureText(failure, t)}</Line>)
+    if (failure !== undefined) lines.push(<Line key="manual-failed" title={failure.notRun === undefined ? failure.detail : undefined}>{failureText(failure, t)}</Line>)
     if (scope.kind === 'all') {
       const all = checkups?.allResult ?? null
       if (all !== null && !isResultSeen(seen, all.checkupId, key)) {

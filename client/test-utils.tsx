@@ -1,10 +1,11 @@
-// 组件测试的渲染入口：真实的面板外壳 + 内存假网关 + 中文字典，和宿主里组件拿到的上下文同构。
+// 组件测试的渲染入口：真实的面板外壳 + 内存假网关 + 中文字典，和宿主里组件拿到的上下文同构；另有只假宿主传输的真网关夹具。
 import type { ReactElement } from 'react'
 import { render } from '@testing-library/react'
 import { vi } from 'vitest'
-import { PENDING_LEVELS, type MemoryCard, type PendingView } from '../src/gui/contract.ts'
+import { MEMORY_RPC_PING, PENDING_LEVELS, type MemoryCard, type PendingView } from '../src/gui/contract.ts'
 import { createFakeGateway, type FakeGateway } from './gateway.fake.ts'
-import type { HostContext, SidebarHost } from './host.ts'
+import { createHostGateway, type MemoryGateway } from './gateway.ts'
+import type { HostContext, RemoteResult, SessionListState, SidebarHost } from './host.ts'
 import { createTranslator } from './i18n.tsx'
 import { zh } from './locales.ts'
 import { PanelShell } from './ui/PanelShell.tsx'
@@ -78,3 +79,26 @@ export function fakeHostContext<E extends object = object>(
     ...rest,
   } as FakeHost & E
 }
+
+/** 宿主通道的一次调用（`connection.rpc.call`）。 */
+export type RpcCall = (channel: string, endpoint: string, payload: unknown) => Promise<RemoteResult<unknown>>
+
+const HOST_SESSIONS: SessionListState = { ids: ['s1'], byId: { s1: { id: 's1', displayTitle: 's1', running: false, cwd: '/w/app', updatedAt: 0, retainedBy: {} } }, phase: 'ready' }
+const HOST_PROPS = {
+  useSessions: <S,>(selector: (s: SessionListState) => S) => selector(HOST_SESSIONS),
+  useResource: () => ({ status: 'none' as const, value: undefined, failure: undefined }),
+}
+
+/** 真网关，只假宿主的传输：没有连接服务，借会话执行命令都回这个错误。会话 s1 在 /w/app。 */
+export function gatewayViaCommand(error: { code: string; message: string }): MemoryGateway {
+  return createHostGateway(fakeHostContext({ remote: { commands: { execute: vi.fn(async () => ({ ok: false as const, error })) } } }))(HOST_PROPS)
+}
+
+/** 真网关，只假宿主的传输：通道的探活走 ping，执行走 run（缺省时一执行就抛错）。会话 s1 在 /w/app。 */
+export function gatewayViaChannel(ping: RpcCall, run: RpcCall = vi.fn<RpcCall>(async () => { throw new Error('不该执行') })): MemoryGateway {
+  const call = vi.fn<RpcCall>((channel, endpoint, payload) => (endpoint === MEMORY_RPC_PING ? ping : run)(channel, endpoint, payload))
+  return createHostGateway(fakeHostContext({ connection: { rpc: { call } } }))(HOST_PROPS)
+}
+
+/** 探活通着。 */
+export const PING_OK: RpcCall = async () => ({ ok: true, value: { ok: true } })

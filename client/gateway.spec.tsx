@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
 import { useSyncExternalStore } from 'react'
 import { GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, MEMORY_RPC_CHANNEL, MEMORY_RPC_PING, MEMORY_RPC_RUN, type CheckupView, type PendingItem, type PendingView } from '../src/gui/contract.ts'
-import { createHostGateway, decodeExecution, fileAddress, MEMORY_ROOT_CONFIG_KEY, MEMORY_ROOT_KEY, parseView, viewPath, type BorrowedSession } from './gateway.ts'
+import { createHostGateway, decodeExecution, fileAddress, MEMORY_ROOT_CONFIG_KEY, MEMORY_ROOT_KEY, parseView, PROBE_INCOMPLETE, viewPath, type BorrowedSession } from './gateway.ts'
 import { createFakeConfigForm, DEFAULT_SECTION } from './settings/config-form.fake.ts'
 import { ENTRY_ID } from './settings/config.ts'
 import { createTranslator } from './i18n.tsx'
@@ -33,11 +33,23 @@ describe('decodeExecution', () => {
   })
 
   it('宿主失败、无结果、非契约文本都折成 failed，原话进 detail', () => {
-    expect(decodeExecution('scan', { ok: false, error: { code: 'session/writer-held', message: 'busy' } }))
-      .toEqual({ ok: false, cmd: 'scan', code: 'failed', detail: 'session/writer-held: busy' })
+    expect(decodeExecution('scan', { ok: false, error: { code: 'plastic-memory/no-session', message: 'gone' } }))
+      .toEqual({ ok: false, cmd: 'scan', code: 'failed', detail: 'plastic-memory/no-session: gone' })
     expect(decodeExecution('scan', { ok: true, value: undefined })).toMatchObject({ ok: false, code: 'failed' })
     expect(decodeExecution('scan', { ok: true, value: { commandId: 'c', result: { kind: 'error', text: 'unknown command' } } }))
       .toEqual({ ok: false, cmd: 'scan', code: 'failed', detail: 'unknown command' })
+  })
+
+  it('什么都没执行的三种失败按错误码认出来（会话在别的窗口、会话正忙、通道探活没走完），原话照留在 detail', () => {
+    expect(decodeExecution('scan', { ok: false, error: { code: 'session/writer-held', message: 'busy' } }))
+      .toEqual({ ok: false, cmd: 'scan', code: 'failed', detail: 'session/writer-held: busy', notRun: 'writer-held' })
+    expect(decodeExecution('forget', { ok: false, error: { code: 'session/agent-busy', message: 'agent is running' } }))
+      .toMatchObject({ ok: false, code: 'failed', notRun: 'agent-busy' })
+    expect(decodeExecution('forget', { ok: false, error: { code: PROBE_INCOMPLETE, message: 'anything' } }))
+      .toMatchObject({ ok: false, code: 'failed', notRun: 'probe-incomplete' })
+    // 只认错误码，原话再像也不算
+    expect(decodeExecution('forget', { ok: false, error: { code: 'thrown', message: 'memory channel probe did not complete' } })).not.toHaveProperty('notRun')
+    expect(decodeExecution('forget', { ok: false, error: { code: 'constructor', message: 'x' } })).not.toHaveProperty('notRun')
   })
 })
 
@@ -1070,7 +1082,7 @@ describe('面板动作的通道', () => {
       () => { if (pings++ < 2) throw new TypeError('Failed to fetch'); return { ok: true, value: { ok: true } } },
     )
     const gateway = createHostGateway(fakeHostContext({ remote: { commands: { execute } }, connection: { rpc: { call } } }))(props)
-    expect(await gateway.execute('s1', { cmd: 'forget', memoryId: 'm1', layer })).toMatchObject({ ok: false, code: 'failed' })
+    expect(await gateway.execute('s1', { cmd: 'forget', memoryId: 'm1', layer })).toMatchObject({ ok: false, code: 'failed', notRun: 'probe-incomplete' })
     expect(pings).toBe(2)
     expect(await gateway.execute('s1', { cmd: 'restore', memoryId: 'm1', layer })).toEqual({ ok: true, cmd: 'restore' })
     expect(pings).toBe(3)
