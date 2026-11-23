@@ -21,6 +21,13 @@ All notable changes to this project are documented here. The format follows
 - Testing: the test suite runs the published 0.2.0 package on the same
   memory folder as this version.
 
+### Changed
+- The recall options of a memory type are renamed after what each chat
+  carries: Always, Search and Passive are now Full text, Summary and Brief
+  index (全文, 摘要 and 简单索引 in Chinese). The settings page, the side
+  panel and the guide use the new names; the values in configuration
+  (`core`, `search`, `passive`) stay the same.
+
 ### Fixed
 - A memory file whose timestamp was a number outside the range of a date was
   read as normal, and the next change to that memory failed. Such files now go
