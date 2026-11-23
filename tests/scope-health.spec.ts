@@ -163,6 +163,24 @@ describe('scoreScope × 待确认记录', () => {
   })
 })
 
+describe('scoreScope 确认周期', () => {
+  it('改了通用类型的确认周期：超期条数、很久没确认的记忆和新鲜度扣分都按新周期', async () => {
+    const DAY = 86_400_000
+    const now = 100 * DAY
+    const deps = makeDeps()
+    await deps.store.put(record({ id: 'mem_proj', type: 'project', lastConfirmedAt: now - 10 * DAY }))
+    await deps.store.put(record({ id: 'mem_know', type: 'knowledge', lastConfirmedAt: now - 10 * DAY }))
+    const before = await score(deps, { kind: 'global' }, now)
+    expect(before.staleIds).toEqual(['mem_proj'])
+    expect(before.health.freshness.staleCount).toBe(1)
+
+    const after = await score({ ...deps, registry: buildTypeRegistry({ template: 'coding', customTypes: {}, builtinDecayDays: { project: 30, knowledge: 5 } }) }, { kind: 'global' }, now)
+    expect(after.staleIds).toEqual(['mem_know'])
+    expect(after.health.freshness.staleCount).toBe(1)
+    expect(after.health.freshness.avgRatio).toBeCloseTo((10 / 30 + 10 / 5) / 2)
+  })
+})
+
 describe('scoreScope 体检后改过的记忆', () => {
   it('旧缓存（没有记忆指纹）：仍按 updatedAt 是否晚于体检时间判断', async () => {
     const deps = makeDeps()

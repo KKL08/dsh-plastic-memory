@@ -15,8 +15,8 @@ import { Button } from '../ui/Button.tsx'
 import { SegmentedControl } from '../ui/Segmented.tsx'
 import { SettingsForm, SettingsGroupCard, SettingsItem } from '../ui/Settings.tsx'
 import {
-  ACCENTS, EVIDENCE_LEVELS, OVERFLOW_MODES, PROMOTE_TARGETS, SENSITIVITIES, SENSITIVITY_NUMBERS, configuredRoot, customTypeChanges, presetTypeChanges,
-  droppedTypes, governanceEnabled, parsePositiveInt, sceneChanges, type ConfigForm, type Migrations, type SettingsFields,
+  ACCENTS, BUILTIN_TYPE_NAMES, EVIDENCE_LEVELS, OVERFLOW_MODES, PROMOTE_TARGETS, SENSITIVITIES, SENSITIVITY_NUMBERS, configuredRoot, customTypeChanges, presetTypeChanges,
+  decayDaysOf, droppedTypes, governanceEnabled, parsePositiveInt, sceneChanges, type ConfigForm, type Migrations, type SettingsFields,
 } from './config.ts'
 import { Dialog, TextField } from './controls.tsx'
 import { SceneSection, sceneLabel, typeNames } from './Scenes.tsx'
@@ -222,6 +222,7 @@ const FIELD_LABELS: Record<keyof SettingsFields, LocaleKey> = {
   scenes: 'settings.confirm.scenes',
   removedPresets: 'settings.confirm.presets',
   customTypes: 'settings.types.label',
+  builtinDecayDays: 'settings.confirm.periods',
   budget: 'settings.budget.label',
   overflow: 'settings.overflow.label',
   evidence: 'settings.evidence.label',
@@ -230,7 +231,7 @@ const FIELD_LABELS: Record<keyof SettingsFields, LocaleKey> = {
   accent: 'settings.accent.label',
 }
 
-function valueText(t: Translate, key: Exclude<keyof SettingsFields, 'scenes' | 'customTypes' | 'removedPresets'>, fields: SettingsFields): string {
+function valueText(t: Translate, key: Exclude<keyof SettingsFields, 'scenes' | 'customTypes' | 'removedPresets' | 'builtinDecayDays'>, fields: SettingsFields): string {
   switch (key) {
     case 'template': return sceneLabel(t, fields.template, fields.scenes)
     case 'budget': return String(parsePositiveInt(fields.budget) ?? fields.budget)
@@ -269,6 +270,11 @@ function changeLines(t: Translate, saved: SettingsFields, fields: SettingsFields
       const moved = Object.entries(migrations).flatMap(([from, m]) => m.action === 'retype' ? [from, m.to] : [])
       const without = (types: SettingsFields['customTypes']) => Object.fromEntries(Object.entries(types).filter(([name]) => !moved.includes(name)))
       change = partsText(t, customTypeChanges(without(saved.customTypes), without(fields.customTypes)))
+    } else if (key === 'builtinDecayDays') {
+      const days = (n: number | null) => n === null ? t('settings.types.periodNone') : t('settings.types.periodDays', { n })
+      change = BUILTIN_TYPE_NAMES.filter(name => decayDaysOf(saved, name) !== decayDaysOf(fields, name))
+        .map(name => t('settings.confirm.period', { name: typeNames(t, [typeLabel(t, name, {})]), from: days(decayDaysOf(saved, name)), to: days(decayDaysOf(fields, name)) }))
+        .join(t('settings.confirm.partSep'))
     } else if (key === 'scenes') {
       const ids = sceneChanges(saved.scenes, fields.scenes)
       change = partsText(t, {

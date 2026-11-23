@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { assertNoBuiltinCollision, buildTypeRegistry, BUILTIN_TYPES, PRESET_SCENES, PRESET_TYPES, RETIRED_TYPES } from '../src/type-registry.ts'
-import { GENERAL_SCENE, SCENE_MAX_TYPES } from '../src/contract-codes.ts'
+import { DECAY_DAYS_MAX, GENERAL_SCENE, SCENE_MAX_TYPES } from '../src/contract-codes.ts'
 import { TypeRegistryError } from '../src/errors.ts'
 import { captureError } from './helpers/errors.ts'
 
@@ -298,5 +298,51 @@ describe('删掉的预设类型', () => {
     expect(registry.has('procedure')).toBe(true)
     expect(registry.get('procedure')).toMatchObject({ label: '我的流程' })
     expect(registry.warnings).toEqual([])
+  })
+})
+
+describe('通用类型的确认周期', () => {
+  it('不配 builtinDecayDays 时各类型的确认周期和出厂一致', () => {
+    const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
+    const periods = Object.fromEntries(['profile', 'preference', 'knowledge', 'project', 'reference', 'procedure', 'decision', 'commitment', 'person']
+      .map(name => [name, registry.get(name).decayDays]))
+    expect(periods).toEqual({ profile: null, preference: null, knowledge: 90, project: 7, reference: null, procedure: 90, decision: 30, commitment: 14, person: null })
+    expect(buildTypeRegistry({ template: 'coding', customTypes: {}, builtinDecayDays: {} }).get('project')).toEqual(registry.get('project'))
+    expect(registry.warnings).toEqual([])
+  })
+
+  it('改了确认周期的通用类型按新周期，其余字段不变；当前场景没有它时读到的也是新周期', () => {
+    const builtinDecayDays = { project: 30, knowledge: 5, profile: 180 }
+    const coding = buildTypeRegistry({ template: 'coding', customTypes: {}, builtinDecayDays })
+    const project = BUILTIN_TYPES.find(t => t.name === 'project')!
+    expect(coding.get('project')).toEqual({ ...project, decayDays: 30 })
+    expect(coding.all().find(t => t.name === 'project')).toEqual({ ...project, decayDays: 30 })
+    expect(coding.get('knowledge').decayDays).toBe(5)
+    expect(coding.get('profile').decayDays).toBe(180)
+    expect(coding.get('preference').decayDays).toBeNull()
+    expect(coding.warnings).toEqual([])
+
+    const writing = buildTypeRegistry({
+      template: 'scene-1', customTypes: {}, builtinDecayDays,
+      scenes: { 'scene-1': { label: '写作', types: ['preference'] } },
+    })
+    expect(writing.has('project')).toBe(false)
+    expect(writing.get('project').decayDays).toBe(30)
+  })
+
+  it(`不是通用类型的名字、不是 1 到 ${DECAY_DAYS_MAX} 的整数：忽略并警告，按出厂周期`, () => {
+    const registry = buildTypeRegistry({
+      template: 'office', customTypes: { 'domain-term': term },
+      builtinDecayDays: { decision: 3, 'domain-term': 3, commitment: 3, project: 0, knowledge: 1.5, reference: DECAY_DAYS_MAX + 1, profile: DECAY_DAYS_MAX },
+    })
+    expect(registry.get('decision').decayDays).toBe(30)
+    expect(registry.get('domain-term').decayDays).toBeNull()
+    expect(registry.get('commitment').decayDays).toBe(14)
+    expect(registry.get('project').decayDays).toBe(7)
+    expect(registry.get('knowledge').decayDays).toBe(90)
+    expect(registry.get('reference').decayDays).toBeNull()
+    expect(registry.get('profile').decayDays).toBe(DECAY_DAYS_MAX)
+    expect(registry.warnings.join('\n')).toMatch(/decision[\s\S]*domain-term[\s\S]*commitment/)
+    expect(registry.warnings.join('\n')).toMatch(/project[\s\S]*knowledge[\s\S]*reference/)
   })
 })

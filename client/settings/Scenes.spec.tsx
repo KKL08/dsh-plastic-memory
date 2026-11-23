@@ -280,7 +280,7 @@ describe('场景弹层', () => {
     expect(form.value.scenes).toMatchObject({ coding: { types: [...GENERAL, 'procedure', 'domain-term', 't-a'] } })
   })
 
-  it('类型表单：必填项、英文名格式、内置重名、中文名重复、衰退天数各有提示；「‹ 返回」回到勾选', () => {
+  it('类型表单：必填项、英文名格式、内置重名、中文名重复、确认周期各有提示；「‹ 返回」回到勾选', () => {
     setup({ value: { customTypes: { term } } })
     fireEvent.click(button('新建场景'))
     fireEvent.click(button('＋ 新建类型', dialog('新建场景')))
@@ -288,10 +288,10 @@ describe('场景弹层', () => {
     fireEvent.click(button('确定', f))
     expect(within(f).getAllByText('必填。')).toHaveLength(4)
     fireEvent.change(within(f).getByLabelText('英文名'), { target: { value: 'Meeting Note' } })
-    fireEvent.change(within(f).getByLabelText('衰退天数'), { target: { value: '0' } })
+    fireEvent.change(within(f).getByLabelText('确认周期（天）'), { target: { value: '0' } })
     fireEvent.change(within(f).getByLabelText('中文名'), { target: { value: '决定' } })
     expect(within(f).getByText('只能用小写英文字母和连字符，例如 domain-term。')).toBeInTheDocument()
-    expect(within(f).getByText('填一个大于 0 的整数，或者留空。')).toBeInTheDocument()
+    expect(within(f).getByText('填 1 到 365 的整数，或者留空。')).toBeInTheDocument()
     expect(within(f).getByText('已经有叫「决定」的类型了。')).toBeInTheDocument()
     fireEvent.change(within(f).getByLabelText('英文名'), { target: { value: 'preference' } })
     expect(within(f).getByText('和内置类型重名了，换一个。')).toBeInTheDocument()
@@ -353,9 +353,9 @@ describe('记忆类型列表', () => {
     expect(within(typeRow('客户名')).getByText('没有场景在用 · 0 条记忆')).toBeInTheDocument()
   })
 
-  it('通用只有查看；预设、我加的有编辑、删除', () => {
+  it('通用只有编辑；预设、我加的有编辑、删除', () => {
     withCounts()
-    expect(within(typeRow('用户画像')).getAllByRole('button').map(el => el.getAttribute('aria-label'))).toEqual(['查看 用户画像'])
+    expect(within(typeRow('用户画像')).getAllByRole('button').map(el => el.getAttribute('aria-label'))).toEqual(['编辑 用户画像'])
     expect(within(typeRow('决定')).getAllByRole('button').map(el => el.getAttribute('aria-label'))).toEqual(['编辑 决定', '删除 决定'])
     expect(button('编辑 术语', typeRow('术语'))).toBeInTheDocument()
     expect(button('删除 客户名', typeRow('客户名'))).toBeInTheDocument()
@@ -402,7 +402,7 @@ describe('记忆类型列表', () => {
     fireEvent.click(button('编辑 术语'))
     const f = dialog('编辑类型')
     expect(within(f).queryByRole('button', { name: '‹ 返回' })).toBeNull()
-    fireEvent.change(within(f).getByLabelText('衰退天数'), { target: { value: '30' } })
+    fireEvent.change(within(f).getByLabelText('确认周期（天）'), { target: { value: '30' } })
     fireEvent.click(button('确定', f))
     expect(screen.queryByRole('dialog')).toBeNull()
     await clickSave(form)
@@ -426,19 +426,18 @@ describe('记忆类型列表', () => {
 describe('通用、预设类型', () => {
   const edited = { ...TYPE_DEFINITIONS.procedure, decayDays: 60 }
 
-  it('查看通用类型：只读弹层写出定义原文，没有输入框，关闭就收起', () => {
+  it('编辑通用类型：弹层以类型名为题，定义原文只读列出，只有确认周期一个输入框；取消就收起', () => {
     setup()
-    fireEvent.click(button('查看 用户画像'))
+    fireEvent.click(button('编辑 用户画像'))
     const f = dialog('用户画像')
     expect(within(f).getByText('profile')).toBeInTheDocument()
     expect(within(f).getByText(TYPE_DEFINITIONS.profile.whenToSave)).toBeInTheDocument()
     expect(within(f).getByText('带入后怎么用')).toBeInTheDocument()
     expect(within(f).getByText(TYPE_DEFINITIONS.profile.howToUse!)).toBeInTheDocument()
     expect(within(f).getByText('全文')).toBeInTheDocument()
-    expect(within(f).getByText('不衰退')).toBeInTheDocument()
-    expect(within(f).queryByRole('textbox')).toBeNull()
-    expect(within(f).queryByRole('button', { name: '确定' })).toBeNull()
-    fireEvent.click(within(f).getAllByRole('button', { name: '关闭' }).at(-1)!)
+    expect(within(f).getAllByRole('textbox')).toHaveLength(1)
+    expect(within(f).getByRole('textbox', { name: '确认周期（天）' })).toHaveValue('')
+    fireEvent.click(button('取消', f))
     expect(screen.queryByRole('dialog')).toBeNull()
   })
 
@@ -449,7 +448,7 @@ describe('通用、预设类型', () => {
     expect(within(f).getByLabelText('中文名')).toHaveValue('可复用流程')
     expect(within(f).getByLabelText('英文名')).toHaveValue('procedure')
     expect(within(f).getByLabelText('英文名')).toHaveAttribute('readonly')
-    fireEvent.change(within(f).getByLabelText('衰退天数'), { target: { value: '60' } })
+    fireEvent.change(within(f).getByLabelText('确认周期（天）'), { target: { value: '60' } })
     fireEvent.click(button('确定', f))
     expect(within(typeRow('可复用流程')).getByText('已改')).toBeInTheDocument()
     expect(button('可复用流程恢复默认', typeRow('可复用流程'))).toBeInTheDocument()
@@ -475,7 +474,7 @@ describe('通用、预设类型', () => {
   it('编辑预设改回和出厂一样：等于恢复默认', async () => {
     const { form } = setup({ value: { customTypes: { procedure: edited } } })
     fireEvent.click(button('编辑 可复用流程'))
-    fireEvent.change(within(dialog('编辑类型')).getByLabelText('衰退天数'), { target: { value: '90' } })
+    fireEvent.change(within(dialog('编辑类型')).getByLabelText('确认周期（天）'), { target: { value: '90' } })
     fireEvent.click(button('确定', dialog('编辑类型')))
     expect(within(typeRow('可复用流程')).queryByText('已改')).toBeNull()
     await clickSave(form)
@@ -775,6 +774,214 @@ describe('改名与删除：已有记忆怎么办', () => {
     expect(within(row).getByText('开一个会话后才能处理已有记忆。')).toBeInTheDocument()
     expect(button('移到最近删除', row)).toBeDisabled()
     expect(button('保留记忆', row)).toBeEnabled()
+  })
+})
+
+describe('确认周期', () => {
+  /** 卡上写确认周期的那一行。 */
+  const periodLine = (label: string) => within(typeRow(label)).getByText(/^确认周期 \d+ 天$|^不用定期确认$/).textContent
+  const periodBox = (scope: HTMLElement) => within(scope).getByRole('textbox', { name: '确认周期（天）' })
+  /** 打开通用类型的弹层，返回弹层。 */
+  const openGeneral = (label: string) => {
+    fireEvent.click(button(`编辑 ${label}`))
+    return dialog(label)
+  }
+
+  it('每张类型卡只写一行确认周期：没有输入框，也没有周期的恢复默认', () => {
+    setup({ value: { customTypes: { term: { ...term, decayDays: 10 }, client }, builtinDecayDays: { knowledge: 30 } } })
+    expect(periodLine('项目信息')).toBe('确认周期 7 天')
+    expect(periodLine('事实与经验')).toBe('确认周期 30 天')
+    expect(periodLine('可复用流程')).toBe('确认周期 90 天')
+    expect(periodLine('决定')).toBe('确认周期 30 天')
+    expect(periodLine('术语')).toBe('确认周期 10 天')
+    for (const label of ['用户画像', '行为偏好', '参考引用', '客户名']) expect(periodLine(label)).toBe('不用定期确认')
+    expect(within(typesRegion()).queryByRole('textbox')).toBeNull()
+    expect(screen.queryByRole('button', { name: /确认周期恢复默认/ })).toBeNull()
+  })
+
+  it('改通用类型的周期在弹层里：确定后卡上跟着变，保存确认写前后天数，写进 builtinDecayDays', async () => {
+    const { form } = setup()
+    const f = openGeneral('项目信息')
+    expect(periodBox(f)).toHaveValue('7')
+    fireEvent.change(periodBox(f), { target: { value: '30' } })
+    fireEvent.click(button('确定', f))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(periodLine('项目信息')).toBe('确认周期 30 天')
+    fireEvent.click(button('保存'))
+    expect(confirmLines()).toEqual(['通用类型的确认周期：「项目信息」7 天 → 30 天'])
+    fireEvent.click(button('取消', dialog('保存这些改动？')))
+    await clickSave(form)
+    expect(form.calls[0]!.ops).toEqual([{ op: 'set', path: ['builtinDecayDays', 'project'], value: 30 }])
+  })
+
+  it('弹层里改了再取消：草稿不变', () => {
+    setup()
+    const f = openGeneral('项目信息')
+    fireEvent.change(periodBox(f), { target: { value: '30' } })
+    fireEvent.click(button('取消', f))
+    expect(periodLine('项目信息')).toBe('确认周期 7 天')
+    expect(button('保存')).toBeDisabled()
+  })
+
+  it('弹层里的恢复默认：周期和出厂不同时才有，点了回到出厂周期，确定后保存去掉这一项', async () => {
+    const { form } = setup({ value: { builtinDecayDays: { project: 30 } } })
+    const f = openGeneral('项目信息')
+    expect(periodBox(f)).toHaveValue('30')
+    fireEvent.click(button('项目信息的确认周期恢复默认', f))
+    expect(periodBox(f)).toHaveValue('7')
+    expect(within(f).queryByRole('button', { name: '项目信息的确认周期恢复默认' })).toBeNull()
+    fireEvent.change(periodBox(f), { target: { value: '14' } })
+    expect(button('项目信息的确认周期恢复默认', f)).toBeInTheDocument()
+    fireEvent.change(periodBox(f), { target: { value: '7' } })
+    fireEvent.click(button('确定', f))
+    expect(periodLine('项目信息')).toBe('确认周期 7 天')
+    await clickSave(form)
+    expect(form.calls[0]!.ops).toEqual([{ op: 'unset', path: ['builtinDecayDays', 'project'] }])
+  })
+
+  it('弹层里点了恢复默认：焦点落在周期输入框上', () => {
+    setup({ value: { builtinDecayDays: { project: 30 } } })
+    const f = openGeneral('项目信息')
+    fireEvent.click(button('项目信息的确认周期恢复默认', f))
+    expect(periodBox(f)).toHaveFocus()
+  })
+
+  it('弹层里没改、或填的还是原来的天数就确定：没有待保存的改动', () => {
+    setup()
+    for (const text of [undefined, '007', ' 7 ']) {
+      const f = openGeneral('项目信息')
+      if (text !== undefined) fireEvent.change(periodBox(f), { target: { value: text } })
+      fireEvent.click(button('确定', f))
+      expect(periodLine('项目信息')).toBe('确认周期 7 天')
+      expect(button('保存')).toBeDisabled()
+    }
+  })
+
+  it('弹层里改了再按 Esc 或点右上角关闭：草稿不变', () => {
+    setup()
+    for (const close of [(f: HTMLElement) => { fireEvent.keyDown(f, { key: 'Escape' }) }, (f: HTMLElement) => { fireEvent.click(button('关闭', f)) }]) {
+      const f = openGeneral('项目信息')
+      fireEvent.change(periodBox(f), { target: { value: '30' } })
+      close(f)
+      expect(screen.queryByRole('dialog')).toBeNull()
+      expect(periodLine('项目信息')).toBe('确认周期 7 天')
+      expect(button('保存')).toBeDisabled()
+    }
+  })
+
+  it('确定后还没保存就再打开：输入框里是刚才改的天数', () => {
+    setup()
+    fireEvent.change(periodBox(openGeneral('项目信息')), { target: { value: '30' } })
+    fireEvent.click(button('确定', dialog('项目信息')))
+    expect(periodBox(openGeneral('项目信息'))).toHaveValue('30')
+  })
+
+  it('出厂不用定期确认、已存过周期的通用类型清空后确定：保存去掉这一项', async () => {
+    const { form } = setup({ value: { builtinDecayDays: { profile: 30 } } })
+    const f = openGeneral('用户画像')
+    fireEvent.change(periodBox(f), { target: { value: '' } })
+    fireEvent.click(button('确定', f))
+    expect(periodLine('用户画像')).toBe('不用定期确认')
+    await clickSave(form)
+    expect(form.calls[0]!.ops).toEqual([{ op: 'unset', path: ['builtinDecayDays', 'profile'] }])
+  })
+
+  it('出厂不用定期确认的通用类型也能设周期：确认框写从不用定期确认到天数；清空就回到出厂，没有改动', async () => {
+    const { form } = setup()
+    let f = openGeneral('用户画像')
+    expect(within(f).queryByRole('button', { name: /恢复默认/ })).toBeNull()
+    fireEvent.change(periodBox(f), { target: { value: '30' } })
+    expect(button('用户画像的确认周期恢复默认', f)).toBeInTheDocument()
+    fireEvent.click(button('确定', f))
+    expect(periodLine('用户画像')).toBe('确认周期 30 天')
+    fireEvent.click(button('保存'))
+    expect(confirmLines()).toEqual(['通用类型的确认周期：「用户画像」不用定期确认 → 30 天'])
+    fireEvent.click(button('取消', dialog('保存这些改动？')))
+    f = openGeneral('用户画像')
+    fireEvent.change(periodBox(f), { target: { value: '' } })
+    fireEvent.click(button('确定', f))
+    expect(periodLine('用户画像')).toBe('不用定期确认')
+    expect(button('保存')).toBeDisabled()
+    f = openGeneral('用户画像')
+    fireEvent.change(periodBox(f), { target: { value: '60' } })
+    fireEvent.click(button('确定', f))
+    await clickSave(form)
+    expect(form.calls[0]!.ops).toEqual([{ op: 'set', path: ['builtinDecayDays', 'profile'], value: 60 }])
+  })
+
+  it('填的不是 1 到 365 的整数：离开输入框后填的留着、提示留着，确定置灰；改对了才能确定', () => {
+    setup()
+    const f = openGeneral('项目信息')
+    for (const value of ['0', '366', '1.5', 'abc']) {
+      fireEvent.change(periodBox(f), { target: { value } })
+      fireEvent.blur(periodBox(f))
+      expect(periodBox(f)).toHaveValue(value)
+      expect(periodBox(f)).toHaveAttribute('aria-invalid', 'true')
+      expect(periodBox(f)).toHaveAccessibleDescription('填 1 到 365 的整数。')
+      expect(button('确定', f)).toBeDisabled()
+    }
+    fireEvent.change(periodBox(f), { target: { value: '14' } })
+    expect(periodBox(f)).not.toHaveAttribute('aria-invalid')
+    expect(button('确定', f)).toBeEnabled()
+  })
+
+  it('出厂有周期的通用类型不能留空：说明里不提留空，清空就提示、确定置灰', () => {
+    setup()
+    const f = openGeneral('项目信息')
+    expect(periodBox(f)).toHaveAccessibleDescription('超过这么多天没确认，带入时标为可能过时。')
+    fireEvent.change(periodBox(f), { target: { value: '' } })
+    expect(periodBox(f)).toHaveAccessibleDescription('填 1 到 365 的整数。')
+    expect(button('确定', f)).toBeDisabled()
+  })
+
+  it('能留空的类型：说明写留空表示不用定期确认，填错时提示里写可以留空', () => {
+    setup()
+    const f = openGeneral('用户画像')
+    expect(periodBox(f)).toHaveAccessibleDescription('超过这么多天没确认，带入时标为可能过时。留空表示不用定期确认。')
+    fireEvent.change(periodBox(f), { target: { value: '0' } })
+    expect(periodBox(f)).toHaveAccessibleDescription('填 1 到 365 的整数，或者留空。')
+  })
+
+  it('预设、我加的类型只在编辑表单里改周期：卡上跟着变，预设标已改', async () => {
+    const { form } = setup({ value: { customTypes: { term: { ...term, decayDays: 10 } } } })
+    fireEvent.click(button('编辑 决定'))
+    fireEvent.change(periodBox(dialog('编辑类型')), { target: { value: '60' } })
+    fireEvent.click(button('确定', dialog('编辑类型')))
+    expect(periodLine('决定')).toBe('确认周期 60 天')
+    expect(within(typeRow('决定')).getByText('已改')).toBeInTheDocument()
+    fireEvent.click(button('编辑 术语'))
+    fireEvent.change(periodBox(dialog('编辑类型')), { target: { value: '' } })
+    fireEvent.click(button('确定', dialog('编辑类型')))
+    expect(periodLine('术语')).toBe('不用定期确认')
+    await clickSave(form)
+    expect(form.calls[0]!.ops).toEqual([
+      { op: 'set', path: ['customTypes', 'term'], value: { ...term, decayDays: null } },
+      { op: 'set', path: ['customTypes', 'decision'], value: { ...TYPE_DEFINITIONS.decision, decayDays: 60 } },
+    ])
+  })
+
+  it('编辑表单里填错：离开输入框后填的和提示都留着，确定置灰', () => {
+    setup({ value: { customTypes: { term } } })
+    fireEvent.click(button('编辑 术语'))
+    const f = dialog('编辑类型')
+    fireEvent.change(periodBox(f), { target: { value: '400' } })
+    fireEvent.blur(periodBox(f))
+    expect(periodBox(f)).toHaveValue('400')
+    expect(periodBox(f)).toHaveAccessibleDescription('填 1 到 365 的整数，或者留空。')
+    expect(button('确定', f)).toBeDisabled()
+    fireEvent.change(periodBox(f), { target: { value: '40' } })
+    expect(button('确定', f)).toBeEnabled()
+  })
+
+  it('英文界面：卡上写确认周期一行，表单里的字段叫 Confirmation period (days)', () => {
+    render(<PanelShell gateway={createFakeGateway({ views: { library: library([]) } })} t={createTranslator(en)}><SettingsPage form={createFakeConfigForm()} onOpenMemoryPage={() => {}} now={NOW} /></PanelShell>)
+    const region = screen.getByRole('region', { name: 'Memory types' })
+    const row = (title: string) => within(region).getAllByRole('listitem').find(el => el.textContent!.startsWith(title))!
+    expect(within(row('Project')).getByText('Confirmation period: 7 days')).toBeInTheDocument()
+    expect(within(row('Profile')).getByText('No regular confirmation')).toBeInTheDocument()
+    fireEvent.click(button('Edit Profile'))
+    const f = dialog('Profile')
+    expect(within(f).getByRole('textbox', { name: 'Confirmation period (days)' })).toHaveAccessibleDescription('Unconfirmed for longer than this, it is marked as possibly outdated. Leave empty for no regular confirmation.')
   })
 })
 

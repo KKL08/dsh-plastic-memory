@@ -1,11 +1,12 @@
 /**
  * 「记什么」的两组小卡和场景弹层（卡片网格同宿主设置页的 Agent 预设：卡身是选择区，操作放在细线下的卡脚，新建是网格下的虚线条）：
  * - 场景：单选卡，点卡身切换；通用场景不能编辑，没有卡脚。
- * - 记忆类型：类型池里每一类一张卡，写哪些场景在用、存了几条，分三组：通用五类只能查看（只读弹层）；预设能编辑（英文名不变）、
+ * - 记忆类型：类型池里每一类一张卡，写哪些场景在用、存了几条和确认周期（卡上只读），分三组：通用五类的弹层只能改确认周期，定义只读；预设能编辑（英文名不变）、
  *   恢复默认、删除，删掉的在组末一行、能恢复；我加的能编辑、删除。删除都是原位确认，确认后直接改草稿。
  * 场景弹层是一个 Dialog，换两种内容：勾选（场景名 + 类型清单）、类型表单。弹层是一次事务：里面的改动
  * （勾选、新建 / 改 / 删类型、类型迁移）先留在弹层里，「确定」时一起并进页面草稿，「取消」、Esc、关闭全部撤销。
- * 从记忆类型列表打开的只有类型表单，确定后直接并进页面草稿。换场景、删类型后不再新增哪几类，由保存确认框写（SettingsPage）。
+ * 从记忆类型列表打开的只有类型表单，确定后直接并进页面草稿。确认周期只在表单里改：预设和我加的在类型表单，通用五类在它们的弹层。
+ * 换场景、删类型后不再新增哪几类，由保存确认框写（SettingsPage）。
  */
 import { Fragment, useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { useT, type Translate } from '../i18n.tsx'
@@ -13,13 +14,14 @@ import type { LocaleKey } from '../locales.ts'
 import { Button } from '../ui/Button.tsx'
 import {
   BUILTIN_TYPE_NAMES, EMPTY_TYPE_DRAFT, GENERAL_SCENE, MAX_SCENES, PRESET_TYPE_NAMES, SCENE_MAX_TYPES, TYPE_DEFINITIONS,
-  draftOf, forgetMigrations, isPresetEdited, isPresetScene, isPresetType, isPresetTypeEdited, keepMigrations, memoryCountOf, nextSceneId,
-  pendingNames, presetSceneTypes, removeType, renameMigrations, renameType, restorePresetType, sceneTypes, scenesUsing, validateSceneDraft,
-  validateTypeDraft, type CustomType, type CustomTypeDraft, type MigrationAction, type Migrations, type Pool, type Scene, type SettingsFields,
+  decayDaysOf, draftOf, forgetMigrations, isPresetEdited, isPresetScene, isPresetType, isPresetTypeEdited, keepMigrations,
+  memoryCountOf, nextSceneId, parsePeriodText, pendingNames, presetSceneTypes, removeType, renameMigrations, renameType, restorePresetType,
+  sceneTypes, scenesUsing, validateSceneDraft, validateTypeDraft, withDecayDays,
+  type CustomType, type CustomTypeDraft, type MigrationAction, type Migrations, type Pool, type Scene, type SettingsFields,
 } from './config.ts'
 import { Icon } from '../ui/Icon.tsx'
 import { Dialog, TextField } from './controls.tsx'
-import { TypeFormFields } from './CustomTypes.tsx'
+import { PeriodField, TypeFormFields, isPeriodInvalid } from './CustomTypes.tsx'
 import { typeLabel } from '../type-label.ts'
 
 type DefinedType = keyof typeof TYPE_DEFINITIONS
@@ -77,7 +79,7 @@ function hasMemories(name: string, saved: SettingsFields, migrations: Migrations
 /** 页面上一次只开一个原位确认：删场景或删类型。 */
 type Removing = { kind: 'scene' | 'type'; id: string }
 
-type DialogMode = { kind: 'scene'; id?: string } | { kind: 'type'; name?: string } | { kind: 'view'; name: DefinedType }
+type DialogMode = { kind: 'scene'; id?: string } | { kind: 'type'; name?: string } | { kind: 'general'; name: DefinedType }
 
 export function SceneSection({ fields, saved, migrations, counts, canMigrate, disabled, now, onChange }: {
   fields: SettingsFields
@@ -174,6 +176,7 @@ export function SceneSection({ fields, saved, migrations, counts, canMigrate, di
     const users = sceneIds.filter(sid => sceneTypes(fields, sid).includes(name)).map(sid => sceneLabel(t, sid, fields.scenes))
     const usage = users.length > 0 ? t('settings.types.usedBy', { names: users.join(t('settings.scene.listSep')) }) : t('settings.types.unused')
     const n = countOf(name, migrations, counts)
+    const days = decayDaysOf(fields, name)
     const resetPreset = () => {
       const { [name]: _edited, ...customTypes } = fields.customTypes
       onChange({ customTypes })
@@ -181,8 +184,8 @@ export function SceneSection({ fields, saved, migrations, counts, canMigrate, di
     let foot: ReactNode
     if (isBuiltin) {
       foot = (
-        <Button variant="quiet" disabled={disabled} aria-label={t('settings.types.viewAria', { name: label })}
-          onClick={() => { openDialog({ kind: 'view', name: name as DefinedType }) }}>{t('settings.types.view')}</Button>
+        <Button variant="quiet" disabled={disabled} aria-label={t('settings.types.editAria', { name: label })}
+          onClick={() => { openDialog({ kind: 'general', name: name as DefinedType }) }}>{t('settings.types.edit')}</Button>
       )
     } else if (isRemoving('type', name)) {
       foot = (
@@ -222,6 +225,7 @@ export function SceneSection({ fields, saved, migrations, counts, canMigrate, di
             {!isBuiltin && !isPreset ? <code className="pm-scene-code pm-tile-code" title={name}>{name}</code> : null}
           </span>
           <span className="pm-tile-detail">{n !== undefined ? `${usage} · ${t('settings.types.count', { n })}` : usage}</span>
+          <span className="pm-tile-detail">{days === null ? t('settings.types.periodNone') : t('settings.types.period', { n: days })}</span>
         </div>
         <div className="pm-tile-foot">{foot}</div>
       </li>
@@ -282,8 +286,18 @@ export function SceneSection({ fields, saved, migrations, counts, canMigrate, di
           </li>
         ))}
       </section>
-      {dialog?.kind === 'view' ? <TypeView name={dialog.name} onClose={() => { setDialog(undefined) }} /> : null}
-      {dialog !== undefined && dialog.kind !== 'view'
+      {dialog?.kind === 'general'
+        ? (
+          <GeneralTypeDialog
+            name={dialog.name} days={decayDaysOf(fields, dialog.name)} onCancel={() => { setDialog(undefined) }}
+            onConfirm={(next) => {
+              setDialog(undefined)
+              if (next !== decayDaysOf(fields, dialog.name)) onChange(withDecayDays(fields, dialog.name, next))
+            }}
+          />
+        )
+        : null}
+      {dialog !== undefined && dialog.kind !== 'general'
         ? (
           <SceneDialog
             mode={dialog}
@@ -310,7 +324,7 @@ type View =
 type FormView = Extract<View, { kind: 'form' }>
 
 function SceneDialog({ mode, fields, saved, migrations: initialMigrations, counts, canMigrate, now, onCancel, onCommit }: {
-  mode: Exclude<DialogMode, { kind: 'view' }>
+  mode: Exclude<DialogMode, { kind: 'general' }>
   fields: SettingsFields
   saved: SettingsFields
   migrations: Migrations
@@ -478,7 +492,7 @@ function SceneDialog({ mode, fields, saved, migrations: initialMigrations, count
         <>
           {autoPick !== undefined ? <span className="pm-scene-foot-note">{autoPick}</span> : null}
           <Button onClick={back}>{t('settings.sceneDialog.cancel')}</Button>
-          <Button variant="primary" onClick={() => { confirmForm(form) }}>{t('settings.sceneDialog.confirm')}</Button>
+          <Button variant="primary" disabled={isPeriodInvalid(form.draft.decayDays, true)} onClick={() => { confirmForm(form) }}>{t('settings.sceneDialog.confirm')}</Button>
         </>
       )
     }
@@ -560,10 +574,24 @@ function SceneDialog({ mode, fields, saved, migrations: initialMigrations, count
   )
 }
 
-/** 通用类型的只读弹层：逐项写出定义原文（模型看到的就是这些），只有关闭。 */
-function TypeView({ name, onClose }: { name: DefinedType; onClose: () => void }) {
+/**
+ * 通用类型的弹层：定义逐项写出原文（模型看到的就是这些），只读；下面只有确认周期能改，和出厂不同时给「恢复默认」。
+ * 和类型表单一样是一次事务：「确定」时周期才进页面草稿，「取消」、Esc、关闭都不留改动；周期填错时「确定」置灰。
+ * 出厂不用定期确认的能留空（回到不用定期确认），出厂有周期的不能留空：配置里没有给它们关掉提醒的写法。
+ */
+function GeneralTypeDialog({ name, days, onCancel, onConfirm }: {
+  name: DefinedType
+  days: number | null
+  onCancel: () => void
+  onConfirm: (days: number | null) => void
+}) {
   const t = useT()
+  const id = useId()
   const def = TYPE_DEFINITIONS[name]
+  const label = typeLabel(t, name, {})
+  const [text, setText] = useState(days === null ? '' : String(days))
+  const canBeNone = def.decayDays === null
+  const value = parsePeriodText(text, canBeNone)
   const rows: ReadonlyArray<[LocaleKey, ReactNode]> = [
     ['settings.type.label', def.label],
     ['settings.type.name', <code className="pm-scene-code">{name}</code>],
@@ -572,16 +600,28 @@ function TypeView({ name, onClose }: { name: DefinedType; onClose: () => void })
     ['settings.type.howToUse', def.howToUse],
     ['settings.type.recall', t(`settings.type.recall.${def.recall}`)],
     ['settings.type.priority', t(`settings.type.priority.${def.governancePriority}`)],
-    ['settings.type.decayDays', def.decayDays === null ? t('settings.type.noDecay') : String(def.decayDays)],
   ]
+  const footer = (
+    <>
+      <Button onClick={onCancel}>{t('settings.sceneDialog.cancel')}</Button>
+      <Button variant="primary" disabled={isPeriodInvalid(text, canBeNone)} onClick={() => { if (value !== undefined) onConfirm(value) }}>
+        {t('settings.sceneDialog.confirm')}
+      </Button>
+    </>
+  )
   return (
-    <Dialog
-      title={typeLabel(t, name, {})} closeLabel={t('settings.sceneDialog.close')} onClose={onClose}
-      footer={<Button onClick={onClose}>{t('settings.sceneDialog.close')}</Button>}
-    >
-      <dl className="pm-type-view">
-        {rows.map(([key, value]) => <div key={key}><dt>{t(key)}</dt><dd>{value}</dd></div>)}
-      </dl>
+    <Dialog title={label} closeLabel={t('settings.sceneDialog.close')} onClose={onCancel} footer={footer}>
+      <div className="pm-scene-view">
+        <dl className="pm-type-view">
+          {rows.map(([key, row]) => <div key={key}><dt>{t(key)}</dt><dd>{row}</dd></div>)}
+        </dl>
+        <PeriodField
+          id={`${id}-period`} value={text} canBeNone={canBeNone} onChange={setText}
+          reset={value === def.decayDays
+            ? undefined
+            : { label: t('settings.types.periodResetAria', { name: label }), onClick: () => { setText(def.decayDays === null ? '' : String(def.decayDays)) } }}
+        />
+      </div>
     </Dialog>
   )
 }
@@ -718,6 +758,8 @@ export const scenesCss = `
 .pm-tile-removed + .pm-tile-removed { margin-top: 4px; }
 .pm-tile-removed .pm-sep { margin: 0; }
 .pm-tile-removed .pm-link { font-weight: 600; }
+.pm-period-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.pm-period-head .pm-link { font-size: 12px; }
 .pm-type-view { display: flex; flex-direction: column; gap: 12px; margin: 0; }
 .pm-type-view div { display: flex; flex-direction: column; gap: 2px; }
 .pm-type-view dt { font-size: 12px; font-weight: 500; line-height: 1.5; color: var(--pm-text-2); }

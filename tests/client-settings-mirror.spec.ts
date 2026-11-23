@@ -4,12 +4,12 @@ import { readFileSync } from 'node:fs'
 import { parse } from 'yaml'
 import {
   BUILTIN_TYPE_NAMES, ENTRY_ID, OVERFLOW_MODES, PACKAGE_NAME, PRESET_SCENES as CLIENT_PRESET_SCENES, PRESET_TYPE_NAMES, PROMOTE_TARGETS,
-  RETIRED_TYPE_NAMES, SENSITIVITY_NUMBERS, TYPE_DEFINITIONS, buildOps, fieldsOf, removeType,
+  RETIRED_TYPE_NAMES, SENSITIVITY_NUMBERS, TYPE_DEFINITIONS, buildOps, fieldsOf, removeType, withDecayDays,
 } from '../client/settings/config.ts'
 import { applyOps } from '../client/settings/config-form.fake.ts'
 import { Config } from '../src/index.ts'
 import { SENSITIVITY_PRESETS } from '../src/governance/health-presets.ts'
-import { BUILTIN_TYPES, PRESET_SCENES, PRESET_TYPES, RETIRED_TYPES } from '../src/type-registry.ts'
+import { BUILTIN_TYPES, PRESET_SCENES, PRESET_TYPES, RETIRED_TYPES, buildTypeRegistry } from '../src/type-registry.ts'
 
 describe('设置页手抄的服务端常量', () => {
   it('内置类型名与 BUILTIN_TYPES 一致', () => {
@@ -69,6 +69,19 @@ describe('设置页手抄的服务端常量', () => {
     expect(config.removedPresetTypes.get()).toEqual(['decision'])
     expect(config.customTypes.get()).toEqual({})
     expect(fieldsOf(written).removedPresets).toEqual(['decision'])
+  })
+
+  it('确认周期写进 Config：通用类型按类型名读回，预设存成同名 customTypes，类型表都按新周期', () => {
+    const saved = fieldsOf({})
+    let draft = { ...saved, ...withDecayDays(saved, 'project', 30) }
+    draft = { ...draft, ...withDecayDays(draft, 'decision', 60) }
+    const config = new Config(applyOps({}, buildOps(saved, draft)!) as never)
+    expect(config.builtinDecayDays.get()).toEqual({ project: 30 })
+    const registry = buildTypeRegistry({
+      template: 'office', customTypes: config.customTypes.get(), builtinDecayDays: config.builtinDecayDays.get(),
+    })
+    expect([registry.get('project').decayDays, registry.get('decision').decayDays, registry.get('knowledge').decayDays]).toEqual([30, 60, 90])
+    expect(registry.warnings).toEqual([])
   })
 
   it('设置页不读写用户词典路径：保存别的项时不会把配置文件里的路径写回或清掉', () => {
