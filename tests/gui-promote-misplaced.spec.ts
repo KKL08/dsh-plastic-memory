@@ -10,7 +10,7 @@ import { AdviceIgnoreStore, adviceFingerprint } from '../src/governance/advice-i
 import { type AdviceIgnore } from '../src/governance/schema.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { RETENTION_MS } from '../src/retention.ts'
-import { computeDigest } from '../src/storage/frontmatter.ts'
+import { editFingerprint } from '../src/governance/snapshots.ts'
 import { ViewWriter, collectGlobalViews } from '../src/gui/view-writer.ts'
 import { createMemoryCommand } from '../src/gui/commands.ts'
 import { GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, encodeMemoryCommand, healthViewSchema, memoryCommandResultSchema, pendingViewSchema, type MemoryCommand, type MemoryCommandResult } from '../src/gui/contract.ts'
@@ -55,7 +55,7 @@ function env() {
   /** 照界面的做法忽略 mem_m 的放错层：带上记忆此刻的版本。 */
   const ignoreMisplaced = async () => {
     const r = (await store.get('mem_m'))!
-    return run({ cmd: 'ignore-advice', type: 'misplaced', memories: [{ memoryId: 'mem_m', layer: wsScope, base: { updatedAt: r.updatedAt, digest: computeDigest(r.name, r.summary, r.content) } }] })
+    return run({ cmd: 'ignore-advice', type: 'misplaced', memories: [{ memoryId: 'mem_m', layer: wsScope, base: { updatedAt: r.updatedAt, digest: editFingerprint(r) } }] })
   }
   return { store, decisions, ignores, pendingTable: sidecar.pending, clock, run, pending, wsHealth, ignoreMisplaced }
 }

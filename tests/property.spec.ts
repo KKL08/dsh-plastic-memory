@@ -10,7 +10,8 @@ import { createSystemMessage } from '@deepseek-ai/dsh-llm'
 import { slugifyName, isReservedFileName, INDEX_FILE, ARCHIVE_DIR } from '../src/storage/paths.ts'
 import { expandQueryTerms, textSimilarity } from '../src/text.ts'
 import { apply, Config } from '../src/index.ts'
-import { computeDigest, decodeFile } from '../src/storage/frontmatter.ts'
+import { decodeFile } from '../src/storage/frontmatter.ts'
+import { editFingerprint } from '../src/governance/snapshots.ts'
 import { isPendingDelegated, type MemoryRecord } from '../src/record-schema.ts'
 import { MEMORY_COMMAND_NAME, encodeMemoryCommand, type MemoryCommand } from '../src/gui/contract.ts'
 import { createMemoryCommand } from '../src/gui/commands.ts'
@@ -338,7 +339,7 @@ describe('子 agent 记忆的生命周期', () => {
             if (cur) {
               const r = await h.editMemory({
                 cmd: 'edit-memory', memoryId: cur.record.id, layer: { kind: 'workspace', workspacePath: h.ws },
-                base: { updatedAt: cur.record.updatedAt, digest: computeDigest(cur.record.name, cur.record.summary, cur.record.content) },
+                base: { updatedAt: cur.record.updatedAt, digest: editFingerprint(cur.record) },
                 content: `用户改成「词${k}」`, name: `用户改${k}`, summary: `用户改${k}`, tags: [],
               })
               outcome = r.kind

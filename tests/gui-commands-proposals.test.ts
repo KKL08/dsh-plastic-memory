@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { computeDigest } from '../src/storage/frontmatter.ts'
 import { baselineFingerprint, conflictFingerprint, suggestionBasis, type PendingTable } from '../src/governance/decisions.ts'
 import { editFingerprint } from '../src/governance/snapshots.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
@@ -555,7 +554,7 @@ describe('draft-proposal 与按要求应用（补充要求）', () => {
   const said = (action: string, extra: object = {}) => JSON.stringify({ action, reason: `照你说的 ${action}`, ...extra })
   const MERGED = said('merge', { draft: DRAFT })
   /** 卡片上那一份的版本（同 MemoryCard 的 updatedAt、digest）。 */
-  const baseOf = (r: MemoryRecord) => ({ updatedAt: r.updatedAt, digest: computeDigest(r.name, r.summary, r.content) })
+  const baseOf = (r: MemoryRecord) => ({ updatedAt: r.updatedAt, digest: editFingerprint(r) })
   const basesOf = async (e: ReturnType<typeof env>) => {
     const [a, b] = [(await e.store.get('mem_a'))!, (await e.store.get('mem_b'))!]
     return [baseOf(a), baseOf(b)] as [ReturnType<typeof baseOf>, ReturnType<typeof baseOf>]
@@ -858,7 +857,7 @@ describe('垂直冲突（记忆和指令文件）用处理卡', () => {
     return item
   }
   const memoryNow = async (e: ReturnType<typeof env>) => (await e.store.get('mem_v', { workspacePath: SESSION_WS }))!
-  const baseOf = (r: MemoryRecord) => ({ updatedAt: r.updatedAt, digest: computeDigest(r.name, r.summary, r.content) })
+  const baseOf = (r: MemoryRecord) => ({ updatedAt: r.updatedAt, digest: editFingerprint(r) })
   const agentsMdPath = () => join(root, 'AGENTS.md')
 
   describe('suggest（补上建议）', () => {

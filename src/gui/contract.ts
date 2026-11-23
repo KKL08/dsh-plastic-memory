@@ -94,7 +94,7 @@ export const memoryCardSchema = z.object({
   delegation: z.object({ depth: z.number().int().min(1), reviewed: reviewedBySchema.optional() }).optional(),
   /** 记忆文件的绝对路径。 */
   filePath: z.string(),
-  /** 名称、摘要、正文的内容摘要（同文件里的 digest 算法）：直接改时连同 updatedAt 带回去，磁盘上对不上就是卡片加载后被改过。
+  /** 卡片提交依据的编辑指纹（editFingerprint，含名称、摘要、正文、标签等内容字段）：直接改时连同 updatedAt 带回去，磁盘上对不上就是卡片加载后被改过。
    *  可缺省：对话卡从工具参数拼出来，没有它。 */
   digest: z.string().optional(),
   /** 四个面含高危密钥（只看高危，与界面遮盖同口径）：界面上的文字是遮盖后的，不给直接改、直接合并。 */

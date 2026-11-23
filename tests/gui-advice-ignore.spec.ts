@@ -18,7 +18,7 @@ import { BLOAT_THRESHOLD } from '../src/governance/rule-scan.ts'
 import { type AdviceIgnore, type Finding } from '../src/governance/schema.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { RETENTION_MS } from '../src/retention.ts'
-import { computeDigest } from '../src/storage/frontmatter.ts'
+import { editFingerprint } from '../src/governance/snapshots.ts'
 import { ViewWriter, collectGlobalViews } from '../src/gui/view-writer.ts'
 import { createMemoryCommand } from '../src/gui/commands.ts'
 import { GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, encodeMemoryCommand, healthViewSchema, memoryCommandResultSchema, pendingViewSchema, scopeOfMemory, type IgnorableAdviceType, type MemoryCommand, type MemoryCommandResult } from '../src/gui/contract.ts'
@@ -238,7 +238,7 @@ describe('忽略与取消忽略', () => {
     const layer = { kind: 'workspace', workspacePath: WS } as const
     const refOf = async (id: string) => {
       const r = await e.store.get(id, { workspacePath: WS })
-      return { memoryId: id, layer, base: { updatedAt: r?.updatedAt ?? 0, digest: r === undefined ? '' : computeDigest(r.name, r.summary, r.content) } }
+      return { memoryId: id, layer, base: { updatedAt: r?.updatedAt ?? 0, digest: r === undefined ? '' : editFingerprint(r) } }
     }
     const stale = { memoryId: 'mem_ok', layer, base: { updatedAt: 1, digest: 'd' } }
     expect(err(await e.runRaw(` ignore-advice ${JSON.stringify({ type: 'stale', memories: [stale] })}`)).code).toBe('invalid-args')
