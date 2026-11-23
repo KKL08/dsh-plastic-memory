@@ -233,8 +233,11 @@ describe('写入段 × 真实的记忆根写锁', () => {
     const lock = createRootLock({ root, log: quiet, loadSqlite: () => undefined })
     const order: string[] = []
     const g = gate()
-    const first = lock.run(async () => { order.push('甲进'); await g.opened; order.push('甲出') })
+    const entered = gate()
+    const first = lock.run(async () => { order.push('甲进'); entered.open(); await g.opened; order.push('甲出') })
     const second = lock.run(async () => { order.push('乙进') })
+    // 等甲真的进了段再看乙：拿锁的耗时不定，按轮数等在慢机器上可能还没轮到甲
+    await entered.opened
     await settle()
     expect(order).toEqual(['甲进'])
     g.open()
@@ -296,13 +299,17 @@ describe('写入段 × 真实的记忆根写锁', () => {
     const lock = createRootLock({ root, log: quiet })
     const order: string[] = []
     const g = gate()
+    const nested = gate()
     const first = lock.run(async () => {
       order.push('甲进')
       await lock.run(async () => { order.push('甲里嵌套') })
+      nested.open()
       await g.opened
       order.push('甲出')
     })
     const second = lock.run(async () => { order.push('乙进') })
+    // 等甲的嵌套写完再看乙：拿锁要建锁目录、开锁库，按轮数等在慢机器上可能还没轮到甲
+    await nested.opened
     await settle(20)
     expect(order).toEqual(['甲进', '甲里嵌套'])
     g.open()
