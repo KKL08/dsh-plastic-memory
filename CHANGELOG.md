@@ -28,6 +28,15 @@ All notable changes to this project are documented here. The format follows
 - Testing: seeded random sequences run several writers over the same memories
   and check that no write is lost, every write finishes and undoing one write
   leaves the others as they were.
+- A change to a memory that is cut short, for example when the app quits
+  partway, is finished the next time a memory is written: the record that
+  lets you undo a model rewrite is added, and the old file of a memory that
+  was being moved is removed. Each memory file now carries a `lastWriteOp`
+  line naming the write that last touched it; undoing a change updates it
+  too. The log this uses is kept outside the memory folder, one per machine,
+  and holds no memory text.
+- Testing: each kind of memory write is stopped before every disk call and
+  checked after the next write.
 
 ### Changed
 - The recall options of a memory type are renamed after what each chat

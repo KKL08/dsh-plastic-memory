@@ -1,3 +1,4 @@
+import { join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import type { Context, Volatile } from '@deepseek-ai/cordis'
 import type { MemoryTypeDefinition } from './types.ts'
@@ -8,7 +9,8 @@ import { FileTable } from './storage/file-table.ts'
 import { SidecarStore } from './storage/sidecar.ts'
 import { createRootLock } from './storage/root-lock.ts'
 import type { LegacyKvTables } from './storage/legacy-kv-import.ts'
-import { resolveMemoryRoot } from './storage/paths.ts'
+import { localStateDir, OP_JOURNAL_FILE, resolveMemoryRoot } from './storage/paths.ts'
+import { OpJournal } from './storage/op-journal.ts'
 import { formatIndexLine } from './index-line.ts'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { Session } from '@deepseek-ai/dsh-session'
@@ -34,6 +36,7 @@ import { lastVisibleSnapshot, shouldSendSnapshot, snapshotMessageBody } from './
 import { OVERFLOW_MODES, type OverflowMode } from './contract-codes.ts'
 import { resolveHealthThresholds, type HealthSensitivity } from './governance/health-presets.ts'
 import { PendingDecisionsStore, overflowScopeOf } from './governance/decisions.ts'
+import { ledgerSteps } from './governance/op-steps.ts'
 import { SnapshotStore } from './governance/snapshots.ts'
 import { AdviceIgnoreStore } from './governance/advice-ignores.ts'
 import { CheckupRecordStore } from './governance/checkup-records.ts'
@@ -206,9 +209,13 @@ export async function apply(ctx: Context, config: Config) {
   })
   // 纯逻辑层（file-table/store/forget）不 import 框架包，日志经 MemoryLogger 注入；
   // ctx.logger 结构上满足该形状（info/warn/error），直接注入，宿主按插件名归因。
+  // 操作日志库在记忆根之外、每台机器一份：懒打开，不可用时写入照常进行。卸载时关连接，迟到的写入会重新打开
+  const journal = new OpJournal({ path: join(localStateDir(memoryRoot), OP_JOURNAL_FILE), log: ctx.logger })
+  ctx.effect(() => () => { journal.close() }, 'plastic-memory: op journal')
   const fileTable = new FileTable({
     root: memoryRoot,
     lock: rootLock,
+    journal,
     stats: sidecar.recallStats,
     // 磁盘索引不带陈旧度（静态文件里的时间相对标注会随时间失真），注入侧的陈旧度由 snapshot.ts 计算
     formatIndexLine: (r, file) => formatIndexLine(r, { passive: registry.get(r.type).recall === 'passive', file }),
@@ -218,6 +225,8 @@ export async function apply(ctx: Context, config: Config) {
   const store = new MemoryStore(fileTable, ctx.logger, sidecar.recallStats)
   // forget 的快照先行与待决账本清理需要这两个存储，治理关闭时也接线
   const decisions = new PendingDecisionsStore(sidecar.pending, rootLock)
+  // 写成之后要补的账：启动时登记，上一个进程写到一半退出的，这里的第一次写入就能补上
+  store.registerSteps(ledgerSteps(decisions, ctx.logger))
   // 拍完快照落盘后复核：读完记录之后被彻底删除的那份在快照里脱敏
   const snapshots = new SnapshotStore(sidecar.snapshots, { findGone: goneCopies(store) })
   const scanCache = sidecar.scanCache

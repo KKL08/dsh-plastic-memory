@@ -1,11 +1,12 @@
 import { mkdir, readdir, readFile, writeFile, rename, rm, stat } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { ConcurrentModificationError, RecordNotFoundError } from '../errors.ts'
 import { basename, dirname, join, relative } from 'node:path'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { Scope } from '../scope.ts'
 import {
-  byPosition, resolveDuplicates, pickLiveFirst, isScopeTarget, scopesOf,
-  type MemoryTable, type MemoryLogger, type DirectoryNote, type QuarantineEntry, type LocatedFile, type LocatedRecord,
+  byPosition, resolveDuplicates, pickLiveFirst, isScopeTarget, scopesOf, newWriteOp,
+  type MemoryTable, type WriteOp, type OpStep, type OpStepHandler, type MemoryLogger, type DirectoryNote, type QuarantineEntry, type LocatedFile, type LocatedRecord,
   type LocateTarget, type LocateOptions, type ScopeReadOptions, type ScopeReadResult, type WorkspaceDirListing, type KeywordMatch,
 } from './table.ts'
 import type { KvTable } from '../kv-table.ts'
@@ -13,6 +14,7 @@ import type { RecallStats } from './schema.ts'
 import { decodeFile, digestMismatch, encodeRecord, type DecodeOutcome, type FileLocation } from './frontmatter.ts'
 import { ParseCache, type CachedFile, type FileSignature } from './parse-cache.ts'
 import type { RootLock } from '../root-lock.ts'
+import type { OpJournal, PendingOp } from './op-journal.ts'
 import { defaultRootLock } from './root-lock.ts'
 import {
   WORKSPACE_MARKER, INDEX_FILE, GLOBAL_DIR, ARCHIVE_DIR, workspaceDirName, slugifyName, isReservedFileName,
@@ -36,12 +38,24 @@ const TMP_SUFFIX_RE = /\.tmp-(\d+)-[a-z0-9]+$/
 
 /** 写路径 locate 到写盘之间文件被别处改动时，重读重算的总次数上限；到上限仍在变就报错不写。 */
 const WRITE_ATTEMPTS = 3
+/** 同一行在一个进程里最多补做几次。 */
+const RECOVERY_ATTEMPTS = 3
 
 /** 维护点写索引后发现目录变了、按新清单重写的总次数上限（含第一次写）。 */
 const INDEX_ROUNDS = 3
 
 /** 写前复核发现 locate 之后文件被改：本轮写作废，由 update / put 重新 locate 再来（只在本文件内流转）。 */
 class StaleReadError extends Error {}
+
+/** 日志行的目标是这个版本认识的形状。 */
+function isKnownTarget(target: unknown): target is PendingOp['target'] {
+  if (typeof target !== 'object' || target === null) return false
+  const t = target as Record<string, unknown>
+  const isText = (key: string) => typeof t[key] === 'string'
+  if (t.kind === 'write') return isText('memoryId') && isText('dir') && isText('after') && Array.isArray(t.fields)
+  if (t.kind === 'delete') return isText('memoryId') && isText('dir') && isText('nameHash')
+  return false
+}
 
 /** 候选文件名都被别的 id 占着：不覆盖。写路径原样抛给调用方；维护点搬家时跳过这一个文件。 */
 class NameTakenError extends Error {}
@@ -76,6 +90,22 @@ export interface FileTableOptions {
   parseCache?: ParseCache<DecodeOutcome>
   /** 记忆根写锁，写路径与维护点都在锁内。接线层注入插件实例的那一把；缺省用同一进程同一记忆根共用的那把（root-lock.ts）。 */
   lock?: RootLock
+  /** 操作日志库：每次写入先记一行待完成，被打断的由下一次进写入段时补完。不给就只打提交标记、不能补做。 */
+  journal?: OpJournal
+}
+
+/** 文件原文、文件名的指纹：操作日志里只记它，不记原文和名字（名字由记忆名生成）。 */
+function fingerprintOf(text: string): string {
+  return createHash('sha256').update(text).digest('hex').slice(0, 32)
+}
+
+/** 这次改了哪些字段（只有字段名）：召回统计不算。 */
+function changedFields(prev: MemoryRecord | undefined, next: MemoryRecord): string[] {
+  const skip = new Set(['recallCount', 'lastRecalledAt'])
+  const before = (prev ?? {}) as Record<string, unknown>
+  const after = next as Record<string, unknown>
+  return [...new Set([...Object.keys(before), ...Object.keys(after)])]
+    .filter(key => !skip.has(key) && JSON.stringify(before[key]) !== JSON.stringify(after[key])).sort()
 }
 
 /**
@@ -134,6 +164,12 @@ export class FileTable implements MemoryTable {
   private readonly opts: FileTableOptions
   private readonly parseCache: ParseCache<DecodeOutcome>
   private readonly lock: RootLock
+  private readonly journal: OpJournal | undefined
+  private readonly stepHandlers = new Map<string, OpStepHandler>()
+  /** 进写入段时已经替调用方补完的操作：它随后来结这次操作时不再做一遍。 */
+  private readonly settledOnEnter = new Set<string>()
+  /** 每一行在这个进程里补做失败了几次：到上限就不再试，免得一行补不上、此后每次进写入段都扫一遍目录。 */
+  private readonly recoveryFailures = new Map<string, number>()
   readonly globalDir: string
 
   constructor(opts: FileTableOptions) {
@@ -141,6 +177,9 @@ export class FileTable implements MemoryTable {
     this.log = opts.log ?? console
     this.parseCache = opts.parseCache ?? new ParseCache()
     this.lock = opts.lock ?? defaultRootLock(opts.root, this.log)
+    this.journal = opts.journal
+    // 每次拿到写锁先看有没有被打断的操作：平时一行都没有
+    if (this.journal !== undefined) this.lock.onEnter?.(() => this.recoverPending())
     this.globalDir = join(opts.root, GLOBAL_DIR)
   }
 
@@ -252,16 +291,20 @@ export class FileTable implements MemoryTable {
     }
     const mtimeMs = sig.mtimeMs
     const row = statsRows.get(outcome.record.id)
-    // 浅拷贝：缓存里的解析结果是冻结的，调用方拿到的顶层可以改
-    const record = row ? { ...outcome.record, recallCount: row.recallCount, lastRecalledAt: row.lastRecalledAt } : { ...outcome.record }
+    // 浅拷贝：缓存里的解析结果是冻结的，调用方拿到的顶层可以改。提交标记不随记录出去，单独带在槽位上
+    const { lastWriteOp: writeOp, ...decoded } = outcome.record
+    const record = row ? { ...decoded, recallCount: row.recallCount, lastRecalledAt: row.lastRecalledAt } : decoded
     return {
-      slot: { record, extras: outcome.extras, filePath, dir, raw, mtimeMs, hasReservedKeys: outcome.notes.some(n => n.code === 'reserved-keys') },
+      slot: {
+        record, extras: outcome.extras, filePath, dir, raw, mtimeMs, hasReservedKeys: outcome.notes.some(n => n.code === 'reserved-keys'),
+        ...(writeOp !== undefined ? { writeOp } : {}),
+      },
       notes: outcome.notes.map(n => ({ ...n, path: filePath })),
     }
   }
 
-  private toLocated({ record, extras, filePath, dir }: Slot): LocatedFile {
-    return { record, extras, filePath, dir }
+  private toLocated({ record, extras, filePath, dir, writeOp }: Slot): LocatedFile {
+    return { record, extras, filePath, dir, ...(writeOp !== undefined ? { writeOp } : {}) }
   }
 
   /**
@@ -494,7 +537,8 @@ export class FileTable implements MemoryTable {
         if (digestMismatch(DIGEST_LINE_RE.exec(frontmatterOf(slot.raw))?.[1], record)) {
           record = { ...record, updatedAt: slot.mtimeMs, lastConfirmedAt: slot.mtimeMs }
         }
-        const text = encodeRecord(record, slot.extras)
+        // 维护点的回写不是一次操作：提交标记原样留着
+        const text = encodeRecord(slot.writeOp === undefined ? record : { ...record, lastWriteOp: slot.writeOp }, slot.extras)
         if (!inArchive && record.status !== 'active') {
           // 搬家不改文件名（spec：文件名不变；手编文件的名字由用户起），撞名由占名追加 id 片段
           if (!(await this.unchangedSince(slot))) continue
@@ -685,8 +729,8 @@ export class FileTable implements MemoryTable {
 
   /**
    * 排他占名并写入（撞名时追加 id 片段）。完整内容先进 tmp，再 link 到候选名：目标名原子出现
-   * 且内容完整，没有"先建空文件再填"的窗口，崩溃最多留下 tmp（维护点清）。卷不支持硬链接时 linkExclusive 退回排他复制，
-   * 排他不变，只是不再原子。EEXIST 表示名被占——占着的是同一记录自己的
+   * 且内容完整，没有"先建空文件再填"的窗口，崩溃最多留下 tmp（维护点清）。卷不支持硬链接时，持着跨进程写锁就确认目标
+   * 不存在后把 tmp 改名过去（同样原子）；写锁不可用才退回排他复制，排他不变，只是不再原子。EEXIST 表示名被占——占着的是同一记录自己的
    * 文件（崩溃残留、同 id 副本）才允许 rename 覆盖，否则换下一个候选：基础名 → id 片段名 → 全 id 名。全 id 名也被别的 id
    * 占着（手建、改过 id 的文件）就抛错，不覆盖。两个进程写同名异 id 的记录因此两条都存活；隔离文件、缺标记目录里的文件也不会被同 slug 写入静默覆盖。
    * 同 id 的文件也只覆盖 known 里读到、此后没变过的那份：读之后才出现或被改过的是别的进程刚落的盘，覆盖会丢掉对方的修改，
@@ -703,7 +747,7 @@ export class FileTable implements MemoryTable {
         const path = join(level, name)
         try {
           // 退回复制时目标是另一个文件，按目标本身记；硬链接时就是 tmp，不再 stat（此刻目标名可能已被别人 rename 覆盖）
-          const isCopy = await linkExclusive(tmp, path)
+          const isCopy = await linkExclusive(tmp, path, this.lock.isExclusive?.() === true)
           this.parseCache.evict(path)
           return { path, ino: isCopy ? (await stat(path)).ino : ino }
         } catch (err) {
@@ -731,11 +775,14 @@ export class FileTable implements MemoryTable {
    * tmp + rename 覆盖，否则排他占名 → 搬家删旧 → 清可见集合里该 id 的其余副本 → 本目录（搬家时两个）维护点。返回实际写出的记录。
    * 覆盖、占名、删旧之前都复核 prev 的原文，变了抛 StaleReadError（占名后才发现的先撤回新文件），由调用方重来。
    */
-  private async persist(key: string, prev: LocatedSlot | undefined, value: MemoryRecord, isOwnDirOnly = false): Promise<MemoryRecord> {
-    const next = value.status === 'deleted' && value.deletedAt === undefined ? { ...value, deletedAt: this.now() } : value
+  private async persist(key: string, prev: LocatedSlot | undefined, value: MemoryRecord, isOwnDirOnly = false, given?: WriteOp): Promise<MemoryRecord> {
+    const { lastWriteOp: _stale, ...stripped } = value
+    const next: MemoryRecord = stripped.status === 'deleted' && stripped.deletedAt === undefined ? { ...stripped, deletedAt: this.now() } : stripped
     const volatileChanged = !prev || !this.volatileEqual(prev.record, next)
     const stableChanged = !prev || !this.stableEqual(prev.record, next)
     if (stableChanged) {
+      // 提交标记：这个文件带着这次的操作 id 出现在目标目录里，这次写入就算提交了
+      const op = given ?? newWriteOp()
       // 位置没变就留在原目录（覆盖手工改名的 workspace 目录），变了才按 scope 选目录
       const sameLocation = prev !== undefined && prev.record.scope === next.scope && prev.record.workspacePath === next.workspacePath
       const dir = sameLocation ? prev.dir : await this.dirFor(next)
@@ -746,9 +793,15 @@ export class FileTable implements MemoryTable {
       // 不同的新旧路径是同一个文件——若触发重命名，"先写新后删旧"会把刚写的文件删掉，丢数据。
       const renamed = prev !== undefined
         && slugifyName(next.name).toLowerCase() !== slugifyName(prev.record.name).toLowerCase()
-      const text = encodeRecord(next, prev?.extras ?? {})   // 易变字段由 encodeRecord 剔除
+      const text = encodeRecord({ ...next, lastWriteOp: op.id }, prev?.extras ?? {})   // 易变字段由 encodeRecord 剔除
+      const isInPlace = prev !== undefined && !moved && !renamed && dirname(prev.filePath) === level
+      this.beginOp(op, {
+        kind: 'write', memoryId: key, dir: level, fields: changedFields(prev?.record, next),
+        ...(prev !== undefined ? { before: fingerprintOf(prev.raw) } : {}), after: fingerprintOf(text),
+        ...(prev !== undefined && !isInPlace ? { source: { dir: dirname(prev.filePath), nameHash: fingerprintOf(basename(prev.filePath)) } } : {}),
+      })
       let filePath: string
-      if (prev !== undefined && !moved && !renamed && dirname(prev.filePath) === level) {
+      if (prev !== undefined && isInPlace) {
         filePath = prev.filePath
         if (!(await this.unchangedSince(prev))) throw new StaleReadError()
         await this.atomicWrite(filePath, text)   // 自己的文件：rename 只覆盖同一记录自己的文件
@@ -769,11 +822,166 @@ export class FileTable implements MemoryTable {
       }
       await this.removeOtherCopies(key, filePath, dir, isOwnDirOnly, prev?.copies ?? [])
       await this.maintainDirs(moved ? [dir, prev!.dir] : [dir])
+      // 调用方给的操作还有账要记，由它做完再结（finishOp）；自己建的到这里就做完了
+      if (given === undefined) this.endOp(op.id)
     }
     if (volatileChanged) {
       await this.opts.stats.put(key, { id: key, recallCount: next.recallCount, lastRecalledAt: next.lastRecalledAt })
     }
     return next
+  }
+
+  // —— 操作日志（锁内）——
+
+  /** 这把锁此刻跨进程互斥才记日志：退回进程内保护时，看到的待完成行可能属于另一个正在写的进程，分不出来。 */
+  private isJournaling(): boolean {
+    return this.journal !== undefined && this.lock.isExclusive?.() !== false
+  }
+
+  private beginOp(op: WriteOp, target: PendingOp['target']): void {
+    if (!this.isJournaling()) return
+    this.journal!.begin({
+      op: op.id, at: this.now(), target, steps: [...op.steps],
+      ...(op.initiator !== undefined ? { initiator: op.initiator } : {}), ...(op.batch !== undefined ? { batch: op.batch } : {}),
+    })
+  }
+
+  private endOp(opId: string): void {
+    if (this.isJournaling()) this.journal!.done(opId)
+  }
+
+  /** 登记提交后某一种步骤的处理器（接线层做）：正常写完和中断后补做走同一个处理器。 */
+  registerStep(kind: string, handler: OpStepHandler): void {
+    this.stepHandlers.set(kind, handler)
+  }
+
+  private async runSteps(opId: string, steps: readonly OpStep[], record: MemoryRecord | undefined, isIntact = true): Promise<void> {
+    for (const step of steps) {
+      const handler = this.stepHandlers.get(step.kind)
+      // 不认识的步骤（更新的版本记的）做不了，跳过
+      if (handler === undefined) this.log.warn(`[plastic-memory] 操作 ${opId} 有一步不认识（${step.kind}），已跳过`)
+      else await handler(step, { op: opId, record, isIntact })
+    }
+  }
+
+  private knowsSteps(steps: unknown): steps is OpStep[] {
+    return Array.isArray(steps) && steps.every(step => typeof step?.kind === 'string' && this.stepHandlers.has(step.kind))
+  }
+
+  async finishOp(op: WriteOp, written?: MemoryRecord): Promise<void> {
+    await this.locked(async () => {
+      // 结操作自己也是进一次写入段：这一行还待完成的话，进段时已经按同一套步骤补完了
+      if (this.settledOnEnter.delete(op.id)) return
+      // 有一步没人会做（处理器没登记）：行留着，等登记了的进程来补，不做一半就销账
+      if (!this.knowsSteps(op.steps)) {
+        this.log.warn(`[plastic-memory] 操作 ${op.id} 有一步不认识，提交后的步骤没做，留在日志里`)
+        return
+      }
+      await this.runSteps(op.id, op.steps, written)
+      this.endOp(op.id)
+    })
+  }
+
+  /**
+   * 补做被打断的操作（每次顶层的段拿到写锁先跑）。写入整段都在锁里，这时看到的待完成行一定来自没走完的上一段：
+   * 进程中途退出，或那一段抛了错。按行里记的目标判提交了没有：
+   *  - 写文件：目标目录里有这个 id、提交标记等于操作 id 的文件算已提交。原来那份（文件位置会变的写入先写新、后删旧）
+   *    原文还是改前的样子才删；被改过就两份都留，读路径照常取舍，体检报同 id 多份。
+   *  - 彻底删除：那个文件不在了算已提交，哪里都没有这个 id 了就清召回统计。补做不删文件：同 id 的其余副本留着，体检报。
+   * 已提交的把提交后的步骤补完；没提交的作废，改前快照留着无害。一行补做失败留到下一次，不挡别的行；
+   * 同一行在这个进程里连着失败几次就不再试。更新的版本记的行（目标种类或步骤不认识）不动。
+   */
+  private async recoverPending(): Promise<void> {
+    if (!this.isJournaling() || !this.journal!.hasPending()) return
+    for (const row of this.journal!.pending()) {
+      if ((this.recoveryFailures.get(row.op) ?? 0) >= RECOVERY_ATTEMPTS) continue
+      const { target } = row
+      // 更新的版本记的行（形状、目标种类或步骤不认识）原样留着，等认识它的版本来补
+      if (!isKnownTarget(target) || !this.knowsSteps(row.steps)) {
+        this.recoveryFailures.set(row.op, RECOVERY_ATTEMPTS)
+        this.log.warn(`[plastic-memory] 被打断的操作 ${row.op} 是更新的版本记的，这个版本补不了，留给它`)
+        continue
+      }
+      try {
+        if (target.kind === 'write') {
+          const committed = await this.findStamped(target.dir, target.memoryId, row.op)
+          if (committed !== undefined) {
+            if (target.source !== undefined && target.before !== undefined) await this.removeSourceIfUnchanged(target.source, target.before, committed.located.filePath)
+            await this.runSteps(row.op, row.steps, committed.located.record, fingerprintOf(committed.raw) === target.after)
+          }
+        } else if (!(await this.hasFileNamed(target.dir, target.nameHash))) {
+          // 补做不删文件：名字不在了可能是删成了，也可能是中断后被人改了名，分不出来。同 id 还剩着的副本留给体检报
+          if ((await this.locateSlot(target.memoryId)) === undefined) await this.opts.stats.delete(target.memoryId)
+          await this.runSteps(row.op, row.steps, undefined)
+        }
+        this.journal!.done(row.op)
+        this.recoveryFailures.delete(row.op)
+        this.settledOnEnter.add(row.op)
+      } catch (err) {
+        const failures = (this.recoveryFailures.get(row.op) ?? 0) + 1
+        this.recoveryFailures.set(row.op, failures)
+        const next = failures >= RECOVERY_ATTEMPTS ? '这个进程不再试，重启后再补' : '下次写入时再试'
+        this.log.warn(`[plastic-memory] 补做被打断的操作 ${row.op} 失败，${next}（${err instanceof Error ? err.message : String(err)}）`)
+      }
+    }
+  }
+
+  async locateWrittenBy(id: string, target: Scope, opId: string): Promise<LocatedFile | undefined> {
+    return this.locked(async () => {
+      const own = target.kind === 'global' ? [{ dir: this.globalDir, loc: { scope: 'global' } as FileLocation }] : await this.hintDirs(target.workspacePath)
+      const written = (await this.scanForId(id, own)).find(copy => copy.writeOp === opId)
+      return written && this.toLocated(written)
+    })
+  }
+
+  /**
+   * 目录里这个 id、提交标记等于 opId 的文件。每个文件只读一次，指纹和记录出自同一份原文；原文里没有这个操作 id 的不解析。
+   * 有文件读不出（权限、占用）又没找到时抛错：不能当成「没有」，否则这一行会被当成没提交而作废。
+   */
+  private async findStamped(level: string, id: string, opId: string): Promise<{ located: LocatedFile; raw: string } | undefined> {
+    const listed = await this.listMemoryFiles(level)
+    if ('note' in listed) throw new Error(listed.note.text)
+    const dir = basename(level) === ARCHIVE_DIR ? dirname(level) : level
+    const loc = await this.locationOf(dir)
+    if (loc === undefined || 'note' in loc) return undefined
+    let unreadable: string | undefined
+    for (const name of listed.names.sort()) {
+      const filePath = join(level, name)
+      let raw: string
+      let mtimeMs: number
+      try {
+        mtimeMs = (await stat(filePath)).mtimeMs
+        raw = await readFile(filePath, 'utf8')
+      } catch (err) {
+        if (errnoCode(err) !== 'ENOENT') unreadable = name
+        continue
+      }
+      if (!frontmatterOf(raw).includes(opId)) continue
+      const decoded = decodeFile(raw, { path: filePath, loc: loc.loc, relPath: relative(this.opts.root, filePath), mtimeMs })
+      if (!decoded.ok || decoded.record.id !== id || decoded.record.lastWriteOp !== opId) continue
+      const { lastWriteOp: writeOp, ...record } = decoded.record
+      return { located: { record, extras: decoded.extras, filePath, dir, writeOp }, raw }
+    }
+    if (unreadable !== undefined) throw new Error(`${level} 里有文件读不出（${unreadable}），分不出这次写入提交了没有`)
+    return undefined
+  }
+
+  private async fileNamed(level: string, nameHash: string): Promise<string | undefined> {
+    const listed = await this.listMemoryFiles(level)
+    if ('note' in listed) throw new Error(listed.note.text)
+    const name = listed.names.find(n => fingerprintOf(n) === nameHash)
+    return name === undefined ? undefined : join(level, name)
+  }
+
+  private async hasFileNamed(level: string, nameHash: string): Promise<boolean> {
+    return (await this.fileNamed(level, nameHash)) !== undefined
+  }
+
+  private async removeSourceIfUnchanged(source: { dir: string; nameHash: string }, before: string, committedPath: string): Promise<void> {
+    const path = await this.fileNamed(source.dir, source.nameHash)
+    if (path === undefined || path.toLowerCase() === committedPath.toLowerCase()) return
+    const raw = await readFile(path, 'utf8').catch(() => undefined)
+    if (raw !== undefined && fingerprintOf(raw) === before) await this.removeFile(path)
   }
 
   /** 锁内 locate → attempt；attempt 因复核失败作废就重新 locate 再来，总共 WRITE_ATTEMPTS 次。 */
@@ -788,11 +996,11 @@ export class FileTable implements MemoryTable {
     throw new ConcurrentModificationError(key, WRITE_ATTEMPTS)
   }
 
-  async create(record: MemoryRecord): Promise<void> {
-    await this.locked(async () => { await this.persist(record.id, undefined, record) })
+  async create(record: MemoryRecord, op?: WriteOp): Promise<void> {
+    await this.locked(async () => { await this.persist(record.id, undefined, record, false, op) })
   }
 
-  async put(value: MemoryRecord, from: LocateTarget, skipIf?: (current: MemoryRecord | undefined) => boolean): Promise<MemoryRecord | undefined> {
+  async put(value: MemoryRecord, from: LocateTarget, skipIf?: (current: MemoryRecord | undefined) => boolean, op?: WriteOp): Promise<MemoryRecord | undefined> {
     // put 是整条替换：值由调用方给定，重来时只换新的位置、附加字段与召回统计，不重算内容；skipIf 每轮按新读数重判
     return this.locked(() => this.withFreshLocate(value.id, from, async prev => {
       if (skipIf?.(prev && byPosition(prev))) return undefined
@@ -801,23 +1009,28 @@ export class FileTable implements MemoryTable {
       const next = prev
         ? { ...value, recallCount: prev.record.recallCount, lastRecalledAt: prev.record.lastRecalledAt }
         : value
-      return this.persist(value.id, prev, next, isScopeTarget(from))
+      return this.persist(value.id, prev, next, isScopeTarget(from), op)
     }))
   }
 
-  async update(id: string, from: LocateTarget, fn: (current: MemoryRecord) => MemoryRecord): Promise<MemoryRecord> {
+  async update(id: string, from: LocateTarget, fn: (current: MemoryRecord) => MemoryRecord, op?: WriteOp): Promise<MemoryRecord> {
     // 锁内重读磁盘：外部编辑不丢；写盘前又被改就在新内容上重算 fn
     return this.locked(() => this.withFreshLocate(id, from, async current => {
       if (!current) throw new RecordNotFoundError(id)
-      return this.persist(id, current, fn(current.record), isScopeTarget(from))
+      return this.persist(id, current, fn(current.record), isScopeTarget(from), op)
     }))
   }
 
-  async delete(id: string, at: LocateTarget, skipIf?: (current: LocatedFile) => boolean): Promise<boolean> {
+  async delete(id: string, at: LocateTarget, skipIf?: (current: LocatedFile) => boolean, given?: WriteOp): Promise<boolean> {
     return this.locked(async () => {
       const found = await this.locateSlot(id, at)
       const slot = found && this.toLocated(found)
       if (!slot || skipIf?.(slot)) return false
+      const op = given ?? newWriteOp()
+      this.beginOp(op, {
+        kind: 'delete', memoryId: id, dir: dirname(slot.filePath), nameHash: fingerprintOf(basename(slot.filePath)),
+        before: fingerprintOf(found.raw), scopeDir: slot.dir, isOwnDirOnly: isScopeTarget(at),
+      })
       await this.removeFile(slot.filePath)
       // 彻底删除（密钥硬删、最近删除里的彻底删除）的承诺是「可见集合里再没有它」：global 与该记录目录里同 id 的其余副本
       // （含 .archive/）一并物理删除；给作用域时只删该目录里的，别的作用域里的同 id 副本是另一张卡
@@ -825,6 +1038,7 @@ export class FileTable implements MemoryTable {
       // 召回统计按 id 一行，别的作用域还有副本时是它的，留着
       if ((await this.locateSlot(id)) === undefined) await this.opts.stats.delete(id)
       await this.maintainDirs([...new Set([slot.dir, this.globalDir])])
+      if (given === undefined) this.endOp(op.id)
       return true
     })
   }

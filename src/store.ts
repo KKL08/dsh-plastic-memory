@@ -5,7 +5,7 @@ import { expandQueryTerms, matchScore } from './text.ts'
 import {
   byPosition, resolveLiveFirst,
   type MemoryLogger, type MemoryTable, type LocateTarget, type LocateOptions, type ScopeReadOptions, type ScopeReadResult, type KeywordMatch,
-  type DirectoryNote, type QuarantineEntry,
+  type DirectoryNote, type QuarantineEntry, type OpStepHandler, type WriteOp,
 } from './storage/table.ts'
 import type { BatchKvTable } from './kv-table.ts'
 import type { RecallStats } from './storage/schema.ts'
@@ -59,6 +59,7 @@ export class MemoryStore {
   private table: MemoryTable
   private readonly log: MemoryLogger
   private stats: BatchKvTable<RecallStats>
+  private readonly stepHandlers = new Map<string, OpStepHandler>()
 
   /** log 缺省回退 console；stats：召回统计侧表（接线层传 .state/recall-stats.json）。 */
   constructor(table: MemoryTable, log: MemoryLogger | undefined, stats: BatchKvTable<RecallStats>) {
@@ -80,16 +81,41 @@ export class MemoryStore {
   /** 一条记忆的一次改动整段在一个写入段里：中途拿锁超时不会只做一半，同进程别的写入也插不进中间。 */
   writeSection<T>(fn: () => Promise<T>): Promise<T> { return this.table.inSection !== undefined ? this.table.inSection(fn) : fn() }
   /** 新记录：不定位，排他占名（save create 用）。 */
-  create(record: MemoryRecord) { return this.table.create(record) }
+  create(record: MemoryRecord, op?: WriteOp) { return this.table.create(record, op) }
   /** 整条替换。from：跨 scope 搬家时传原记录的作用域，让定位到的是门放行的那份；缺省按 record 自己的 workspace 做会话视角定位。
    *  skipIf 见 MemoryTable.put：锁内按最新内容判定为真就不写，返回 undefined；写了返回实际写出的记录。 */
-  put(record: MemoryRecord, from: LocateTarget = { workspacePath: record.workspacePath }, skipIf?: (current: MemoryRecord | undefined) => boolean) {
-    return this.table.put(record, from, skipIf)
+  put(record: MemoryRecord, from: LocateTarget = { workspacePath: record.workspacePath }, skipIf?: (current: MemoryRecord | undefined) => boolean, op?: WriteOp) {
+    return this.table.put(record, from, skipIf, op)
   }
   /** 读改写：锁内按调用方读到的那条记录定位（定位约定同 put），对磁盘上的当前内容套 fn；
    *  调用方读到之后被别处改过的字段不丢。只改几个字段的写回都该走这里，整条替换才用 put。 */
-  update(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, fn: (current: MemoryRecord) => MemoryRecord, from: LocateTarget = { workspacePath: record.workspacePath }) {
-    return this.table.update(record.id, from, fn)
+  update(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, fn: (current: MemoryRecord) => MemoryRecord, from: LocateTarget = { workspacePath: record.workspacePath }, op?: WriteOp) {
+    return this.table.update(record.id, from, fn, op)
+  }
+
+  /** 这次写入落没落盘：作用域里有没有提交标记等于 op 的那一份（见 MemoryTable.locateWrittenBy）。 */
+  async locateWrittenBy(id: string, scope: Scope, op: WriteOp) {
+    if (this.table.locateWrittenBy !== undefined) return this.table.locateWrittenBy(id, scope, op.id)
+    const current = await this.table.locate(id, scope)
+    return current?.writeOp === op.id ? current : undefined
+  }
+
+  /** 登记提交后步骤的处理器（见 MemoryTable.registerStep）。写入点动手前登记自己要用的那几种，接线层启动时也登记一遍，中断后才补得上。 */
+  registerSteps(handlers: Readonly<Record<string, OpStepHandler>>): void {
+    for (const [kind, handler] of Object.entries(handlers)) {
+      this.stepHandlers.set(kind, handler)
+      this.table.registerStep?.(kind, handler)
+    }
+  }
+
+  hasStep(kind: string): boolean {
+    return this.stepHandlers.has(kind)
+  }
+
+  /** 带着 op 的那次写入落盘了：做掉它提交后的步骤（见 MemoryTable.finishOp）。没有操作日志的表在这里直接做。 */
+  async finishOp(op: WriteOp, written?: MemoryRecord): Promise<void> {
+    if (this.table.finishOp !== undefined) return this.table.finishOp(op, written)
+    for (const step of op.steps) await this.stepHandlers.get(step.kind)?.(step, { op: op.id, record: written, isIntact: true })
   }
   /** 同 update，但锁内发现记录已不存在或已软删就不写、返回 undefined（工具据此报「不存在或已删除」，不抛错）。
    *  from 同 update：调用方按作用域读到的（locateCopy），给同一个作用域写回，别的作用域里同 id 的副本不动。
@@ -155,7 +181,7 @@ export class MemoryStore {
    */
   async softDeleteUnlessSecret(
     record: Pick<MemoryRecord, 'id' | 'workspacePath'>,
-    opts: DeleteOptions & { isChanged?: (current: MemoryRecord) => boolean; isSecret?: (current: MemoryRecord) => boolean } = {},
+    opts: DeleteOptions & { isChanged?: (current: MemoryRecord) => boolean; isSecret?: (current: MemoryRecord) => boolean; op?: WriteOp } = {},
   ): Promise<'deleted' | 'has-secret' | 'changed' | 'missing'> {
     const target = deleteTarget(record, opts)
     if (!(await this.table.locate(record.id, target, { isMissRechecked: true }))) return 'missing'
@@ -165,7 +191,7 @@ export class MemoryStore {
       await this.update(record, (r) => {
         outcome = opts.isChanged?.(r) === true ? 'changed' : (opts.isSecret ?? hasSecret)(r) ? 'has-secret' : 'deleted'
         return outcome === 'deleted' ? markDeleted(r, opts.now) : r
-      }, target)
+      }, target, opts.op)
       return outcome
     } catch (err) {
       if (err instanceof RecordNotFoundError) return 'missing'   // 定位之后被别处删掉

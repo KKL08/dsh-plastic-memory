@@ -6,6 +6,13 @@ export interface RootLock {
   /** 在写锁内执行 fn。写入点拿到的是写入段（storage/write-section.ts）：跨进程互斥，同一进程里也一段一段来，段内再进不等待；
    *  只有跨进程那一层（createCrossProcessLock）同一实例内可并发进入。拿锁超时抛 RootLockTimeoutError，fn 不执行。 */
   run<T>(fn: () => Promise<T>): Promise<T>
+  /** 跨进程互斥此刻是否有效；锁库用不了、退回进程内保护后为 false。没有这个方法的实现按有效算。 */
+  isExclusive?(): boolean
+  /**
+   * 登记一个钩子：每次顶层的段拿到锁、开始执行之前先跑它（段内再进不跑）。操作日志用它补做被打断的写入。
+   * 钩子抛错不挡这一段。没有段的概念的实现可以不提供。
+   */
+  onEnter?(hook: () => Promise<void>): void
 }
 
 /**

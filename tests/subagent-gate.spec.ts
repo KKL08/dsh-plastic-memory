@@ -73,6 +73,7 @@ async function boot(opts: { governance?: boolean } = {}) {
     on: (event: string, fn: (...args: unknown[]) => unknown) => { listeners.set(event, fn); return () => {} },
     get: (name: string) => (name === 'llm' ? llm : name === 'sessionQuery' ? sessionQuery : undefined),
     inject: () => () => {},
+    effect: () => () => {},
     logger: { info() {}, warn() {}, error() {} },
   }
   const memoryRoot = await makeTmp()

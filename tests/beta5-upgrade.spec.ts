@@ -102,6 +102,7 @@ async function stageBeta5() {
     on: () => () => {},
     get: (name: string) => (name === 'storageDomain' ? storageDomain : undefined),
     inject: () => () => {},
+    effect: () => () => {},
     logger: { info() {}, warn() {}, error() {} },
   }
   const run = (name: string, args: unknown) => tools.get(name)!.execute(args, fakeExec())

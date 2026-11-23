@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
+import { mkdtemp, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { baselineFingerprint, conflictFingerprint, suggestionBasis, type PendingTable } from '../src/governance/decisions.ts'
@@ -13,6 +13,7 @@ import type { MemoryRecord } from '../src/record-schema.ts'
 import { record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 import { NOW, SESSION_WS, OTHER_WS, root, setRoot, type EnvOpts, env, ok, err, seedPair, allEntries, memoryTree, ledgerItems } from './helpers/gui-command-env.ts'
+import { memoryText } from './helpers/memory-text.ts'
 
 
 describe('apply-proposal（采纳建议：保留一方、都保留）', () => {
@@ -210,7 +211,7 @@ describe('apply-proposal（采纳融合建议：保留方改写成融合稿，�
   /** 两条的文件（路径和逐字节内容）；不在为 undefined。 */
   const files = async (e: ReturnType<typeof env>, at: readonly [Scope, Scope] = [GLOBAL, GLOBAL]) => Promise.all(['mem_a', 'mem_b'].map(async (id, i) => {
     const located = await e.store.locate(id, at[i]!)
-    return located === undefined ? undefined : [located.filePath, await readFile(located.filePath, 'utf8')]
+    return located === undefined ? undefined : [located.filePath, await memoryText(located.filePath)]
   }))
   const horizontalOf = async (e: ReturnType<typeof env>, id: string) => {
     const item = pendingViewSchema.parse(await e.readView('pending')).items.find(i => 'decisionId' in i && i.decisionId === id)
@@ -669,7 +670,7 @@ describe('draft-proposal 与按要求应用（补充要求）', () => {
   const statuses = async (e: ReturnType<typeof env>) => [(await e.store.get('mem_a'))!.status, (await e.store.get('mem_b'))!.status]
   const files = async (e: ReturnType<typeof env>) => Promise.all(['mem_a', 'mem_b'].map(async id => {
     const located = await e.store.locate(id, { kind: 'global' })
-    return located === undefined ? undefined : [located.filePath, await readFile(located.filePath, 'utf8')]
+    return located === undefined ? undefined : [located.filePath, await memoryText(located.filePath)]
   }))
 
   describe('draft-proposal：只读，按要求回一份方案或做不到', () => {

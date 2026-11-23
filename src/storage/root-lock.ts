@@ -25,7 +25,7 @@ const WAIT_LIMIT_MS = 10_000
 const BACKOFF_MIN_MS = 10
 const BACKOFF_MAX_MS = 200
 
-type SqliteModule = { DatabaseSync: typeof DatabaseSync }
+export type SqliteModule = { DatabaseSync: typeof DatabaseSync }
 
 /** 退避等待用的计时器。 */
 export interface RootLockTimers {
@@ -76,7 +76,7 @@ export function defaultRootLock(root: string, log: MemoryLogger): WriteSection {
  * 其余警告照常转发。替换与还原在同一个同步块里，中间不会跑别的代码。
  * Node 哪天不再经 process.emitWarning 发这条，结果只是警告重新出现。
  */
-function loadSqliteQuietly(): SqliteModule | undefined {
+export function loadSqliteQuietly(): SqliteModule | undefined {
   const original = process.emitWarning
   process.emitWarning = function (this: unknown, warning: string | Error, ...rest: unknown[]) {
     const type = typeof rest[0] === 'string' ? rest[0] : (rest[0] as { type?: unknown } | undefined)?.type
@@ -130,6 +130,10 @@ class SqliteRootLock implements RootLock {
         if (db !== undefined) release(db)
       }
     }
+  }
+
+  isExclusive(): boolean {
+    return !this.unavailable
   }
 
   private startBatch(): Batch {

@@ -3,6 +3,40 @@ import type { MemoryRecord } from '../record-schema.ts'
 import type { CodedNote, DirectoryNoteCode } from '../contract-codes.ts'
 import { scopeOfMemory, type Scope } from '../scope.ts'
 
+/** 提交之后调用方要补做的一件事：kind 之外的内容由登记这一种的处理器解释，不含字段值和正文。 */
+export type OpStep = { kind: string } & Record<string, unknown>
+
+/**
+ * 提交之后补做一步的处理器。record 是这次写下的那条（彻底删除、文件已不在时没有）；中断后补做时是文件此刻的内容，
+ * isIntact 说它还是不是这次操作写下的原样：之后被手改、被旧版本改过的，按它算指纹会把别人的改动当成这次写的。要能重复执行。
+ */
+export type OpStepHandler = (step: OpStep, ctx: { op: string; record: MemoryRecord | undefined; isIntact: boolean }) => Promise<void>
+
+/**
+ * 一次写入的操作：id 写进记忆文件当提交标记（lastWriteOp），也是操作日志那一行的键。
+ * 提交之后还有账要记的写入，调用方建一个带 steps 的传给写方法，写完调 finishOp 做掉这些步骤；
+ * 中途被打断，下一个拿到写锁的人按日志补做（FileTable.recoverPending）。不传时表自己建一个、写完自己结。
+ * 一个操作只对应一次文件写入。
+ */
+export interface WriteOp {
+  readonly id: string
+  /** 谁发起的（前台主会话、子 agent、界面……）。 */
+  readonly initiator?: string
+  /** 同一批操作共用的批次 id。 */
+  readonly batch?: string
+  /** 提交之后要补做的事，不含字段值和正文。 */
+  readonly steps: readonly OpStep[]
+}
+
+export function newWriteOp(init: { initiator?: string; batch?: string; steps?: readonly OpStep[] } = {}): WriteOp {
+  return {
+    id: `op_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`,
+    ...(init.initiator !== undefined ? { initiator: init.initiator } : {}),
+    ...(init.batch !== undefined ? { batch: init.batch } : {}),
+    steps: init.steps ?? [],
+  }
+}
+
 /** 纯逻辑层的日志注入口：接线层（index.ts）传入 ctx.logger，缺省回退 console，
  *  保证测试与独立使用场景仍有输出。file-table.ts / forget.ts 复用此形状，保持三层注入风格一致。 */
 export interface MemoryLogger {
@@ -28,7 +62,11 @@ export interface DirectoryNote extends CodedNote<DirectoryNoteCode> {
 /** 一次按范围读取里的一条记录：带实际文件路径与所在目录，索引行与注入尾注用它，不再从 name 重算。 */
 export interface LocatedRecord { record: MemoryRecord; filePath: string; dir: string }
 /** 定位结果：比 LocatedRecord 多带 extras（未知 frontmatter 键，写回时保留）。 */
-export interface LocatedFile extends LocatedRecord { extras: Record<string, unknown> }
+export interface LocatedFile extends LocatedRecord {
+  extras: Record<string, unknown>
+  /** 文件里的提交标记（最近一次写它的操作 id）。记录里不带它：每次写入都变，不算内容。 */
+  writeOp?: string
+}
 
 /** 位置即作用域（同 readRaw）：.archive/ 里 status 仍写着 active 的按 deleted 看。 */
 export function byPosition(found: LocatedFile): MemoryRecord {
@@ -122,17 +160,17 @@ export interface MemoryTable {
   locate(id: string, target: LocateTarget, opts?: LocateOptions): Promise<LocatedFile | undefined>
   listWorkspaceDirs(): Promise<WorkspaceDirListing>
   /** 新 id：不定位，排他占名落盘（撞名追加 id 片段，不覆盖别的记录）。 */
-  create(record: MemoryRecord): Promise<void>
+  create(record: MemoryRecord, op?: WriteOp): Promise<void>
   /** 锁内 locate（from 是现有那份所在的目标；跨 scope 搬家时调用方传原记录的作用域，定位到的才是要搬的那份；写到哪里由 value 自己的作用域决定）→ 写；
    *  scope / workspacePath 变化时搬家删旧；status 离开 active 时文件进 .archive/，回到 active 搬回顶层。清副本见 LocateTarget。
    *  skipIf：对锁内定位到的当前记录求值（按位置看，同 byPosition；定位不到时传 undefined），为真就不写、返回 undefined
    *  （调用方锁外预读过的条件在这里按最新内容再判一次）。返回实际写出的记录（召回统计取现有那份的，deleted 缺 deletedAt 时已补）。 */
-  put(value: MemoryRecord, from: LocateTarget, skipIf?: (current: MemoryRecord | undefined) => boolean): Promise<MemoryRecord | undefined>
+  put(value: MemoryRecord, from: LocateTarget, skipIf?: (current: MemoryRecord | undefined) => boolean, op?: WriteOp): Promise<MemoryRecord | undefined>
   /** 锁内 locate（同 id 多副本时与调用方读到的那份一致）→ fn(当前) → 写（同 put 的搬家、归档与清副本规则）；返回实际写出的记录（deleted 缺 deletedAt 时已补）。 */
-  update(id: string, from: LocateTarget, fn: (current: MemoryRecord) => MemoryRecord): Promise<MemoryRecord>
+  update(id: string, from: LocateTarget, fn: (current: MemoryRecord) => MemoryRecord, op?: WriteOp): Promise<MemoryRecord>
   /** 物理删除（含 .archive/ 里的文件）；at 同 update，清副本见 LocateTarget。
    *  召回统计行只在哪个作用域都没有这个 id 了才清。skipIf：对锁内定位到的当前文件求值，为真就不删、返回 false。 */
-  delete(id: string, at: LocateTarget, skipIf?: (current: LocatedFile) => boolean): Promise<boolean>
+  delete(id: string, at: LocateTarget, skipIf?: (current: LocatedFile) => boolean, op?: WriteOp): Promise<boolean>
   /** 这个 id 在哪些作用域有副本（任何状态，含只在 .archive/ 里的）：全局在前，项目按路径排序，同一作用域只算一次。在写锁内扫（理由同 locate）。 */
   copiesOf(id: string): Promise<Scope[]>
   /**
@@ -146,6 +184,15 @@ export interface MemoryTable {
    * 没有写锁的实现（内存表）直接执行。
    */
   inSection?<T>(fn: () => Promise<T>): Promise<T>
+  /**
+   * 调用方传进写方法的操作做完了：written 是那次写方法的返回值（彻底删除不传），提交后的步骤按它做，再结掉日志行。
+   * 那次写方法没落盘（skipIf 判中、内容没变）时不用调。没有操作日志的实现（内存表）可以不提供。
+   */
+  finishOp?(op: WriteOp, written?: MemoryRecord): Promise<void>
+  /** 这个作用域里由 opId 那次写入写下的那一份（看文件上的提交标记，含 .archive/ 里的）。软删写完新文件、旧文件还没删时，按 id 定位会挑到旧的那份。 */
+  locateWrittenBy?(id: string, target: Scope, opId: string): Promise<LocatedFile | undefined>
+  /** 登记提交后某一种步骤的处理器：正常写完和中断后补做走同一个。重复登记以后一次为准。 */
+  registerStep?(kind: string, handler: OpStepHandler): void
 }
 
 /**

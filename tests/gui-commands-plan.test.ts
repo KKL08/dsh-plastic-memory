@@ -14,6 +14,7 @@ import { locateCopy } from '../src/tools/workspace-gate.ts'
 import { candidate, record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 import { NOW, SESSION_WS, OTHER_WS, registry, root, env, ok, err, allEntries, memoryTree } from './helpers/gui-command-env.ts'
+import { memoryText } from './helpers/memory-text.ts'
 
 
 describe('model-info（让模型改用哪个模型）', () => {
@@ -1164,7 +1165,7 @@ describe('apply-edits（整理所选：应用全部）', () => {
     ({ kind: 'forget' as const, ...await refOf(e, id, layer), ...(into !== undefined ? { into } : {}) })
   const apply = (e: ReturnType<typeof env>, fields: Omit<ApplyCommand, 'cmd'>) => e.run({ cmd: 'apply-edits', ...fields })
   const files = async (e: ReturnType<typeof env>, workspacePath = SESSION_WS) =>
-    Promise.all(SEED.map(async m => { const at = await e.store.locate(m.id, scopeAt(workspacePath)); return at === undefined ? undefined : [at.filePath, await readFile(at.filePath, 'utf8')] }))
+    Promise.all(SEED.map(async m => { const at = await e.store.locate(m.id, scopeAt(workspacePath)); return at === undefined ? undefined : [at.filePath, await memoryText(at.filePath)] }))
   const statusOf = async (e: ReturnType<typeof env>, id: string) => (await locateCopy(e.store, id, wsScope))?.status
 
   it('混合批次：按计划顺序逐项写，整批一份快照，删除项进最近删除并清掉指向它们的账本条目，记一条带逐项回执的 batch-edited', async () => {
