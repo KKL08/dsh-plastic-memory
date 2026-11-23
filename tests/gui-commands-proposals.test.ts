@@ -823,6 +823,13 @@ describe('draft-proposal 与按要求应用（补充要求）', () => {
   })
 
   describe('apply-proposal 带按要求生成的方案', () => {
+    it('保留 A 的方案生成后 B 被写进高危密钥：应用回 stale，B 不删、条目不结清（含密钥的生成时就不发给模型）', async () => {
+      const { e, entry, proposal } = await drafted(said('keep-a'))
+      await e.store.update({ id: 'mem_b' }, r => ({ ...r, content: `用 npm，token ${FAKE_SECRET.github}` }))
+      expect(err(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, proposal })).code).toBe('stale')
+      expect(await statuses(e)).toEqual(['active', 'active'])
+      expect(await e.decisions.listSettled()).toEqual([])
+    })
     it('保留 A：B 软删，条目记删一方裁决、来源 request；撤销后 B 回来、条目回到待处理', async () => {
       const { e, entry, proposal } = await drafted(said('keep-a'))
       const body = ok(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, proposal }))

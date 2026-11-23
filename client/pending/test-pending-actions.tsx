@@ -43,12 +43,12 @@ describe('待处理：裁决后结果留原位、撤销', () => {
   it('裁决 → 原位结果卡（视图还没重写也不重复）→ 撤销发 undo → 视图带回冲突后只剩一张卡', async () => {
     const { gateway, commands } = setup([secret, horizontal, promote])
     ruleConflict('保留 A')
-    await screen.findByText('按你的选择处理。B 已删除，14 天内可恢复。')
+    await screen.findByText('按你的选择处理。「mock-db-in-tests」已删除，14 天内可恢复。')
     // 视图还是旧的（仍含这条冲突）：只显示结果卡，位置不变
     expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual([
       '这条记忆里有密钥', '测试里怎么准备数据库，两条记忆互相矛盾', '这条适合所有项目',
     ])
-    expect(screen.getByText('已保留 A')).toBeInTheDocument()
+    expect(screen.getByText('已保留「postgres-in-tests」')).toBeInTheDocument()
     expect(screen.getByText('测试用真实 Postgres。')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '保留 B' })).toBeNull()
 
@@ -81,8 +81,8 @@ describe('待处理：裁决后结果留原位、撤销', () => {
     fireEvent.click(screen.getByRole('button', { name: '保留 A' }))
     expect(screen.getByText('保留 A：B 含密钥，将彻底删除、不可恢复。')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '彻底删除' }))
-    await screen.findByText('按你的选择处理。B 含密钥，已彻底删除。如果它是真的凭证，记得去换一个新的。')
-    expect(screen.queryByText(/B 已删除，14 天内可恢复。/)).toBeNull()
+    await screen.findByText('按你的选择处理。「mock-db-in-tests」含密钥，已彻底删除。如果它是真的凭证，记得去换一个新的。')
+    expect(screen.queryByText(/「mock-db-in-tests」已删除，14 天内可恢复。/)).toBeNull()
     expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
   })
 
@@ -105,7 +105,7 @@ describe('待处理：别处已经在处理同一条', () => {
     ruleConflict('保留 B')
     expect(await screen.findByRole('alert')).toHaveTextContent(refused)
     expect(screen.queryByText(/正在被另一次裁决处理/)).toBeNull()
-    expect(screen.queryByText('已保留 B')).toBeNull()
+    expect(screen.queryByText('已保留「mock-db-in-tests」')).toBeNull()
 
     // 另一个标签页的裁决写进视图：这条冲突出了待处理
     act(() => { gateway.setView('pending', view(secret, promote)) })
@@ -169,7 +169,7 @@ describe('待处理：别处已经在处理同一条', () => {
     ruleConflict('保留 A')
     fireEvent.click(await screen.findByRole('button', { name: '撤销' }))
     expect(await screen.findByRole('alert')).toHaveTextContent(refused)
-    expect(screen.getByText('已保留 A')).toBeInTheDocument()
+    expect(screen.getByText('已保留「postgres-in-tests」')).toBeInTheDocument()
   })
 
   it('之后在任一张卡上做成了一件事：提示收起', async () => {
@@ -208,7 +208,7 @@ describe('待处理：跨项目先确认', () => {
 
     ruleConflict('保留 A')
     fireEvent.click(await screen.findByRole('button', { name: '继续处理' }))
-    await screen.findByText('已保留 A')
+    await screen.findByText('已保留「postgres-in-tests」')
     expect(commands()).toEqual([
       { cmd: 'resolve', decisionId: 'd-h', verdict: 'keep-left' },
       { cmd: 'resolve', decisionId: 'd-h', verdict: 'keep-left' },

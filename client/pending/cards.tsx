@@ -43,10 +43,10 @@ export type Outcome =
    */
   | { kind: 'resolved'; verdict: Verdict; isUnrecorded?: true; isHardDeleted?: true; source?: ProposalSource }
   /**
-   * 融合成一条（横向冲突，采纳融合建议或按要求生成的融合方案，source 同上）：keeper 是写进融合稿的那条，按融合后的样子显示；keep、drop 是它和被并入的那条在卡上是 A 还是 B。
+   * 融合成一条（横向冲突，采纳融合建议或按要求生成的融合方案，source 同上）：keeper 是写进融合稿的那条，按融合后的样子显示；keep、drop 是它和被并入的那条融合前的名称（结果卡用名称指代，不用 A / B）。
    * isPartial：只完成了一部分（被并入的那条没删）；decisionId 是仍可撤销的那一笔（融合稿还在时有），没有就不能撤。
    */
-  | { kind: 'plan-merged'; source: ProposalSource; keeper: MemoryCardData; keep: 'A' | 'B'; drop: 'A' | 'B'; partial?: MergePartial; decisionId?: string }
+  | { kind: 'plan-merged'; source: ProposalSource; keeper: MemoryCardData; keep: string; drop: string; partial?: MergePartial; decisionId?: string }
   /**
    * 改写这条记忆（垂直冲突，采纳改写建议或按要求生成的改写方案，source 同上）：memory 按改写后的样子显示。
    * isPartial：没有做完（改写没退干净）；decisionId 是仍可撤销的那一笔（有才能撤）。
@@ -290,7 +290,10 @@ function mergePartialOf(keeperId: string, recorded: readonly string[], unrecorde
   return 'other'
 }
 
-/** 融合方案（建议或按要求生成的）写进哪条、哪条并入删除：按方案里的操作，不在界面上重算合并规则。keeper 换成融合后的样子。 */
+/** 记忆在结果和后果里的称呼：名称；这一方找不到时退回卡上的 A / B。 */
+const nameOf = (memory: MemoryCardData | null, side: 'A' | 'B'): string => memory?.name ?? side
+
+/** 融合方案（建议或按要求生成的）写进哪条、哪条并入删除：按方案里的操作，不在界面上重算合并规则。keeper 换成融合后的样子，keep、drop 是两条融合前的名称。 */
 function mergeSidesOf(ops: readonly ProposalOp[], left: MemoryCardData | null, right: MemoryCardData | null) {
   const edit = ops.find(op => op.kind === 'edit')
   if (edit?.kind !== 'edit') return undefined
@@ -298,7 +301,7 @@ function mergeSidesOf(ops: readonly ProposalOp[], left: MemoryCardData | null, r
   const keeper = isRight ? right : edit.memoryId === left?.id ? left : null
   if (keeper === null) return undefined
   const { content, name, summary, tags } = edit
-  return { keeper: { ...keeper, content, name, summary, tags }, keep: isRight ? 'B' as const : 'A' as const, drop: isRight ? 'A' as const : 'B' as const }
+  return { keeper: { ...keeper, content, name, summary, tags }, keep: keeper.name, drop: isRight ? nameOf(left, 'A') : nameOf(right, 'B') }
 }
 
 /**
@@ -362,8 +365,8 @@ function HorizontalActions({ item, session, onDone, onRefused }: Pick<CardProps<
   const canRequest = left !== null && right !== null && isEditable(left) && isEditable(right) && model.status !== 'unavailable'
   const isRequesting = canRequest && slot.isOpen
   /** 每种裁决留哪边、删哪边；都保留不删。 */
-  const sides = (verdict: Verdict) => (verdict === horizontal.keepA ? { keep: 'A', drop: 'B', loser: right }
-    : verdict === horizontal.keepB ? { keep: 'B', drop: 'A', loser: left } : undefined)
+  const sides = (verdict: Verdict) => (verdict === horizontal.keepA ? { keep: 'A', drop: 'B', loser: right } as const
+    : verdict === horizontal.keepB ? { keep: 'B', drop: 'A', loser: left } as const : undefined)
   const isPurge = (verdict: Verdict) => sides(verdict)?.loser?.hasSecret === true
   const adopt = () => {
     if (suggestion !== undefined) run({ cmd: 'apply-proposal', decisionId: item.decisionId, suggestionId: suggestion.id })
@@ -377,10 +380,11 @@ function HorizontalActions({ item, session, onDone, onRefused }: Pick<CardProps<
     else setStaleId(ask.suggestionId)
   }
 
+  // 采纳后果用名称指代被删的那条：说明行离 A、B 两张卡有一段距离
   const adoptNote = merging !== undefined ? t('pending.conflict.adoptNote', { drop: merging.drop })
     : adopted === undefined ? undefined
     : adopted === horizontal.keepBoth ? t('pending.conflict.adoptNoteKeepBoth')
-      : t(isPurge(adopted) ? 'pending.conflict.adoptNotePurge' : 'pending.conflict.adoptNote', { drop: sides(adopted)!.drop })
+      : t(isPurge(adopted) ? 'pending.conflict.adoptNotePurge' : 'pending.conflict.adoptNote', { drop: nameOf(sides(adopted)!.loser, sides(adopted)!.drop) })
   // 两条都回查到出处时说明行先交代一句（由服务端按实际放进提示词的片段定）；没回查到就不提
   const sourced = suggestion?.isSourced === true ? t('pending.suggestion.sourced') : undefined
   // 输入区开着时说明行写的是采纳建议的后果，先收起，免得和方案的去向混在一起
@@ -1166,9 +1170,11 @@ function resultCopy(item: PendingItem, outcome: Outcome, t: Translate): ResultCo
   if (outcome.kind === 'resolved' && item.kind === 'conflict-horizontal') {
     // 来由（按模型建议 / 你直接选的）在前，去向在后
     const by = (second: string) => t('conflict.twoSentences', { first: t(byKeyOf(outcome.source)), second })
-    const deleted = (side: 'A' | 'B') => by(outcome.isHardDeleted ? t('conflict.purgedSide', { side }) : t('pending.result.deletedSide', { side }))
-    if (outcome.verdict === 'keep-left') return { memory: item.left, chip: t('pending.result.keptA'), body: deleted('B'), undoable: outcome.isHardDeleted !== true }
-    if (outcome.verdict === 'keep-right') return { memory: item.right, chip: t('pending.result.keptB'), body: deleted('A'), undoable: outcome.isHardDeleted !== true }
+    // 结果里用名称指代两条：卡片换成结果后只剩留下的那条，被删的那条已不在眼前
+    const deleted = (name: string) => by(outcome.isHardDeleted ? t('conflict.purgedSide', { name }) : t('pending.result.deletedName', { name }))
+    const [a, b] = [nameOf(item.left, 'A'), nameOf(item.right, 'B')]
+    if (outcome.verdict === 'keep-left') return { memory: item.left, chip: t('pending.result.kept', { name: a }), body: deleted(b), undoable: outcome.isHardDeleted !== true }
+    if (outcome.verdict === 'keep-right') return { memory: item.right, chip: t('pending.result.kept', { name: b }), body: deleted(a), undoable: outcome.isHardDeleted !== true }
     if (outcome.isUnrecorded) return { chip: t('pending.result.keptBoth'), body: by(t('pending.result.unrecordedBody')), undoable: false }
     return { chip: t('pending.result.keptBoth'), body: by(t('pending.result.keptBothBody')), undoable: true }
   }
@@ -1214,15 +1220,17 @@ function resultCopy(item: PendingItem, outcome: Outcome, t: Translate): ResultCo
         body: outcome.deletes > 0 ? t('pending.result.tidiedBody', { rewrites: outcome.rewrites, deletes: outcome.deletes }) : t('pending.result.tidiedBodyNoDelete', { rewrites: outcome.rewrites }),
       }
     case 'plan-merged':
-      // 只完成了一部分：按实际留下的改动写；不是最常见的两种时不猜哪条成了，请用户看列表
+      // 只完成了一部分：按实际留下的改动写；不是最常见的两种时不猜哪条成了，请用户看列表。
+      // 保留方停在融合稿的，磁盘上已是融合后的名称，用它；其余用融合前的
       if (outcome.partial !== undefined) {
         const key = outcome.partial === 'kept' ? 'pending.result.mergePartialKept' : outcome.partial === 'changed' ? 'pending.result.mergePartialChanged'
           : outcome.decisionId !== undefined ? 'pending.result.mergePartialOtherUndoable' : 'pending.result.mergePartialOther'
-        return { chip: t('pending.result.partial'), body: t(key, { keep: outcome.keep, drop: outcome.drop }), undoable: outcome.decisionId !== undefined }
+        const keep = outcome.partial === 'kept' ? outcome.keeper.name : outcome.keep
+        return { chip: t('pending.result.partial'), body: t(key, { keep, drop: outcome.drop }), undoable: outcome.decisionId !== undefined }
       }
       return {
         memory: outcome.keeper, chip: t('pending.result.mergedOne'), undoable: true,
-        body: t('conflict.twoSentences', { first: t(byKeyOf(outcome.source)), second: t('pending.result.deletedSide', { side: outcome.drop }) }),
+        body: t('conflict.twoSentences', { first: t(byKeyOf(outcome.source)), second: t('pending.result.deletedName', { name: outcome.drop }) }),
       }
     case 'plan-rewritten':
       // 没有做完：不猜改写停在哪一版，请用户看列表；有可撤销的那一笔才给撤销

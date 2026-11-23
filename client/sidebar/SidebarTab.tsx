@@ -315,11 +315,13 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const conflictFooter = (item: Conflict | VerticalConflict, suggestion: Suggestion | undefined, isStale: boolean) => {
     const verdict = suggestion === undefined ? undefined : verdictOfAction(suggestion.action)
     const { horizontal, vertical } = CONFLICT_ACTION_VERDICTS
+    // 横向保留一方时要删的那条：含密钥的采纳后彻底删除，同记忆页
+    const loser = item.kind === 'conflict-horizontal' ? (verdict === horizontal.keepA ? item.right : item.left) : null
     const adoptNote = verdict === undefined ? undefined
       : item.kind === 'conflict-vertical'
         ? t(verdict === vertical.keepBaseline ? item.memory?.hasSecret === true ? 'pending.vertical.adoptNotePurge' : 'pending.vertical.adoptNoteDelete' : 'pending.vertical.adoptNoteKeepBoth')
         : verdict === horizontal.keepBoth ? t('pending.conflict.adoptNoteKeepBoth')
-          : t('pending.conflict.adoptNote', { drop: verdict === horizontal.keepA ? 'B' : 'A' })
+          : t(loser?.hasSecret === true ? 'pending.conflict.adoptNotePurge' : 'pending.conflict.adoptNote', { drop: loser?.name ?? (verdict === horizontal.keepA ? 'B' : 'A') })
     return (
       <>
         {suggestion !== undefined
@@ -580,7 +582,8 @@ function SavedRow({ session, memory, card, state, onWroteAgentsMd, children }: {
 }
 
 /**
- * 刚裁决完：留下的卡（按基线则不留卡），下面结果行「已保留 A」（基线冲突：「已按基线」「已保留这条记忆」）+ 后果 +「撤销」。
+ * 刚裁决完：留下的卡（按基线则不留卡），下面结果行「已保留「名称」」（基线冲突：「已按基线」「已保留这条记忆」）+ 后果 +「撤销」。
+ * 横向冲突用名称指代两条，不用 A / B：被删的那条已不在眼前。
  * 冲突在这里只能采纳建议，后果前面先写来由「按模型建议处理。」（同记忆页的结果卡）。
  */
 function RuledCard({ ruled, card, unavailable, onUndo }: {
@@ -592,13 +595,15 @@ function RuledCard({ ruled, card, unavailable, onUndo }: {
   const t = useT()
   const { verdict } = ruled
   const isBaseline = ruled.kind === 'vertical' && verdict === CONFLICT_ACTION_VERDICTS.vertical.keepBaseline
-  const chipKey = ruled.kind === 'vertical'
-    ? isBaseline ? 'sidebar.ruled.keepBaseline' : 'sidebar.ruled.keepMemory'
-    : verdict === 'keep-left' ? 'sidebar.ruled.keepA' : verdict === 'keep-right' ? 'sidebar.ruled.keepB' : 'sidebar.ruled.keepBoth'
+  const sides = ruled.kind === 'horizontal' && verdict !== CONFLICT_ACTION_VERDICTS.horizontal.keepBoth
+    ? verdict === 'keep-left' ? { kept: ruled.left.name, dropped: ruled.right.name } : { kept: ruled.right.name, dropped: ruled.left.name }
+    : undefined
+  const chip = ruled.kind === 'vertical' ? t(isBaseline ? 'sidebar.ruled.keepBaseline' : 'sidebar.ruled.keepMemory')
+    : sides !== undefined ? t('sidebar.ruled.kept', { name: sides.kept }) : t('sidebar.ruled.keepBoth')
   const outcome = ruled.isUnrecorded ? t('sidebar.ruled.unrecorded')
-    : ruled.isHardDeleted ? ruled.kind === 'vertical' ? t('conflict.purgedMemory') : t('conflict.purgedSide', { side: verdict === 'keep-left' ? 'B' : 'A' })
-    : t(ruled.kind === 'vertical' ? isBaseline ? 'sidebar.ruled.deletedMemory' : 'sidebar.ruled.keptMemory'
-      : verdict === 'keep-left' ? 'sidebar.ruled.deletedB' : verdict === 'keep-right' ? 'sidebar.ruled.deletedA' : 'sidebar.ruled.keptBoth')
+    : ruled.kind === 'vertical' ? ruled.isHardDeleted ? t('conflict.purgedMemory') : t(isBaseline ? 'sidebar.ruled.deletedMemory' : 'sidebar.ruled.keptMemory')
+    : sides === undefined ? t('sidebar.ruled.keptBoth')
+    : t(ruled.isHardDeleted ? 'conflict.purgedSide' : 'sidebar.ruled.deleted', { name: sides.dropped })
   const note = t('conflict.twoSentences', { first: t('pending.result.bySuggestion'), second: outcome })
   // 删掉了一条时补一句生效时机：这次对话的快照已冻结，删掉的那条要到压缩后或下个对话才不再带入
   const isDeleting = ruled.kind === 'vertical' ? isBaseline : verdict !== CONFLICT_ACTION_VERDICTS.horizontal.keepBoth
@@ -608,7 +613,7 @@ function RuledCard({ ruled, card, unavailable, onUndo }: {
     <article className="pm-side-ruled">
       {kept.map(memory => <div key={memory.id}>{card(memory)}</div>)}
       <ResultLine
-        chip={t(chipKey)}
+        chip={chip}
         undo={ruled.isUnrecorded || ruled.isHardDeleted
           ? undefined
           : (

@@ -74,6 +74,13 @@ All notable changes to this project are documented here. The format follows
 - Undoing something that had already been undone or had expired showed an
   internal message with an id, in Chinese even in the English interface. It
   now says plainly that nothing was undone.
+- Conflict results and their notes on the memory page and in the side panel
+  now name the memories ("Kept “…”", "“…” was deleted") instead of calling
+  them A and B, since the deleted one is no longer on screen. A long name in
+  the result label is cut off with an ellipsis.
+- In the side panel, when the memory a suggestion would delete holds a
+  secret, the note said it would move to Recently deleted. It now says the
+  memory will be deleted permanently, as the memory page already did.
 
 ## [0.2.0] - 2026-11-21
 

@@ -65,7 +65,7 @@ describe('待处理：确认收起后的键盘焦点', () => {
     await press(keepA())
     await press(confirmKeepA())
     await press(screen.getByRole('button', { name: '继续处理' }))
-    await screen.findByText('已保留 A')
+    await screen.findByText('已保留「postgres-in-tests」')
     await waitFor(() => { expect(screen.getByRole('button', { name: '撤销' })).toHaveFocus() })
   })
 
@@ -114,7 +114,7 @@ describe('待处理：两态与空状态', () => {
     const gateway = createFakeGateway({ session: SESSION, config, views: { pending: view(horizontal), health: scannedHealth(NOW) } })
     renderInShell(<Tab />, gateway)
     ruleConflict('保留 A')
-    await screen.findByText('已保留 A')
+    await screen.findByText('已保留「postgres-in-tests」')
     act(() => { gateway.setSession({ kind: 'none' }) })
     const undo = screen.getByRole('button', { name: '撤销' })
     expect(undo).toHaveAttribute('aria-disabled', 'true')
