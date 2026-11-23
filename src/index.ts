@@ -72,6 +72,8 @@ export interface Config {
   scenes: Volatile<Record<string, SceneConfig>>
   /** 删掉的预设类型：不进类型池，已有记忆按出厂定义读。改过的预设是 customTypes 里的同名一项。 */
   removedPresetTypes: Volatile<string[]>
+  /** 通用五类改过的确认周期（天），按类型名；没写的按出厂周期。 */
+  builtinDecayDays: Volatile<Record<string, number>>
   governance: {
     enabled: Volatile<boolean>
     health: { sensitivity: Volatile<HealthSensitivity> }
@@ -112,6 +114,8 @@ export const Config = z.object({
   })).default(PRESET_SCENES).volatile(),
   // 不用 union 校验名字：预设名单以后变了，老配置照样能加载（类型表忽略不认识的并警告）
   removedPresetTypes: z.array(z.string()).default([]).volatile(),
+  // 天数范围、类型名由类型表校验（不对的忽略并警告）；值的类型在这里校验
+  builtinDecayDays: z.dict(z.number()).default({}).volatile(),
   governance: z.object({
     enabled: z.boolean().default(true).volatile(),
     health: z.object({
@@ -138,12 +142,12 @@ type SessionLike = object & { header?: { id?: string; cwd?: string; delegationDe
 export async function apply(ctx: Context, config: Config) {
   // 插件本次加载的时刻：健康视图带给右侧栏，判断冻结快照是否早于这次启动
   const bootedAt = Date.now()
-  // 类型表随 template / customTypes / scenes / removedPresetTypes 热更新重建；各处拿到的是转发到当前表的同一个对象。
+  // 类型表随 template / customTypes / scenes / removedPresetTypes / builtinDecayDays 热更新重建；各处拿到的是转发到当前表的同一个对象。
   // 场景配置写错只警告（按通用或截断运行），不让插件加载失败
   const buildRegistry = () => {
     const built = buildTypeRegistry({
       template: config.template.get(), customTypes: config.customTypes.get(), scenes: config.scenes.get(),
-      removedPresetTypes: config.removedPresetTypes.get(),
+      removedPresetTypes: config.removedPresetTypes.get(), builtinDecayDays: config.builtinDecayDays.get(),
     })
     for (const warning of built.warnings) ctx.logger.warn(`[plastic-memory] ${warning}`)
     return built
@@ -457,7 +461,7 @@ export async function apply(ctx: Context, config: Config) {
   loaderEvents.on('loader/volatile-update', async paths => {
     const changed = (...keys: string[]) => paths.some(path => keys.includes(path.join('.')))
     // 决定类型表的配置：变了重建类型表，冻结快照也过期
-    const typeKeys = ['template', 'customTypes', 'scenes', 'removedPresetTypes']
+    const typeKeys = ['template', 'customTypes', 'scenes', 'removedPresetTypes', 'builtinDecayDays']
     if (changed(...typeKeys)) {
       try {
         currentRegistry = buildRegistry()

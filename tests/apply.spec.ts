@@ -27,6 +27,7 @@ import { BUILTIN_TYPES, PRESET_SCENES } from '../src/type-registry.ts'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { scopeCacheKey } from '../src/scope.ts'
 import { IN_SNAPSHOT_NOTE } from '../src/tools/search.ts'
+import { STALENESS_NOTE } from '../src/record-freshness.ts'
 import { type MemorySnapshot, type PendingDecision, type ScanCacheEntry } from '../src/governance/schema.ts'
 import { INSTRUCTION_MAX_BYTES } from '../src/governance/instructions.ts'
 import { EVIDENCE_GUIDANCE } from '../src/evidence-guidance.ts'
@@ -2309,6 +2310,30 @@ describe('配置热生效（loader/volatile-update）', () => {
     const pending = await readNow('pending', pendingViewSchema)
     expect([pending.items, pending.dot]).toEqual([[], 'none'])
     expect(await new PendingDecisionsStore(sidecarAt(t.memoryRoot).pending).listOverflow()).toEqual([])
+  })
+
+  it('改通用类型的确认周期：带入和检索的可能过时说明、待处理的很久没确认都按新周期', async () => {
+    const t = await setup()
+    await t.putGlobal({ id: 'mem_proj', type: 'project', name: '答辩提前', content: '答辩提前到 12 月 10 日', summary: '答辩提前', lastConfirmedAt: Date.now() - 10 * DAY_MS })
+    const staleIds = (v: PendingView) => v.items.flatMap(i => i.kind === 'advice' && i.type === 'stale' ? i.memories.map(m => m.id) : [])
+    // 出厂 7 天：10 天没确认就算很久没确认
+    expect(await t.assembleOnce()).toMatch(new RegExp(`\\[mem_proj\\][^\\n]*${STALENESS_NOTE(10)}`))
+    expect(await searchHits(t, { query: '答辩' })).toEqual([{ id: 'mem_proj', type: 'project', stalenessNote: STALENESS_NOTE(10) }])
+    await t.command('/memory refresh-views')
+    await globalView(t, 'pending', pendingViewSchema, v => expect(staleIds(v)).toEqual(['mem_proj']))
+
+    expect(await t.update({ builtinDecayDays: { project: 30 } })).toEqual([['builtinDecayDays']])
+    const after = await t.assembleOnce()
+    expect(after).toContain('[mem_proj]')
+    expect(after).not.toContain(STALENESS_NOTE(10))
+    expect(await searchHits(t, { query: '答辩' })).toEqual([{ id: 'mem_proj', type: 'project', stalenessNote: '' }])
+    await globalView(t, 'pending', pendingViewSchema, v => expect(staleIds(v)).toEqual([]))
+
+    // 调短到 5 天：知识类 10 天没确认也算很久没确认
+    await t.putGlobal({ id: 'mem_know', type: 'knowledge', name: '报销截止', content: '报销每月 25 日截止', summary: '报销截止', lastConfirmedAt: Date.now() - 10 * DAY_MS })
+    await t.update({ builtinDecayDays: { project: 30, knowledge: 5 } })
+    expect(await searchHits(t, { query: '报销' })).toEqual([{ id: 'mem_know', type: 'knowledge', stalenessNote: STALENESS_NOTE(10) }])
+    await globalView(t, 'pending', pendingViewSchema, v => expect(staleIds(v)).toEqual(['mem_know']))
   })
 })
 

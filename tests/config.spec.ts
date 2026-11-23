@@ -32,6 +32,7 @@ describe('Config schema', () => {
       customTypes: {},
       scenes: PRESET_SCENES,
       removedPresetTypes: [],
+      builtinDecayDays: {},
       governance: { enabled: true, health: { sensitivity: 'normal' }, globalPromoteTarget: 'plugin-global' },
       search: {},
       subagent: { maxSavesPerSession: 10 },
@@ -43,7 +44,7 @@ describe('Config schema', () => {
   it('进 GUI 的字段是 volatile 引用（用时 .get()），writeMode 与 memoryRoot 不是', () => {
     const value = new Config({} as never)
     const refs = [
-      value.template, value.customTypes, value.scenes, value.removedPresetTypes, value.snapshotTokenBudget, value.snapshotOverflow, value.evidenceLookup,
+      value.template, value.customTypes, value.scenes, value.removedPresetTypes, value.builtinDecayDays, value.snapshotTokenBudget, value.snapshotOverflow, value.evidenceLookup,
       value.governance.enabled, value.governance.health.sensitivity, value.governance.globalPromoteTarget,
       value.subagent.maxSavesPerSession, value.accent,
     ]
@@ -94,6 +95,12 @@ describe('Config schema', () => {
       },
     } as never)
     expect(value.customTypes.get().regulation!.decayDays).toBeNull()
+  })
+
+  it('通用类型的确认周期 builtinDecayDays：默认不改，YAML 按类型名写天数', () => {
+    expect(new Config({} as never).builtinDecayDays.get()).toEqual({})
+    expect(new Config(parse('builtinDecayDays:\n  project: 30\n') as never).builtinDecayDays.get()).toEqual({ project: 30 })
+    expect(() => new Config({ builtinDecayDays: { project: 'monthly' } } as never)).toThrow()
   })
 
   it('自定义类型的 howToUse 选填：写了原样读回，不写就没有这一项', () => {

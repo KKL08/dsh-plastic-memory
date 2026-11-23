@@ -1,6 +1,6 @@
 import type { MemoryTypeDefinition } from './types.ts'
 import { TypeRegistryError } from './errors.ts'
-import { GENERAL_SCENE, SCENE_MAX_TYPES } from './contract-codes.ts'
+import { DECAY_DAYS_MAX, GENERAL_SCENE, SCENE_MAX_TYPES } from './contract-codes.ts'
 
 /** 场景：从类型池里挑的一组类型（含通用类型），顺序无意义，类型表按类型池顺序排。 */
 export interface SceneConfig {
@@ -16,6 +16,8 @@ export interface TypeRegistryConfig {
   scenes?: Readonly<Record<string, SceneConfig>>
   /** 删掉的预设类型：不进类型池，和退役类型一样只供读取。 */
   removedPresetTypes?: readonly string[]
+  /** 通用五类改过的确认周期（天），按类型名；没写的按出厂周期。预设和自建类型的周期在各自定义里。 */
+  builtinDecayDays?: Readonly<Record<string, number>>
 }
 
 export const BUILTIN_TYPES: readonly MemoryTypeDefinition[] = [
@@ -123,6 +125,20 @@ export function assertNoBuiltinCollision(types: readonly MemoryTypeDefinition[],
   }
 }
 
+/** 通用五类套上改过的确认周期；不是通用类型的名字、不是 1 到 DECAY_DAYS_MAX 的整数的周期忽略并警告。 */
+function withDecayDays(periods: Readonly<Record<string, number>>, warnings: string[]): MemoryTypeDefinition[] {
+  const names = Object.keys(periods)
+  const unknown = names.filter(name => !BUILTIN_NAMES.includes(name))
+  if (unknown.length > 0) warnings.push(`builtinDecayDays 里的 ${unknown.join('、')} 不是通用类型，已忽略`)
+  const isValid = (days: number) => Number.isInteger(days) && days >= 1 && days <= DECAY_DAYS_MAX
+  const invalid = names.filter(name => BUILTIN_NAMES.includes(name) && !isValid(periods[name]!))
+  if (invalid.length > 0) warnings.push(`builtinDecayDays 里 ${invalid.join('、')} 的天数不是 1 到 ${DECAY_DAYS_MAX} 的整数，按出厂周期`)
+  return BUILTIN_TYPES.map((t) => {
+    const days = Object.hasOwn(periods, t.name) ? periods[t.name]! : undefined
+    return days !== undefined && isValid(days) ? { ...t, decayDays: days } : t
+  })
+}
+
 export function buildTypeRegistry(config: TypeRegistryConfig): BuiltTypeRegistry {
   const customTypes = Object.entries(config.customTypes).map(([name, def]) => ({ name, ...def }))
   assertNoBuiltinCollision(customTypes, '自定义')
@@ -132,10 +148,11 @@ export function buildTypeRegistry(config: TypeRegistryConfig): BuiltTypeRegistry
   const unknown = removedNames.filter(name => !PRESET_TYPES.some(t => t.name === name))
   if (unknown.length > 0) warnings.push(`removedPresetTypes 里的 ${unknown.join('、')} 不是预设类型，已忽略`)
   const removed = PRESET_TYPES.filter(t => removedNames.includes(t.name))
+  const builtins = withDecayDays(config.builtinDecayDays ?? {}, warnings)
 
   // 类型池：内置 → 预设 → 自建（自建与预设同名 = 改过的预设，与退役同名 = 新类型）。删掉的预设只供读取，同名自建不生效
   const pool = new Map<string, MemoryTypeDefinition>()
-  for (const t of [...BUILTIN_TYPES, ...PRESET_TYPES]) {
+  for (const t of [...builtins, ...PRESET_TYPES]) {
     if (!removed.includes(t)) pool.set(t.name, t)
   }
   const retired = new Map([...RETIRED_TYPES, ...removed].map(t => [t.name, t]))

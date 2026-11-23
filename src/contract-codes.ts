@@ -203,3 +203,5 @@ export const GENERAL_SCENE = 'custom'
 export const SCENE_MAX_TYPES = 8
 /** 通用以外最多几个场景（编码、办公也算）。 */
 export const MAX_SCENES = 5
+/** 通用类型确认周期的上限（天）：一年一确认已是最长的周期，再长等于不提醒。 */
+export const DECAY_DAYS_MAX = 365

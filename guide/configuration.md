@@ -15,6 +15,7 @@
 | `customTypes`                    | `{}`              | 自定义记忆类型定义字典，进入类型池                                       |
 | `scenes`                         | 编码、办公两项          | 场景定义：`label` 场景名、`types` 包含的类型（1 到 8 类）。通用场景固定，不写在这里 |
 | `removedPresetTypes`             | `[]`              | 删掉的预设类型（`procedure`、`decision`）：不再新增，已有记忆照常读取          |
+| `builtinDecayDays`               | `{}`              | 通用五类的确认周期（天），按类型名写，例如 `project: 30`：超过这么多天没确认的记忆标为可能过时。填 1 到 365 的整数，没写的按出厂周期 |
 | `governance.enabled`             | `true`            | 是否启用主动治理层（体检、健康分、冲突裁决、提权、子 agent 写入等），只能在配置文件里改 |
 | `governance.health.sensitivity`  | `'normal'`        | 健康警报灵敏度：`conservative` / `normal` / `proactive`              |
 | `governance.globalPromoteTarget` | `'plugin-global'` | 提权目标：`plugin-global`（插件全局域）或 `agents-md`（`${DSH_HOME:-~/.dsh}/AGENTS.md`） |
