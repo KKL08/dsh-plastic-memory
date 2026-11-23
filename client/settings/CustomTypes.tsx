@@ -1,13 +1,14 @@
 /**
  * 自建类型的表单视图：场景弹层里换上的那一屏（不叠第二层弹窗），从记忆类型列表打开时是弹层唯一的内容；状态由弹层持有（Scenes.tsx）。
- * 字段按 schema 全给：中文名、英文名、说明、什么时候记必填，怎么召回、治理优先级预选「搜索」「中」，衰退天数可空。
+ * 字段按 schema 全给：中文名、英文名、说明、什么时候记必填，怎么召回、治理优先级预选「搜索」「中」，确认周期可空。
+ * 确认周期的输入框（PeriodField）也给通用类型的弹层用，两处同一个实现。
  * 英文名可以改：存过记忆的，改名时由弹层问旧记忆怎么办（跟着改名 / 移到最近删除）。编辑预设时英文名锁定。
  */
 import { useId } from 'react'
 import { useT } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
 import { SegmentedControl } from '../ui/Segmented.tsx'
-import { PRIORITIES, RECALL_MODES, type CustomTypeDraft, type CustomTypeError } from './config.ts'
+import { DECAY_DAYS_MAX, PRIORITIES, RECALL_MODES, parsePeriodText, type CustomTypeDraft, type CustomTypeError } from './config.ts'
 import { TextField } from './controls.tsx'
 
 const ERROR_KEY: Record<CustomTypeError, LocaleKey> = {
@@ -37,7 +38,7 @@ export function TypeFormFields({ draft, errors, isNameLocked = false, onChange }
     const code = errors?.[field]
     return code === undefined ? undefined : t(ERROR_KEY[code], { label: draft.label.trim() })
   }
-  const field = (key: 'label' | 'name' | 'description' | 'whenToSave' | 'howToUse' | 'decayDays', labelKey: LocaleKey, hintKey: LocaleKey, extra: { multiline?: boolean; inputMode?: 'numeric'; readOnly?: boolean } = {}) => (
+  const field = (key: 'label' | 'name' | 'description' | 'whenToSave' | 'howToUse', labelKey: LocaleKey, hintKey: LocaleKey, extra: { multiline?: boolean; readOnly?: boolean } = {}) => (
     <div className="pm-field">
       <label className="pm-setting-label" htmlFor={`${id}-${key}`}>{t(labelKey)}</label>
       <TextField id={`${id}-${key}`} value={draft[key]} onChange={(text) => { onChange({ [key]: text }) }} error={errorOf(key)} hint={t(hintKey)} {...extra} />
@@ -68,7 +69,45 @@ export function TypeFormFields({ draft, errors, isNameLocked = false, onChange }
       {field('howToUse', 'settings.type.howToUse', 'settings.type.howToUseHint', { multiline: true })}
       {choice('recall', 'settings.type.recall', 'settings.type.recallHint', RECALL_MODES, v => `settings.type.recall.${v}` as LocaleKey)}
       {choice('governancePriority', 'settings.type.priority', 'settings.type.priorityHint', PRIORITIES, v => `settings.type.priority.${v}` as LocaleKey)}
-      {field('decayDays', 'settings.type.decayDays', 'settings.type.decayDaysHint', { inputMode: 'numeric' })}
+      <PeriodField id={`${id}-decayDays`} value={draft.decayDays} canBeNone onChange={(text) => { onChange({ decayDays: text }) }} />
     </>
   )
+}
+
+/**
+ * 确认周期的输入框：边输边校验，填错时原文留在框里、说明换成提示，直到改对（弹层的「确定」这时置灰，见 isPeriodInvalid）。
+ * canBeNone：留空表示不用定期确认（我加的、预设、出厂不用定期确认的通用类型）；出厂有周期的通用类型不能留空。
+ * reset：周期和出厂不同时，标签右边给「恢复默认」（只有通用类型的弹层给）。
+ */
+export function PeriodField({ id, value, canBeNone, onChange, reset }: {
+  id: string
+  value: string
+  canBeNone: boolean
+  onChange: (text: string) => void
+  reset?: { label: string; onClick: () => void } | undefined
+}) {
+  const t = useT()
+  const label = <label className="pm-setting-label" htmlFor={id}>{t('settings.type.decayDays')}</label>
+  return (
+    <div className="pm-field">
+      {reset === undefined
+        ? label
+        : (
+          <div className="pm-period-head">
+            {label}
+            <button type="button" className="pm-link pm-link--muted" aria-label={reset.label} onClick={reset.onClick}>{t('settings.scene.reset')}</button>
+          </div>
+        )}
+      <TextField
+        id={id} value={value} inputMode="numeric" onChange={onChange}
+        error={isPeriodInvalid(value, canBeNone) ? t(canBeNone ? 'settings.type.error.decay-invalid' : 'settings.types.periodInvalid', { max: DECAY_DAYS_MAX }) : undefined}
+        hint={t(canBeNone ? 'settings.type.decayDaysHint' : 'settings.type.decayDaysHintRequired')}
+      />
+    </div>
+  )
+}
+
+/** 确认周期的原文填错了（弹层的「确定」据此置灰）。 */
+export function isPeriodInvalid(text: string, canBeNone: boolean): boolean {
+  return parsePeriodText(text, canBeNone) === undefined
 }

@@ -18,9 +18,9 @@ export type { ConfigForm, ConfigFormSnapshot, ConfigPathOp } from '../host.ts'
 
 // —— 配置段 ——
 
-import { ACCENTS, GENERAL_SCENE, MAX_SCENES, SCENE_MAX_TYPES } from '../../src/gui/contract.ts'
+import { ACCENTS, DECAY_DAYS_MAX, GENERAL_SCENE, MAX_SCENES, SCENE_MAX_TYPES } from '../../src/gui/contract.ts'
 
-export { ACCENTS, GENERAL_SCENE, MAX_SCENES, SCENE_MAX_TYPES }
+export { ACCENTS, DECAY_DAYS_MAX, GENERAL_SCENE, MAX_SCENES, SCENE_MAX_TYPES }
 
 /** 内置五类的英文名，也是通用场景的组成（src/type-registry.ts BUILTIN_TYPES，tests/client-settings-mirror.spec.ts 守一致）。自定义类型不能重名。 */
 export const BUILTIN_TYPE_NAMES = ['profile', 'preference', 'knowledge', 'project', 'reference'] as const
@@ -30,6 +30,11 @@ export const PRESET_TYPE_NAMES = ['procedure', 'decision'] as const
 export const RETIRED_TYPE_NAMES = ['commitment', 'person'] as const
 
 export type PresetTypeName = (typeof PRESET_TYPE_NAMES)[number]
+type BuiltinTypeName = (typeof BUILTIN_TYPE_NAMES)[number]
+
+function isBuiltinType(name: string): name is BuiltinTypeName {
+  return (BUILTIN_TYPE_NAMES as readonly string[]).includes(name)
+}
 
 export function isPresetType(name: string): name is PresetTypeName {
   return (PRESET_TYPE_NAMES as readonly string[]).includes(name)
@@ -276,6 +281,48 @@ export function renameType<P extends Pick<SettingsFields, 'scenes' | 'customType
   return { ...pool, scenes, customTypes }
 }
 
+// —— 确认周期 ——
+
+/** 确认周期存在哪：通用类型在 builtinDecayDays，预设和我加的在各自的定义里（customTypes，预设没改过时取出厂定义）。 */
+type Periods = Pick<SettingsFields, 'customTypes' | 'builtinDecayDays'>
+
+/** 这一类现在的确认周期（天，null 为不用定期确认）。 */
+export function decayDaysOf(fields: Periods, name: string): number | null {
+  if (isBuiltinType(name)) return Object.hasOwn(fields.builtinDecayDays, name) ? fields.builtinDecayDays[name]! : TYPE_DEFINITIONS[name].decayDays
+  if (Object.hasOwn(fields.customTypes, name)) return fields.customTypes[name]!.decayDays
+  return isPresetType(name) ? TYPE_DEFINITIONS[name].decayDays : null
+}
+
+/**
+ * 改一类的确认周期，只返回改到的那一项（通用类型是 builtinDecayDays，其余是 customTypes）。通用类型改回出厂值就从 builtinDecayDays 去掉；
+ * 预设改了周期就是改过的预设（customTypes 同名一项），整条和出厂定义一样时去掉。
+ */
+export function withDecayDays(fields: Periods, name: string, days: number | null): Partial<Periods> {
+  if (isBuiltinType(name)) {
+    const { [name]: _old, ...rest } = fields.builtinDecayDays
+    // 通用类型没有「不用定期确认」的开关：null 是回到出厂周期
+    const isDefault = days === TYPE_DEFINITIONS[name].decayDays || days === null
+    return { builtinDecayDays: isDefault ? rest : { ...rest, [name]: days } }
+  }
+  const base = Object.hasOwn(fields.customTypes, name) ? fields.customTypes[name]! : isPresetType(name) ? TYPE_DEFINITIONS[name] : undefined
+  if (base === undefined) return {}
+  const next = { ...base, decayDays: days }
+  const { [name]: _old, ...others } = fields.customTypes
+  const isDefault = isPresetType(name) && sameType(next, TYPE_DEFINITIONS[name])
+  return { customTypes: isDefault ? others : { ...fields.customTypes, [name]: next } }
+}
+
+/** 确认周期的输入：只收 1 到 DECAY_DAYS_MAX 的整数；不合法为 undefined。 */
+export function parseDecayDays(text: string): number | undefined {
+  const n = parsePositiveInt(text)
+  return n !== undefined && n <= DECAY_DAYS_MAX ? n : undefined
+}
+
+/** 确认周期输入框里的原文：留空在能留空时是不用定期确认（null），否则和填错一样为 undefined。 */
+export function parsePeriodText(text: string, canBeNone: boolean): number | null | undefined {
+  return text.trim() === '' ? (canBeNone ? null : undefined) : parseDecayDays(text)
+}
+
 /** 删掉一类，场景组成里一并去掉。预设类型还要记进 removedPresets，改过的定义一并丢掉。 */
 export function removeType<P extends Pool>(pool: P, name: string): P {
   const { [name]: _removed, ...customTypes } = pool.customTypes
@@ -334,6 +381,8 @@ export interface SettingsFields {
   customTypes: Record<string, CustomType>
   /** 删掉的预设类型（配置里的 removedPresetTypes），按预设顺序。 */
   removedPresets: string[]
+  /** 通用类型改过的确认周期（天），按类型名；没改的不在这里。 */
+  builtinDecayDays: Record<string, number>
   budget: string
   overflow: (typeof OVERFLOW_MODES)[number]
   evidence: (typeof EVIDENCE_LEVELS)[number]
@@ -342,8 +391,8 @@ export interface SettingsFields {
   accent: (typeof ACCENTS)[number]
 }
 
-/** 各字段在配置段里的路径（scenes、customTypes 按键逐条写，removedPresets 整段写，见 buildOps）。用户词典路径不进表单：只在配置文件或对话里改。 */
-const PATHS: Record<Exclude<keyof SettingsFields, 'scenes' | 'customTypes' | 'removedPresets'>, string[]> = {
+/** 各字段在配置段里的路径（scenes、customTypes、builtinDecayDays 按键逐条写，removedPresets 整段写，见 buildOps）。用户词典路径不进表单：只在配置文件或对话里改。 */
+const PATHS: Record<Exclude<keyof SettingsFields, 'scenes' | 'customTypes' | 'removedPresets' | 'builtinDecayDays'>, string[]> = {
   template: ['template'],
   budget: ['snapshotTokenBudget'],
   overflow: ['snapshotOverflow'],
@@ -354,8 +403,8 @@ const PATHS: Record<Exclude<keyof SettingsFields, 'scenes' | 'customTypes' | 're
 }
 
 const DEFAULTS: SettingsFields = {
-  template: 'custom', scenes: PRESET_SCENES, customTypes: {}, removedPresets: [], budget: '4000', overflow: 'relax', evidence: 'strict',
-  sensitivity: 'normal', promoteTarget: 'plugin-global', accent: 'ella',
+  template: 'custom', scenes: PRESET_SCENES, customTypes: {}, removedPresets: [], builtinDecayDays: {}, budget: '4000', overflow: 'relax',
+  evidence: 'strict', sensitivity: 'normal', promoteTarget: 'plugin-global', accent: 'ella',
 }
 
 function at(value: unknown, path: readonly string[]): unknown {
@@ -392,6 +441,16 @@ function removedPresetsOf(value: unknown): string[] {
 }
 
 /**
+ * 配置段里的 builtinDecayDays：和服务端类型表认同一批，只认通用类型名、1 到 DECAY_DAYS_MAX 的整数（别的服务端忽略、按出厂周期）。
+ * 写的就是出厂周期的也去掉，算没改过：否则改成别的再改回来，会多出一条删掉这一项的改动。
+ */
+function builtinDecayDaysOf(value: unknown): Record<string, number> {
+  if (typeof value !== 'object' || value === null) return {}
+  return Object.fromEntries(Object.entries(value).filter(([name, days]) =>
+    isBuiltinType(name) && Number.isInteger(days) && days >= 1 && days <= DECAY_DAYS_MAX && days !== TYPE_DEFINITIONS[name].decayDays))
+}
+
+/**
  * 配置段 → 表单字段。宿主给的是解析过的值，取不到时回落到 schema 默认值。
  * 当前场景指向不存在的场景时服务端按通用运行，这里也显示通用。
  */
@@ -406,6 +465,7 @@ export function fieldsOf(section: unknown): SettingsFields {
     scenes,
     customTypes: typeof types === 'object' && types !== null ? types as Record<string, CustomType> : {},
     removedPresets: removedPresetsOf(at(section, ['removedPresetTypes'])),
+    builtinDecayDays: builtinDecayDaysOf(at(section, ['builtinDecayDays'])),
     budget: typeof budget === 'number' ? String(budget) : DEFAULTS.budget,
     overflow: oneOf(OVERFLOW_MODES, at(section, PATHS.overflow), DEFAULTS.overflow),
     evidence: oneOf(EVIDENCE_LEVELS, at(section, PATHS.evidence), DEFAULTS.evidence),
@@ -495,6 +555,12 @@ export function buildOps(saved: SettingsFields, draft: SettingsFields): ConfigPa
   }
   for (const name of Object.keys(saved.customTypes)) {
     if (!(name in draft.customTypes)) ops.push({ op: 'unset', path: ['customTypes', name] })
+  }
+  for (const [name, days] of Object.entries(draft.builtinDecayDays)) {
+    if (saved.builtinDecayDays[name] !== days) ops.push({ op: 'set', path: ['builtinDecayDays', name], value: days })
+  }
+  for (const name of Object.keys(saved.builtinDecayDays)) {
+    if (!Object.hasOwn(draft.builtinDecayDays, name)) ops.push({ op: 'unset', path: ['builtinDecayDays', name] })
   }
   if (!sameSet(saved.removedPresets, draft.removedPresets)) {
     ops.push({ op: 'set', path: ['removedPresetTypes'], value: PRESET_TYPE_NAMES.filter(name => draft.removedPresets.includes(name)) })
@@ -587,8 +653,7 @@ export function validateTypeDraft(draft: CustomTypeDraft, taken: {
   for (const key of ['label', 'description', 'whenToSave', 'recall', 'governancePriority'] as const) {
     if (draft[key].trim() === '') errors[key] = 'required'
   }
-  const decay = draft.decayDays.trim()
-  const decayDays = decay === '' ? null : parsePositiveInt(decay)
+  const decayDays = parsePeriodText(draft.decayDays, true)
   if (decayDays === undefined) errors.decayDays = 'decay-invalid'
   if (Object.keys(errors).length > 0 || draft.recall === '' || draft.governancePriority === '' || decayDays === undefined) {
     return { ok: false, errors }

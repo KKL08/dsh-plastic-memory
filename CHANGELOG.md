@@ -7,6 +7,11 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Each memory type's confirmation period can now be changed, the five
+  general types included: every type card on the settings page shows its
+  period, and Edit opens the form where you change it. A memory left
+  unconfirmed for longer shows up as not confirmed in a while, so the
+  reminder can follow how quickly each kind of information goes out of date.
 - Memory files can hold new optional keys that upcoming features will use:
   when a fact took effect, which sessions a memory came from and how it last
   changed, related memories, the memories a decision depends on, a

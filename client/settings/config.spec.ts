@@ -5,6 +5,7 @@ import {
   forgetMigrations, isPresetEdited, isPresetTypeEdited, keepMigrations, memoryCountOf, nextSceneId, pendingNames, presetSceneTypes, presetTypeChanges,
   removeType, renameMigrations, renameType, restorePresetType, sceneChanges, sceneTypes, typePool, validateSceneDraft, validateTypeDraft,
   OVERFLOW_MODES, PROMOTE_TARGETS, toPluginConfig, type CustomType, type SettingsFields,
+  DECAY_DAYS_MAX, decayDaysOf, parseDecayDays, parsePeriodText, withDecayDays,
 } from './config.ts'
 import { DEFAULT_SECTION } from './config-form.fake.ts'
 
@@ -143,6 +144,94 @@ describe('类型表单校验', () => {
     expect(blank.ok && blank.type).toEqual({ label: '术语', description: 'd', whenToSave: 'w', recall: 'search', decayDays: null, governancePriority: 'medium' })
     const used = validateTypeDraft({ ...filled, howToUse: ' 遇到这个词时按记下的含义理解 ' }, { names: [], labels: [] })
     expect(used.ok && used.type.howToUse).toBe('遇到这个词时按记下的含义理解')
+  })
+})
+
+describe('确认周期', () => {
+  it('没改过时各类型的确认周期取出厂值；fieldsOf 只认通用类型名和数字', () => {
+    const fields = fieldsOf({})
+    expect(fields.builtinDecayDays).toEqual({})
+    expect(Object.fromEntries(['profile', 'knowledge', 'project', 'procedure', 'decision'].map(name => [name, decayDaysOf(fields, name)])))
+      .toEqual({ profile: null, knowledge: 90, project: 7, procedure: 90, decision: 30 })
+    expect(fieldsOf({ builtinDecayDays: { project: 30, decision: 3, ghost: 3, knowledge: 'x' } }).builtinDecayDays).toEqual({ project: 30 })
+  })
+
+  it('fieldsOf 和类型表认同一批周期：不是 1 到上限的整数的忽略；写的就是出厂周期的算没改过', () => {
+    const fields = fieldsOf({ builtinDecayDays: { project: 0, knowledge: 1.5, procedure: 5, reference: DECAY_DAYS_MAX + 1, preference: -5, profile: 30 } })
+    expect(fields.builtinDecayDays).toEqual({ profile: 30 })
+    expect(fieldsOf({ builtinDecayDays: { project: 7, knowledge: 90, profile: DECAY_DAYS_MAX } }).builtinDecayDays).toEqual({ profile: DECAY_DAYS_MAX })
+    const odd = fieldsOf({ builtinDecayDays: { project: 7, knowledge: 0, reference: 1.5 } })
+    expect(buildOps(odd, odd)).toEqual([])
+  })
+
+  it('配置里手写了出厂周期：改成别的再改回来，不产生改动', () => {
+    const saved = fieldsOf({ builtinDecayDays: { project: 7 } })
+    const changed = { ...saved, ...withDecayDays(saved, 'project', 30) }
+    const back = { ...changed, ...withDecayDays(changed, 'project', 7) }
+    expect(buildOps(saved, back)).toEqual([])
+  })
+
+  it('只返回改到的那一项：通用类型只给 builtinDecayDays，预设和我加的只给 customTypes', () => {
+    const saved = base({ customTypes: { term } })
+    expect(Object.keys(withDecayDays(saved, 'project', 30))).toEqual(['builtinDecayDays'])
+    expect(Object.keys(withDecayDays(saved, 'project', null))).toEqual(['builtinDecayDays'])
+    expect(Object.keys(withDecayDays(saved, 'decision', 60))).toEqual(['customTypes'])
+    expect(Object.keys(withDecayDays(saved, 'term', 20))).toEqual(['customTypes'])
+    expect(withDecayDays(saved, 'ghost', 20)).toEqual({})
+  })
+
+  it('改成不用定期确认：通用类型是回到出厂周期，我加的类型写 null', () => {
+    const saved = base({ builtinDecayDays: { profile: 30, project: 30 }, customTypes: { term: { ...term, decayDays: 10 } } })
+    expect(withDecayDays(saved, 'profile', null).builtinDecayDays).toEqual({ project: 30 })
+    expect(withDecayDays(saved, 'project', null).builtinDecayDays).toEqual({ profile: 30 })
+    expect(withDecayDays(saved, 'term', null).customTypes).toEqual({ term: { ...term, decayDays: null } })
+  })
+
+  it('改通用类型：写进 builtinDecayDays、按键 set；改回出厂值或恢复默认就去掉这一项（unset）', () => {
+    const saved = base()
+    const draft = { ...saved, ...withDecayDays(saved, 'project', 30) }
+    expect(draft.builtinDecayDays).toEqual({ project: 30 })
+    expect(draft.customTypes).toEqual({})
+    expect(decayDaysOf(draft, 'project')).toBe(30)
+    expect(buildOps(saved, draft)).toEqual([{ op: 'set', path: ['builtinDecayDays', 'project'], value: 30 }])
+
+    const stored = base({ builtinDecayDays: { project: 30, knowledge: 5 } })
+    const reset = { ...stored, ...withDecayDays(stored, 'project', 7) }
+    expect(reset.builtinDecayDays).toEqual({ knowledge: 5 })
+    expect(buildOps(stored, reset)).toEqual([{ op: 'unset', path: ['builtinDecayDays', 'project'] }])
+  })
+
+  it('改预设：存成 customTypes 里的同名一项（算改过）；改回出厂值就去掉，还有别的改动时只恢复周期', () => {
+    const saved = base()
+    const draft = { ...saved, ...withDecayDays(saved, 'decision', 60) }
+    expect(draft.customTypes).toEqual({ decision: { ...TYPE_DEFINITIONS.decision, decayDays: 60 } })
+    expect(draft.builtinDecayDays).toEqual({})
+    expect(isPresetTypeEdited('decision', draft.customTypes)).toBe(true)
+    expect(withDecayDays(draft, 'decision', 30).customTypes).toEqual({})
+
+    const relabeled = base({ customTypes: { decision: { ...TYPE_DEFINITIONS.decision, label: '约定', decayDays: 60 } } })
+    expect(withDecayDays(relabeled, 'decision', 30).customTypes).toEqual({ decision: { ...TYPE_DEFINITIONS.decision, label: '约定' } })
+  })
+
+  it('改我加的类型：改它定义里的 decayDays', () => {
+    const saved = base({ customTypes: { term: { ...term, decayDays: 10 } } })
+    expect(decayDaysOf(saved, 'term')).toBe(10)
+    const draft = { ...saved, ...withDecayDays(saved, 'term', 20) }
+    expect(draft.customTypes).toEqual({ term: { ...term, decayDays: 20 } })
+    expect(buildOps(saved, draft)).toEqual([{ op: 'set', path: ['customTypes', 'term'], value: { ...term, decayDays: 20 } }])
+  })
+
+  it(`天数只收 1 到 ${DECAY_DAYS_MAX} 的整数；类型表单里的确认周期同一个范围，可以留空`, () => {
+    expect(['1', ' 30 ', String(DECAY_DAYS_MAX)].map(parseDecayDays)).toEqual([1, 30, DECAY_DAYS_MAX])
+    expect(['', '0', '-3', '1.5', '30天', String(DECAY_DAYS_MAX + 1)].map(parseDecayDays)).toEqual([undefined, undefined, undefined, undefined, undefined, undefined])
+    const filled = { ...EMPTY_TYPE_DRAFT, name: 'glossary', label: '术语', description: 'd', whenToSave: 'w' }
+    expect(validateTypeDraft({ ...filled, decayDays: String(DECAY_DAYS_MAX + 1) }, { names: [], labels: [] })).toEqual({ ok: false, errors: { decayDays: 'decay-invalid' } })
+    expect(validateTypeDraft({ ...filled, decayDays: String(DECAY_DAYS_MAX) }, { names: [], labels: [] })).toMatchObject({ ok: true, type: { decayDays: DECAY_DAYS_MAX } })
+  })
+
+  it('输入框原文：能留空的类型留空是不用定期确认，不能留空的留空和填错一样不收', () => {
+    expect([parsePeriodText(' ', true), parsePeriodText('', false)]).toEqual([null, undefined])
+    expect([parsePeriodText('30', true), parsePeriodText('30', false), parsePeriodText('0', true)]).toEqual([30, 30, undefined])
   })
 })
 
