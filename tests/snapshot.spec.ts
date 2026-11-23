@@ -17,7 +17,7 @@ import { InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 
-// 出厂类型都不是 passive：只带标题的判据用一个 passive 自定义类型来测
+// 出厂类型都不是 passive：简单索引的判据用一个 passive 自定义类型来测
 const withPassive = buildTypeRegistry({ template: 'coding', customTypes: { link: { label: '链接', description: '链接', whenToSave: '链接', recall: 'passive', decayDays: null, governancePriority: 'medium' } } })
 
 // 本文件默认时间戳为 0。

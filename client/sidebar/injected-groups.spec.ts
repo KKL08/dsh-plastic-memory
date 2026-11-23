@@ -23,7 +23,7 @@ describe('groupInjected', () => {
     expect(inline.size).toBe(0)
   })
 
-  it('组的带入方式：全是 core 标全文、全是只带标题标只带标题、都不是标只带摘要、混着的不标', () => {
+  it('组的带入方式：全是 core 标全文、全是简单索引标简单索引、都不是标摘要、混着的不标', () => {
     const depthOf = (coreIds: string[], titleOnlyIds: string[]) =>
       groupInjected({ ...base, injectedIds: ['p1', 'p2'], coreIds, titleOnlyIds }).groups[0]?.depth
     expect(depthOf(['p1', 'p2'], [])).toBe('full')

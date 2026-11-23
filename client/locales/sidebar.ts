@@ -17,8 +17,8 @@ export const sidebarZh = {
   'sidebar.saved.note': '压缩后或下个对话带入',
   'sidebar.groups.title': '带入的记忆',
   'sidebar.groups.full': '全文',
-  'sidebar.groups.summary': '只带摘要',
-  'sidebar.groups.titleOnly': '只带标题',
+  'sidebar.groups.summary': '摘要',
+  'sidebar.groups.titleOnly': '简单索引',
   'sidebar.saved.delete': '删除这条记忆',
 
   'sidebar.empty.title': '还没有记忆',
@@ -69,8 +69,8 @@ export const sidebarEn: Record<keyof typeof sidebarZh, string> = {
   'sidebar.saved.note': 'Brought in after compaction or in the next chat',
   'sidebar.groups.title': 'Brought-in memories',
   'sidebar.groups.full': 'Full text',
-  'sidebar.groups.summary': 'Summary only',
-  'sidebar.groups.titleOnly': 'Title only',
+  'sidebar.groups.summary': 'Summary',
+  'sidebar.groups.titleOnly': 'Brief index',
   'sidebar.saved.delete': 'Delete this memory',
 
   'sidebar.empty.title': 'No memories yet',

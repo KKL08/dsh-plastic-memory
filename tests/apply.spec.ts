@@ -1933,7 +1933,7 @@ describe('配置热生效（loader/volatile-update）', () => {
     expect(resaved).not.toBe(saveDef)
     expect(resaved.parameters.properties.type!.enum).toEqual(['preference', 'decision', 'regulation'])
     expect(resaved.description).toContain('regulation（合规要求）')
-    // 自定义类型是常驻（core）：下一次组装就以完整正文带入；旧场景独有类型的记忆照常带入，分组名不退化
+    // 自定义类型是全文（core）：下一次组装就以完整正文带入；旧场景独有类型的记忆照常带入，分组名不退化
     await t.putGlobal({ id: 'mem_proc', type: 'procedure', name: '发版流程', summary: '发版步骤' })
     const switched = await t.assembleOnce()
     expect(switched).toContain('【记忆·合规要求】数据出境要先过安全评估')
@@ -2078,7 +2078,7 @@ describe('配置热生效（loader/volatile-update）', () => {
     expect(written).toContain('数据出境要先过安全评估')
   })
 
-  it('退役的承诺记忆照常按原定义带入（常驻、中文名），但办公场景不能再新增', async () => {
+  it('退役的承诺记忆照常按原定义带入（全文、中文名），但办公场景不能再新增', async () => {
     const t = await setup({ template: 'office' })
     await t.putGlobal({ id: 'mem_promise', type: 'commitment', content: '周五前给客户回方案', summary: '周五回方案' })
     expect(await t.assembleOnce()).toContain('【记忆·承诺】周五前给客户回方案')
