@@ -185,7 +185,7 @@ export class FileTable implements MemoryTable {
       try { await stat(dir) } catch (err) { if (errnoCode(err) === 'ENOENT') return undefined; throw err }
       return { note: this.note('marker-missing', dir, `目录缺少有效的 ${WORKSPACE_MARKER} 标记，其中的记忆文件未读取：${dir}`) }
     } catch (err) {
-      return { note: this.note('dir-unreadable', dir, `目录不可读，计空：${dir}（${err instanceof Error ? err.message : String(err)}）`) }
+      return { note: this.note('dir-unreadable', dir, `目录读取失败：${dir}（${err instanceof Error ? err.message : String(err)}）`) }
     }
   }
 
@@ -195,7 +195,7 @@ export class FileTable implements MemoryTable {
       return { names: (await readdir(dir)).filter(isMemoryFileName) }
     } catch (err) {
       if (errnoCode(err) === 'ENOENT') return { names: [] }
-      return { note: this.note('dir-unreadable', dir, `目录不可读，计空：${dir}（${err instanceof Error ? err.message : String(err)}）`) }
+      return { note: this.note('dir-unreadable', dir, `目录读取失败：${dir}（${err instanceof Error ? err.message : String(err)}）`) }
     }
   }
 
@@ -336,7 +336,7 @@ export class FileTable implements MemoryTable {
     try {
       names = (await readdir(this.opts.root, { withFileTypes: true })).filter(e => e.isDirectory()).map(e => e.name)
     } catch (err) {
-      if (errnoCode(err) !== 'ENOENT') directoryNotes.push(this.note('dir-unreadable', this.opts.root, `记忆根目录不可读，计空：${this.opts.root}`))
+      if (errnoCode(err) !== 'ENOENT') directoryNotes.push(this.note('dir-unreadable', this.opts.root, `记忆根目录读取失败：${this.opts.root}`))
       return { entries, directoryNotes }
     }
     for (const name of names.filter(isWorkspaceDirName).sort()) {
@@ -361,18 +361,22 @@ export class FileTable implements MemoryTable {
   }
 
   /** 提示 workspace 的目录：先算确定性目录名并校验标记；算不出或标记不符时经清单找（覆盖手工改名的目录）。
-   *  listing：调用方已读过的清单，给了就不再重读。 */
-  private async hintDirs(workspacePath: string, listing?: WorkspaceDirListing): Promise<ScopeDir[]> {
+   *  listing：调用方已读过的清单，给了就不再重读。onListing：这次自己读了清单时交给调用方（要看清单里的目录说明）。 */
+  private async hintDirs(workspacePath: string, listing?: WorkspaceDirListing, onListing?: (read: WorkspaceDirListing) => void): Promise<ScopeDir[]> {
     const loc: FileLocation = { scope: 'workspace', workspacePath }
     const dir = join(this.opts.root, workspaceDirName(workspacePath))
     try {
       if ((await this.readMarker(dir)) === workspacePath) return [{ dir, loc }]
     } catch { /* 不可读：走清单 */ }
-    return (listing ?? await this.listWorkspaceDirs()).entries.filter(e => e.workspacePath === workspacePath).map(e => ({ dir: e.dir, loc }))
+    const read = listing ?? await this.listWorkspaceDirs()
+    if (listing === undefined) onListing?.(read)
+    return read.entries.filter(e => e.workspacePath === workspacePath).map(e => ({ dir: e.dir, loc }))
   }
 
-  async workspaceDirs(workspacePath: string): Promise<string[]> {
-    return (await this.hintDirs(workspacePath)).map(d => d.dir)
+  async workspaceDirs(workspacePath: string): Promise<{ dirs: string[]; directoryNotes: DirectoryNote[] }> {
+    let listing: WorkspaceDirListing | undefined
+    const dirs = await this.hintDirs(workspacePath, undefined, read => { listing = read })
+    return { dirs: dirs.map(d => d.dir), directoryNotes: listing?.directoryNotes.filter(n => n.code === 'dir-unreadable') ?? [] }
   }
 
   /** 在一组目录（顶层 + .archive/）里找 id 的全部候选：看原文 id 行，只解析命中文件。派生 id 先按文件路径重算哈希（不读内容，

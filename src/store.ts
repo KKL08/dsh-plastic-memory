@@ -171,26 +171,28 @@ export class MemoryStore {
     }
   }
 
-  /** scope → 目录。缺省读全部目录（global + 全部有标记的 workspace 目录）。 */
-  private async dirsOf(scope: QueryScope | undefined): Promise<string[]> {
-    if (scope === undefined) return [this.table.globalDir, ...(await this.table.listWorkspaceDirs()).entries.map(e => e.dir)]
-    if (scope.kind === 'global') return [this.table.globalDir]
+  /** scope → 目录，外加找项目目录时读不出的目录说明（见 MemoryTable.workspaceDirs）。缺省读全部目录（global + 全部有标记的 workspace 目录）。 */
+  private async dirsOf(scope: QueryScope | undefined): Promise<{ dirs: string[]; directoryNotes: DirectoryNote[] }> {
+    if (scope === undefined) return { dirs: [this.table.globalDir, ...(await this.table.listWorkspaceDirs()).entries.map(e => e.dir)], directoryNotes: [] }
+    if (scope.kind === 'global') return { dirs: [this.table.globalDir], directoryNotes: [] }
     if (scope.kind === 'workspace') return this.table.workspaceDirs(scope.workspacePath)
-    return [this.table.globalDir, ...(scope.workspacePath === undefined ? [] : await this.table.workspaceDirs(scope.workspacePath))]
+    const own = scope.workspacePath === undefined ? { dirs: [], directoryNotes: [] } : await this.table.workspaceDirs(scope.workspacePath)
+    return { dirs: [this.table.globalDir, ...own.dirs], directoryNotes: own.directoryNotes }
   }
 
   /** 按范围原样读目录：记录含非 active、同 id 不取舍。health / scan 按作用域预读用它。
    *  位置即作用域：.archive/ 里 status 仍写着 active 的文件（手工搬进去的）按 deleted 看待，维护点会把它归一落盘。 */
   async readRaw(scope: QueryScope | undefined, opts: ScopeReadOptions = {}): Promise<ScopeReadResult> {
-    const read = await this.table.readScope(await this.dirsOf(scope), opts)
+    const { dirs, directoryNotes } = await this.dirsOf(scope)
+    const read = await this.table.readScope(dirs, opts)
     const records = read.records.map(l =>
       l.record.status === 'active' && dirname(l.filePath) !== l.dir ? { ...l, record: { ...l.record, status: 'deleted' as const } } : l)
-    return { ...read, records }
+    return { ...read, records, directoryNotes: [...directoryNotes, ...read.directoryNotes] }
   }
 
   /** 维护点入口（快照冻结时调用）：scope 决定维护哪些目录；未解析 workspace 时只有 global。 */
   async maintain(scope: QueryScope): Promise<void> {
-    await this.table.maintain(await this.dirsOf(scope))
+    await this.table.maintain((await this.dirsOf(scope)).dirs)
   }
 
   /**

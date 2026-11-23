@@ -35,6 +35,12 @@ All notable changes to this project are documented here. The format follows
 - A memory file whose timestamp was a number outside the range of a date was
   read as normal, and the next change to that memory failed. Such files now go
   to quarantine, like other malformed files.
+- A memory folder that could not be read, for example after a permission
+  change, was treated as empty: the chat went without those memories for
+  the rest of the session, `MEMORY.md` was rewritten without them and
+  dismissed over-budget reminders came back. The chat is now told the
+  memories could not be read, nothing is rewritten, and the next message
+  reads the folder again.
 
 ## [0.2.0] - 2026-11-21
 

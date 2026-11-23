@@ -55,8 +55,8 @@ export class InMemoryTable implements MemoryTable {
     return slot
   }
 
-  async workspaceDirs(workspacePath: string): Promise<string[]> {
-    return [join(this.root, workspaceDirName(workspacePath))]
+  async workspaceDirs(workspacePath: string): Promise<{ dirs: string[]; directoryNotes: DirectoryNote[] }> {
+    return { dirs: [join(this.root, workspaceDirName(workspacePath))], directoryNotes: [] }
   }
 
   async readScope(dirs: string[], opts: ScopeReadOptions = {}): Promise<ScopeReadResult> {

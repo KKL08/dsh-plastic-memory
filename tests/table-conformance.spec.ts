@@ -448,7 +448,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     await h.seedFile({ dir: h.wsDir(WS_B), fileName: 'b.md', record: ws(WS_B, { id: 'mem_q3', content: '别的项目' }) })
     const visible = await store.query({ scope: { kind: 'visible', workspacePath: WS_A } })
     expect(visible.map(r => [r.id, r.content]).sort()).toEqual([['mem_q1', 'global 较新'], ['mem_q2', '本项目同时']])
-    expect(await table.workspaceDirs(WS_A)).toEqual([h.wsDir(WS_A)])
+    expect((await table.workspaceDirs(WS_A)).dirs).toEqual([h.wsDir(WS_A)])
   })
 
   it('同 id 取舍④：提示的 workspace 目录优先于其他项目，⑤ 都是其他项目时按文件路径字典序', async () => {

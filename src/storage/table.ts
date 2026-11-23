@@ -114,8 +114,9 @@ export interface WorkspaceDirListing {
 export interface MemoryTable {
   /** global 目录的绝对路径。 */
   readonly globalDir: string
-  /** 某个 workspace 的目录：确定性目录名的标记匹配就用它，否则经清单找（手工改名的目录）；还没有目录时为空。 */
-  workspaceDirs(workspacePath: string): Promise<string[]>
+  /** 某个 workspace 的目录：确定性目录名的标记匹配就用它，否则经清单找（手工改名的目录）；还没有目录时为空。
+   *  经清单找时，清单里读不出的目录（记忆根、标记读不出的目录）带回 dir-unreadable 说明：这个项目的记忆可能就在里面。 */
+  workspaceDirs(workspacePath: string): Promise<{ dirs: string[]; directoryNotes: DirectoryNote[] }>
   readScope(dirs: string[], opts?: ScopeReadOptions): Promise<ScopeReadResult>
   /** 按 id 定位。别的写入正在挪这个文件时锁外扫描可能新旧两处都看不到：实现在这种情况下到写锁内再确认，见 LocateOptions。 */
   locate(id: string, target: LocateTarget, opts?: LocateOptions): Promise<LocatedFile | undefined>
