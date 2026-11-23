@@ -81,6 +81,14 @@ All notable changes to this project are documented here. The format follows
 - In the side panel, when the memory a suggestion would delete holds a
   secret, the note said it would move to Recently deleted. It now says the
   memory will be deleted permanently, as the memory page already did.
+- If the page reloaded, the connection dropped or the app answered with a
+  temporary error while the memory page was checking its action channel,
+  the following actions ran as `/memory` commands and left rows in the
+  conversation. The page now checks once more and, if that fails too, fails
+  that action and checks again on the next one.
+- When a session could not run a memory page action, for example because it
+  was open in another window, the page said only that the session was
+  unavailable. The message now carries the app's own error code and text.
 
 ## [0.2.0] - 2026-11-21
 
