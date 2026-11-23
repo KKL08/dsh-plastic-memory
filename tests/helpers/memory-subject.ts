@@ -61,6 +61,8 @@ export type Verdict = 'keep-left' | 'keep-right' | 'keep-both'
 export type MemOp =
   | { kind: 'create'; name: Key | 'fresh'; scope: 'global' | 'workspace' }
   | { kind: 'update' | 'softDelete' | 'restore' | 'promote' | 'guiEdit'; id: Key }
+  | { kind: 'preciseEdit'; id: Key }
+  | { kind: 'guiBatch' }
   | { kind: 'hardDelete'; id: Key; layer?: 'workspace' | 'global' }
   | { kind: 'modelRewrite'; id: Key; isForced: boolean }
   | { kind: 'external'; id: Key; isTwoStep: boolean }
@@ -204,7 +206,7 @@ async function externalEdit(root: string, id: string, isTwoStep: boolean, index:
 }
 
 /** 按宿主的切法把命令名之后的原文交给界面命令处理器，回处理器给的结果对象。 */
-async function runGui(w: MemoryWorld, hooks: OpHooks, now: number, command: MemoryCommand): Promise<unknown> {
+export async function runGui(w: MemoryWorld, hooks: OpHooks, now: number, command: MemoryCommand): Promise<unknown> {
   const raw = encodeMemoryCommand(command).slice(`/${MEMORY_COMMAND_NAME}`.length)
   return JSON.parse((await guiCommand(w, withCommitPoint(w.store, hooks), now).handler({ rawInput: raw, agent: {} })).text!) as unknown
 }
@@ -249,13 +251,30 @@ async function runMemOp(w: MemoryWorld, op: MemOp, index: number, hooks: OpHooks
         content: `界面改 ${index}`, name: base.name, summary: base.summary, tags: base.tags,
       })
     }
+    case 'guiBatch': {
+      const records = (['a', 'b'] as const).map(key => w.bases.get(key))
+      if (records.some(r => r === undefined)) return 'no-card'
+      return runGui(w, hooks, t, {
+        cmd: 'apply-edits',
+        ops: records.map(r => ({
+          kind: 'edit', memoryId: r!.id,
+          layer: scopeOfMemory(r!)!,
+          base: { updatedAt: r!.updatedAt, digest: computeDigest(r!.name, r!.summary, r!.content) },
+          name: r!.name, summary: r!.summary, tags: r!.tags, content: `批量改写 ${index}`,
+        })),
+      })
+    }
+    case 'preciseEdit':
     case 'modelRewrite': {
       // 像模型一样：改的是全局记忆就先收到引导，抄引导里的确认码重发；其间被别处改过、码变了，就照新引导再发一次
-      const args = candidate({ action: 'update', id: IDS[op.id], name: NAMES[op.id], type: 'knowledge', scope: 'workspace', content: `模型改写 ${index}`, summary: `模型改写 ${index}`, ...(op.isForced ? { force: true } : {}) })
+      const args = candidate({ action: 'update', id: IDS[op.id], name: NAMES[op.id], type: 'knowledge', scope: 'workspace', content: `模型改写 ${index}`, summary: `模型改写 ${index}`, ...(op.kind === 'modelRewrite' && op.isForced ? { force: true } : {}) })
+      const input = op.kind === 'preciseEdit'
+        ? { action: 'update' as const, id: IDS[op.id], sourceMode: 'user-explicit' as const, edits: [{ oldString: w.bases.get(op.id)?.content ?? '不存在的正文', newString: `精确修改 ${index}` }] }
+        : args
       const deps = { store: withCommitPoint(w.store, hooks), registry, workspacePath: W, session: { id: 's-model', lastSeq: 1 }, snapshots: w.snapshots, decisions: w.decisions, now: () => t }
-      let r = await runSavePipeline(args, deps)
+      let r = await runSavePipeline(input, deps)
       for (let attempt = 0; attempt < 3 && r.kind === 'rejected' && r.code === 'global-update-unconfirmed'; attempt++) {
-        r = await runSavePipeline({ ...args, confirmGlobal: confirmCodeOf(r) }, deps)
+        r = await runSavePipeline({ ...input, confirmGlobal: confirmCodeOf(r) }, deps)
       }
       // 重发几次还在等确认，说明确认环节卡住了：当场失败，不让串行和交错两边一起停在这里而对上
       if (r.kind === 'rejected' && r.code === 'global-update-unconfirmed') throw new Error(`全局改写重发 3 次仍未写入：${r.reason}`)
@@ -301,7 +320,7 @@ export const labelOf = (op: MemOp) => {
     case 'hardDelete': return `hardDelete(${op.id}${op.layer === undefined ? '' : `,${op.layer}`})`
     case 'recall': return `recall(${op.ids.join('+')})`
     case 'snapshot': return `snapshot(${op.ids.length === 0 ? '可见' : op.ids.join('+')})`
-    case 'restoreSnapshot': case 'undo': return op.kind
+    case 'guiBatch': case 'restoreSnapshot': case 'undo': return op.kind
     case 'resolve': return `resolve(${op.verdict})`
     default: return `${op.kind}(${op.id})`
   }
@@ -313,10 +332,10 @@ export const labelOf = (op: MemOp) => {
  * 改动前的快照留在盘上（无害，保留期满清扫），整体串行重放复现不出这份快照，所以在提交点拆开比。
  */
 function splitTag(value: unknown, op: MemOp): string | undefined {
-  if (op.kind === 'guiEdit') return (value as { code?: string }).code === 'stale' ? 'race' : undefined
+  if (op.kind === 'guiEdit' || op.kind === 'guiBatch') return (value as { code?: string }).code === 'stale' ? 'race' : undefined
   // 锁内复核发现定位之后被恢复或改过，没有删（清账本、快照在复核之前已经做了）
   if (op.kind === 'hardDelete') return (value as { code?: string }).code === 'failed' ? 'race' : undefined
-  if (op.kind === 'modelRewrite') {
+  if (op.kind === 'modelRewrite' || op.kind === 'preciseEdit') {
     const r = value as PipelineResult
     return r.kind === 'rejected' && r.subcode === 'changed-after-read' ? 'race' : undefined
   }

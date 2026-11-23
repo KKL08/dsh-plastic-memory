@@ -20,6 +20,9 @@ All notable changes to this project are documented here. The format follows
   plugin.
 - Testing: the test suite runs the published 0.2.0 package on the same
   memory folder as this version.
+- Testing: seeded random sequences run several writers over the same memories
+  and check that no write is lost, every write finishes and undoing one write
+  leaves the others as they were.
 
 ### Changed
 - The recall options of a memory type are renamed after what each chat
