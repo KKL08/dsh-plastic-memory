@@ -6,9 +6,17 @@
   "license": "MIT",
   "keywords": [
     "deepseek-harness",
+    "deepseek-harness-plugin",
     "dsh",
     "dsh-plugin",
     "agent-memory",
+    "llm-memory",
+    "persistent-memory",
+    "long-term-memory",
+    "runtime-memory",
+    "working-memory",
+    "cross-session-memory",
+    "context-management",
     "memory",
     "llm",
     "plastic-memory"
