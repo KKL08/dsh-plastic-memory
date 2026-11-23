@@ -2116,8 +2116,41 @@ describe('配置热生效（loader/volatile-update）', () => {
     expect(await readFile(join(t.memoryRoot, 'global', 'mem_keep.md'), 'utf8')).toBe(before)
   })
 
+  it('全局视图已出现时体检视图仍可能在写，刷新命令等待它收尾', async () => {
+    let release!: () => void
+    let entered!: () => void
+    const held = new Promise<void>(resolve => { release = resolve })
+    const reached = new Promise<void>(resolve => { entered = resolve })
+    fsTrace.hold = call => {
+      if (call.startsWith('rename(') && call.includes(`${GUI_CHECKUP_VIEW_FILE}.tmp-`)) {
+        entered()
+        return held
+      }
+      return undefined
+    }
+    let pending: Promise<unknown> | undefined
+    try {
+      const t = await setup()
+      await reached
+      let finished = false
+      pending = t.command('/memory refresh-views').then(result => { finished = true; return result })
+      // 排队的命令不能越过尚未放行的文件系统调用。
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(finished).toBe(false)
+      release()
+      await pending
+      await stat(join(t.memoryRoot, GUI_VIEW_DIR, GUI_CHECKUP_VIEW_FILE))
+    } finally {
+      release()
+      await pending
+      fsTrace.hold = undefined
+    }
+  })
+
   it('配置热更新之后重写一遍全局视图', async () => {
     const t = await setup()
+    // 文件出现不代表启动写入收尾；刷新命令排在写入器队列后面，等整次写入结束再删目录。
+    await t.command('/memory refresh-views')
     await rm(join(t.memoryRoot, GUI_VIEW_DIR), { recursive: true })
     await t.update({ governance: { health: { sensitivity: 'proactive' } } })
     for (const file of Object.values(GUI_VIEW_FILES)) await stat(join(t.memoryRoot, GUI_VIEW_DIR, file))
