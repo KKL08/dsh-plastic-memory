@@ -410,7 +410,8 @@ describe('权限面：子 agent 调每个工具只触发权限内的副作用', 
       for (const id of absent) expect(text, `${s.header.id} 不应带 ${id}`).not.toContain(id)
       expect(effects.llmCalls).toBe(0)
       expect(effects.recordWrites).toEqual([])
-      expect(effects.snapshotWrites).toEqual([])
+      // 冻结时清一批过期的改前快照是例行维护，和谁的会话无关；除此之外不动快照
+      expect(effects.snapshotWrites.filter(name => name !== 'sweep')).toEqual([])
       expect(h.stateWrites('scan-cache')).toEqual([])
     }
   })

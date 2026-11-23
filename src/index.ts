@@ -9,8 +9,9 @@ import { FileTable } from './storage/file-table.ts'
 import { SidecarStore } from './storage/sidecar.ts'
 import { createRootLock } from './storage/root-lock.ts'
 import type { LegacyKvTables } from './storage/legacy-kv-import.ts'
-import { localStateDir, OP_JOURNAL_FILE, resolveMemoryRoot } from './storage/paths.ts'
+import { localStateDir, OP_JOURNAL_FILE, DERIVED_INDEX_FILE, resolveMemoryRoot } from './storage/paths.ts'
 import { OpJournal } from './storage/op-journal.ts'
+import { DerivedIndex } from './storage/derived-index.ts'
 import { formatIndexLine } from './index-line.ts'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { Session } from '@deepseek-ai/dsh-session'
@@ -212,10 +213,14 @@ export async function apply(ctx: Context, config: Config) {
   // 操作日志库在记忆根之外、每台机器一份：懒打开，不可用时写入照常进行。卸载时关连接，迟到的写入会重新打开
   const journal = new OpJournal({ path: join(localStateDir(memoryRoot), OP_JOURNAL_FILE), log: ctx.logger })
   ctx.effect(() => () => { journal.close() }, 'plastic-memory: op journal')
+  // 派生索引库同样在记忆根之外、每台机器一份：存的都能从记忆文件重算，不可用时查找改回逐个读文件
+  const derivedIndex = new DerivedIndex({ path: join(localStateDir(memoryRoot), DERIVED_INDEX_FILE), log: ctx.logger })
+  ctx.effect(() => () => { derivedIndex.close() }, 'plastic-memory: derived index')
   const fileTable = new FileTable({
     root: memoryRoot,
     lock: rootLock,
     journal,
+    index: derivedIndex,
     stats: sidecar.recallStats,
     // 磁盘索引不带陈旧度（静态文件里的时间相对标注会随时间失真），注入侧的陈旧度由 snapshot.ts 计算
     formatIndexLine: (r, file) => formatIndexLine(r, { passive: registry.get(r.type).recall === 'passive', file }),
@@ -271,7 +276,7 @@ export async function apply(ctx: Context, config: Config) {
   // 超限提醒进待决账本（治理关闭时也记：它是待处理里的提醒，不是体检结果）。
   // 上限、超限处理、溯源档位是 getter：每次构建快照时现读配置（SnapshotCache 一次构建只取一次）。
   const snapshotCache = new SnapshotCache({
-    store, registry, overflowLedger: decisions, memoryRoot, host, log: ctx.logger,
+    store, registry, overflowLedger: decisions, snapshots, memoryRoot, host, log: ctx.logger,
     get budget() { return config.snapshotTokenBudget.get() },
     get overflow() { return config.snapshotOverflow.get() },
     get evidenceLookup() { return config.evidenceLookup.get() },

@@ -36,10 +36,23 @@ describe('SnapshotStore.capture', () => {
     expect(list[0].data).toHaveLength(2)
   })
 
-  it('capture 顺手清理超过 14 天的旧快照', async () => {
+  it('capture 不清过期快照（每次写入不扫快照表）；sweep 清掉超过 14 天的', async () => {
     const s = makeStore()
     await s.capture({ operation: 'manual', description: '老', records: [] }, 0)
     await s.capture({ operation: 'manual', description: '新', records: [] }, SNAPSHOT_RETENTION_MS + 1)
+    expect((await s.list()).map(x => x.description)).toEqual(['新', '老'])
+    await s.sweep(SNAPSHOT_RETENTION_MS + 1)
+    expect((await s.list()).map(x => x.description)).toEqual(['新'])
+  })
+
+  it('sweep 给了上限就分批清：一次最多清这么多条过期的，没过期的不动，剩下的下次清完', async () => {
+    const s = makeStore()
+    for (let i = 0; i < 5; i++) await s.capture({ operation: 'manual', description: `老${i}`, records: [] }, i)
+    await s.capture({ operation: 'manual', description: '新', records: [] }, SNAPSHOT_RETENTION_MS + 10)
+    await s.sweep(SNAPSHOT_RETENTION_MS + 10, 2)
+    expect(await s.list()).toHaveLength(4)
+    await s.sweep(SNAPSHOT_RETENTION_MS + 10, 2)
+    await s.sweep(SNAPSHOT_RETENTION_MS + 10, 2)
     expect((await s.list()).map(x => x.description)).toEqual(['新'])
   })
 })

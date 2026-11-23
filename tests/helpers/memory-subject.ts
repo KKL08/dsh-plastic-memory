@@ -8,6 +8,7 @@ import { readdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import fc from 'fast-check'
 import { FileTable } from '../../src/storage/file-table.ts'
+import { DerivedIndex } from '../../src/storage/derived-index.ts'
 import { SidecarStore } from '../../src/storage/sidecar.ts'
 import { createAgentsMdWriter } from '../../src/storage/agents-md.ts'
 import { ARCHIVE_DIR, GLOBAL_DIR, STATE_DIR, isMemoryFileName, workspaceDirName } from '../../src/storage/paths.ts'
@@ -105,11 +106,12 @@ const newSidecar = (root: string, lock: SectionLock) => new SidecarStore({
   now: () => STORE_NOW,
 })
 
+// hintRacyMs 给无穷大：提示用不用不看真实时间过了多久（每次都列目录比对），同一个调度每次走出的文件调用一样
 /** 接线层同款构造（src/index.ts）：一把记忆根写锁注入侧表、文件表、账本；存储、快照（带读后被彻底删除的复核）。 */
 function memoryWorld(root: string, lock: WriteLock | undefined): MemoryWorld {
   const rootLock = lock ?? createRootLock({ root, log: silent })
   const sidecar = newSidecar(root, rootLock)
-  const store = new MemoryStore(new FileTable({ root, lock: rootLock, stats: sidecar.recallStats, log: silent, now: () => STORE_NOW }), silent, sidecar.recallStats)
+  const store = new MemoryStore(new FileTable({ root, lock: rootLock, stats: sidecar.recallStats, log: silent, now: () => STORE_NOW, index: new DerivedIndex({ path: join(root, STATE_DIR, 'derived', 'derived-index.sqlite'), log: silent }), hintRacyMs: Infinity }), silent, sidecar.recallStats)
   const snapshots = new SnapshotStore(sidecar.snapshots, { findGone: goneCopies(store) })
   const decisions = new PendingDecisionsStore(sidecar.pending, rootLock)
   const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
@@ -361,9 +363,10 @@ function splitTag(value: unknown, op: MemOp): string | undefined {
 /**
  * 盘面：记忆根下全部文件的原文。界面视图（.state/gui/）不比：它是派生缓存，任何一次读都可能读到别的写入中途的状态，
  * 下一次视图重写收敛，记忆数据不受影响。写锁的锁库（.state/lock/）也不比：它不存数据。
+ * 派生索引库（.state/derived/，正式接线里在记忆根之外）也不比：它可以从记忆文件重建。
  */
 const memoryState = async (_: MemoryWorld, root: string) =>
-  diskState(root, path => !path.startsWith(`${STATE_DIR}/gui/`) && !path.startsWith(`${STATE_DIR}/lock/`))
+  diskState(root, path => !path.startsWith(`${STATE_DIR}/gui/`) && !path.startsWith(`${STATE_DIR}/lock/`) && !path.startsWith(`${STATE_DIR}/derived/`))
 
 /** 认领不到、立即返回（界面命令的 claimed）：判据把它当成没发生过（见 Subject.isClaimed）。 */
 const isClaimed = (value: unknown) => (value as { ok?: boolean; code?: string } | null)?.ok === false && (value as { code?: string }).code === 'claimed'

@@ -48,6 +48,18 @@ All notable changes to this project are documented here. The format follows
   that lets you undo it) now runs as one step under the memory folder's
   write lock. If the lock stays busy, the change fails as a whole and can
   be retried, instead of stopping partway.
+- Saving or changing a memory no longer reads every file in the memory
+  folder, so a write no longer slows down as the folder grows. The write
+  updates its own line in `MEMORY.md`. Files edited by hand are picked up,
+  deleted memories are archived and expired ones are removed when a chat in
+  that project next loads its memories, instead of after every write. To
+  find a memory by id the plugin keeps a small lookup file outside the
+  memory folder, one per machine. It holds memory file names (which come
+  from memory names) and ids, no memory content; a permanently deleted
+  memory is removed from it at once, and it is rebuilt from the memory
+  files if it is deleted.
+- Testing: a write in a folder of 5,000 memories is compared with the same
+  write in a folder of 1,000.
 
 ### Fixed
 - A memory file whose timestamp was a number outside the range of a date was

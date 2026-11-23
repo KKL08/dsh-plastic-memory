@@ -17,7 +17,7 @@ export function resolveMemoryRoot(configured: string): string {
 }
 
 /**
- * 本机状态目录：只和这台机器有关、不随记忆根同步的库（操作日志）住这里，在记忆根之外。
+ * 本机状态目录：只和这台机器有关、不随记忆根同步的库（操作日志、派生索引）住这里，在记忆根之外。
  * 按记忆根的绝对路径分目录，目录名是路径的摘要：换一个记忆根就是另一份。
  */
 export function localStateDir(memoryRoot: string): string {
@@ -27,6 +27,9 @@ export function localStateDir(memoryRoot: string): string {
 
 /** 操作日志库的文件名（在 localStateDir 下）。 */
 export const OP_JOURNAL_FILE = 'op-journal.sqlite'
+
+/** 派生索引库的文件名（在 localStateDir 下）。 */
+export const DERIVED_INDEX_FILE = 'derived-index.sqlite'
 
 /** APFS 等大小写不敏感文件系统上，memory.md 会与索引 MEMORY.md 相互覆盖——文件命名处必须避让。 */
 export function isReservedFileName(fileName: string): boolean {

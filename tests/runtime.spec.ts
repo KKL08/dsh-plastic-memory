@@ -421,6 +421,20 @@ describe('SnapshotCache', () => {
     expect(spy).toHaveBeenCalledTimes(2)
   })
 
+  it('冻结时清一批过期的改前快照：每次冻结调一次、带上限；清扫出错不影响注入', async () => {
+    const calls: Array<[number, number | undefined]> = []
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
+    const sweep = async (now: number, limit?: number) => { calls.push([now, limit]); throw new Error('清扫失败') }
+    const cache = new SnapshotCache({ store, registry, budget: 4000, snapshots: { sweep }, log: { info: () => {}, warn: () => {}, error: () => {} } })
+    const session = {}
+    cache.setWorkspacePath(session, '/repo')
+    expect(await cache.assemble(session)).toBeTypeOf('string')
+    expect(calls).toHaveLength(1)
+    expect(calls[0]![1]).toBeGreaterThan(0)
+    await cache.assemble(session)                     // 缓存命中：不再清
+    expect(calls).toHaveLength(1)
+  })
+
   it('缓存按 session 隔离', async () => {
     const { cache } = makeCache()
     const a = {}
