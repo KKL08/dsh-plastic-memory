@@ -147,7 +147,7 @@ describe('手编检测与恢复比较投影', () => {
       { name: '别名' }, { type: 'knowledge' }, { tags: ['新'] }, { summary: '新摘要' }, { content: '新正文' },
       { validFrom: 11 * MIN }, { validTo: 21 * MIN }, { confidence: 0.5 }, { supersedes: ['mem_y'] },
       { source: { sessionId: 's-other', eventRange: [1, 2], sourceMode: 'user-explicit' } },
-      { factTime: '2026-11' }, { related: ['mem_r'] }, { premises: [{ id: 'mem_q', digest: 'd1' }] }, { recall: 'search-only' },
+      { factTime: '2026-11' }, { related: ['mem_r'] }, { premises: [{ id: 'mem_q', digest: 'd1' }] }, { recall: 'unlisted' },
       { locked: true }, { lockedUntil: 5 },
     ]
     for (const c of changes) expect(same({ ...base, ...c }), JSON.stringify(c)).toBe(false)

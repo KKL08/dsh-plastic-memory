@@ -71,7 +71,7 @@ describe('SnapshotStore.diff / restore', () => {
 
   it.each<[string, Partial<MemoryRecord>]>([
     ['事实时间', { factTime: '2026-12' }], ['关联', { related: ['mem_other'] }], ['前提', { premises: [{ id: 'mem_p', digest: 'd1' }] }],
-    ['单条注入档位', { recall: 'search-only' }], ['锁', { locked: true }], ['锁到期', { lockedUntil: 5000 }],
+    ['单条注入档位', { recall: 'unlisted' }], ['锁', { locked: true }], ['锁到期', { lockedUntil: 5000 }],
   ])('快照之后只改了%s：默认恢复跳过这条，不把改动盖掉', async (_label, change) => {
     const s = makeStore()
     const original = record({ id: 'mem_a', content: '原文', updatedAt: 50, factTime: '2026-11' })

@@ -178,7 +178,7 @@ describe('格式：开放取值的读取口径', () => {
   })
 
   it('单条注入档位：认得的生效，不认识的跟随类型', () => {
-    expect(recallOverride({ recall: 'search-only' })).toBe('search-only')
+    expect(recallOverride({ recall: 'unlisted' })).toBe('unlisted')
     expect(recallOverride({ recall: 'core' })).toBe('core')
     expect(recallOverride({ recall: 'pinned-v2' })).toBeUndefined()
     expect(recallOverride({})).toBeUndefined()

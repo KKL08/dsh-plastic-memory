@@ -31,7 +31,7 @@ const withNewKeys = (): MemoryRecord => record({
   source: { sessionId: 's2', eventRange: [5, 9], sourceMode: 'user-explicit' },
   sourceTrail: [{ sessionId: 's2', eventRange: [5, 9], sourceMode: 'user-explicit', at: Date.UTC(2026, 10, 2), initiator: 'user', evidence: { user: true, tool: false }, change: 'refine', by: 'main' }],
   stateSince: Date.UTC(2026, 10, 1), factTime: '2026-11', lastChange: { kind: 'refine', at: Date.UTC(2026, 10, 2), op: 'op_1', by: 'main' },
-  lastWriteOp: 'op_1', related: ['mem_rel'], premises: [{ id: 'mem_pre', digest: 'd1:0123456789abcdef' }], recall: 'search-only',
+  lastWriteOp: 'op_1', related: ['mem_rel'], premises: [{ id: 'mem_pre', digest: 'd1:0123456789abcdef' }], recall: 'unlisted',
   locked: true, lockedUntil: Date.UTC(2027, 0, 1),
 })
 const pick = (r: MemoryRecord) => Object.fromEntries(NEW_KEYS.map(k => [k, r[k]]))

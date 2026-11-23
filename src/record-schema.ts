@@ -143,9 +143,9 @@ export function readChangeKind(kind: string | undefined): ChangeKind | undefined
   return (CHANGE_KINDS as readonly string[]).includes(kind) ? kind as ChangeKind : 'refine'
 }
 
-/** 单条注入档位：类型定义的三档，加「只能搜到、不进注入的索引区」。 */
-export type RecallTier = MemoryTypeDefinition['recall'] | 'search-only'
-export const RECALL_TIERS = ['core', 'search', 'passive', 'search-only'] as const satisfies readonly RecallTier[]
+/** 单条注入档位：类型定义的三档，再加一档不列入（unlisted）：不进注入的索引区，只能搜到。 */
+export type RecallTier = MemoryTypeDefinition['recall'] | 'unlisted'
+export const RECALL_TIERS = ['core', 'search', 'passive', 'unlisted'] as const satisfies readonly RecallTier[]
 /** 单条设过、认得的档位；没设或不认识时返回 undefined，由调用方取类型的档位。 */
 export function recallOverride(record: Pick<MemoryRecord, 'recall'>): RecallTier | undefined {
   const v = record.recall
