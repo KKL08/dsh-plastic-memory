@@ -944,7 +944,7 @@ describe('交付卡：提升候选就地处理', () => {
     expect(row('mem_c').queryByRole('button', { name: '撤销' })).toBeNull()
   })
 
-  it('撤销失败：原位写原话，结果文字和「撤销」都还在', async () => {
+  it('撤销失败（已撤销过或已过期）：原位写本地说法，不露原话，结果文字和「撤销」都还在', async () => {
     card(createFakeGateway({
       views: { library: libraryOf([asCandidate, plain.memory]) },
       respond: command => command.cmd === 'undo' ? { ok: false, cmd: command.cmd, code: 'not-found', detail: '快照已过期' } : decided(command),
@@ -952,7 +952,7 @@ describe('交付卡：提升候选就地处理', () => {
     expand()
     await act(async () => { fireEvent.click(row('mem_c').getByRole('button', { name: '提升为全局' })) })
     await act(async () => { fireEvent.click(row('mem_c').getByRole('button', { name: '撤销' })) })
-    expect(row('mem_c').getByRole('alert')).toHaveTextContent('没有成功：快照已过期')
+    expect(row('mem_c').getByRole('alert')).toHaveTextContent('没有成功：这次操作已经撤销或已过期，没有再撤销。')
     expect(row('mem_c').getByText('已提升为全局')).toBeInTheDocument()
     expect(row('mem_c').getByRole('button', { name: '撤销' })).toBeInTheDocument()
   })

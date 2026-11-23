@@ -30,7 +30,7 @@ const EXPECTED: Record<GuiErrorCode, (command: MemoryCommand) => Outcome> = {
   'secret-suspected': c => c.cmd === 'edit-memory' || c.cmd === 'merge-memories' || c.cmd === 'apply-edits' ? { kind: 'confirm-suspected', resend: { ...c, force: true } } : raw('secret-suspected'),
   'claimed': () => ({ kind: 'handled-elsewhere' }),
   'not-found': c => OPEN_ITEM_COMMANDS.has(c.cmd) ? { kind: 'handled-elsewhere' } : isTidy(c) ? local('not-found', 'library.batch.stale')
-    : 'memoryId' in c || 'memories' in c ? local('not-found', 'pending.memory.gone') : raw('not-found'),
+    : is(c, 'undo') ? local('not-found', 'pending.undo.gone') : 'memoryId' in c || 'memories' in c ? local('not-found', 'pending.memory.gone') : raw('not-found'),
   'stale': c => local('stale', isTidy(c) ? 'library.batch.stale' : is(c, 'undo', 'restore') ? 'pending.undo.stale' : is(c, 'ignore-advice') ? 'pending.ignore.stale' : is(c, 'forget', 'hard-delete') ? 'pending.delete.stale' : 'pending.edit.stale'),
   'secret-critical': () => local('secret-critical', 'pending.edit.secretCritical'),
   'no-baseline': () => local('no-baseline', 'pending.suggestion.noBaseline'),

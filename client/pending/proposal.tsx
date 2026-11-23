@@ -256,7 +256,7 @@ function ProposalView({ proposal, left, right }: { proposal: RequestedProposal; 
     detail = (
       <>
         <div className="pm-model-body"><p className="pm-model-text">{kept.content}</p></div>
-        <p className="pm-suggestion-into">{t('pending.proposal.dropNote', { drop: kept === left ? 'B' : 'A' })}</p>
+        <p className="pm-suggestion-into">{t('pending.proposal.dropNote', { drop: kept === left ? right?.name ?? 'B' : left.name })}</p>
       </>
     )
   } else if (proposal.action === 'keep-both') {

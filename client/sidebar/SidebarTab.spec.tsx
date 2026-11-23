@@ -19,8 +19,8 @@ const WS = '/w/app'
 /** 插件本次加载时刻（健康视图的 bootedAt）。 */
 const BOOTED = 1_000
 
-const pref = memory({ id: 'p1', type: 'preference', content: '测试用真实 Postgres。' })
-const pref2 = memory({ id: 'p2', type: 'preference', content: '测试里 mock 数据库就行。' })
+const pref = memory({ id: 'p1', name: 'postgres-in-tests', type: 'preference', content: '测试用真实 Postgres。' })
+const pref2 = memory({ id: 'p2', name: 'mock-db-in-tests', type: 'preference', content: '测试里 mock 数据库就行。' })
 const proj = memory({ id: 'j1', type: 'project', content: 'merge freeze 到 3 月 5 日。' })
 const glob = memory({ id: 'g1', type: 'profile', scope: 'global', workspacePath: undefined, content: '用户是数据工程师。' })
 
@@ -669,8 +669,8 @@ describe('SidebarTab 就地裁决', () => {
       gateway.setView('library', library(pref, proj, glob))
     })
     expect(screen.queryByRole('heading', { name: '两条记忆互相矛盾，等你决定' })).toBeNull()
-    expect(screen.getByText('已保留 A')).toBeInTheDocument()
-    expect(screen.getByText(/按模型建议处理。B 已删除，14 天内可恢复。/)).toBeInTheDocument()
+    expect(screen.getByText('已保留「postgres-in-tests」')).toBeInTheDocument()
+    expect(screen.getByText(/按模型建议处理。「mock-db-in-tests」已删除，14 天内可恢复。/)).toBeInTheDocument()
     // 删掉一条只影响之后的组装：这次对话冻结的快照里还是两条
     expect(screen.getByText('这次对话里已带入的不变，压缩后或下个对话起生效。')).toBeInTheDocument()
     // 「撤销」和别处一样是标准尺寸的幽灵按钮
@@ -678,7 +678,7 @@ describe('SidebarTab 就地裁决', () => {
 
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
     expect(gateway.executed.map(e => e.command)[1]).toEqual({ cmd: 'undo', decisionId: 'pd_1' })
-    expect(screen.queryByText('已保留 A')).toBeNull()
+    expect(screen.queryByText('已保留「postgres-in-tests」')).toBeNull()
     act(() => {
       gateway.setView('pending', pending(adoptable))
       gateway.setView('library', library(pref, pref2, proj, glob))
@@ -739,8 +739,8 @@ describe('SidebarTab 冲突行的处理建议', () => {
   const todo = { view: 'todo', scope: { kind: 'workspace', workspacePath: WS }, fromChat: true, level: 'your-call' }
 
   it.each([
-    ['keep-a', '保留 A', '采纳后 B 进最近删除，14 天内可恢复。', '已保留 A', /按模型建议处理。B 已删除，14 天内可恢复。/],
-    ['keep-b', '保留 B', '采纳后 A 进最近删除，14 天内可恢复。', '已保留 B', /按模型建议处理。A 已删除，14 天内可恢复。/],
+    ['keep-a', '保留 A', '采纳后「mock-db-in-tests」进最近删除，14 天内可恢复。', '已保留「postgres-in-tests」', /按模型建议处理。「mock-db-in-tests」已删除，14 天内可恢复。/],
+    ['keep-b', '保留 B', '采纳后「postgres-in-tests」进最近删除，14 天内可恢复。', '已保留「mock-db-in-tests」', /按模型建议处理。「postgres-in-tests」已删除，14 天内可恢复。/],
     ['keep-both', '都保留（不算冲突）', '采纳后两条都留着，以后体检不再把它们当冲突。', '两条都保留', /按模型建议处理。以后体检不再把它们当冲突。/],
   ] as const)('建议 %s：A、B 下面一行「模型建议：%s」，不显示理由；说明采纳后哪条去哪；「采纳建议」只带条目 id 和建议 id，结果写来由', async (action, conclusion, note, chip, body) => {
     const { gateway, container } = setup({ library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1', 'p2'] }), pending: pending(suggested(action)) })
@@ -758,6 +758,13 @@ describe('SidebarTab 冲突行的处理建议', () => {
     act(() => { gateway.setView('pending', pending()) })
     expect(screen.getByText(chip)).toBeInTheDocument()
     expect(screen.getByText(body)).toBeInTheDocument()
+  })
+
+  it('建议保留一方、要删的那条含密钥：说明写采纳后彻底删除、不可恢复，不说进最近删除', () => {
+    const withSecret = suggested('keep-a', 'sg_1', { ...conflict, right: { ...pref2, hasSecret: true } } as PendingItem)
+    setup({ library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1', 'p2'] }), pending: pending(withSecret) })
+    expect(yourCall().getByText('「mock-db-in-tests」含密钥，采纳后将彻底删除、不可恢复。')).toBeInTheDocument()
+    expect(yourCall().queryByText(/进最近删除/)).toBeNull()
   })
 
   it('有可采纳的建议时，后面跟「在记忆页处理 ›」：不想按建议处理的出口，落在记忆页的「等你决定」', () => {
@@ -860,7 +867,7 @@ describe('SidebarTab 别处已经在处理同一条冲突', () => {
       gateway.setView('library', library(pref, proj, glob))
     })
     expect(screen.queryByRole('heading', { name: '两条记忆互相矛盾，等你决定' })).toBeNull()
-    expect(screen.queryByText('已保留 B')).toBeNull()
+    expect(screen.queryByText('已保留「mock-db-in-tests」')).toBeNull()
     expect(screen.getByRole('alert')).toHaveTextContent(refused)
   })
 
@@ -897,7 +904,7 @@ describe('SidebarTab 一条冲突同时只发一次裁决', () => {
     await act(async () => { fireEvent.click(group.getByRole('button', { name: '采纳建议' })) })
     expect(gateway.executed.map(e => e.command.cmd)).toEqual(['apply-proposal', 'forget'])
     await act(async () => { finish!() })
-    expect(screen.getByText('已保留 A')).toBeInTheDocument()
+    expect(screen.getByText('已保留「postgres-in-tests」')).toBeInTheDocument()
   })
 })
 
@@ -948,8 +955,8 @@ describe('SidebarTab 裁决删掉的一方含密钥', () => {
       command => ({ ok: true, cmd: command.cmd, decisionId: 'pd_1', isHardDeleted: true }),
     )
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '采纳建议' })) })
-    expect(screen.getByText('按模型建议处理。B 含密钥，已彻底删除。如果它是真的凭证，记得去换一个新的。')).toBeInTheDocument()
-    expect(screen.queryByText(/B 已删除，14 天内可恢复。/)).toBeNull()
+    expect(screen.getByText('按模型建议处理。「mock-db-in-tests」含密钥，已彻底删除。如果它是真的凭证，记得去换一个新的。')).toBeInTheDocument()
+    expect(screen.queryByText(/「mock-db-in-tests」已删除，14 天内可恢复。/)).toBeNull()
     expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
   })
 })
@@ -1183,7 +1190,7 @@ describe('SidebarTab 确认收起后的键盘焦点', () => {
     await press(await screen.findByRole('button', { name: '采纳建议' }))
     const adopt = { cmd: 'apply-proposal', decisionId: 'pd_1', suggestionId: 'sg_1' }
     expect(gateway.executed.map(e => e.command)).toEqual([adopt, { cmd: 'undo', decisionId: 'pd_1' }, adopt])
-    expect(screen.getByText('已保留 A')).toBeInTheDocument()
+    expect(screen.getByText('已保留「postgres-in-tests」')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '采纳建议' })).toBeNull()
   })
 
@@ -1296,11 +1303,11 @@ describe('SidebarTab 折叠与「等你决定」', () => {
     })
     const head = screen.getByRole('button', { name: '等你决定' })
     expect(head.querySelector('.pm-marker')).toBeNull()
-    expect(within(yourCall()).getByText('已保留 A')).toBeInTheDocument()
+    expect(within(yourCall()).getByText('已保留「postgres-in-tests」')).toBeInTheDocument()
 
     fireEvent.click(head)
     expect(head).toHaveAttribute('aria-expanded', 'false')
-    expect(screen.queryByText('已保留 A')).toBeNull()
+    expect(screen.queryByText('已保留「postgres-in-tests」')).toBeNull()
     act(() => { gateway.setView('pending', pending(vertical)) })
     const again = screen.getByRole('button', { name: '等你决定 1' })
     expect(again).toHaveAttribute('aria-expanded', 'false')

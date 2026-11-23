@@ -66,6 +66,21 @@ All notable changes to this project are documented here. The format follows
   the undo could still write it back, bringing back a deleted secret or
   removing a global memory with the same id. Restores now check each memory
   again right before writing it back and skip it once it has been deleted.
+- After merging two conflicting memories into one, the only way to undo the
+  merge was the result card, which went away once you left the view;
+  Recently deleted could bring back only the merged-away memory. Its row
+  there now also has Undo merge, which puts both memories back as they were
+  and returns the conflict to Waiting on you.
+- Undoing something that had already been undone or had expired showed an
+  internal message with an id, in Chinese even in the English interface. It
+  now says plainly that nothing was undone.
+- Conflict results and their notes on the memory page and in the side panel
+  now name the memories ("Kept “…”", "“…” was deleted") instead of calling
+  them A and B, since the deleted one is no longer on screen. A long name in
+  the result label is cut off with an ellipsis.
+- In the side panel, when the memory a suggestion would delete holds a
+  secret, the note said it would move to Recently deleted. It now says the
+  memory will be deleted permanently, as the memory page already did.
 
 ## [0.2.0] - 2026-11-21
 

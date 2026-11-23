@@ -22,11 +22,12 @@ export interface UndoDeps {
 /** stale：之后又被改过（六种撤销共用），什么都没动，或停在第三方的版本。真失败（读写出错）直接抛出，由调用方回 failed。 */
 export type UndoErrorCode = 'not-found' | 'claimed' | 'cross-workspace' | 'stale' | 'target-taken'
 /**
- * 内部子码，只给测试和日志用，不进界面契约。no-entry：条目不在、未结清或已换了裁决；undone：已撤销过；expired：改前快照已过保留窗口；
+ * 内部子码，只给测试和日志用，不进界面契约。no-entry：条目不在、未结清或已换了裁决；undone：已撤销过；
+ * resettled：条目撤销后又重新结清过，已不是调用方看到的那次（改前快照对不上）；expired：改前快照已过保留窗口；
  * changed：目标之后被改过、删掉或搬走，什么都没动；redacted：目标之后含密钥被物理删除；kept-third-party：合并撤销写了一条之后停下，
  * 那一条已被第三方改过，没有写回，停在第三方的版本。
  */
-export type UndoReason = 'no-entry' | 'undone' | 'expired' | 'changed' | 'redacted' | 'kept-third-party'
+export type UndoReason = 'no-entry' | 'undone' | 'resettled' | 'expired' | 'changed' | 'redacted' | 'kept-third-party'
 
 export type UndoError = { kind: 'error'; code: UndoErrorCode; reason?: UndoReason; rejected?: CrossWorkspaceRejection[]; message: string }
 export type UndoResult = { kind: 'undone'; decisionId: string; restored: string[]; snapshotId?: string } | UndoError
@@ -50,13 +51,16 @@ const GLOBAL: Scope = { kind: 'global' }
  * 机制三种：按改前快照恢复（直接改与合并、整理所选的应用、模型改写与替代、删一方的裁决、提升为全局）、搬回（移到项目）、放回标记（留在本项目）。
  * 之后被改过的一律回 stale；同一条同时只撤一次，撞上另一次操作回 claimed。
  */
-export function executeUndo(args: { decisionId: string; allowCrossWorkspace?: boolean }, context: GovernanceContext, deps: UndoDeps): Promise<UndoResult> {
+export function executeUndo(args: UndoArgs, context: GovernanceContext, deps: UndoDeps): Promise<UndoResult> {
   return claimAndUndo(args, context, deps)
 }
 
+/** snapshotId：调用方看到的那次结清的改前快照，给了就在认领后核对，对不上（期间撤销后又重新裁决过）回 stale、什么都不动。 */
+type UndoArgs = { decisionId: string; snapshotId?: string; allowCrossWorkspace?: boolean }
+
 /** isExpected：认领后重读的条目还得是调用方看到的那条（最近删除的恢复：期间被撤销或重新裁决过的不再按旧裁决动手）。 */
 async function claimAndUndo(
-  args: { decisionId: string; allowCrossWorkspace?: boolean }, context: GovernanceContext, deps: UndoDeps, isExpected?: (entry: UndoableEntry) => boolean,
+  args: UndoArgs, context: GovernanceContext, deps: UndoDeps, isExpected?: (entry: UndoableEntry) => boolean,
 ): Promise<UndoResult> {
   // 两个标签页或两个宿主进程同时撤同一条，或撤销撞上裁决、体检：只让一条执行，另一条什么都不动
   const claimed = await deps.decisions.withClaim(args.decisionId, async () => {
@@ -64,6 +68,9 @@ async function claimAndUndo(
     const entry = found === undefined ? undefined : asUndoable(found)
     if (entry === undefined || isExpected?.(entry) === false) return notFound(args.decisionId, 'no-entry')
     if (entry.settled.isUndone === true) return notFound(`${entry.id}（已撤销）`, 'undone')
+    if (args.snapshotId !== undefined && entry.settled.snapshotId !== args.snapshotId) {
+      return error('stale', `待决项 ${entry.id} 在你看到之后撤销过、又重新处理了，未做任何改动`, 'resettled')
+    }
     const rule = undoRuleOf(entry)
     const allow = args.allowCrossWorkspace
     if (rule.mechanism === 'relocate') return await relocate(entry, rule, allow, context, deps)

@@ -96,7 +96,7 @@ export const zh = {
 
   'conflict.title': '两条记忆互相矛盾，等你决定',
   'conflict.side': '记忆 {side}',
-  'conflict.purgedSide': '{side} 含密钥，已彻底删除。如果它是真的凭证，记得去换一个新的。',
+  'conflict.purgedSide': '「{name}」含密钥，已彻底删除。如果它是真的凭证，记得去换一个新的。',
   'conflict.purgedMemory': '这条记忆含密钥，已彻底删除。如果它是真的凭证，记得去换一个新的。',
   'conflict.twoSentences': '{first}{second}',
   'conflict.missing': '这条记忆找不到了，可能已经被删除。',
@@ -220,7 +220,7 @@ export const en: Record<LocaleKey, string> = {
 
   'conflict.title': 'Two memories contradict each other',
   'conflict.side': 'Memory {side}',
-  'conflict.purgedSide': '{side} held a secret and was deleted permanently. If it was a real credential, remember to rotate it.',
+  'conflict.purgedSide': '“{name}” held a secret and was deleted permanently. If it was a real credential, remember to rotate it.',
   'conflict.purgedMemory': 'This memory held a secret and was deleted permanently. If it was a real credential, remember to rotate it.',
   'conflict.twoSentences': '{first} {second}',
   'conflict.missing': 'This memory can no longer be found. It may have been deleted.',

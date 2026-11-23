@@ -70,7 +70,7 @@ describe('待处理：按级别分组', () => {
     const { gateway } = setup([horizontal, tidy])
     expect(screen.queryByText('都处理完了，agent 之后按你的决定来。')).toBeNull()
     ruleConflict('保留 A')
-    await screen.findByText('已保留 A')
+    await screen.findByText('已保留「postgres-in-tests」')
     act(() => { gateway.setView('pending', view(tidy)) })
     // 还剩一条可以整理：不算处理完
     expect(screen.queryByText('都处理完了，agent 之后按你的决定来。')).toBeNull()
@@ -87,13 +87,13 @@ describe('待处理：按级别分组', () => {
     // 没处理过的卡不带结果卡的淡入
     expect(document.querySelector('.pm-pending-item--result')).toBeNull()
     ruleConflict('保留 A')
-    await screen.findByText('已保留 A')
+    await screen.findByText('已保留「postgres-in-tests」')
     const yourCall = screen.getByRole('region', { name: '等你决定 1' })
-    expect(within(yourCall).getByText('已保留 A')).toBeInTheDocument()
+    expect(within(yourCall).getByText('已保留「postgres-in-tests」')).toBeInTheDocument()
     expect(screen.getByRole('region', { name: '先处理 1' })).toBeInTheDocument()
     // 标记列不空出来：处理完换成灰圆点，标题不往左跳
-    expect(within(yourCall).getByText('已保留 A').closest('article')!.querySelector('.pm-pending-head .pm-marker--done')).not.toBeNull()
-    expect(within(yourCall).getByText('已保留 A').closest('article')).toHaveClass('pm-pending-item--result')
+    expect(within(yourCall).getByText('已保留「postgres-in-tests」').closest('article')!.querySelector('.pm-pending-head .pm-marker--done')).not.toBeNull()
+    expect(within(yourCall).getByText('已保留「postgres-in-tests」').closest('article')).toHaveClass('pm-pending-item--result')
   })
 })
 

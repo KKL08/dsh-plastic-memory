@@ -396,7 +396,8 @@ describe('横向冲突卡：采纳建议、直接处理（票 05）', () => {
   const keepBoth: Suggestion = { id: 'sg_3', action: 'keep-both', reason: '两条说的是不同场景。', isSourced: false, ops: [{ kind: 'keep', memoryId: 'a' }, { kind: 'keep', memoryId: 'b' }] }
   const merged: Suggestion = {
     id: 'sg_2', action: 'merge', reason: '两边各有适用场景。', isSourced: false,
-    ops: [{ kind: 'edit', memoryId: 'a', content: '集成测试用真实 Postgres。', name: A.name, summary: A.summary, tags: [] }, { kind: 'forget', memoryId: 'b' }],
+    // 融合稿的名称和两条原名都不同：锁住结果里各处取的是融合前还是融合后的名称
+    ops: [{ kind: 'edit', memoryId: 'a', content: '集成测试用真实 Postgres。', name: 'db-in-tests', summary: A.summary, tags: [] }, { kind: 'forget', memoryId: 'b' }],
   }
   const DIRECT = ['保留 A', '保留 B', '都保留，不算冲突']
   const rowOf = () => document.querySelector('.pm-conflict-actions') as HTMLElement
@@ -408,7 +409,7 @@ describe('横向冲突卡：采纳建议、直接处理（票 05）', () => {
 
   it('建议保留 A：说明行写采纳后果，按钮行「采纳建议」（主按钮）在前；点了直接发 apply-proposal（只带条目 id 和建议 id），不加确认', async () => {
     const { commands } = setup([withState({ suggestion: keepA })])
-    expect(screen.getByText('采纳后 B 进最近删除，14 天内可恢复。')).toBeInTheDocument()
+    expect(screen.getByText('采纳后「mock-db-in-tests」进最近删除，14 天内可恢复。')).toBeInTheDocument()
     expect(labelsOf(rowOf())).toEqual(['采纳建议', ...DIRECT])
     const adopt = screen.getByRole('button', { name: '采纳建议' })
     expect(adopt).toHaveClass('pm-btn--primary')
@@ -418,11 +419,11 @@ describe('横向冲突卡：采纳建议、直接处理（票 05）', () => {
     await waitFor(() => { expect(commands()).toEqual([{ cmd: 'apply-proposal', decisionId: 'd-h', suggestionId: 'sg_1' }]) })
   })
 
-  it('采纳后结果卡：「已保留 A」，写「按模型建议处理。」和去向，带撤销、焦点落在「撤销」；撤销发 undo，视图带回后建议还在', async () => {
+  it('采纳后结果卡：「已保留」写留下那条的名称，写「按模型建议处理。」和去向（被删那条也写名称），带撤销、焦点落在「撤销」；撤销发 undo，视图带回后建议还在', async () => {
     const { gateway, commands } = setup([withState({ suggestion: keepA })], { respond: command => ({ ok: true, cmd: command.cmd, decisionId: 'd-h' }) as MemoryCommandResult })
     await press(screen.getByRole('button', { name: '采纳建议' }))
-    expect(await screen.findByText('已保留 A')).toBeInTheDocument()
-    expect(screen.getByText('按模型建议处理。B 已删除，14 天内可恢复。')).toBeInTheDocument()
+    expect(await screen.findByText('已保留「postgres-in-tests」')).toBeInTheDocument()
+    expect(screen.getByText('按模型建议处理。「mock-db-in-tests」已删除，14 天内可恢复。')).toBeInTheDocument()
     await waitFor(() => { expect(screen.getByRole('button', { name: '撤销' })).toHaveFocus() })
     act(() => { gateway.setView('pending', view()) })
     await press(screen.getByRole('button', { name: '撤销' }))
@@ -443,7 +444,7 @@ describe('横向冲突卡：采纳建议、直接处理（票 05）', () => {
 
   it('建议回查过两条的出处：说明行先写这一句，再写采纳后果；没回查到时不写', () => {
     const first = setup([withState({ suggestion: { ...keepA, isSourced: true } })])
-    expect(screen.getByText('建议是回查两条的出处后给出的。采纳后 B 进最近删除，14 天内可恢复。')).toBeInTheDocument()
+    expect(screen.getByText('建议是回查两条的出处后给出的。采纳后「mock-db-in-tests」进最近删除，14 天内可恢复。')).toBeInTheDocument()
     first.unmount()
     const second = setup([withState({ suggestion: { ...keepBoth, isSourced: true } })])
     expect(screen.getByText('建议是回查两条的出处后给出的。采纳后两条都留着，以后体检不再把它们当冲突。')).toBeInTheDocument()
@@ -455,20 +456,20 @@ describe('横向冲突卡：采纳建议、直接处理（票 05）', () => {
   it('英文界面：回查过出处的说明行', () => {
     const gateway = createFakeGateway({ session: SESSION, config, views: { pending: view(withState({ suggestion: { ...keepA, isSourced: true } })), health: scannedHealth(NOW) } })
     render(<PanelShell gateway={gateway} t={createTranslator(en)}><PendingTab nav={createNavStore()} session={SESSION} scope={ALL_SCOPE} workspacePath="/w/app" now={NOW} /></PanelShell>)
-    expect(screen.getByText('This suggestion was made after looking up the conversations both memories came from. If you adopt it, B moves to Recently deleted and can be restored within 14 days.')).toBeInTheDocument()
+    expect(screen.getByText('This suggestion was made after looking up the conversations both memories came from. If you adopt it, “mock-db-in-tests” moves to Recently deleted and can be restored within 14 days.')).toBeInTheDocument()
   })
 
-  it('建议保留 B：采纳后「已保留 B」，A 进最近删除', async () => {
+  it('建议保留 B：说明行和结果都用名称指代，B 留下、A 进最近删除', async () => {
     setup([withState({ suggestion: { ...keepA, action: 'keep-b', ops: [{ kind: 'forget', memoryId: 'a' }, { kind: 'keep', memoryId: 'b' }] } })])
-    expect(screen.getByText('采纳后 A 进最近删除，14 天内可恢复。')).toBeInTheDocument()
+    expect(screen.getByText('采纳后「postgres-in-tests」进最近删除，14 天内可恢复。')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '采纳建议' }))
-    expect(await screen.findByText('已保留 B')).toBeInTheDocument()
-    expect(screen.getByText('按模型建议处理。A 已删除，14 天内可恢复。')).toBeInTheDocument()
+    expect(await screen.findByText('已保留「mock-db-in-tests」')).toBeInTheDocument()
+    expect(screen.getByText('按模型建议处理。「postgres-in-tests」已删除，14 天内可恢复。')).toBeInTheDocument()
   })
 
-  it('融合建议（票 06）：说明行写采纳后被并入的那条去哪，「采纳建议」在前；点了直接发 apply-proposal，不加确认', async () => {
+  it('融合建议：说明行用名称写采纳后被并入的那条去哪，「采纳建议」在前；点了直接发 apply-proposal，不加确认', async () => {
     const { commands } = setup([withState({ suggestion: merged })])
-    expect(screen.getByText('采纳后 B 进最近删除，14 天内可恢复。')).toBeInTheDocument()
+    expect(screen.getByText('采纳后「mock-db-in-tests」进最近删除，14 天内可恢复。')).toBeInTheDocument()
     expect(labelsOf(rowOf())).toEqual(['采纳建议', ...DIRECT])
     await press(screen.getByRole('button', { name: '采纳建议' }))
     expect(screen.queryByRole('group')).toBeNull()
@@ -481,7 +482,7 @@ describe('横向冲突卡：采纳建议、直接处理（票 05）', () => {
     })
     await press(screen.getByRole('button', { name: '采纳建议' }))
     expect(await screen.findByText('已融合成一条')).toBeInTheDocument()
-    expect(screen.getByText('按模型建议处理。B 已删除，14 天内可恢复。')).toBeInTheDocument()
+    expect(screen.getByText('按模型建议处理。「mock-db-in-tests」已删除，14 天内可恢复。')).toBeInTheDocument()
     expect(screen.getByText('集成测试用真实 Postgres。')).toBeInTheDocument()
     await waitFor(() => { expect(screen.getByRole('button', { name: '撤销' })).toHaveFocus() })
     await press(screen.getByRole('button', { name: '撤销' }))
@@ -504,20 +505,20 @@ describe('横向冲突卡：采纳建议、直接处理（票 05）', () => {
     expect(screen.queryByRole('button', { name: '采纳建议' })).toBeNull()
   })
 
-  it('融合稿写进 B 时：说明行和结果都写 A 进最近删除', async () => {
+  it('融合稿写进 B 时：说明行和结果都写 A 的名称进最近删除', async () => {
     const intoB: Suggestion = { ...merged, ops: [{ kind: 'forget', memoryId: 'a' }, { ...merged.ops[0]!, memoryId: 'b' } as Suggestion['ops'][number]] }
     setup([withState({ suggestion: intoB })], { respond: command => ({ ok: true, cmd: command.cmd, decisionId: 'd-h' }) as MemoryCommandResult })
-    expect(screen.getByText('采纳后 A 进最近删除，14 天内可恢复。')).toBeInTheDocument()
+    expect(screen.getByText('采纳后「postgres-in-tests」进最近删除，14 天内可恢复。')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '采纳建议' }))
-    expect(await screen.findByText('按模型建议处理。A 已删除，14 天内可恢复。')).toBeInTheDocument()
+    expect(await screen.findByText('按模型建议处理。「postgres-in-tests」已删除，14 天内可恢复。')).toBeInTheDocument()
   })
 
   it.each([
-    ['退回时写盘出错、融合稿还在', { decisionId: 'pd_batch', memoryIds: ['a'], unrecordedIds: [] }, 'A 已写成融合稿，B 没有删除。撤销可把 A 退回原样。', { cmd: 'undo', decisionId: 'pd_batch' }],
-    ['退回前 A 又被别处改过', { memoryIds: [], unrecordedIds: ['a'] }, 'B 没有删除；A 退回前又被别处改过，停在那边的版本。', undefined],
-    ['A 已退回、B 仍被删', { decisionId: 'pd_batch', memoryIds: ['b'], unrecordedIds: [] }, '这次融合没有做完，A、B 现在的内容以记忆列表为准。撤销可退回这次留下的改动。', { cmd: 'undo', decisionId: 'pd_batch' }],
-    ['两条都被别处改过', { memoryIds: [], unrecordedIds: ['a', 'b'] }, '这次融合没有做完，A、B 现在的内容以记忆列表为准。', undefined],
-  ] as const)('采纳融合只完成了一部分（%s）：结果卡如实写，能撤的按那一笔撤', async (_label, partial, body, undo) => {
+    ['退回时写盘出错、融合稿还在', { decisionId: 'pd_batch', memoryIds: ['a'], unrecordedIds: [] }, '「db-in-tests」已写成融合稿，「mock-db-in-tests」没有删除。撤销可把「db-in-tests」退回原样。', { cmd: 'undo', decisionId: 'pd_batch' }],
+    ['退回前 A 又被别处改过', { memoryIds: [], unrecordedIds: ['a'] }, '「mock-db-in-tests」没有删除；「postgres-in-tests」退回前又被别处改过，停在那边的版本。', undefined],
+    ['A 已退回、B 仍被删', { decisionId: 'pd_batch', memoryIds: ['b'], unrecordedIds: [] }, '这次融合没有做完，「postgres-in-tests」、「mock-db-in-tests」现在的内容以记忆列表为准。撤销可退回这次留下的改动。', { cmd: 'undo', decisionId: 'pd_batch' }],
+    ['两条都被别处改过', { memoryIds: [], unrecordedIds: ['a', 'b'] }, '这次融合没有做完，「postgres-in-tests」、「mock-db-in-tests」现在的内容以记忆列表为准。', undefined],
+  ] as const)('采纳融合只完成了一部分（%s）：结果卡用名称如实写，能撤的按那一笔撤', async (_label, partial, body, undo) => {
     const { commands } = setup([withState({ suggestion: merged })], {
       respond: command => ({ ok: true, cmd: command.cmd, snapshotId: 'snap', isPartial: true, ...partial }) as unknown as MemoryCommandResult,
     })
@@ -550,8 +551,8 @@ describe('横向冲突卡：采纳建议、直接处理（票 05）', () => {
     expect(commands()).toEqual([])
     await press(within(group).getByRole('button', { name: '保留 A' }))
     await waitFor(() => { expect(commands()).toEqual([{ cmd: 'resolve', decisionId: 'd-h', verdict: 'keep-left' }]) })
-    expect(await screen.findByText('已保留 A')).toBeInTheDocument()
-    expect(screen.getByText('按你的选择处理。B 已删除，14 天内可恢复。')).toBeInTheDocument()
+    expect(await screen.findByText('已保留「postgres-in-tests」')).toBeInTheDocument()
+    expect(screen.getByText('按你的选择处理。「mock-db-in-tests」已删除，14 天内可恢复。')).toBeInTheDocument()
     await waitFor(() => { expect(screen.getByRole('button', { name: '撤销' })).toHaveFocus() })
   })
 
@@ -559,8 +560,8 @@ describe('横向冲突卡：采纳建议、直接处理（票 05）', () => {
     const { commands } = setup([withState({ suggestion: keepA })])
     fireEvent.click(screen.getByRole('button', { name: '保留 B' }))
     fireEvent.click(within(screen.getByRole('group', { name: '保留 B，A 进最近删除？' })).getByRole('button', { name: '保留 B' }))
-    expect(await screen.findByText('已保留 B')).toBeInTheDocument()
-    expect(screen.getByText('按你的选择处理。A 已删除，14 天内可恢复。')).toBeInTheDocument()
+    expect(await screen.findByText('已保留「mock-db-in-tests」')).toBeInTheDocument()
+    expect(screen.getByText('按你的选择处理。「postgres-in-tests」已删除，14 天内可恢复。')).toBeInTheDocument()
     expect(commands()).toEqual([{ cmd: 'resolve', decisionId: 'd-h', verdict: 'keep-right' }])
   })
 
@@ -589,8 +590,8 @@ describe('横向冲突卡：采纳建议、直接处理（票 05）', () => {
     expect(screen.getByText('保留 A：B 含密钥，将彻底删除、不可恢复。')).toBeInTheDocument()
     expect(commands()).toEqual([])
     await press(screen.getByRole('button', { name: '彻底删除' }))
-    expect(await screen.findByText('已保留 A')).toBeInTheDocument()
-    expect(screen.getByText('按你的选择处理。B 含密钥，已彻底删除。如果它是真的凭证，记得去换一个新的。')).toBeInTheDocument()
+    expect(await screen.findByText('已保留「postgres-in-tests」')).toBeInTheDocument()
+    expect(screen.getByText('按你的选择处理。「mock-db-in-tests」含密钥，已彻底删除。如果它是真的凭证，记得去换一个新的。')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
     expect(commands()).toEqual([{ cmd: 'resolve', decisionId: 'd-h', verdict: 'keep-left' }])
   })
@@ -599,12 +600,12 @@ describe('横向冲突卡：采纳建议、直接处理（票 05）', () => {
     const { commands } = setup([withState({ right: { ...B, hasSecret: true }, suggestion: keepA })], {
       respond: command => ({ ok: true, cmd: command.cmd, decisionId: 'd-h', isHardDeleted: true }) as MemoryCommandResult,
     })
-    expect(screen.getByText('B 含密钥，采纳后将彻底删除、不可恢复。')).toBeInTheDocument()
+    expect(screen.getByText('「mock-db-in-tests」含密钥，采纳后将彻底删除、不可恢复。')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '采纳建议' }))
     expect(screen.getByText('保留 A：B 含密钥，将彻底删除、不可恢复。')).toBeInTheDocument()
     expect(commands()).toEqual([])
     fireEvent.click(screen.getByRole('button', { name: '彻底删除' }))
-    expect(await screen.findByText('按模型建议处理。B 含密钥，已彻底删除。如果它是真的凭证，记得去换一个新的。')).toBeInTheDocument()
+    expect(await screen.findByText('按模型建议处理。「mock-db-in-tests」含密钥，已彻底删除。如果它是真的凭证，记得去换一个新的。')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
     expect(commands()).toEqual([{ cmd: 'apply-proposal', decisionId: 'd-h', suggestionId: 'sg_1' }])
   })
@@ -623,7 +624,7 @@ describe('横向冲突卡：采纳建议、直接处理（票 05）', () => {
     expect(screen.queryByRole('button', { name: '采纳建议' })).toBeNull()
     expect(labelsOf(rowOf())).toEqual(DIRECT)
     expect(screen.queryByRole('alert')).toBeNull()
-    expect(screen.queryByText('已保留 A')).toBeNull()
+    expect(screen.queryByText('已保留「postgres-in-tests」')).toBeNull()
     // 焦点不掉到页首：落在卡上剩下的控件
     await waitFor(() => { expect(document.activeElement?.closest('.pm-pending-item')).not.toBeNull() })
   })
@@ -690,10 +691,10 @@ describe('横向冲突卡：采纳建议、直接处理（票 05）', () => {
   it('英文界面：按钮、说明行、结果卡都有英文', async () => {
     const gateway = createFakeGateway({ session: SESSION, config, views: { pending: view(withState({ suggestion: keepA })), health: scannedHealth(NOW) } })
     render(<PanelShell gateway={gateway} t={createTranslator(en)}><PendingTab nav={createNavStore()} session={SESSION} scope={ALL_SCOPE} workspacePath="/w/app" now={NOW} /></PanelShell>)
-    expect(screen.getByText('If you adopt it, B moves to Recently deleted and can be restored within 14 days.')).toBeInTheDocument()
+    expect(screen.getByText('If you adopt it, “mock-db-in-tests” moves to Recently deleted and can be restored within 14 days.')).toBeInTheDocument()
     expect(labelsOf(rowOf())).toEqual(['Adopt suggestion', 'Keep A', 'Keep B', 'Keep both, not a conflict'])
     fireEvent.click(screen.getByRole('button', { name: 'Adopt suggestion' }))
-    expect(await screen.findByText('Kept A')).toBeInTheDocument()
-    expect(screen.getByText('Done as the model suggested. B was deleted and can be restored within 14 days.')).toBeInTheDocument()
+    expect(await screen.findByText('Kept “postgres-in-tests”')).toBeInTheDocument()
+    expect(screen.getByText('Done as the model suggested. “mock-db-in-tests” was deleted and can be restored within 14 days.')).toBeInTheDocument()
   })
 })

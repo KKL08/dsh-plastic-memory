@@ -6,7 +6,7 @@ import { themeCss } from './theme.ts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { AdviceNote, ResultLine, adviceCss } from './Advice.tsx'
 import { Icon } from './Icon.tsx'
-import { Chip } from './Chip.tsx'
+import { Chip, chipCss } from './Chip.tsx'
 import { DismissButton } from './DismissButton.tsx'
 import { EmptyState } from './EmptyState.tsx'
 import { HealthBanner } from './HealthBanner.tsx'
@@ -95,8 +95,8 @@ describe('Chip', () => {
       <Chip variant="result">已按 A</Chip>
       <Chip variant="neutral">规划中</Chip>
     </>)
-    expect(screen.getByText('已按 A')).toHaveClass('pm-chip', 'pm-chip--result')
-    expect(screen.getByText('已按 A').querySelector('.pm-chip-dot')).not.toBeNull()
+    expect(screen.getByText('已按 A').closest('.pm-chip')).toHaveClass('pm-chip', 'pm-chip--result')
+    expect(screen.getByText('已按 A').closest('.pm-chip')!.querySelector('.pm-chip-dot')).not.toBeNull()
     expect(screen.getByText('规划中')).toHaveClass('pm-chip--neutral')
     expect(container.querySelectorAll('.pm-chip-dot')).toHaveLength(1)
   })
@@ -158,6 +158,21 @@ describe('建议区与结果行', () => {
     const line = container.querySelector('.pm-result-line')!
     expect([...line.children].map(c => c.textContent)).toEqual(['已提升为全局', '所有项目都会带入它。', '撤销'])
     expect(line.firstElementChild).toHaveClass('pm-chip--result')
+  })
+
+  it('结果 chip 写了很长的记忆名称：不超过一行宽，文字单行截断加省略号，圆点照旧在', () => {
+    const { container } = renderInShell(<ResultLine chip="已保留「一条名字非常非常长的记忆，长到放不下一行」">按你的选择处理。</ResultLine>)
+    const chip = container.querySelector('.pm-chip--result')!
+    expect(chip.querySelector('.pm-chip-dot')).not.toBeNull()
+    expect(chip.querySelector('.pm-chip-text')).toHaveTextContent('已保留「一条名字非常非常长的记忆，长到放不下一行」')
+    expect(chipCss).toMatch(/\.pm-chip \{[^}]*max-width: 100%;/)
+    expect(chipCss).toMatch(/\.pm-chip-text \{[^}]*min-width: 0;[^}]*overflow: hidden;[^}]*text-overflow: ellipsis;/)
+  })
+
+  it('名称是一长串没有断点的英文：说明和结果正文可以在任意处断行，不撑出窄栏；结果正文有基准宽，chip 占得太宽时整段折到 chip 下一行，不挤成细条', () => {
+    expect(adviceCss).toMatch(/\.pm-advice-text, \.pm-result-text \{[^}]*overflow-wrap: anywhere;/)
+    expect(adviceCss).toMatch(/\.pm-result-text \{[^}]*flex: 1 1 12em;/)
+    expect(adviceCss).toMatch(/\.pm-result-line \{[^}]*flex-wrap: wrap;/)
   })
 
   it('建议区靠开头的图标认出来，不画细线：建议是灯泡、说明是信息图标；结果行靠结果 chip，也不画线', () => {

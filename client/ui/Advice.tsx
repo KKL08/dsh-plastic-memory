@@ -2,6 +2,7 @@
  * 建议区与结果行（DESIGN.md「Advice」）：记忆卡下面、动作行上面。不画细线：细线只用来分条目，建议区靠开头的图标认出来。
  * - AdviceNote：图标 + 加粗的「建议」（灯泡；冲突裁决写「说明」，信息图标），后面一段次文字，写来由和每个动作的后果。
  * - ResultLine：处理之后建议区和动作原位换成它：结果 chip（自带圆点，不另加图标）+ 一句后果 + 撤销（能撤销时）。
+ *   后果那句至少要有 12 个字宽，chip 带着长名称占得太宽时整句折到下一行，不挤成细条；没有断点的长名称在任意处断行。
  * 状态和它的动作放在一起，记忆卡的元信息行只放属性。
  */
 import type { ReactNode } from 'react'
@@ -45,6 +46,7 @@ export const adviceCss = `
 .pm-advice, .pm-result-line { display: flex; gap: 6px; margin: 0; padding-top: 4px; }
 .pm-advice > svg { flex: none; margin-top: 2px; color: var(--pm-text); }
 .pm-advice-label { flex: none; margin-right: 2px; font-size: 12px; font-weight: 600; line-height: 1.6; color: var(--pm-text); }
-.pm-advice-text, .pm-result-text { flex: 1; min-width: 0; margin: 0; font-size: 12px; line-height: 1.6; color: var(--pm-text-2); }
+.pm-advice-text, .pm-result-text { flex: 1; min-width: 0; margin: 0; font-size: 12px; line-height: 1.6; color: var(--pm-text-2); overflow-wrap: anywhere; }
 .pm-result-line { align-items: center; flex-wrap: wrap; gap: 8px; }
+.pm-result-text { flex: 1 1 12em; }
 `

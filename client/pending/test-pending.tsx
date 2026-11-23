@@ -12,8 +12,8 @@ import { PendingTab } from './PendingTab.tsx'
 const SESSION = { kind: 'ready', sessionId: 's1', cwd: '/w/app' } as const
 const config: PluginConfig = { snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget: 'plugin-global', accent: 'ella', customTypes: {} }
 
-const A = memory({ id: 'a', content: '测试用真实 Postgres。', sourceMode: 'user-explicit' })
-const B = memory({ id: 'b', content: '测试里 mock 数据库就行。', sourceMode: 'agent-inferred' })
+const A = memory({ id: 'a', name: 'postgres-in-tests', content: '测试用真实 Postgres。', sourceMode: 'user-explicit' })
+const B = memory({ id: 'b', name: 'mock-db-in-tests', content: '测试里 mock 数据库就行。', sourceMode: 'agent-inferred' })
 const horizontal: Extract<PendingItem, { kind: 'conflict-horizontal' }> = { kind: 'conflict-horizontal', level: 'your-call', decisionId: 'd-h', firstSeenAt: 1, summary: '测试里怎么准备数据库，两条记忆互相矛盾', left: A, right: B, preferredId: 'a' }
 const vertical: Extract<PendingItem, { kind: 'conflict-vertical' }> = { kind: 'conflict-vertical', level: 'your-call', decisionId: 'd-v', firstSeenAt: 2, summary: '包管理器和基线矛盾', memory: memory({ id: 'v', content: '用 npm。' }), baselineRef: 'AGENTS.md：用 pnpm' }
 const promote: Extract<PendingItem, { kind: 'promote-candidate' }> = { kind: 'promote-candidate', level: 'your-call', decisionId: 'd-p', firstSeenAt: 3, memory: memory({ id: 'p', content: '所有项目都用 vitest。' }) }

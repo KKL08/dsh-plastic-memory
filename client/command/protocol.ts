@@ -56,8 +56,9 @@ function localKeyOf(command: MemoryCommand, code: GuiErrorCode): LocaleKey | und
       return command.cmd === 'undo' || command.cmd === 'restore' ? 'pending.undo.stale'
         : command.cmd === 'ignore-advice' ? 'pending.ignore.stale'
         : command.cmd === 'forget' || command.cmd === 'hard-delete' ? 'pending.delete.stale' : 'pending.edit.stale'
-    // 按记忆动手的：要动的记忆已经不在（多半在外面删了），服务端已重写视图。待决项的在前面算别处已处理；撤销的是快照没了，照常显示原话
-    case 'not-found': return 'memoryId' in command || 'memories' in command ? 'pending.memory.gone' : undefined
+    // 按记忆动手的：要动的记忆已经不在（多半在外面删了），服务端已重写视图。待决项的在前面算别处已处理；
+    // 撤销的是这次操作已撤销过、条目已不在或快照过期，原话里只有账本 id，换成本地说法
+    case 'not-found': return command.cmd === 'undo' ? 'pending.undo.gone' : 'memoryId' in command || 'memories' in command ? 'pending.memory.gone' : undefined
     case 'secret-critical': return 'pending.edit.secretCritical'
     // 垂直冲突的补上建议、按要求生成：这条记忆对应的指令文件读不到，或在体检后改过
     case 'no-baseline': return 'pending.suggestion.noBaseline'

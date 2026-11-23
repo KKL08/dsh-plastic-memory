@@ -72,7 +72,7 @@ describe('横向冲突卡：补充要求（票 07）', () => {
     const { commands } = setup([card({ suggestion: keepA })], { model: 'deepseek-v4-flash' })
     open()
     expect(rowOf()).toBeNull()
-    expect(screen.queryByText('采纳后 B 进最近删除，14 天内可恢复。')).toBeNull()
+    expect(screen.queryByText('采纳后「mock-db-in-tests」进最近删除，14 天内可恢复。')).toBeNull()
     expect(box()).toHaveValue('')
     expect(box()).toHaveAttribute('placeholder', '也可以直接写你的要求，例如：以 A 为准，但把 B 里的端口号并进来。')
     expect(within(screen.getByRole('group', { name: '常用处理（可选）' })).getAllByRole('button').map(b => b.textContent)).toEqual(CANDIDATES)
@@ -139,7 +139,7 @@ describe('横向冲突卡：补充要求（票 07）', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '应用' })) })
     expect(commands().at(-1)).toEqual({ cmd: 'apply-proposal', decisionId: 'd-h', proposal: mergeProposal })
     expect(await screen.findByText('已融合成一条')).toBeInTheDocument()
-    expect(screen.getByText('按你的要求处理。B 已删除，14 天内可恢复。')).toBeInTheDocument()
+    expect(screen.getByText('按你的要求处理。「mock-db-in-tests」已删除，14 天内可恢复。')).toBeInTheDocument()
     expect(screen.getByText(MERGED_TEXT)).toBeInTheDocument()
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
     await waitFor(() => { expect(commands().at(-1)).toEqual({ cmd: 'undo', decisionId: 'd-h' }) })
@@ -155,12 +155,24 @@ describe('横向冲突卡：补充要求（票 07）', () => {
     expect(document.querySelector('.pm-proposal')).toBeNull()
     expect(screen.queryByRole('textbox', { name: '想怎么处理这两条？' })).toBeNull()
     expect(within(document.querySelector('.pm-suggestion') as HTMLElement).getByText('A 是你明确说过的，B 是推断的。')).toBeInTheDocument()
-    expect(screen.getByText('采纳后 B 进最近删除，14 天内可恢复。')).toBeInTheDocument()
+    expect(screen.getByText('采纳后「mock-db-in-tests」进最近删除，14 天内可恢复。')).toBeInTheDocument()
     expect(labelsOf(rowOf()!)).toEqual(['采纳建议', '补充要求'])
     expect(commands()).toEqual([{ cmd: 'draft-proposal', decisionId: 'd-h', request: '两者融合', bases: BASES }])
   })
 
-  it('只留一条的方案：留下的那条原样显示、另一条写进最近删除；应用后「已保留 A」「按你的要求处理。」', async () => {
+  it('只留一条的方案、要删的那条变成含密钥（版本没变也一样）：方案区收起，不再给「应用」，也就不会写「进最近删除」', async () => {
+    const { gateway } = setup([card({ noSuggestion: { code: 'not-generated' } })], { respond: drafted(keepAProposal) })
+    open()
+    write('以 A 为准')
+    await generate()
+    expect(screen.getByText('应用后「mock-db-in-tests」进最近删除，14 天内可恢复。')).toBeInTheDocument()
+    act(() => { gateway.setView('pending', view(card({ noSuggestion: { code: 'not-generated' }, right: { ...B2, hasSecret: true } }))) })
+    expect(document.querySelector('.pm-proposal')).toBeNull()
+    expect(screen.queryByRole('button', { name: '应用' })).toBeNull()
+    expect(screen.queryByText(/进最近删除/)).toBeNull()
+  })
+
+  it('只留一条的方案：留下的那条原样显示、另一条用名称写进最近删除；应用后写保留了哪条、「按你的要求处理。」', async () => {
     const { commands } = setup([card({ noSuggestion: { code: 'not-generated' } })], { respond: drafted(keepAProposal) })
     open()
     write('以 A 为准')
@@ -168,11 +180,11 @@ describe('横向冲突卡：补充要求（票 07）', () => {
     const area = document.querySelector('.pm-proposal') as HTMLElement
     expect(within(area).getByText('保留 A').tagName).toBe('STRONG')
     expect(within(area).getByText(A.content)).toBeInTheDocument()
-    expect(within(area).getByText('应用后 B 进最近删除，14 天内可恢复。')).toBeInTheDocument()
+    expect(within(area).getByText('应用后「mock-db-in-tests」进最近删除，14 天内可恢复。')).toBeInTheDocument()
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '应用' })) })
     expect(commands().at(-1)).toEqual({ cmd: 'apply-proposal', decisionId: 'd-h', proposal: keepAProposal })
-    expect(await screen.findByText('已保留 A')).toBeInTheDocument()
-    expect(screen.getByText('按你的要求处理。B 已删除，14 天内可恢复。')).toBeInTheDocument()
+    expect(await screen.findByText('已保留「postgres-in-tests」')).toBeInTheDocument()
+    expect(screen.getByText('按你的要求处理。「mock-db-in-tests」已删除，14 天内可恢复。')).toBeInTheDocument()
   })
 
   it('都保留的方案：一句话；应用后「两条都保留」「按你的要求处理。」', async () => {
@@ -338,7 +350,7 @@ describe('横向冲突卡：补充要求（票 07）', () => {
     fireEvent.change(screen.getByRole('textbox', { name: 'How should these two be handled?' }), { target: { value: 'go with A' } })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Make a plan' })) })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Apply' })) })
-    expect(await screen.findByText('Done as you asked. B was deleted and can be restored within 14 days.')).toBeInTheDocument()
+    expect(await screen.findByText('Done as you asked. “mock-db-in-tests” was deleted and can be restored within 14 days.')).toBeInTheDocument()
   })
 })
 

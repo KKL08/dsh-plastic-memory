@@ -18,8 +18,8 @@ export interface RunHandlers {
   onOk?: (result: Ok, command: MemoryCommand) => void
   /** 别处已处理（什么都没动）：给了就交给调用方（提示放在别处，例如卡片外），不给则原位显示。 */
   onHandledElsewhere?: () => void
-  /** 失败：'silent' 不显示；函数返回 true 表示调用方已就地处理，不再显示。 */
-  onFailed?: 'silent' | ((failure: Failure) => boolean)
+  /** 失败：'silent' 不显示；函数返回 true 表示调用方已就地处理，不再显示；返回一份 Failure 就原位显示它（换成调用方的说法）。 */
+  onFailed?: 'silent' | ((failure: Failure) => boolean | Failure)
 }
 
 export interface CommandRunner {
@@ -71,11 +71,14 @@ export function useCommandRunner(session: BorrowedSession): CommandRunner {
   const settle = (key: string, outcome: Outcome, handlers: RunHandlers, command: MemoryCommand) => {
     if (outcome.kind === 'ok') { clear(key); handlers.onOk?.(outcome.result, command); return }
     if (outcome.kind === 'handled-elsewhere' && handlers.onHandledElsewhere !== undefined) { clear(key); handlers.onHandledElsewhere(); return }
+    let shown: Outcome = outcome
     if (outcome.kind === 'failed') {
       const { onFailed } = handlers
-      if (onFailed === 'silent' || (onFailed !== undefined && onFailed(outcome))) { clear(key); return }
+      const handled = onFailed === 'silent' || (onFailed !== undefined && onFailed(outcome))
+      if (handled === true) { clear(key); return }
+      if (handled !== false) shown = handled
     }
-    setStates(prev => new Map(prev).set(key, outcome))
+    setStates(prev => new Map(prev).set(key, shown))
   }
   const run = (key: string, command: MemoryCommand, handlers: RunHandlers = {}) => {
     if (session.kind !== 'ready' || inFlight.current.has(key)) return
