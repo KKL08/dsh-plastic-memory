@@ -241,6 +241,7 @@ describe('子 agent 记忆的生命周期', () => {
       get: (name: string) => (name === 'sessionQuery' ? sessionQuery : undefined),
       // commands 服务不给：插件内的视图写入器按文件节流（两次替换至少隔 150ms），每次写入都等它会把 400 条序列拖到半分钟
       inject: () => () => {},
+      effect: () => () => {},
       logger: { info() {}, warn() {}, error() {} },
     }
     await apply(ctx as never, new Config({ memoryRoot } as never))

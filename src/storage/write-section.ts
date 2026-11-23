@@ -27,6 +27,8 @@ export class WriteSection implements SectionLock {
   /** 顶层段拿跨进程锁超时的次数和最近那次的错误：排队期间超时过的段不再自己去拿，一起按这次超时失败。 */
   private timeouts = 0
   private lastTimeout: unknown
+  /** 顶层的段开始执行前先跑的钩子（见 RootLock.onEnter）。 */
+  private readonly enterHooks: Array<() => Promise<void>> = []
 
   constructor(crossProcess: RootLock) {
     this.crossProcess = crossProcess
@@ -42,7 +44,10 @@ export class WriteSection implements SectionLock {
       isEntered = true
       section.isActive = true
       try {
-        return await this.current.run(section, fn)
+        return await this.current.run(section, async () => {
+          if (owner === this.top) await this.runEnterHooks()
+          return fn()
+        })
       } finally {
         // 段里发起、没等的再进排在这一段的队上：它们也做完，这一段才算走完、才放锁
         for (let tail = section.tail; ; tail = section.tail) {
@@ -72,6 +77,25 @@ export class WriteSection implements SectionLock {
           this.lastTimeout = err
         }
         throw err
+      }
+    }
+  }
+
+  onEnter(hook: () => Promise<void>): void {
+    this.enterHooks.push(hook)
+  }
+
+  isExclusive(): boolean {
+    return this.crossProcess.isExclusive?.() ?? true
+  }
+
+  /** 钩子里的写入是这一段的再进。一个钩子抛错不挡别的钩子，也不挡这一段。 */
+  private async runEnterHooks(): Promise<void> {
+    for (const hook of this.enterHooks) {
+      try {
+        await hook()
+      } catch {
+        // 补做失败留给下一次：行还在
       }
     }
   }

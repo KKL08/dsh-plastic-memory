@@ -35,6 +35,7 @@ const FRAMEWORK_PREFIX = '@deepseek-ai/'
 const ALLOWED_EXCEPTIONS: ReadonlyArray<{ from: string; to: string; reason: string }> = [
   { from: 'pipeline', to: 'governance/snapshots', reason: 'update global 前快照先行（2026-09-01 定）；改写、替代都拍（2026-10-27）' },
   { from: 'pipeline', to: 'governance/decisions', reason: '模型改写、替代后记一条已结清的撤销记录（2026-10-27 定）' },
+  { from: 'pipeline', to: 'governance/op-steps', reason: '那条撤销记录随写入登记成提交后的步骤，中断后能补记' },
 ]
 
 function layerOf(mod: string): LayerName | undefined {

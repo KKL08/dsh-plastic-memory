@@ -25,6 +25,7 @@ import { record as baseRecord } from './helpers/record.ts'
 import { fakeExec } from './helpers/exec.ts'
 import { formatValidity } from '../src/validity.ts'
 import { noInstructions } from './helpers/instructions.ts'
+import { memoryText } from './helpers/memory-text.ts'
 
 // 手编检测与恢复比较投影。
 // 全部用真实目录（FileTable + .state 侧表）；文件直接改盘模拟用户手编。
@@ -231,14 +232,14 @@ describe('手编检测与恢复比较投影', () => {
     if (created.kind !== 'created') throw new Error(created.kind)
 
     await h.assemble()   // 快照冻结 = 维护点：旧文件改写成本机时间
-    const convertedText = await readFile(path, 'utf8')
+    const convertedText = await memoryText(path)
     expect(convertedText).toContain(`validTo: ${formatValidity(Date.parse('2099-02-01T18:01:00.000Z'))}`)
 
     for (const snapshotId of [created.snapshotId, 'snap_pre_upgrade']) {
       const r = restored(await h.snapshot({ action: 'restore', snapshotId }))
       expect(r.restored).toEqual([before.id])
       expect(r.skipped).toEqual([])
-      expect(await readFile(path, 'utf8')).toBe(convertedText)
+      expect(await memoryText(path)).toBe(convertedText)
     }
   })
 

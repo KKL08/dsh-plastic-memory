@@ -161,6 +161,7 @@ async function boot() {
     on: (event: string, fn: (...args: unknown[]) => unknown) => { listeners.set(event, fn); return () => {} },
     get: (name: string) => services[name],
     // commands、timer 依赖齐了才回调；sessionProjections 的投影注册不模拟
+    effect: () => () => {},
     inject: (deps: string[], callback: (child: Record<string, unknown>) => unknown) => {
       const collect = (dispose: unknown) => { if (typeof dispose === 'function') disposers.push(dispose as () => unknown) }
       if (deps.includes('commands')) collect(callback({ commands: { register: (def: MemoryCommandDefinition) => { command = def; return () => {} } } }))

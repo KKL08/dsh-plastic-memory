@@ -1,6 +1,6 @@
 import { sidecarSchemas } from './helpers/sidecar-schemas.ts'
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat, link } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat, link, copyFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
@@ -16,7 +16,7 @@ import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
 // 文件系统是进程边界：只把 link 换成可控的桩，其余 fs 函数保持真实。
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
-  return { ...actual, link: vi.fn(actual.link) }
+  return { ...actual, link: vi.fn(actual.link), copyFile: vi.fn(actual.copyFile) }
 })
 
 /** exFAT/FAT、部分网络盘与 FUSE 挂载上 link 的报错形态。 */
@@ -32,6 +32,7 @@ let root: string
 beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pm-nolink-')) })
 afterEach(async () => {
   vi.mocked(link).mockReset()
+  vi.mocked(copyFile).mockClear()
   await rm(root, { recursive: true, force: true })
 })
 
@@ -50,6 +51,20 @@ describe.each(['ENOTSUP', 'EPERM', 'ENOSYS'])('不支持硬链接的卷（link �
     expect((await newTable().locate('mem_new', {}))!.record).toEqual(r)
     expect(await tmps(globalDir())).toEqual([])
     expect(vi.mocked(link)).toHaveBeenCalled()
+  })
+
+  it('FileTable 持着写锁：新文件由临时文件改名而来，不走复制（中途退出不会留下半截文件）', async () => {
+    await newTable().create(record({ id: 'mem_new', name: '新建', content: '新建正文' }))
+    expect(vi.mocked(copyFile)).not.toHaveBeenCalled()
+    expect(await readFile(join(globalDir(), '新建.md'), 'utf8')).toContain('新建正文')
+  })
+
+  it('FileTable 写锁不可用：退回排他复制，文件照样写成', async () => {
+    const unlocked = { run: <T>(fn: () => Promise<T>) => fn(), isExclusive: () => false }
+    await new FileTable({ root, stats: new InMemoryKvTable<RecallStats>(), lock: unlocked }).create(record({ id: 'mem_new', name: '新建', content: '新建正文' }))
+    expect(vi.mocked(copyFile)).toHaveBeenCalled()
+    expect(await readFile(join(globalDir(), '新建.md'), 'utf8')).toContain('新建正文')
+    expect(await tmps(globalDir())).toEqual([])
   })
 
   it('FileTable 撞名仍追加 id 片段，已有文件一字不动', async () => {

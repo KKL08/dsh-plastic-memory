@@ -2,6 +2,7 @@ import { mkdir } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { markDeleted, type MemoryLogger, type MemoryStore } from '../store.ts'
+import { byPosition, newWriteOp, type WriteOp } from '../storage/table.ts'
 import type { CasKvTable } from '../kv-table.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { AgentsMdWriter } from '../storage/agents-md.ts'
@@ -308,6 +309,8 @@ async function writeBatch(items: readonly BatchItem[], store: MemoryStore, now: 
     writes.push(write)
     let candidate: MemoryRecord | undefined
     let outcome: 'deleted' | 'has-secret' | 'changed' | 'missing' = 'changed'
+    // 这一项的写入带着自己的操作 id：抛错之后凭文件上的提交标记判它落没落盘
+    const writeOp = newWriteOp()
     try {
       if (op.kind === 'edit') {
         const committed = await store.update(record, (cur) => {
@@ -315,23 +318,24 @@ async function writeBatch(items: readonly BatchItem[], store: MemoryStore, now: 
           // 锁内按磁盘上的现状再核对一次：读过之后被改过就原样不写
           if (isChanged(cur)) return cur
           return (candidate = withUserEdits(cur, op, now))
-        }, at)
+        }, at, writeOp)
         if (candidate !== undefined) write.written = committed
       } else {
         outcome = await store.softDeleteUnlessSecret(record, {
-          at, now, isChanged: (cur) => { candidate = cur; return isChanged(cur) }, ...(isSecret !== undefined ? { isSecret } : {}),
+          at, now, op: writeOp, isChanged: (cur) => { candidate = cur; return isChanged(cur) }, ...(isSecret !== undefined ? { isSecret } : {}),
         })
         // 软删只改状态和时间，内容就是锁内最后看到的那份
         if (outcome === 'deleted') write.written = markDeleted(candidate!, now)
       }
     } catch (error) {
       if (!(error instanceof RecordNotFoundError)) {
-        // 抛错时不知道落没落盘：按 id 重读，状态和指纹与最后一次候选一致、updatedAt 是这次的才算已写（已写的一样要退回）
-        write.written = await committedAfterThrow(store, record, op.kind, candidate, now)
+        // 抛错时不知道落没落盘：按 id 重读，文件上的提交标记是这次的操作才算已写（已写的一样要退回）
+        write.written = await committedAfterThrow(store, record, writeOp)
         return { writes, failure: { kind: 'thrown', error } }
       }
       outcome = 'missing'
     }
+    if (write.written !== undefined) await store.finishOp(writeOp, write.written)
     if (write.written === undefined) {
       return { writes, failure: { kind: outcome === 'has-secret' ? 'has-secret' : outcome === 'missing' ? 'not-found' : 'stale', memoryId: record.id } }
     }
@@ -340,15 +344,14 @@ async function writeBatch(items: readonly BatchItem[], store: MemoryStore, now: 
 }
 
 /**
- * 写入调用抛错后这一项落没落盘（文件表写盘后还可能在维护目录、写统计时抛错）：按 id 在它自己的作用域里重读，
- * 状态是这一步该有的（改写在用、删除在最近删除）、指纹与最后一次候选一致、updatedAt 是这次的时刻，才算已写，返回读到的那份。
+ * 写入调用抛错后这一项落没落盘（文件表写盘后还可能在维护目录、写统计时抛错）：在它自己的作用域里找
+ * 提交标记等于这次操作 id 的那一份（软删写完归档那份、还没删掉原来那份时也认得出），找到才算已写，返回那份。只改元数据、不动 updatedAt 的写入同样判得出。
  */
-async function committedAfterThrow(store: MemoryStore, record: MemoryRecord, op: ApplyEditOp['kind'], candidate: MemoryRecord | undefined, now: number): Promise<MemoryRecord | undefined> {
+async function committedAfterThrow(store: MemoryStore, record: MemoryRecord, op: WriteOp): Promise<MemoryRecord | undefined> {
   const scope = scopeOfMemory(record)
-  if (candidate === undefined || scope === undefined) return undefined
-  const current = await locateCopy(store, record.id, scope).catch(() => undefined)
-  const status = op === 'edit' ? 'active' : 'deleted'
-  return current !== undefined && current.status === status && current.updatedAt === now && editFingerprint(current) === editFingerprint(candidate) ? current : undefined
+  if (scope === undefined) return undefined
+  const written = await store.locateWrittenBy(record.id, scope, op).catch(() => undefined)
+  return written === undefined ? undefined : byPosition(written)
 }
 
 /**

@@ -14,6 +14,7 @@ import { scopeAt } from '../src/scope.ts'
 import { candidate, record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 import { NOW, SESSION_WS, OTHER_WS, registry, root, env, ok, err, seedPair, allEntries, ledgerItems } from './helpers/gui-command-env.ts'
+import { memoryText } from './helpers/memory-text.ts'
 
 
 describe('refresh-views', () => {
@@ -213,7 +214,7 @@ describe('edit-memory（建议整理的直接改）', () => {
     const e = env()
     await e.store.create(record({ id: 'mem_u', name: '甲', content: '旧正文', tags: ['旧'], ...(workspacePath !== undefined ? { scope: 'workspace', workspacePath } : {}) }))
     const path = await fileOf(e, 'mem_u', workspacePath)
-    const before = await readFile(path, 'utf8')
+    const before = await memoryText(path)
     e.clock.now = LATER
     const body = ok(await e.run(edit('mem_u', workspacePath, await baseOf(e, 'mem_u'), { name: '乙' })))
     expect((await e.store.get('mem_u', { workspacePath }))!.content).toBe('新正文')
@@ -221,7 +222,7 @@ describe('edit-memory（建议整理的直接改）', () => {
     const undone = ok(await e.run({ cmd: 'undo', decisionId: body.decisionId! }))
     expect(undone.memoryIds).toEqual(['mem_u'])
     expect(await fileOf(e, 'mem_u', workspacePath)).toBe(path)
-    expect(await readFile(path, 'utf8')).toBe(before)
+    expect(await memoryText(path)).toBe(before)
     expect(await allEntries(e)).toEqual([])
   })
 
@@ -429,7 +430,7 @@ describe('merge-memories（内容重复的直接合并）', () => {
     await e.store.create(record({ id: 'mem_b', name: '乙', content: '乙的正文', tags: ['乙'], ...b }))
     const ws = (id: string) => (id === 'mem_a' ? a : b).scope === 'global' ? undefined : SESSION_WS
     const paths = { kept: await (async () => (await e.store.locate(keptId, scopeAt(ws(keptId))))!.filePath)(), removed: (await e.store.locate(removedId, scopeAt(ws(removedId))))!.filePath }
-    const before = { kept: await readFile(paths.kept, 'utf8'), removed: await readFile(paths.removed, 'utf8') }
+    const before = { kept: await memoryText(paths.kept), removed: await memoryText(paths.removed) }
 
     e.clock.now = LATER
     const body = ok(await merge(e, ['mem_a', 'mem_b']))
@@ -447,8 +448,8 @@ describe('merge-memories（内容重复的直接合并）', () => {
     expect((await e.decisions.listSettled()).map(d => [d.kind, d.memoryIds, d.settled?.verdict, d.settled?.snapshotId])).toEqual([['edit', [keptId, removedId], 'merged', snaps[0]!.id]])
 
     ok(await e.run({ cmd: 'undo', decisionId: body.decisionId! }))
-    expect(await readFile(paths.kept, 'utf8')).toBe(before.kept)
-    expect(await readFile(paths.removed, 'utf8')).toBe(before.removed)
+    expect(await memoryText(paths.kept)).toBe(before.kept)
+    expect(await memoryText(paths.removed)).toBe(before.removed)
     expect(deletedViewSchema.parse(await e.readView('deleted')).items).toEqual([])
     expect(await allEntries(e)).toEqual([])
   })
@@ -471,7 +472,7 @@ describe('merge-memories（内容重复的直接合并）', () => {
     await e.store.create(record({ id: 'mem_a', content: '甲的正文', createdAt: 1 }))
     await e.store.create(record({ id: 'mem_b', content: '乙的正文', createdAt: 2 }))
     const pathA = (await e.store.locate('mem_a'))!.filePath
-    const beforeA = await readFile(pathA, 'utf8')
+    const beforeA = await memoryText(pathA)
     // 快照拍在核对之后：借它插入另一个会话对乙的修改
     const capture = e.snapshots.capture.bind(e.snapshots)
     e.snapshots.capture = async (...args) => {
@@ -481,7 +482,7 @@ describe('merge-memories（内容重复的直接合并）', () => {
     }
     e.clock.now = LATER
     expect(err(await merge(e, ['mem_a', 'mem_b'])).code).toBe('stale')
-    expect(await readFile(pathA, 'utf8')).toBe(beforeA)
+    expect(await memoryText(pathA)).toBe(beforeA)
     expect(await e.store.get('mem_b')).toMatchObject({ status: 'active', content: '乙的第二版' })
     expect(await e.decisions.listSettled()).toEqual([])
   })

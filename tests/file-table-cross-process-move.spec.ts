@@ -21,7 +21,7 @@ type Op = 'link' | 'rm' | 'rename' | 'copyFile'
 const { hooks, reads, volume } = vi.hoisted(() => ({
   hooks: [] as Array<{ op: string; path: string; when: 'before' | 'after'; run: () => Promise<unknown> }>,
   reads: [] as string[],   // readFile 读过的路径，按调用顺序
-  volume: { isNoHardlink: false },   // 为真时 link 报 ENOTSUP（exFAT/FAT 这类卷），占名退回复制
+  volume: { isNoHardlink: false },   // 为真时 link 报 ENOTSUP（exFAT/FAT 这类卷），占名退回改名（没有写锁时退回复制）
 }))
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
@@ -145,11 +145,11 @@ describe('占名之后、删旧文件之前源文件不见了', () => {
     expect(await mds(globalDir())).toEqual([])
   })
 
-  it('卷不支持硬链接、占名退回复制时同样撤回：新文件是复制出来的另一个文件，仍认得出是本轮写的', async () => {
+  it('卷不支持硬链接、占名退回改名时同样撤回：新文件是临时文件改名来的，仍认得出是本轮写的', async () => {
     volume.isNoHardlink = true
     const source = await seed()
     const b = newTable()
-    at('after', 'copyFile', join(globalDir(), '改名后.md'), () => rm(source))
+    at('after', 'rename', join(globalDir(), '改名后.md'), () => rm(source))
     expect(await captureRejection(b.update('mem_race', {}, renameByB))).toBeInstanceOf(RecordNotFoundError)
     expect(await mds(globalDir())).toEqual([])
   })

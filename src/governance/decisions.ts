@@ -546,13 +546,16 @@ export class PendingDecisionsStore {
   async addSettled(
     input: { kind: PendingKind; memoryIds: string[]; summary: string; workspaces: string[]; fingerprint?: string; receipts?: BatchReceipt[]; origin?: PendingDecision['origin'] },
     verdict: SettledVerdict, now: number,
-    opts: { snapshotId?: string; isBornSettled?: true; misplacedIgnore?: MisplacedIgnore } = {},
+    opts: { snapshotId?: string; isBornSettled?: true; misplacedIgnore?: MisplacedIgnore; id?: string } = {},
   ): Promise<PendingDecision> {
+    // 调用方定好 id 的（写入前就定下、中断后补记的）：已经记过就不再记
+    const existing = opts.id === undefined ? undefined : await this.table.get(opts.id)
+    if (existing !== undefined) return existing
     const settled = {
       verdict, at: now, ...(opts.snapshotId !== undefined ? { snapshotId: opts.snapshotId } : {}), ...(opts.isBornSettled ? { isBornSettled: true as const } : {}),
       ...(opts.misplacedIgnore !== undefined ? { misplacedIgnore: opts.misplacedIgnore } : {}),
     }
-    const entry: PendingDecision = { id: genId('pd'), ...input, firstSeenAt: now, settled }
+    const entry: PendingDecision = { id: opts.id ?? genId('pd'), ...input, firstSeenAt: now, settled }
     await this.table.put(entry.id, entry)
     await this.sweep(now)
     return entry
@@ -579,11 +582,11 @@ export class PendingDecisionsStore {
     return this.addSettled({ kind: 'move', memoryIds: [written.id], summary: input.summary, workspaces: [input.workspace], fingerprint: editFingerprint(written) }, 'moved', now, { snapshotId })
   }
 
-  /** 模型改写、替代：written 是改写后的那条、标成已取代的那条。 */
-  addModelChange(written: MemoryRecord, input: { kind: 'rewrite' | 'supersede'; workspace: string; origin: NonNullable<PendingDecision['origin']> }, snapshotId: string, now: number) {
+  /** 模型改写、替代：written 是改写后的那条、标成已取代的那条。id 给了就用它当条目 id，这个 id 已有条目时不再记。 */
+  addModelChange(written: MemoryRecord, input: { kind: 'rewrite' | 'supersede'; workspace: string; origin: NonNullable<PendingDecision['origin']> }, snapshotId: string, now: number, id?: string) {
     return this.addSettled({
       kind: input.kind, memoryIds: [written.id], summary: written.name, workspaces: [input.workspace], fingerprint: editFingerprint(written), origin: input.origin,
-    }, input.kind === 'rewrite' ? 'rewritten' : 'superseded', now, { snapshotId })
+    }, input.kind === 'rewrite' ? 'rewritten' : 'superseded', now, { snapshotId, ...(id !== undefined ? { id } : {}) })
   }
 
   /** 模型改写、替代已撤销：条目留到保留窗口结束（对话卡与右侧栏据此显示「已撤销」），不能再撤一次。条目不存在或未结清返回 false。 */

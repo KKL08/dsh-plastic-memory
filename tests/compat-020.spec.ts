@@ -15,7 +15,7 @@ import { openRelease020Table } from './helpers/release-020.ts'
 
 const quiet = { info() {}, warn() {}, error() {}, debug() {} }
 const global = { kind: 'global' } as const
-const NEW_KEYS = ['sourceTrail', 'stateSince', 'factTime', 'lastChange', 'lastWriteOp', 'related', 'premises', 'recall', 'locked', 'lockedUntil'] as const
+const NEW_KEYS = ['sourceTrail', 'stateSince', 'factTime', 'lastChange', 'related', 'premises', 'recall', 'locked', 'lockedUntil'] as const
 
 let root: string
 let stats: InMemoryKvTable<RecallStats>
@@ -31,10 +31,12 @@ const withNewKeys = (): MemoryRecord => record({
   source: { sessionId: 's2', eventRange: [5, 9], sourceMode: 'user-explicit' },
   sourceTrail: [{ sessionId: 's2', eventRange: [5, 9], sourceMode: 'user-explicit', at: Date.UTC(2026, 10, 2), initiator: 'user', evidence: { user: true, tool: false }, change: 'refine', by: 'main' }],
   stateSince: Date.UTC(2026, 10, 1), factTime: '2026-11', lastChange: { kind: 'refine', at: Date.UTC(2026, 10, 2), op: 'op_1', by: 'main' },
-  lastWriteOp: 'op_1', related: ['mem_rel'], premises: [{ id: 'mem_pre', digest: 'd1:0123456789abcdef' }], recall: 'unlisted',
+  related: ['mem_rel'], premises: [{ id: 'mem_pre', digest: 'd1:0123456789abcdef' }], recall: 'unlisted',
   locked: true, lockedUntil: Date.UTC(2027, 0, 1),
 })
 const pick = (r: MemoryRecord) => Object.fromEntries(NEW_KEYS.map(k => [k, r[k]]))
+/** 文件上的提交标记：不在记录里，随定位结果带出来。 */
+const stampOf = async (id: string) => (await current().locate(id, global))?.writeOp
 const globalFile = async () => {
   const dir = join(root, 'global')
   const name = (await readdir(dir)).find(f => f.endsWith('.md') && f !== 'MEMORY.md')!
@@ -45,16 +47,20 @@ describe('新旧版本共用一个记忆根（0.2.0 发布包）', () => {
   it('0.2.0 整条更新一条记忆：顶层的新键原样保留', async () => {
     const rec = withNewKeys()
     await current().create(rec)
+    const stamp = await stampOf(rec.id)
+    expect(stamp).toMatch(/^op_/)
     const old = await openRelease020Table({ root, stats })
     await old.update(rec.id, global, r => ({ ...r, content: '旧版本改过的正文', updatedAt: r.updatedAt + 1000 }))
     const after = await current().locate(rec.id, global)
     expect(after?.record.content).toBe('旧版本改过的正文')
     expect(pick(after!.record)).toEqual(pick(rec))
+    expect(after?.writeOp).toBe(stamp)
   })
 
   it('0.2.0 整条替换一条记忆并换了出处：新键照旧保留，换上的出处补成出处清单最前一个没有发起方的锚', async () => {
     const rec = withNewKeys()
     await current().create(rec)
+    const stamp = await stampOf(rec.id)
     const old = await openRelease020Table({ root, stats })
     const seen = (await old.locate(rec.id, global))!.record
     expect(seen).not.toHaveProperty('sourceTrail')
@@ -63,6 +69,7 @@ describe('新旧版本共用一个记忆根（0.2.0 发布包）', () => {
     const after = (await current().locate(rec.id, global))!.record
     expect(after.content).toBe('旧版本整条替换的正文')
     expect(pick(after)).toEqual(pick(rec))
+    expect(await stampOf(rec.id)).toBe(stamp)
     const anchors = anchorsOf(after)
     expect(anchors[0]).toEqual({ ...replaced, at: Date.UTC(2026, 10, 3) })
     expect(anchors.slice(1)).toEqual(rec.sourceTrail)
@@ -92,7 +99,7 @@ describe('新旧版本共用一个记忆根（0.2.0 发布包）', () => {
     expect([...tags].sort()).toEqual([...Array.from({ length: 10 }, (_, i) => [`new-${i}`, `old-${i}`]).flat()].sort())
   })
 
-  it('两边轮流写同一条：键的顺序一致，只改正文时文件里只有正文和 digest 两行变', async () => {
+  it('两边轮流写同一条：键的顺序一致，只改正文时文件里只有正文、digest 和提交标记三行变', async () => {
     const rec = withNewKeys()
     await current().create(rec)
     const old = await openRelease020Table({ root, stats })
@@ -103,7 +110,7 @@ describe('新旧版本共用一个记忆根（0.2.0 发布包）', () => {
     expect(Object.keys(splitFrontmatter(byNew).data)).toEqual(Object.keys(splitFrontmatter(byOld).data))
     const oldLines = byOld.split('\n')
     const changed = byNew.split('\n').flatMap((line, i) => line === oldLines[i] ? [] : [line.split(':')[0]])
-    expect(changed).toEqual(['digest', '新版本改过的正文'])
+    expect(changed).toEqual(['digest', 'lastWriteOp', '新版本改过的正文'])
   })
 
   it('0.2.0 丢掉 source 里它不认识的子字段，所以锚的新字段放在出处清单里', async () => {
