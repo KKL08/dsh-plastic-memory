@@ -31,6 +31,17 @@ export class InMemoryKvTable<T> implements ClaimKvTable<T>, CasKvTable<T>, Refre
     }
   }
   async isClaimed(key: string) { return this.claimed.has(key) }
+  private readonly revisions = new WeakMap<object, number>()
+  private lastRevision = 0
+  /** 版本标记：写入都换成新对象，按对象认版本（同一个对象就地改不算变）。 */
+  async revision(key: string) {
+    const value = this.map.get(key)
+    if (value === undefined) return undefined
+    if (typeof value !== 'object' || value === null) return `v:${String(value)}`
+    let n = this.revisions.get(value)
+    if (n === undefined) this.revisions.set(value, n = ++this.lastRevision)
+    return String(n)
+  }
 }
 
 export class InMemoryBatchKvTable<T> extends InMemoryKvTable<T> implements BatchKvTable<T> {

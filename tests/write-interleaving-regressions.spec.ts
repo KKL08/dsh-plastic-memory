@@ -2,13 +2,22 @@ import { describe, expect, it, vi } from 'vitest'
 import { GLOBAL_DIR, workspaceDirName } from '../src/storage/paths.ts'
 import { executeSnapshotTool } from '../src/tools/snapshot.ts'
 import { scopeKey } from '../src/scope.ts'
-import { assertSerialEquivalent, observeConcurrent, observeSerial, phasedScheduler, scheduleTrace } from './helpers/interleave.ts'
-import { IDS, W, memorySubject, secretProblems, type MemOp, type Seed } from './helpers/memory-subject.ts'
+import { assertSerialEquivalent, observeConcurrent, observeSerial, phasedScheduler, scheduleTrace, type Subject } from './helpers/interleave.ts'
+import { IDS, W, memorySubject, secretProblems, type MemOp, type MemoryWorld, type Seed } from './helpers/memory-subject.ts'
 
 // 文件系统是进程边界：存储层 import 的 node:fs/promises 换成夹具包过的那份，调用的全序交给调度器（见 helpers/interleave.ts）
 vi.mock('node:fs/promises', async () => (await import('./helpers/interleave.ts')).interleavedFs)
 
 const PROJ = workspaceDirName(W)
+
+/**
+ * 两个操作像在两个进程里、锁库又用不了：写入段只管进程内，跨进程这时没有任何互斥。用不互斥的锁让调度把窗口钉出来，
+ * 核对兜底仍然有效。两种情形用它：窗口在同一进程里已被写入段关上（整段在段里的操作，别的写入插不进中间）；
+ * 或者窗口在拿锁之前，可调度只能停在文件调用上，停下的那次调用已在写入段里、占着段，另一个操作进不来。
+ */
+function withoutLock(subject: Subject<MemoryWorld, MemOp>): Subject<MemoryWorld, MemOp> {
+  return { ...subject, lock: () => ({ run: fn => fn(), runUnqueued: fn => fn() }) }
+}
 
 /** 调度报告里第一个满足条件的调用的位置：op 号操作发出、调用（不含操作名）是 call 或满足 call。 */
 function firstCall(trace: readonly string[], op: number, call: string | ((call: string) => boolean), from = 0): number {
@@ -39,11 +48,11 @@ describe('锁外读撞上挪文件：在用的记录不被当成不存在', () =
     expect(firstCall(trace, 1, `readdir(${PROJ}/.archive)`, listed)).toBeGreaterThan(removed)
   })
 
-  it('模型改写改名 × 界面编辑拍快照：快照落盘后的复核列完全局目录、改名把 alpha.md 换成 beta.md，快照里这条不被脱敏', async () => {
+  // 拍快照不在写入段里，落盘后的复核是锁外的按范围读（界面编辑、保存拍的快照整段在写入段里，同进程的改名插不进来）
+  it('模型改写改名 × 拍快照：快照落盘后的复核列完全局目录、改名把 alpha.md 换成 beta.md，快照里这条不被脱敏', async () => {
     const seed: Seed = { a: 'workspace', b: 'global', isSameName: true }
-    const ops: MemOp[] = [{ kind: 'modelRewrite', id: 'b', isForced: true }, { kind: 'guiEdit', id: 'b' }]
+    const ops: MemOp[] = [{ kind: 'modelRewrite', id: 'b', isForced: true }, { kind: 'snapshot', ids: ['b'] }]
     const s = phasedScheduler([
-      { op: 0, until: call => call === 'readdir(.state/snapshots)' },
       { op: 1, until: call => call.startsWith('rename(.state/snapshots/') },
       { op: 1, until: call => call === `readdir(${GLOBAL_DIR})` },
       { op: 0, until: call => call === `rm(${GLOBAL_DIR}/alpha.md)` },
@@ -62,10 +71,11 @@ describe('锁外读撞上挪文件：在用的记录不被当成不存在', () =
     expect(firstCall(trace, 1, `readdir(${GLOBAL_DIR}/.archive)`, listed)).toBeGreaterThan(removed)
   })
 
-  it('模型改写改名 × 界面编辑：编辑的预读列完全局目录、改名把 alpha.md 换成 beta.md 后才看 .archive/，编辑仍找到它', async () => {
+  // 拍快照按 id 的预读在写入段外（界面编辑的预读整条命令在写入段里，同进程的改名插不进来）
+  it('模型改写改名 × 拍快照：拍快照的预读列完全局目录、改名把 alpha.md 换成 beta.md 后才看 .archive/，仍找到它', async () => {
     // 预读不带「没找到在锁内确认」：靠扫描期间有写入在跑这一条进锁确认
     const seed: Seed = { a: 'workspace', b: 'global', isSameName: true }
-    const ops: MemOp[] = [{ kind: 'modelRewrite', id: 'b', isForced: true }, { kind: 'guiEdit', id: 'b' }]
+    const ops: MemOp[] = [{ kind: 'modelRewrite', id: 'b', isForced: true }, { kind: 'snapshot', ids: ['b'] }]
     const s = phasedScheduler([
       { op: 1, until: call => call === `readdir(${GLOBAL_DIR})` },
       { op: 0, until: call => call === `rm(${GLOBAL_DIR}/alpha.md)` },
@@ -170,7 +180,8 @@ describe('遗忘读完、软删之前同一条被改过', () => {
   it('模型改写插在裁决删败方的预读与软删之间：败方不删、留着改写后的那一版，条目仍未决', async () => {
     const seed: Seed = { a: 'workspace', b: 'workspace', isSameName: false, conflict: 'open' }
     const ops: MemOp[] = [{ kind: 'resolve', verdict: 'keep-left' }, { kind: 'modelRewrite', id: 'b', isForced: true }]
-    const obs = await observeSerial(memorySubject(seed), ops, [{ index: 0, part: 'read' }, { index: 1, part: 'all' }, { index: 0, part: 'commit' }])
+    // 裁决的预读和软删都在裁决段里：同一进程里改写插不进来，只在跨进程、锁库用不了时会插进来
+    const obs = await observeSerial(withoutLock(memorySubject(seed)), ops, [{ index: 0, part: 'read' }, { index: 1, part: 'all' }, { index: 0, part: 'commit' }])
     expect((obs.outcomes[0] as { value: { ok: boolean } }).value.ok).toBe(false)
     const file = (path: string) => obs.state.find(([p]) => p === path)?.[1]
     expect(file(`${PROJ}/beta.md`)).toContain('模型改写 1')
@@ -208,8 +219,9 @@ describe('快照恢复与密钥硬删同一条：恢复读完快照、硬删随�
       { op: 0 },
       { op: 1 },
     ])
-    // 串行里只有「恢复全写完再硬删」与「硬删完再恢复」两种：前者硬删删到它，后者恢复跳过它
-    await assertSerialEquivalent(memorySubject(seed), s, ops)
+    // 串行里只有「恢复全写完再硬删」与「硬删完再恢复」两种：前者硬删删到它，后者恢复跳过它。
+    // 窗口在恢复写入拿锁之前；调度停在读完快照之后的下一次文件调用时，恢复已进了写入段，所以用不互斥的锁
+    await assertSerialEquivalent(withoutLock(memorySubject(seed)), s, ops)
     // 窗口确实出现了：恢复写入前读快照时还没脱敏，硬删脱敏之后恢复才去写这一条
     const trace = scheduleTrace(s)
     const read = firstCall(trace, 0, nth(3, call => call.startsWith('readFile(.state/snapshots/')))
@@ -217,6 +229,22 @@ describe('快照恢复与密钥硬删同一条：恢复读完快照、硬删随�
     expect(read).toBeGreaterThanOrEqual(0)
     expect(redacted).toBeGreaterThan(read)
     expect(firstCall(trace, 0, `readFile(${PROJ}/alpha.md)`, redacted)).toBeGreaterThan(redacted)
+  })
+
+  it('全局另有一份独立副本：硬删整个插在恢复读完快照与写回之间，全局那份留着', async () => {
+    // 恢复按读到的快照写回项目这一层，写入顺带清掉全局的同 id 副本；随后发现已脱敏、撤回刚写的那条，两份就都没了
+    const seed: Seed = { a: 'workspace', b: 'workspace', isSameName: false, secret: 'a', isSnapshotted: true, copy: 'a' }
+    const ops: MemOp[] = [{ kind: 'restoreSnapshot' }, { kind: 'hardDelete', id: 'a', layer: 'workspace' }]
+    const isSnapshotRead = (call: string) => call.startsWith('readFile(.state/snapshots/')
+    let seen = 0
+    const s = phasedScheduler([{ op: 0, until: call => isSnapshotRead(call) && ++seen === 3 }, { op: 1 }, { op: 0 }])
+    await assertSerialEquivalent(memorySubject(seed), s, ops)
+    // 窗口确实出现了：硬删在恢复第三次读快照之后才开始脱敏
+    const trace = scheduleTrace(s)
+    let n = 0
+    const read = firstCall(trace, 0, call => isSnapshotRead(call) && ++n === 3)
+    expect(read).toBeGreaterThanOrEqual(0)
+    expect(firstCall(trace, 1, call => call.startsWith('rename(.state/snapshots/'))).toBeGreaterThan(read)
   })
 })
 

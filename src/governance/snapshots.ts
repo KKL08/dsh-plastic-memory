@@ -247,7 +247,7 @@ export class SnapshotStore {
   async restore(
     snapshot: MemorySnapshot,
     ids: string[] | undefined,
-    store: Pick<MemoryStore, 'put' | 'hardDelete'>,
+    store: Pick<MemoryStore, 'put' | 'hardDelete' | 'writeSection'>,
     { target, overwrite, now = Date.now }: RestoreOptions,
   ): Promise<{ restored: string[]; skipped: string[]; redacted: string[] }> {
     const targets = ids ? snapshot.data.filter(r => ids.includes(r.id)) : snapshot.data
@@ -260,23 +260,39 @@ export class SnapshotStore {
       const snap = await this.table.get(snapshot.id)
       return snap === undefined ? undefined : new Map(snap.data.map(r => [r.id, r]))
     }
-    const before = await onDisk() ?? new Map<string, SnapshotRecord>()
+    // 版本标记先取后读：读之前就变了的，下面比对时照样重读
+    let seen = { revision: await this.table.revision?.(snapshot.id), records: await onDisk() }
+    /**
+     * 快照此刻的内容：版本标记没变就用上次读到的，变了（或表不支持版本标记）才整份重读，不按条数成倍地读。
+     * 整份已不在为 undefined：可能是彻底删除把它清空删掉了，也可能是过期被清扫，两者分不出来，所以还没写回的都跳过，
+     * 不按之前读到的写回（写回会清掉全局同 id 的副本，删掉的密钥也会回来）。
+     */
+    const current = async () => {
+      const revision = await this.table.revision?.(snapshot.id)
+      if (revision !== undefined && revision === seen.revision) return seen.records
+      seen = { revision, records: await onDisk() }
+      return seen.records
+    }
     try {
       for (const [i, rec] of targets.entries()) {
-        const latest = rec.redacted ? rec : before.get(rec.id)
-        if (latest?.redacted) { outcomes.push('redacted'); continue }
-        // 现状已和快照里这条完全相同：不写，也不进撤回名单。撤回删的是「刚写回的那一版」，这时删掉的其实是原来那份，
-        // 正在删它的那次密钥硬删随后找不到它，回报删了 0 条、待决账本也清不到
-        let isAlreadyThere = false
-        const put = latest === undefined ? undefined
-          : await store.put(rec, target === 'exact' ? scopeAt(rec.workspacePath) : { workspacePath: rec.workspacePath }, cur => {
-            isAlreadyThere = false
-            if (overwrite !== true && blocks(cur, rec)) return true
-            isAlreadyThere = isSameRecord(cur, rec)
-            return isAlreadyThere
-          })
-        if (put !== undefined) written.set(i, put)
-        outcomes.push(put === undefined && !isAlreadyThere ? 'skipped' : 'restored')
+        // 一条一段：快照里这一条的现状在写入段里再确认一次，确认到写回之间别的写入插不进来。开头那次读到的可能已过时：
+        // 密钥硬删先脱敏快照、再删文件，夹在中间的话照旧写回，写入还会顺带清掉全局的同 id 副本，收尾撤回后两份都没了
+        outcomes.push(await store.writeSection(async () => {
+          const latest = rec.redacted ? rec : (await current())?.get(rec.id)
+          if (latest?.redacted) return 'redacted'
+          // 现状已和快照里这条完全相同：不写，也不进撤回名单。撤回删的是「刚写回的那一版」，这时删掉的其实是原来那份，
+          // 正在删它的那次密钥硬删随后找不到它，回报删了 0 条、待决账本也清不到
+          let isAlreadyThere = false
+          const put = latest === undefined ? undefined
+            : await store.put(rec, target === 'exact' ? scopeAt(rec.workspacePath) : { workspacePath: rec.workspacePath }, cur => {
+              isAlreadyThere = false
+              if (overwrite !== true && blocks(cur, rec)) return true
+              isAlreadyThere = isSameRecord(cur, rec)
+              return isAlreadyThere
+            })
+          if (put !== undefined) written.set(i, put)
+          return put === undefined && !isAlreadyThere ? 'skipped' : 'restored'
+        }))
       }
     } finally {
       // 后面某条写入抛错也要跑：前面已写回的可能正赶上别处的密钥硬删

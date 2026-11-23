@@ -1,6 +1,8 @@
 import { readFile, writeFile, mkdir, rename } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import type { RootLock } from '../root-lock.ts'
+import { WriteSection } from './write-section.ts'
 
 /**
  * 往 ds 原生全局指令文件 ~/.dsh/AGENTS.md 的专属区块追加记忆（promote 的 agents-md 目标）。
@@ -20,16 +22,13 @@ export interface AgentsMdWriter {
   append(line: string): Promise<void>
 }
 
-export function createAgentsMdWriter(filePath: string): AgentsMdWriter {
-  // 进程内串行：append 是"读取→构造→写入"三步，两次并发读改写会互相覆盖（tmp+rename 只保证
-  // 单次替换完整，不保证两次替换不丢更新）。与 FileTable.locked 同款链式互斥。
-  let chain: Promise<unknown> = Promise.resolve()
+/**
+ * lock：记忆根的写入段，接线层注入插件实例的那一把。append 是「读取→构造→写入」三步，两次并发读改写会互相覆盖
+ * （tmp+rename 只保证单次替换完整），所以整段在写入段里。缺省只做进程内串行，不拿跨进程锁。
+ */
+export function createAgentsMdWriter(filePath: string, lock: RootLock = new WriteSection({ run: fn => fn() })): AgentsMdWriter {
   return {
-    append(line: string): Promise<void> {
-      const next = chain.then(() => appendInner(filePath, line), () => appendInner(filePath, line))
-      chain = next.catch(() => {})
-      return next
-    },
+    append: line => lock.run(() => appendInner(filePath, line)),
   }
 }
 

@@ -117,6 +117,15 @@ const SELF_WRITING_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['scan'
 /** 改待决项的子命令，先认领条目再执行，同一条同时只跑一个（resolve、undo 由执行器 executeConfirm、executeUndo 自己认领）。 */
 const CLAIMED_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['promote', 'keep-local', 'dismiss-overflow'])
 
+/**
+ * 一次改一条记忆（合并是一次改两条）的子命令，整条命令在一个写入段里：快照、记忆文件、账本之间拿锁超时不会只做一半
+ * （比如改了文件却没留撤销），同进程别的写入也插不进中间。认领的命令已在认领段里；批量命令逐项各占一段，不在这里。
+ * 这些命令都不调模型、不等视图写入（视图在命令返回后才重写）。
+ */
+const SECTION_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set([
+  'restore', 'promote-memory', 'keep-local-memory', 'move-memory', 'forget', 'hard-delete', 'confirm', 'edit-memory', 'merge-memories',
+])
+
 type Ok = Extract<MemoryCommandResult, { ok: true }>
 type Err = Extract<MemoryCommandResult, { ok: false }>
 
@@ -164,6 +173,8 @@ async function run(deps: MemoryCommandDeps, invocation: MemoryCommandInvocation)
     // 两个标签页或两个宿主进程同时处理同一条（提升与留在本项目）：只让一条执行，另一条什么都不动
     const claimed = await deps.decisions.withClaim(command.decisionId, () => dispatch(deps, command, gov, exec, now))
     result = claimed.isClaimed ? claimed.value : fail(command.cmd, 'claimed', `待决项 ${command.decisionId} 正在被另一次操作处理，未做任何改动`)
+  } else if (SECTION_COMMANDS.has(command.cmd)) {
+    result = await deps.store.writeSection(() => dispatch(deps, command, gov, exec, now))
   } else {
     result = await dispatch(deps, command, gov, exec, now)
   }

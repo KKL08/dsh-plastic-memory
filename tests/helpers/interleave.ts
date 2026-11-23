@@ -22,7 +22,7 @@ import fc from 'fast-check'
  */
 
 /** 写锁的形状（与存储层的记忆根写锁同形）。Subject.lock 给了就交给世界构造函数，由它传给各存储模块。 */
-export interface WriteLock { run<T>(fn: () => Promise<T>): Promise<T> }
+export interface WriteLock { run<T>(fn: () => Promise<T>): Promise<T>; runUnqueued<T>(fn: () => Promise<T>): Promise<T> }
 
 type FsPromises = typeof realFs
 

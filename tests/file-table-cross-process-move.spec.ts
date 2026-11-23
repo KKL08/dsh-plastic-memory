@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
+import { WriteSection } from '../src/storage/write-section.ts'
 import { encodeRecord, splitFrontmatter } from '../src/storage/frontmatter.ts'
 import { ARCHIVE_DIR, GLOBAL_DIR, INDEX_FILE } from '../src/storage/paths.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
@@ -12,7 +13,8 @@ import { RecordNotFoundError } from '../src/errors.ts'
 import { captureRejection } from './helpers/errors.ts'
 import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
 
-// 两个宿主进程同时搬同一个 id 的文件：两个 FileTable 实例共用一个记忆根目录，各有各的进程内锁，互不排队。
+// 两个宿主进程同时搬同一个 id 的文件：两个 FileTable 实例共用一个记忆根目录，各有各的写入段，互不排队
+// （跨进程那一层不排斥，即锁库用不了时两个进程之间的情形）。
 // fs 是进程边界：给 link / rm / rename 套一层，在指定路径的调用之前或之后插进另一个实例的整次写入，交错时机确定，不靠 sleep。
 // 不管怎么交错，写之前存在的 id 写完至少还剩一个文件；索引最后列全目录里的记忆。
 type Op = 'link' | 'rm' | 'rename' | 'copyFile'
@@ -94,7 +96,7 @@ afterEach(async () => {
 const globalDir = () => join(root, GLOBAL_DIR)
 const mds = async (dir: string) => (await readdir(dir).catch(() => [] as string[])).filter(n => n.endsWith('.md') && n !== INDEX_FILE).sort()
 /** 每个实例一份召回统计侧表，模拟两个进程。 */
-const newTable = () => new FileTable({ root, stats: new InMemoryKvTable<RecallStats>(), now: () => Date.now() + fsClockOffset })
+const newTable = () => new FileTable({ root, lock: new WriteSection({ run: fn => fn() }), stats: new InMemoryKvTable<RecallStats>(), now: () => Date.now() + fsClockOffset })
 
 async function seed(r: MemoryRecord = record(), fileName = '竞态.md', dir = globalDir()): Promise<string> {
   await mkdir(dir, { recursive: true })

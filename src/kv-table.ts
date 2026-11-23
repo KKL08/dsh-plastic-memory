@@ -35,6 +35,11 @@ export interface CasKvTable<T> extends KvTable<T> {
   deleteIf(key: string, isStill: (current: T) => boolean): Promise<boolean>
   /** 读改写：对此刻的值（没有为 undefined）求 fn，返回值写回（其 id 须等于 key）；fn 返回 undefined 就不写。写了返回 true。 */
   update(key: string, fn: (current: T | undefined) => T | undefined): Promise<boolean>
+  /**
+   * key 此刻的版本标记：值被改写过就变（文件表是文件签名），没有这一键为 undefined。比整份读便宜，
+   * 给「读过一次，之后只在变了才重读」的调用方用；不支持的实现不给，调用方每次都重读。
+   */
+  revision?(key: string): Promise<string | undefined>
 }
 
 /** 带批量写的 KV：只给召回统计用（单文件表，一次 markRecalled 只该换一次文件）。KvTable 本身不加批量。 */

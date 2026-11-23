@@ -1,11 +1,11 @@
-import type { RootLock } from '../../src/root-lock.ts'
+import type { SectionLock } from '../../src/root-lock.ts'
 import type { SemanticLlm } from '../../src/governance/semantic-scan.ts'
 
 /**
  * 记录持锁深度的写锁替身：depth 是此刻处在 run 内的写者数（同实例嵌套、并发都各算一层），不跨进程、不互斥。
  * maxDepth 证明这条路径真的进过锁，配合 unlockedModel 钉住「持锁时不等模型」。
  */
-export interface DepthLock extends RootLock {
+export interface DepthLock extends SectionLock {
   readonly depth: number
   readonly maxDepth: number
 }
@@ -13,15 +13,17 @@ export interface DepthLock extends RootLock {
 export function depthLock(): DepthLock {
   let depth = 0
   let maxDepth = 0
+  const run = async <T>(fn: () => Promise<T>): Promise<T> => {
+    maxDepth = Math.max(maxDepth, ++depth)
+    try {
+      return await fn()
+    } finally {
+      depth--
+    }
+  }
   return {
-    async run<T>(fn: () => Promise<T>): Promise<T> {
-      maxDepth = Math.max(maxDepth, ++depth)
-      try {
-        return await fn()
-      } finally {
-        depth--
-      }
-    },
+    run,
+    runUnqueued: run,   // 替身本身不排队
     get depth() { return depth },
     get maxDepth() { return maxDepth },
   }

@@ -3,6 +3,8 @@ import { chmod, readFile, writeFile, mkdir, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { agentsMdPath, createAgentsMdWriter } from '../src/storage/agents-md.ts'
+import { createCrossProcessLock } from '../src/storage/root-lock.ts'
+import { WriteSection } from '../src/storage/write-section.ts'
 
 describe('agentsMdPath', () => {
   afterEach(() => {
@@ -83,6 +85,18 @@ describe('createAgentsMdWriter.append', () => {
     const text = await readFile(file, 'utf8')
     expect(text).toContain('- 并发甲')
     expect(text).toContain('- 并发乙')
+  })
+
+  it('两个进程各一个 writer、共用记忆根写锁，同时各 append 10 条：20 条都落到文件', async () => {
+    // 两份写入段各套一把跨进程锁，模拟桌面版和 dsh web 同开：进程内的队互不相干，只靠锁库互斥
+    const root = join(dir, 'memories')
+    await mkdir(root, { recursive: true })
+    const quiet = { info() {}, warn() {}, error() {}, debug() {} }
+    const a = createAgentsMdWriter(file, new WriteSection(createCrossProcessLock({ root, log: quiet })))
+    const b = createAgentsMdWriter(file, new WriteSection(createCrossProcessLock({ root, log: quiet })))
+    await Promise.all(Array.from({ length: 10 }, (_, i) => [a.append(`甲 ${i}`), b.append(`乙 ${i}`)]).flat())
+    const lines = (await readFile(file, 'utf8')).split('\n').filter(l => l.startsWith('- '))
+    expect(lines.sort()).toEqual(Array.from({ length: 10 }, (_, i) => [`- 甲 ${i}`, `- 乙 ${i}`]).flat().sort())
   })
 
   it('判重按整行相等：前缀相同但更短的条目不算重复，两条都写入', async () => {

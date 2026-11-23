@@ -30,6 +30,10 @@ All notable changes to this project are documented here. The format follows
   index (全文, 摘要 and 简单索引 in Chinese). The settings page, the side
   panel and the guide use the new names; the values in configuration
   (`core`, `search`, `passive`) stay the same.
+- Each change to a memory (its snapshot, the memory file and the record
+  that lets you undo it) now runs as one step under the memory folder's
+  write lock. If the lock stays busy, the change fails as a whole and can
+  be retried, instead of stopping partway.
 
 ### Fixed
 - A memory file whose timestamp was a number outside the range of a date was
@@ -54,6 +58,14 @@ All notable changes to this project are documented here. The format follows
   project that has no memories at the moment, for example when they are all
   in recently deleted. The results stay until the project folder itself is
   gone.
+- With the desktop app and `dsh web` open on the same memories, promoting
+  memories to `AGENTS.md` in both at the same time could drop some of the
+  promoted memories. Promotions now take turns under the memory folder's
+  write lock.
+- If a project memory was deleted for good while an undo was restoring it,
+  the undo could still write it back, bringing back a deleted secret or
+  removing a global memory with the same id. Restores now check each memory
+  again right before writing it back and skip it once it has been deleted.
 
 ## [0.2.0] - 2026-11-21
 

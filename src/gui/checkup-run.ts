@@ -65,7 +65,7 @@ export async function holdCheckups(checkups: Pick<CheckupRecordStore, 'claim'>, 
   }
 }
 
-/** 一起放掉这些认领（同一把写锁共用一次拿锁），一个失败不耽误其余的，不抛错。 */
+/** 一起放掉这些认领（各占一个写入段；拿锁超时时排着的一起失败，只等一轮），一个失败不耽误其余的，不抛错。 */
 async function releaseEach(claims: readonly RefreshableClaim[], log: MemoryLogger): Promise<void> {
   const results = await Promise.allSettled(claims.map(claim => claim.release()))
   const failed = results.flatMap(r => (r.status === 'rejected' ? [r.reason as unknown] : []))

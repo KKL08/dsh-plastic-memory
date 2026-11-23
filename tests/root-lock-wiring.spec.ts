@@ -19,7 +19,7 @@ import { RootLockTimeoutError } from '../src/errors.ts'
 import { collectGlobalViews } from '../src/gui/view-writer.ts'
 import { GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_WORKSPACE_MAP_FILE } from '../src/gui/contract.ts'
 import { KV_IMPORT_MARKER } from '../src/storage/legacy-kv-import.ts'
-import type { RootLock } from '../src/root-lock.ts'
+import type { SectionLock } from '../src/root-lock.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import { record } from './helpers/record.ts'
 import { fakeExec } from './helpers/exec.ts'
@@ -54,13 +54,13 @@ afterEach(async () => {
 const lockDir = () => join(root, STATE_DIR, 'lock')
 
 /** 一把真写锁（手动计时器）。 */
-function realLock(extra: { loadSqlite?: () => { DatabaseSync: typeof import('node:sqlite').DatabaseSync } | undefined } = {}): { lock: RootLock; timers: ManualTimers } {
+function realLock(extra: { loadSqlite?: () => { DatabaseSync: typeof import('node:sqlite').DatabaseSync } | undefined } = {}): { lock: SectionLock; timers: ManualTimers } {
   const timers = manualTimers()
   return { lock: createRootLock({ root, log: quietLog, timers, ...extra }), timers }
 }
 
 /** 接线层同款：一把锁注入侧表、文件表、待决账本。 */
-function wired(lock: RootLock, now = () => Date.now()) {
+function wired(lock: SectionLock, now = () => Date.now()) {
   const sidecar = new SidecarStore({ root, schemas, lock, log: quietLog, now })
   const table = new FileTable({ root, lock, stats: sidecar.recallStats, log: quietLog, now })
   const store = new MemoryStore(table, quietLog, sidecar.recallStats)
@@ -238,7 +238,7 @@ describe('RL-19 认领：先认领、再进锁', () => {
   it('RL-19 第一次拿锁就超时：fn 不执行，单独清理认领；清理也拿不到锁时，抛出的仍是第一次的 root-lock-timeout', async () => {
     const a = realLock()
     const errors: unknown[] = []
-    const recording: RootLock = { run: fn => a.lock.run(fn).catch((err: unknown) => { errors.push(err); throw err }) }
+    const recording: SectionLock = { run: fn => a.lock.run(fn).catch((err: unknown) => { errors.push(err); throw err }), runUnqueued: fn => a.lock.runUnqueued(fn) }
     const { decisions } = wired(recording, () => NOW)
     await decisions.list() // 先过导入屏障
     const other = await holdElsewhere()
@@ -273,9 +273,10 @@ describe('RL-19 认领：先认领、再进锁', () => {
 })
 
 /** 拿锁之前插一步的写锁：beforeNextRun 登记的动作在下一次 run 到来、还没去拿锁时跑一次。 */
-function gateLock(inner: RootLock) {
+function gateLock(inner: SectionLock) {
   let pending: (() => Promise<void>) | undefined
-  const lock: RootLock = {
+  const lock: SectionLock = {
+    runUnqueued: fn => inner.runUnqueued(fn),
     async run(fn) {
       const hook = pending
       pending = undefined
@@ -287,10 +288,11 @@ function gateLock(inner: RootLock) {
 }
 
 /** 进锁后先停住的写锁：每次 run 拿到锁就记一次到达、等测试放行，再跑写入本身。 */
-function pausingLock(inner: RootLock) {
+function pausingLock(inner: SectionLock) {
   const arrivals: Array<() => void> = []
   let onArrive: (() => void) | undefined
-  const lock: RootLock = {
+  const lock: SectionLock = {
+    runUnqueued: fn => inner.runUnqueued(fn),
     run: fn => inner.run(async () => {
       const gate = deferred()
       arrivals.push(gate.resolve)

@@ -8,7 +8,7 @@ import { autoCheckupSettingSchema, checkupRecordSchema, recallStatsSchema, type 
 import { STATE_DIR } from './paths.ts'
 import { SAFE_KEY_RE, atomicWrite, breakStaleLock, createExclusive, describeError, errnoCode, isStaleLock, lockOwner } from './state-files.ts'
 import { LegacyKvImport, type LegacyKvTables } from './legacy-kv-import.ts'
-import type { RootLock } from '../root-lock.ts'
+import type { RootLock, SectionLock } from '../root-lock.ts'
 import { defaultRootLock } from './root-lock.ts'
 
 /**
@@ -28,7 +28,7 @@ import { defaultRootLock } from './root-lock.ts'
  *
  * 写都是 tmp + rename 原子写，进程内经一条 Promise 链串行，轮到了再拿记忆根写锁（排队期间不占写锁）；读不加锁。
  * 旧 KV 导入另用锁文件跨进程串行，裁决用条目旁的认领文件跨进程互斥（同一条待决项同时只许一次裁决），
- * 体检同样按范围认领（同一个范围同时只体检一次）。认领不进进程内链：排他创建、发现被占都不拿写锁，只有清残留、刷新、释放各自进写锁。
+ * 体检同样按范围认领（同一个范围同时只体检一次）。认领的快速路径不进写入段：排他创建、发现被占都不拿写锁，只有清残留、刷新、释放各自进写锁。
  * 坏文件跳过并记日志，不抛。快照、账本、扫描缓存、建议忽略表的条目 schema 由接线层注入（storage 不 import governance）；
  * 体检记录表、自动体检设置表的 schema 是存储层自己的（storage/schema.ts），不经注入。
  *
@@ -63,14 +63,14 @@ export interface SidecarOptions<S, P, C, I> {
   log?: MemoryLogger
   now?: () => number
   /** 记忆根写锁。接线层注入插件实例的那一把；缺省用同一进程同一记忆根共用的那把（root-lock.ts）。 */
-  lock?: RootLock
+  lock?: SectionLock
 }
 
 type Locked = <R>(fn: () => Promise<R>) => Promise<R>
 
 interface TableEnv {
   locked: Locked
-  /** 记忆根写锁本身：认领的清残留、刷新、释放直接用它，不经进程内链 */
+  /** 记忆根写锁本身（写入段）：认领的清残留、刷新、释放直接用它，不经导入屏障 */
   lock: RootLock
   /** 导入屏障；召回统计表不用 */
   ready: () => Promise<void>
@@ -117,6 +117,19 @@ class EntryFileTable<T extends { id: string }> implements ClaimKvTable<T>, CasKv
     await this.env.ready()
     const path = this.pathOf(key)
     return path === undefined ? undefined : this.read(path)
+  }
+
+  /** 文件签名：写入都是换文件（原子改名），换过 inode 就变；同一文件被就地改写看大小和时间。文件不在或 stat 不了为 undefined。 */
+  async revision(key: string): Promise<string | undefined> {
+    await this.env.ready()
+    const path = this.pathOf(key)
+    if (path === undefined) return undefined
+    try {
+      const s = await stat(path)
+      return `${s.ino}:${s.size}:${s.mtimeMs}:${s.ctimeMs}`
+    } catch {
+      return undefined
+    }
   }
 
   async list(): Promise<Array<[string, T]>> {
@@ -345,7 +358,7 @@ class MapFileTable<T> implements BatchKvTable<T> {
     })
   }
 
-  /** 锁内读当前整表，逐个 id 算新行，只换一次文件。召回计数靠它不少计：同一进程并发靠进程内链，跨进程靠写锁。 */
+  /** 锁内读当前整表，逐个 id 算新行，只换一次文件。召回计数靠它不少计：同一进程、跨进程都靠写入段（锁库用不了时只保证同一进程）。 */
   async mergeMany(ids: readonly string[], fn: (current: T | undefined, key: string) => T): Promise<void> {
     if (ids.length === 0) return
     await this.env.locked(async () => {
@@ -381,9 +394,8 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
   private readonly stateDir: string
   private readonly opts: SidecarOptions<S, P, C, I>
   private readonly log: MemoryLogger
-  private chain: Promise<unknown> = Promise.resolve() // 进程内互斥：侧表写与导入串行化
   /** 记忆根写锁：侧表写、导入都在锁内；接线层把同一把也注入文件表与待决账本 */
-  readonly lock: RootLock
+  readonly lock: SectionLock
   private readonly legacy: LegacyKvImport<S, P>
 
   /** 构造不做 I/O：目录按需在首次写入时建。 */
@@ -393,11 +405,14 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
     this.stateDir = join(opts.root, STATE_DIR)
     this.lock = opts.lock ?? defaultRootLock(opts.root, this.log)
     const lock = this.lock
-    const locked: Locked = fn => this.locked(fn)
+    // 写入段：进程内一段一段来，轮到了再拿写锁
+    const locked: Locked = fn => lock.run(fn)
+    // 导入是侧表读写前的屏障，会在写入段里被等：排进写入段的队就和等它的段互相等，所以只拿跨进程那一层
+    const unqueued: Locked = fn => lock.runUnqueued(fn)
     const now = () => this.now()
     this.legacy = new LegacyKvImport({
       stateDir: this.stateDir, dirs: { snapshots: SNAPSHOTS_DIR, pending: PENDING_DIR },
-      schemas: { snapshots: opts.schemas.snapshots, pending: opts.schemas.pending }, openLegacyKv: opts.openLegacyKv, locked, log: this.log, now,
+      schemas: { snapshots: opts.schemas.snapshots, pending: opts.schemas.pending }, openLegacyKv: opts.openLegacyKv, locked: unqueued, log: this.log, now,
     })
     const gated: TableEnv = { locked, lock, ready: () => this.legacy.ensureImported(), log: this.log, now }
     const ungated: TableEnv = { locked, lock, ready: async () => {}, log: this.log, now }
@@ -415,14 +430,6 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
   /** 旧 KV 导入是否已结清（导完且旧行已删）；彻底删除据此拦（续传会把旧快照里的明文放回来）。 */
   isLegacyImportSettled(): Promise<boolean> {
     return this.legacy.isImportSettled()
-  }
-
-  /** 进程内按链串行，轮到了再拿写锁。 */
-  private locked<R>(fn: () => Promise<R>): Promise<R> {
-    const run = () => this.lock.run(fn)
-    const next = this.chain.then(run, run)
-    this.chain = next.catch(() => {})
-    return next
   }
 
   private now(): number {

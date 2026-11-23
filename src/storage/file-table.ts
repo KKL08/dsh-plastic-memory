@@ -122,12 +122,11 @@ function frontmatterOf(raw: string): string {
 /**
  * 文件表：磁盘是唯一真相，进程里不常驻记忆表。构造不做 I/O；每个操作读它涉及的目录。
  * 读目录时每个文件都 stat，签名没变才用解析缓存里的结果（parse-cache.ts），外部改动下一次读就能看到。
- * 读路径不加锁、不写盘；写路径经一条 Promise 链串行、在记忆根写锁内，锁内先 locate 重读磁盘再应用修改（外部编辑不丢）；create 是例外：新 id 不定位，排他占名。
+ * 读路径不加锁、不写盘；写路径在写入段里（进程内串行、跨进程持记忆根写锁），锁内先 locate 重读磁盘再应用修改（外部编辑不丢）；create 是例外：新 id 不定位，排他占名。
  * 写锁让插件进程之间的写入互斥；用户手编、git 这类外部写者不认锁：写盘前复核文件原文仍是 locate 读到的那份，被改过就重新 locate、重算后再写。
  * 记忆目录的维护只有两处入口：写路径末尾（被写的目录）与 maintain（快照冻结时由调用方对 global + 当前 workspace 调用），都走同一把锁。
  */
 export class FileTable implements MemoryTable {
-  private chain: Promise<unknown> = Promise.resolve()  // 进程内互斥：写路径与维护点串行化
   /** 锁内段进入的次数与正在跑的个数：锁外定位据此判断扫描期间有没有写入（见 locate）。 */
   private writeEpoch = 0
   private writesRunning = 0
@@ -145,16 +144,17 @@ export class FileTable implements MemoryTable {
     this.globalDir = join(opts.root, GLOBAL_DIR)
   }
 
-  /** 互斥执行：所有写路径都经过这里，进程内按链串行，轮到了再拿写锁（排队期间不占写锁）。 */
+  inSection<T>(fn: () => Promise<T>): Promise<T> {
+    return this.lock.run(fn)
+  }
+
+  /** 互斥执行：所有写路径与维护点都经过这里，在写入段里（进程内一段一段来、轮到了再拿写锁，排队期间不占写锁）。 */
   private locked<T>(fn: () => Promise<T>): Promise<T> {
-    const run = () => this.lock.run(async () => {
+    return this.lock.run(async () => {
       this.writeEpoch++
       this.writesRunning++
       try { return await fn() } finally { this.writesRunning-- }
     })
-    const next = this.chain.then(run, run)
-    this.chain = next.catch(() => {})
-    return next
   }
 
   private now() { return this.opts.now?.() ?? Date.now() }
