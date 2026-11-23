@@ -1012,22 +1012,31 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       const sidecar = new SidecarStore({ root: memoriesRoot, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
       const ledger = new PendingDecisionsStore(sidecar.pending)
       const { entry } = await ledger.upsert({ memoryIds: [a, b], summary: '单元测试框架矛盾：一条说用 vitest，一条说用 jest', workspaces: [ws, ws], fingerprint: 'h20' }, Date.now())
-      const suggest = () => runMemoryCommand(ws, `/memory suggest ${JSON.stringify({ decisionId: entry.id })}`, sel)
-      let r = await suggest()
+      // 每一次都记进 detail：第几次、命令结果、条目上记的失败原因（读不出时带卡在哪一步；模型判断不了时说的理由不打印）
+      const attempts: string[] = []
+      const suggest = async () => {
+        const r = await runMemoryCommand(ws, `/memory suggest ${JSON.stringify({ decisionId: entry.id })}`, sel)
+        if (typeof r === 'string') return { r, saved: undefined }
+        const saved = await ledger.get(entry.id)
+        const { reason: _reason, ...cause } = saved?.suggestionFailure?.cause ?? { kind: null }
+        attempts.push(`第 ${attempts.length + 1} 次 ${r.kind}：${saved?.suggestion !== undefined ? '有建议' : `没有建议，失败原因=${JSON.stringify(cause)}`}`)
+        return { r, saved }
+      }
+      let { r, saved } = await suggest()
       if (typeof r === 'string') return { ok: false, detail: r }
-      let saved = await ledger.get(entry.id)
-      // 模型偶尔给出读不出的回复，插件如实记成失败、不自动重试；这里同用户点一次「再试一次」
-      if (saved?.suggestion === undefined && saved?.suggestionFailure?.cause.kind === 'unparseable') {
-        r = await suggest()
-        if (typeof r === 'string') return { ok: false, detail: r }
-        saved = await ledger.get(entry.id)
+      // 模型偶尔给出读不出的回复，插件如实记成失败、不自动重试；这里同用户点一次「再试一次」，只试这一次
+      const isRetried = saved?.suggestion === undefined && saved?.suggestionFailure?.cause.kind === 'unparseable'
+      if (isRetried) {
+        ({ r, saved } = await suggest())
+        if (typeof r === 'string') return { ok: false, detail: `${attempts.join('；')}；第 2 次 ${r}` }
       }
       const suggestion = saved?.suggestion
-      if (suggestion === undefined) return { ok: false, detail: `suggest → ${r.kind}: ${r.text}；没有建议，失败原因=${JSON.stringify(saved?.suggestionFailure?.cause ?? null)}` }
+      const tried = `${attempts.join('；')}${isRetried ? `；重试${suggestion !== undefined ? '救回了（第一次失败过）' : '没救回'}` : ''}`
+      if (suggestion === undefined) return { ok: false, detail: `suggest → ${r.kind}: ${r.text}；${tried}` }
       const draft = suggestion.ops.find(op => op.kind === 'edit')
       return {
         ok: r.kind === 'success' && suggestion.isSourced,
-        detail: `action=${suggestion.action} isSourced=${suggestion.isSourced} reason=${suggestion.reason} draft=${draft === undefined ? '（无）' : draft.content}`,
+        detail: `action=${suggestion.action} isSourced=${suggestion.isSourced} reason=${suggestion.reason} draft=${draft === undefined ? '（无）' : draft.content}；${tried}`,
       }
     })
     // H14 指令文件按项目现读：一个项目根放 AGENTS.md，另一个什么都不放；各存一条记忆、账本里各挂一条和指令文件的冲突，

@@ -107,6 +107,9 @@ All notable changes to this project are documented here. The format follows
   run because the session is open in another window, the session is busy or
   the connection was interrupted now say so in the interface language,
   instead of showing an error code.
+- A suggestion for a conflict was discarded as unreadable when the model's
+  reply had braces in the text around its answer. It is now read as long as
+  the reply holds exactly one answer.
 
 ## [0.2.0] - 2026-11-21
 

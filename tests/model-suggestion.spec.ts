@@ -74,12 +74,15 @@ describe('处理建议的生成器', () => {
   })
 
   it.each([
-    ['不是 JSON', '都挺好'],
-    ['结论不认识', JSON.stringify({ action: 'rewrite', reason: 'r' })],
-    ['融合缺稿', JSON.stringify({ action: 'merge', reason: '合' })],
-    ['缺理由', JSON.stringify({ action: 'keep-a' })],
-  ])('输出不合格式（%s）：unparseable', async (_label, raw) => {
-    expect(await generateSuggestion(input, answering(raw).llm)).toEqual({ ok: false, cause: { kind: 'unparseable' } })
+    ['不是 JSON', '都挺好', 'no-object'],
+    ['断在字符串中间', '{"action":"merge","reason":"合","draft":{"content":"前端用 pnpm，脚本', 'syntax'],
+    ['结论不认识', JSON.stringify({ action: 'rewrite', reason: 'r' }), 'shape', ['action']],
+    ['融合缺稿', JSON.stringify({ action: 'merge', reason: '合' }), 'shape', ['draft']],
+    ['缺理由', JSON.stringify({ action: 'keep-a' }), 'shape', ['reason']],
+    ['缺结论', JSON.stringify({ reason: 'r' }), 'shape', ['action']],
+    ['稿缺摘要、名称是空串', JSON.stringify({ action: 'merge', reason: '合', draft: { content: '正文', name: '' } }), 'shape', ['draft.summary', 'draft.name']],
+  ] as const)('输出不合格式（%s）：unparseable，记下卡在哪一步，字段不合时带字段名', async (_label, raw, stage, fields?: readonly string[]) => {
+    expect(await generateSuggestion(input, answering(raw).llm)).toEqual({ ok: false, cause: { kind: 'unparseable', stage, ...(fields !== undefined ? { fields } : {}) } })
   })
 
   it('字段之间的逗号、键后面的冒号写成全角：照样读得出；字符串里面的全角标点原样保留', () => {
@@ -101,7 +104,7 @@ describe('处理建议的生成器', () => {
     expect(await generateSuggestion(input, answering(raw).llm)).toEqual({
       ok: false, cause: { kind: 'undecided', reason: '两条都没写适用场景，日期也一样；需要你确认 [已隐藏] 这个项目用哪个' },
     })
-    expect(await generateSuggestion(input, answering(JSON.stringify({ action: 'unsure', reason: ' ' })).llm)).toEqual({ ok: false, cause: { kind: 'unparseable' } })
+    expect(await generateSuggestion(input, answering(JSON.stringify({ action: 'unsure', reason: ' ' })).llm)).toEqual({ ok: false, cause: { kind: 'unparseable', stage: 'shape', fields: ['reason'] } })
   })
 
   it('融合稿含高危密钥：整份丢弃', async () => {
@@ -251,15 +254,15 @@ describe('按要求生成处理方案（补充要求的生成器）', () => {
     expect(await generateProposal(asked('把端口号并进来'), answering(raw).llm)).toEqual({
       ok: true, action: 'infeasible', reason: '两条里都没有端口号，没法并进来；[已隐藏] 也不在原文里',
     })
-    expect(await generateProposal(asked('并进来'), answering(JSON.stringify({ action: 'infeasible', reason: '' })).llm)).toEqual({ ok: false, cause: { kind: 'unparseable' } })
+    expect(await generateProposal(asked('并进来'), answering(JSON.stringify({ action: 'infeasible', reason: '' })).llm)).toEqual({ ok: false, cause: { kind: 'unparseable', stage: 'shape', fields: ['reason'] } })
   })
 
   it.each([
-    ['不是 JSON', '都挺好'],
-    ['判断不了（这里没有这一种）', JSON.stringify({ action: 'unsure', reason: '分不出' })],
-    ['融合缺稿', JSON.stringify({ action: 'merge', reason: '合' })],
-  ])('输出不合格式（%s）：unparseable', async (_label, raw) => {
-    expect(await generateProposal(asked('两者融合'), answering(raw).llm)).toEqual({ ok: false, cause: { kind: 'unparseable' } })
+    ['不是 JSON', '都挺好', 'no-object'],
+    ['判断不了（这里没有这一种）', JSON.stringify({ action: 'unsure', reason: '分不出' }), 'shape', ['action']],
+    ['融合缺稿', JSON.stringify({ action: 'merge', reason: '合' }), 'shape', ['draft']],
+  ] as const)('输出不合格式（%s）：unparseable，记下卡在哪一步，字段不合时带字段名', async (_label, raw, stage, fields?: readonly string[]) => {
+    expect(await generateProposal(asked('两者融合'), answering(raw).llm)).toEqual({ ok: false, cause: { kind: 'unparseable', stage, ...(fields !== undefined ? { fields } : {}) } })
   })
 
   it('稿里的疑似密钥不丢弃（应用时由用户确认）；理由按疑似级遮盖', async () => {
@@ -376,11 +379,13 @@ describe('垂直冲突（记忆和指令文件）的生成器', () => {
   })
 
   it.each([
-    ['横向的结论', JSON.stringify({ action: 'keep-a', reason: 'r' })],
-    ['改写缺稿', JSON.stringify({ action: 'rewrite', reason: '改' })],
-    ['不是 JSON', '都行'],
-  ])('输出不合格式（%s）：unparseable', async (_label, raw) => {
-    expect(await generateVerticalSuggestion(vInput, answering(raw).llm)).toEqual({ ok: false, cause: { kind: 'unparseable' } })
+    ['横向的结论', JSON.stringify({ action: 'keep-a', reason: 'r' }), 'shape', ['action']],
+    ['改写缺稿', JSON.stringify({ action: 'rewrite', reason: '改' }), 'shape', ['draft']],
+    ['缺理由', JSON.stringify({ action: 'delete' }), 'shape', ['reason']],
+    ['不是 JSON', '都行', 'no-object'],
+    ['断在字符串中间', '{"action":"rewrite","reason":"改","draft":{"content":"脚本仓用', 'syntax'],
+  ] as const)('输出不合格式（%s）：unparseable，记下卡在哪一步，字段不合时带字段名', async (_label, raw, stage, fields?: readonly string[]) => {
+    expect(await generateVerticalSuggestion(vInput, answering(raw).llm)).toEqual({ ok: false, cause: { kind: 'unparseable', stage, ...(fields !== undefined ? { fields } : {}) } })
   })
 
   it('unsure：记作 undecided，带遮盖后的理由', async () => {
@@ -429,7 +434,63 @@ describe('垂直冲突（记忆和指令文件）的生成器', () => {
       expect(await generateVerticalProposal(asked('没法'), answering(JSON.stringify({ action: 'infeasible', reason: '做不到' })).llm)).toEqual({ ok: true, action: 'infeasible', reason: '做不到' })
       const r = await generateVerticalProposal(asked('写进密码'), answering(JSON.stringify({ action: 'rewrite', reason: 'r', draft: { ...REWRITE_DRAFT, content: '用 npm，password: abc12345x' } })).llm)
       expect(r.ok && r.action !== 'infeasible' && r.ops[0]).toMatchObject({ kind: 'edit', content: '用 npm，password: abc12345x' })
-      expect(await generateVerticalProposal(asked('x'), answering(JSON.stringify({ action: 'unsure', reason: 'r' })).llm)).toEqual({ ok: false, cause: { kind: 'unparseable' } })
+      expect(await generateVerticalProposal(asked('x'), answering(JSON.stringify({ action: 'unsure', reason: 'r' })).llm)).toEqual({ ok: false, cause: { kind: 'unparseable', stage: 'shape', fields: ['action'] } })
     })
+  })
+})
+
+describe('回复里找答案的 JSON 对象', () => {
+  const ANSWER = { action: 'keep-a', reason: 'A 更新' }
+  const answer = JSON.stringify(ANSWER)
+
+  it.each([
+    ['包在代码块里', '```json\n' + answer + '\n```'],
+    ['前后带普通文字', `看了两条记忆，结论如下：\n${answer}\n以上。`],
+    ['前面的文字带花括号', `我先比较了两条的 {scopes} 和 {workspacePath}，结论：\n${answer}`],
+    ['后面的文字带花括号', `${answer}\n说明：A 的 {scope} 更具体，按 {x: 1} 的写法也行。`],
+    ['前后的文字都带花括号，答案里的分隔符写成全角', `思路 {a}：\n{"action"："keep-a"，"reason":"A 更新"}\n补充 {b}`],
+  ])('读得出（%s）', async (_label, raw) => {
+    expect(await generateSuggestion(input, answering(raw).llm)).toMatchObject({ ok: true, ...ANSWER })
+  })
+
+  it('垂直建议同样读得出：前后的文字带花括号', async () => {
+    const memory = record({ id: 'mem_v', name: '包管理器', content: '用 npm', tags: ['npm'], scope: 'workspace', workspacePath: '/w/app' })
+    const vInput = { summary: '记忆说用 npm', baselineRef: 'AGENTS.md：包管理', record: memory, baseline: ['前端统一用 pnpm'] }
+    const raw = `先看 {scopes}：\n${JSON.stringify({ action: 'delete', reason: '以指令文件为准' })}\n完毕 {done}`
+    expect(await generateVerticalSuggestion(vInput, answering(raw).llm)).toMatchObject({ ok: true, action: 'delete', reason: '以指令文件为准' })
+  })
+
+  it('两个都解析得了的对象（一段推理加答案）：不猜哪个是答案，算读不出，记在 shape', async () => {
+    const raw = `${JSON.stringify({ thought: '两条说的是同一件事' })}\n${answer}`
+    expect(jsonObjectIn(raw)).toBeUndefined()
+    expect(await generateSuggestion(input, answering(raw).llm)).toEqual({ ok: false, cause: { kind: 'unparseable', stage: 'shape' } })
+  })
+
+  it('前面的文字带花括号、后面的答案断了：记在 syntax', async () => {
+    const raw = '比较了 {scopes}：\n{"action":"merge","reason":"合","draft":{"content":"前端'
+    expect(await generateSuggestion(input, answering(raw).llm)).toEqual({ ok: false, cause: { kind: 'unparseable', stage: 'syntax' } })
+  })
+
+  it.each([
+    ['前面复述了格式示例，答案断了：示例不当答案', '可选格式里 {scopes} 不重要，例如 {"action":"keep-b","reason":"一句理由"}。我的结论：{"action":"keep-a","reason":"A 更'],
+    ['前面没有别的花括号，复述的示例后面答案断了', '例如 {"action":"keep-b","reason":"一句理由"}。我的结论：{"action":"keep-a","reason":"A 更'],
+    ['只差最后一个花括号，里面的稿已经闭合', '{"action":"merge","reason":"合","draft":{"content":"x","summary":"y"}'],
+    ['断在理由里，理由里有一对花括号', '{"action":"keep-a","reason":"用 {} 占位，然后'],
+    ['前面的文字里有落单的花括号', `注意 { 这个括号没合上，结论：\n${answer}`],
+  ])('有花括号到结尾都没配平：读不出，记在 syntax（%s）', async (_label, raw) => {
+    expect(jsonObjectIn(raw)).toBeUndefined()
+    expect(await generateSuggestion(input, answering(raw).llm)).toEqual({ ok: false, cause: { kind: 'unparseable', stage: 'syntax' } })
+  })
+
+  it('只有解析不了的花括号片段：记在 syntax', async () => {
+    expect(await generateSuggestion(input, answering('结论是 {keep-a}').llm)).toEqual({ ok: false, cause: { kind: 'unparseable', stage: 'syntax' } })
+  })
+
+  it('稿里的花括号、引号、全角标点逐字保留（前后的文字带花括号时也一样）', async () => {
+    const draft = { content: '模板写成 {name}，结尾是 "}"；不要改成 {{name}}：端口 5173，', summary: '花括号 } 和 { 都保留', name: '模板' }
+    const raw = `说明 {x}：\n${JSON.stringify({ action: 'merge', reason: '各管一块 {a}', draft })}\n附注 {y}`
+    const r = await generateSuggestion(input, answering(raw).llm)
+    expect(r).toMatchObject({ ok: true, action: 'merge', reason: '各管一块 {a}' })
+    expect(r.ok && r.ops.find(op => op.kind === 'edit')).toMatchObject({ content: draft.content, summary: draft.summary, name: draft.name })
   })
 })
