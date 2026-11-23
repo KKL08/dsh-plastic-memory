@@ -103,6 +103,10 @@ All notable changes to this project are documented here. The format follows
 - When a session could not run a memory page action, for example because it
   was open in another window, the page said only that the session was
   unavailable. The message now carries the app's own error code and text.
+- Actions on the memory page, in the side panel and on chat cards that cannot
+  run because the session is open in another window, the session is busy or
+  the connection was interrupted now say so in the interface language,
+  instead of showing an error code.
 
 ## [0.2.0] - 2026-11-21
 

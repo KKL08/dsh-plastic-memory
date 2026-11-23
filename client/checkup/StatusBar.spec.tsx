@@ -1,17 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import {
   GUI_VIEW_VERSION, pendingItemKey,
   type AutoCheckupFrequency, type CheckupResult, type CheckupView, type HealthView, type LibraryView, type MemoryCommandResult, type PendingView, type Scope,
 } from '../../src/gui/contract.ts'
 import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
+import { PROBE_INCOMPLETE, type MemoryGateway } from '../gateway.ts'
 import { createTranslator } from '../i18n.tsx'
-import { en } from '../locales.ts'
+import { en, zh } from '../locales.ts'
 import { MemoryPage } from '../MemoryPage.tsx'
 import { createNavStore, openMemoryPage, type NavTarget } from '../nav.ts'
-import { levelCountsOf, memory, NOW, renderInShell } from '../test-utils.tsx'
+import { gatewayViaChannel, gatewayViaCommand, levelCountsOf, memory, NOW, PING_OK, renderInShell } from '../test-utils.tsx'
 import { PanelShell } from '../ui/PanelShell.tsx'
 import { FLASH_MS } from '../library/shared.tsx'
+import { useCheckupRuns } from './runs.ts'
+import { StatusBar } from './StatusBar.tsx'
 
 const GLOBAL: Scope = { kind: 'global' }
 const APP: Scope = { kind: 'workspace', workspacePath: '/w/app' }
@@ -577,5 +580,69 @@ describe('动效', () => {
     act(() => { gateway.setView('health', health({ app: { score: 76 } })) })
     expect(roll().firstElementChild).toHaveTextContent(/^76$/)
     expect(live()).toHaveAttribute('data-live')
+  })
+})
+
+describe('结果行：手动体检什么都没执行（真网关，只假宿主的传输）', () => {
+
+  /** 记忆页里的那一份：标题行发起、状态条读同一个 useCheckupRuns。 */
+  function Bar() {
+    const runs = useCheckupRuns({ kind: 'ready', sessionId: 's1', cwd: '/w/app' }, checkups())
+    return (
+      <>
+        <button type="button" onClick={() => { runs.run(APP) }}>立即体检</button>
+        <StatusBar
+          scope={APP} view="todo" nav={createNavStore()} runs={runs} seen={{ checkups: [] }} health={health()} checkups={checkups()}
+          isGovernanceEnabled memoryCount={2} projectCount={2} needs={[]}
+        />
+      </>
+    )
+  }
+
+  async function lineOf(gateway: MemoryGateway, dict: typeof zh | typeof en): Promise<HTMLElement> {
+    const { container } = render(<PanelShell gateway={gateway} t={createTranslator(dict)}><Bar /></PanelShell>)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '立即体检' })) })
+    await act(async () => {})
+    return container.querySelector<HTMLElement>('.pm-status [aria-live] p')!
+  }
+
+  const cases = [
+    {
+      name: '会话在别的窗口打开着', gateway: () => gatewayViaCommand({ code: 'session/writer-held', message: 'session s1 is held by another writer' }),
+      zh: '这次没能体检：会话正在别的窗口使用，到那个窗口操作，或关掉那个窗口再试。',
+      en: 'Could not run the checkup. The session is open in another window. Use that window, or close it and try again.',
+      raw: ['session/writer-held', 'session s1 is held by another writer'],
+    },
+    {
+      name: '会话正忙', gateway: () => gatewayViaChannel(PING_OK, async () => ({ ok: false, error: { code: 'session/agent-busy', message: 'agent is busy' } })),
+      zh: '这次没能体检：会话正忙，等这一轮结束再试。',
+      en: 'Could not run the checkup. The session is busy. Try again when the current turn finishes.',
+      raw: ['session/agent-busy', 'agent is busy'],
+    },
+    {
+      name: '通道探活连着两次没走完', gateway: () => gatewayViaChannel(async () => { throw new TypeError('Failed to fetch') }),
+      zh: '这次没能体检：连接中断，还没发出去，请重试。',
+      en: 'Could not run the checkup. The connection was interrupted before anything was sent. Try again.',
+      raw: [PROBE_INCOMPLETE, 'probe did not complete'],
+    },
+  ]
+
+  for (const c of cases) {
+    it(`${c.name}：中文、英文界面各说一句，悬停也不带错误码和原话`, async () => {
+      const zhLine = await lineOf(c.gateway(), zh)
+      expect(zhLine.textContent).toBe(c.zh)
+      expect(zhLine).not.toHaveAttribute('title')
+      cleanup()
+      const enLine = await lineOf(c.gateway(), en)
+      expect(enLine.textContent).toBe(c.en)
+      expect(enLine).not.toHaveAttribute('title')
+      for (const raw of c.raw) { expect(zhLine.textContent).not.toContain(raw); expect(enLine.textContent).not.toContain(raw) }
+    })
+  }
+
+  it('别的失败照旧写原话，悬停是原话', async () => {
+    const line = await lineOf(gatewayViaChannel(PING_OK, async () => ({ ok: false, error: { code: 'plastic-memory/no-session', message: 'session s1 cannot run commands' } })), zh)
+    expect(line.textContent).toBe('体检没有完成：plastic-memory/no-session: session s1 cannot run commands')
+    expect(line).toHaveAttribute('title', 'plastic-memory/no-session: session s1 cannot run commands')
   })
 })

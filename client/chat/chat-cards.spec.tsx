@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import type { ComponentType } from 'react'
 import { GUI_VIEW_VERSION, RETENTION_MS, type DeletedView, type LibraryView, type MemoryCommand, type MemoryCommandResult, type ModelChange, type SessionView } from '../../src/gui/contract.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
-import { createHostGateway, type PluginConfig } from '../gateway.ts'
+import { createHostGateway, PROBE_INCOMPLETE, type PluginConfig } from '../gateway.ts'
 import { createTranslator } from '../i18n.tsx'
 import { en, zh } from '../locales.ts'
 import { PanelShell } from '../ui/PanelShell.tsx'
@@ -12,7 +12,7 @@ import type { SessionListState } from '../host.ts'
 import { createNavStore, PANEL_ID } from '../nav.ts'
 import { PROMOTE_TARGETS, toPluginConfig } from '../settings/config.ts'
 import { DEFAULT_SECTION } from '../settings/config-form.fake.ts'
-import { fakeHostContext, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
+import { fakeHostContext, gatewayViaChannel, NOW, PING_OK, renderInShell, levelCountsOf, type RpcCall } from '../test-utils.tsx'
 import { registerChatCards, type TurnTailProps } from './index.tsx'
 import { MemoryCommandRow, type MemoryCommandNode } from './MemoryCommandRow.tsx'
 import { MemoryToolRow, type MemoryToolViewProps } from './MemoryToolRow.tsx'
@@ -592,6 +592,58 @@ describe('交付卡删除确认：鼠标与指针', () => {
     expect(screen.queryByRole('group', { name: QUESTION })).toBeNull()
     expect(screen.getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
     expect(gateway.executed).toEqual([])
+  })
+})
+
+describe('交付卡删除没有执行：按界面语言说原因，不显示错误码和原话', () => {
+  const refuse = (code: string, message: string): RpcCall => async () => ({ ok: false, error: { code, message } })
+
+  async function deleteFails(ping: RpcCall, run: RpcCall, dict: typeof zh | typeof en): Promise<string> {
+    const t = createTranslator(dict)
+    render(<PanelShell gateway={gatewayViaChannel(ping, run)} t={t}><SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} /></PanelShell>)
+    fireEvent.click(screen.getByRole('button', { expanded: false }))
+    const trash = screen.getByRole('button', { name: t('chat.card.delete') })
+    const row = trash.parentElement!
+    await act(async () => { fireEvent.click(trash) })
+    await act(async () => { fireEvent.click(within(row).getByRole('button', { name: t('pending.softDelete.confirm') })) })
+    return (await screen.findByRole('alert')).textContent ?? ''
+  }
+
+  const cases = [
+    {
+      name: '会话在别的窗口打开着', ping: PING_OK, run: refuse('session/writer-held', 'session s1 is held by another writer'),
+      zh: '会话正在别的窗口使用，到那个窗口操作，或关掉那个窗口再试。',
+      en: 'The session is open in another window. Use that window, or close it and try again.',
+      raw: ['session/writer-held', 'session s1 is held by another writer'],
+    },
+    {
+      name: '会话正忙', ping: PING_OK, run: refuse('session/agent-busy', 'agent is busy'),
+      zh: '会话正忙，等这一轮结束再试。',
+      en: 'The session is busy. Try again when the current turn finishes.',
+      raw: ['session/agent-busy', 'agent is busy'],
+    },
+    {
+      name: '通道探活连着两次没走完', ping: (async () => { throw new TypeError('Failed to fetch') }) as RpcCall, run: refuse('unreachable', 'unreachable'),
+      zh: '连接中断，还没发出去，请重试。',
+      en: 'The connection was interrupted before anything was sent. Try again.',
+      raw: [PROBE_INCOMPLETE, 'probe did not complete'],
+    },
+  ]
+
+  for (const c of cases) {
+    it(`${c.name}：中文、英文界面各说一句`, async () => {
+      const zhText = await deleteFails(c.ping, c.run, zh)
+      expect(zhText).toBe(`没有成功：${c.zh}`)
+      cleanup()
+      const enText = await deleteFails(c.ping, c.run, en)
+      expect(enText).toBe(`Did not work: ${c.en}`)
+      for (const raw of c.raw) { expect(zhText).not.toContain(raw); expect(enText).not.toContain(raw) }
+    })
+  }
+
+  it('别的失败照旧显示原话', async () => {
+    expect(await deleteFails(PING_OK, refuse('plastic-memory/no-session', 'session s1 cannot run commands'), zh))
+      .toBe('没有成功：plastic-memory/no-session: session s1 cannot run commands')
   })
 })
 

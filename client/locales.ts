@@ -69,6 +69,9 @@ export const zh = {
   'view.error': '读取失败：{message}',
 
   'command.failed': '没有成功：{detail}',
+  'command.notRun.writerHeld': '会话正在别的窗口使用，到那个窗口操作，或关掉那个窗口再试。',
+  'command.notRun.agentBusy': '会话正忙，等这一轮结束再试。',
+  'command.notRun.probeIncomplete': '连接中断，还没发出去，请重试。',
   'command.handledElsewhere': '这次操作没有生效：这一条正在别处处理，或者刚在别处处理完。',
 
   'time.justNow': '刚刚',
@@ -193,6 +196,9 @@ export const en: Record<LocaleKey, string> = {
   'view.error': 'Could not read: {message}',
 
   'command.failed': 'Did not work: {detail}',
+  'command.notRun.writerHeld': 'The session is open in another window. Use that window, or close it and try again.',
+  'command.notRun.agentBusy': 'The session is busy. Try again when the current turn finishes.',
+  'command.notRun.probeIncomplete': 'The connection was interrupted before anything was sent. Try again.',
   'command.handledElsewhere': 'This did not take effect: it is being handled elsewhere, or was just handled there.',
 
   'time.justNow': 'Just now',
