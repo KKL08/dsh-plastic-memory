@@ -273,7 +273,7 @@ export const settingsEn: Record<keyof typeof settingsZh, string> = {
   'settings.types.restoreAria': 'Restore {name}',
   'settings.types.period': 'Confirmation period: {n} days',
   'settings.types.periodNone': 'No regular confirmation',
-  'settings.types.periodResetAria': 'Restore the default confirmation period of {name}',
+  'settings.types.periodResetAria': 'Restore default confirmation period of {name}',
   'settings.types.periodInvalid': 'Enter a whole number from 1 to {max}.',
   'settings.types.periodDays': '{n} days',
 

@@ -839,6 +839,53 @@ describe('确认周期', () => {
     expect(form.calls[0]!.ops).toEqual([{ op: 'unset', path: ['builtinDecayDays', 'project'] }])
   })
 
+  it('弹层里点了恢复默认：焦点落在周期输入框上', () => {
+    setup({ value: { builtinDecayDays: { project: 30 } } })
+    const f = openGeneral('项目信息')
+    fireEvent.click(button('项目信息的确认周期恢复默认', f))
+    expect(periodBox(f)).toHaveFocus()
+  })
+
+  it('弹层里没改、或填的还是原来的天数就确定：没有待保存的改动', () => {
+    setup()
+    for (const text of [undefined, '007', ' 7 ']) {
+      const f = openGeneral('项目信息')
+      if (text !== undefined) fireEvent.change(periodBox(f), { target: { value: text } })
+      fireEvent.click(button('确定', f))
+      expect(periodLine('项目信息')).toBe('确认周期 7 天')
+      expect(button('保存')).toBeDisabled()
+    }
+  })
+
+  it('弹层里改了再按 Esc 或点右上角关闭：草稿不变', () => {
+    setup()
+    for (const close of [(f: HTMLElement) => { fireEvent.keyDown(f, { key: 'Escape' }) }, (f: HTMLElement) => { fireEvent.click(button('关闭', f)) }]) {
+      const f = openGeneral('项目信息')
+      fireEvent.change(periodBox(f), { target: { value: '30' } })
+      close(f)
+      expect(screen.queryByRole('dialog')).toBeNull()
+      expect(periodLine('项目信息')).toBe('确认周期 7 天')
+      expect(button('保存')).toBeDisabled()
+    }
+  })
+
+  it('确定后还没保存就再打开：输入框里是刚才改的天数', () => {
+    setup()
+    fireEvent.change(periodBox(openGeneral('项目信息')), { target: { value: '30' } })
+    fireEvent.click(button('确定', dialog('项目信息')))
+    expect(periodBox(openGeneral('项目信息'))).toHaveValue('30')
+  })
+
+  it('出厂不用定期确认、已存过周期的通用类型清空后确定：保存去掉这一项', async () => {
+    const { form } = setup({ value: { builtinDecayDays: { profile: 30 } } })
+    const f = openGeneral('用户画像')
+    fireEvent.change(periodBox(f), { target: { value: '' } })
+    fireEvent.click(button('确定', f))
+    expect(periodLine('用户画像')).toBe('不用定期确认')
+    await clickSave(form)
+    expect(form.calls[0]!.ops).toEqual([{ op: 'unset', path: ['builtinDecayDays', 'profile'] }])
+  })
+
   it('出厂不用定期确认的通用类型也能设周期：确认框写从不用定期确认到天数；清空就回到出厂，没有改动', async () => {
     const { form } = setup()
     let f = openGeneral('用户画像')

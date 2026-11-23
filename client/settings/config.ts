@@ -608,7 +608,7 @@ export function presetTypeChanges(saved: Pool, draft: Pool): { edited: string[];
 
 // —— 自定义类型 ——
 
-/** 弹层草稿：选择项未选时为空串，衰退天数是原文。 */
+/** 弹层草稿：选择项未选时为空串，确认周期是原文。 */
 export interface CustomTypeDraft {
   name: string
   label: string

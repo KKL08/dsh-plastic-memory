@@ -95,7 +95,12 @@ export function PeriodField({ id, value, canBeNone, onChange, reset }: {
         : (
           <div className="pm-period-head">
             {label}
-            <button type="button" className="pm-link pm-link--muted" aria-label={reset.label} onClick={reset.onClick}>{t('settings.scene.reset')}</button>
+            <button type="button" className="pm-link pm-link--muted" aria-label={reset.label}
+              onClick={() => {
+                reset.onClick()
+                // 按钮随即不在了：焦点交给输入框，不掉到弹层外面
+                document.getElementById(id)?.focus()
+              }}>{t('settings.scene.reset')}</button>
           </div>
         )}
       <TextField
