@@ -710,7 +710,7 @@ describe('最近删除里彻底删除', () => {
     const purge = e.snapshots.purge.bind(e.snapshots)
     e.snapshots.purge = async isPurged => {
       await purge(isPurged)
-      expect(await e.store.restoreArchived({ id: 'mem_p', workspacePath: SESSION_WS }, { at: scopeAt(SESSION_WS) })).toBe(true)
+      expect(await e.store.restoreArchived({ id: 'mem_p', workspacePath: SESSION_WS }, { at: scopeAt(SESSION_WS), now: e.clock.now })).toBe(true)
     }
     const body = err(await e.run({ cmd: 'hard-delete', memoryId: 'mem_p', layer: own }))
     expect(body.code).toBe('failed')

@@ -11,6 +11,7 @@ import type { BatchKvTable } from './kv-table.ts'
 import type { RecallStats } from './storage/schema.ts'
 import { hasSecret } from './secrets.ts'
 import type { Scope } from './scope.ts'
+import { RETENTION_MS } from './retention.ts'
 
 export type { MemoryLogger, MemoryTable, KeywordMatch, LocateTarget, LocateOptions, SessionTarget } from './storage/table.ts'
 
@@ -161,11 +162,16 @@ export class MemoryStore {
 
   /**
    * 归档记忆原样复活（没有快照覆盖时的恢复）：改回 active、去掉 deletedAt，经写路径搬回层顶层。
-   * 归档文件本身就是完整内容；updatedAt 记为恢复时刻（opts.now，缺省当前时间），手工放进 .archive/ 仍写 active 的文件也因此会被写回顶层。定位同 softDelete。
+   * 删除时间过了保留期的不复活（返回 false）。归档文件本身就是完整内容；updatedAt 记为恢复时刻（opts.now，缺省当前时间），手工放进 .archive/ 仍写 active 的文件也因此会被写回顶层。定位同 softDelete。
    */
   async restoreArchived(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, opts: DeleteOptions = {}): Promise<boolean> {
     try {
-      await this.table.update(record.id, deleteTarget(record, opts), ({ deletedAt: _, ...r }) => ({ ...r, status: 'active', updatedAt: opts.now ?? Date.now() }))
+      const now = opts.now ?? Date.now()
+      await this.table.update(record.id, deleteTarget(record, opts), ({ deletedAt, ...r }) => {
+        // 过了保留期的归档文件等维护点来清，清之前也不能复活：恢复的资格不看文件清没清
+        if (deletedAt !== undefined && deletedAt < now - RETENTION_MS) throw new RecordNotFoundError(r.id)
+        return { ...r, status: 'active', updatedAt: now }
+      })
     } catch (err) {
       if (err instanceof RecordNotFoundError) return false   // 定位之后被别处删掉
       throw err
