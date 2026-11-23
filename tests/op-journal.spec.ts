@@ -94,6 +94,29 @@ describe('操作日志库', () => {
       expect(existsSync(journalPath())).toBe(false)
     })
 
+    it('库正被别的连接占着：不删库，这一次不记，下次打开照常，原来的待完成行还在', async () => {
+      const { journal: first } = open()
+      first.begin(op('op_1'))
+      first.close()
+      const sqlite = await import('node:sqlite')
+      let isBusy = true
+      class BusyOnce extends sqlite.DatabaseSync {
+        constructor(path: string) {
+          super(path)
+          if (!isBusy) return
+          this.close()
+          throw Object.assign(new Error('database is locked'), { code: 'ERR_SQLITE_ERROR', errcode: 5 })
+        }
+      }
+      const { journal, warnings } = open({ loadSqlite: () => ({ ...sqlite, DatabaseSync: BusyOnce }) })
+      journal.begin(op('op_2'))
+      expect(warnings).toHaveLength(1)
+      isBusy = false
+      expect(journal.pending().map(p => p.op)).toEqual(['op_1'])
+      journal.begin(op('op_3'))
+      expect(journal.pending().map(p => p.op)).toEqual(['op_1', 'op_3'])
+    })
+
     it('库文件损坏：换一个新库接着用，丢掉的只是原来的待完成行', async () => {
       const { journal: first } = open()
       first.begin(op('op_1'))

@@ -74,9 +74,9 @@ describe('恢复读完快照后，彻底删除插进来、整份快照随之不�
     expect(r).toEqual({ isSnapshotLeft: false, result: [], project: undefined, global: GLOBAL_CONTENT })
   })
 
-  it('快照恢复途中刚过保留期，密钥硬删前清扫掉它：删掉的密钥不回到项目，全局独立副本留着', async () => {
+  it('快照恢复途中刚过保留期（密钥硬删不清扫过期快照，只把里面这条脱敏）：删掉的密钥不回到项目，全局独立副本留着', async () => {
     const r = await restoreWithHardDeleteBetween({ snapshotAge: SNAPSHOT_RETENTION_MS - 1, isSoftDeletedFirst: false })
-    expect(r).toEqual({ isSnapshotLeft: false, result: [], project: undefined, global: GLOBAL_CONTENT })
+    expect(r).toEqual({ isSnapshotLeft: true, result: [], project: undefined, global: GLOBAL_CONTENT })
   })
 
   it('对照：快照还在、里面这条已脱敏：跳过，全局独立副本留着', async () => {

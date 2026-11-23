@@ -228,7 +228,7 @@ describe('快照恢复与密钥硬删同一条：恢复读完快照、硬删随�
     const redacted = firstCall(trace, 1, nth(2, call => call.startsWith('rename(.state/snapshots/')))
     expect(read).toBeGreaterThanOrEqual(0)
     expect(redacted).toBeGreaterThan(read)
-    expect(firstCall(trace, 0, `readFile(${PROJ}/alpha.md)`, redacted)).toBeGreaterThan(redacted)
+    expect(firstCall(trace, 0, `readdir(${PROJ})`, redacted)).toBeGreaterThan(redacted)
   })
 
   it('全局另有一份独立副本：硬删整个插在恢复读完快照与写回之间，全局那份留着', async () => {

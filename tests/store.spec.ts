@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { MemoryStore } from '../src/store.ts'
+import { RETENTION_MS } from '../src/retention.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import { record } from './helpers/record.ts'
 import { InMemoryTable } from './helpers/in-memory-table.ts'
@@ -39,6 +40,18 @@ describe('MemoryStore.query', () => {
 })
 
 describe('MemoryStore 变更', () => {
+  it('restoreArchived：删除时间还在保留期内能恢复，过了保留期的不恢复、仍是已删除', async () => {
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
+    const t = 1_700_000_000_000
+    for (const id of ['fresh', 'expired']) await store.put(record({ id }))
+    await store.softDelete({ id: 'fresh', workspacePath: undefined }, { now: t - RETENTION_MS + 1 })
+    await store.softDelete({ id: 'expired', workspacePath: undefined }, { now: t - RETENTION_MS - 1 })
+    expect(await store.restoreArchived({ id: 'fresh', workspacePath: undefined }, { now: t })).toBe(true)
+    expect(await store.restoreArchived({ id: 'expired', workspacePath: undefined }, { now: t })).toBe(false)
+    expect((await store.get('fresh'))!.status).toBe('active')
+    expect((await store.get('expired'))!.status).toBe('deleted')
+  })
+
   it('softDelete 置 status 为 deleted', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'x' }))

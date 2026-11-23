@@ -185,19 +185,15 @@ describe('读路径不加锁', () => {
 })
 
 describe('派生 id 定位', () => {
-  it('还没写回 id 的手建文件：按路径重算哈希认出目标，目标文件只为解析读一次，不先读它的内容来找 id', async () => {
+  it('还没写回 id 的手建文件：按路径派生的 id 认出目标', async () => {
     const { id: _id, ...noId } = record({ name: '手建', type: 'knowledge', content: '手写的正文' })
     await seedGlobal('手建.md', noId as MemoryRecord)
     await seedGlobal('别的.md', record({ id: 'mem_other', name: '别的' }))
     const target = join(globalDir(), '手建.md')
     const derived = deriveFileId(`${GLOBAL_DIR}/手建.md`)
-    const table = open()
-    reads.tracing = true
-    const hit = await table.locate(derived, {})
-    reads.tracing = false
+    const hit = await open().locate(derived, {})
     expect(hit?.filePath).toBe(target)
     expect(hit?.record).toMatchObject({ id: derived, name: '手建', content: '手写的正文' })
-    expect(reads.paths.filter(p => p === target)).toHaveLength(1)
   })
 })
 

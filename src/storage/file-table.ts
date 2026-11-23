@@ -15,10 +15,11 @@ import { decodeFile, digestMismatch, encodeRecord, type DecodeOutcome, type File
 import { ParseCache, type CachedFile, type FileSignature } from './parse-cache.ts'
 import type { RootLock } from '../root-lock.ts'
 import type { OpJournal, PendingOp } from './op-journal.ts'
+import type { DerivedIndex, HintRow, LevelScan } from './derived-index.ts'
 import { defaultRootLock } from './root-lock.ts'
 import {
   WORKSPACE_MARKER, INDEX_FILE, GLOBAL_DIR, ARCHIVE_DIR, workspaceDirName, slugifyName, isReservedFileName,
-  isMemoryFileName, isCompanionLikeFileName, isWorkspaceDirName, deriveFileId, isDerivedFileId,
+  isMemoryFileName, isCompanionLikeFileName, isWorkspaceDirName, deriveFileId,
 } from './paths.ts'
 import { linkExclusive } from './exclusive-link.ts'
 import { formatIndexLine } from '../index-line.ts'
@@ -92,6 +93,10 @@ export interface FileTableOptions {
   lock?: RootLock
   /** 操作日志库：每次写入先记一行待完成，被打断的由下一次进写入段时补完。不给就只打提交标记、不能补做。 */
   journal?: OpJournal
+  /** 派生索引库：按 id 找文件时先看它记的提示，不用逐个读文件。不给（或库不可用）就逐个读，结果相同。 */
+  index?: DerivedIndex
+  /** 目录的修改时间距扫的时刻至少这么久，提示才直接用（同一个时间刻度里的后续改动看不出来）。缺省：时间戳只到整秒的文件系统 3 s，带小数的 20 ms。只有测试会给。 */
+  hintRacyMs?: number
 }
 
 /** 文件原文、文件名的指纹：操作日志里只记它，不记原文和名字（名字由记忆名生成）。 */
@@ -112,7 +117,8 @@ function changedFields(prev: MemoryRecord | undefined, next: MemoryRecord): stri
  * 读取结果的内部形态：带 extras、磁盘原文与 mtime（维护点逐字节比较与取 mtime 用）；对外的 LocatedRecord / LocatedFile 不带后两者。
  * hasReservedKeys：frontmatter 写了保留键（见 frontmatter.ts），维护点不就地回写这份文件。
  */
-interface Slot extends LocatedFile { raw: string; mtimeMs: number; hasReservedKeys: boolean }
+/** statSig：读这个文件时取的 stat 签名（见 sigOf），维护点拿它重记派生库的提示。 */
+interface Slot extends LocatedFile { raw: string; mtimeMs: number; statSig: string; hasReservedKeys: boolean }
 /** 写路径的定位结果：取舍出的那份，外加这次定位读到的该 id 全部副本（含它自己）。写盘时只覆盖、只删这些副本里此后没变过的。 */
 interface LocatedSlot extends Slot { copies: readonly Slot[] }
 /** 占名结果：落到的路径，与本轮写下的那个文件的 inode（硬链接或 rename 过去的就是 tmp 的 inode；退回复制时是复制出的目标自己的）。 */
@@ -129,6 +135,53 @@ function statSignature(name: string, s: { size: number; mtimeMs: number }): stri
   return `${name}\u0000${s.size}\u0000${s.mtimeMs}`
 }
 
+const INDEX_HEADER = '# Memory Index\n\n'
+
+/** 索引里一条记忆的行：以「- [id] 」开头、以「 · 文件名」结尾。占几行的条目（名字或摘要带换行）第一行就对不上。 */
+const INDEX_LINE_RE = /^- \[[^\]]+\] .* · [^/]+\.md$/
+
+/** 记提示时读文件里的 id 行：值照原样取（可以带空格），两头的引号去掉。只是线索，命中后按完整解析的结果核对。 */
+const HINT_ID_RE = /^id:[ \t]*["']?(.*?)["']?[ \t]*$/m
+
+/** 一个文件的 stat 签名：inode、大小、修改时间。同名文件被换掉、被改过都会变。 */
+function sigOf(s: { ino: number; size: number; mtimeMs: number }): string {
+  return `${s.ino}:${s.size}:${s.mtimeMs}`
+}
+
+/** 一个文件名的两个 32 位哈希（FNV-1a，两个种子）。 */
+function nameHash(name: string): [number, number] {
+  let a = 0x811c9dc5
+  let b = 0x01000193
+  for (let i = 0; i < name.length; i++) {
+    const c = name.charCodeAt(i)
+    a = Math.imul(a ^ c, 0x01000193)
+    b = Math.imul(b ^ c, 0x85ebca6b)
+  }
+  return [a >>> 0, b >>> 0]
+}
+
+/**
+ * 一层目录文件名列表的摘要：各个名字的哈希异或起来，再带上个数。和顺序无关，所以加一个名字、去一个名字可以直接在摘要上算
+ * （见 listingWith），不用重列目录。只用来发现「名字有没有变」，不防人为构造。
+ */
+function listingOf(names: readonly string[]): string {
+  return listingWith('0:0:0', [], names)!
+}
+
+/** 在一份摘要上去掉、加上几个名字；摘要不是这个格式（没列过目录时记的空串）返回 undefined。 */
+function listingWith(listing: string, removed: readonly string[], added: readonly string[]): string | undefined {
+  const m = /^([0-9a-f]+):([0-9a-f]+):(\d+)$/.exec(listing)
+  if (m === null) return undefined
+  let a = Number.parseInt(m[1]!, 16)
+  let b = Number.parseInt(m[2]!, 16)
+  for (const name of [...removed, ...added]) {
+    const [x, y] = nameHash(name)
+    a = (a ^ x) >>> 0
+    b = (b ^ y) >>> 0
+  }
+  return `${a.toString(16)}:${b.toString(16)}:${Number(m[3]) - removed.length + added.length}`
+}
+
 /** 目录签名：各项排序后拼接，与 readdir 顺序无关。 */
 function signatureOf(seen: ReadonlyMap<string, string>): string {
   return [...seen.values()].sort().join('\n')
@@ -137,10 +190,6 @@ function signatureOf(seen: ReadonlyMap<string, string>): string {
 /** readMemoryFile 的结果是解析成功的记录（不是被跳过或隔离）。 */
 function isSlot(r: { slot: Slot } | { quarantined: QuarantineEntry } | undefined): r is { slot: Slot; notes: DirectoryNote[] } {
   return r !== undefined && 'slot' in r
-}
-
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 /** 原文的 frontmatter 段（到闭围栏前）：预筛的转义检查与 id 行匹配只看这一段，正文里的 "id:" 行不算。 */
@@ -165,6 +214,8 @@ export class FileTable implements MemoryTable {
   private readonly parseCache: ParseCache<DecodeOutcome>
   private readonly lock: RootLock
   private readonly journal: OpJournal | undefined
+  private readonly index: DerivedIndex | undefined
+  private readonly hintRacyMs: number | undefined
   private readonly stepHandlers = new Map<string, OpStepHandler>()
   /** 进写入段时已经替调用方补完的操作：它随后来结这次操作时不再做一遍。 */
   private readonly settledOnEnter = new Set<string>()
@@ -178,6 +229,8 @@ export class FileTable implements MemoryTable {
     this.parseCache = opts.parseCache ?? new ParseCache()
     this.lock = opts.lock ?? defaultRootLock(opts.root, this.log)
     this.journal = opts.journal
+    this.index = opts.index
+    this.hintRacyMs = opts.hintRacyMs
     // 每次拿到写锁先看有没有被打断的操作：平时一行都没有
     if (this.journal !== undefined) this.lock.onEnter?.(() => this.recoverPending())
     this.globalDir = join(opts.root, GLOBAL_DIR)
@@ -296,7 +349,7 @@ export class FileTable implements MemoryTable {
     const record = row ? { ...decoded, recallCount: row.recallCount, lastRecalledAt: row.lastRecalledAt } : decoded
     return {
       slot: {
-        record, extras: outcome.extras, filePath, dir, raw, mtimeMs, hasReservedKeys: outcome.notes.some(n => n.code === 'reserved-keys'),
+        record, extras: outcome.extras, filePath, dir, raw, mtimeMs, statSig: sigOf(sig), hasReservedKeys: outcome.notes.some(n => n.code === 'reserved-keys'),
         ...(writeOp !== undefined ? { writeOp } : {}),
       },
       notes: outcome.notes.map(n => ({ ...n, path: filePath })),
@@ -422,29 +475,177 @@ export class FileTable implements MemoryTable {
     return { dirs: dirs.map(d => d.dir), directoryNotes: listing?.directoryNotes.filter(n => n.code === 'dir-unreadable') ?? [] }
   }
 
-  /** 在一组目录（顶层 + .archive/）里找 id 的全部候选：看原文 id 行，只解析命中文件。派生 id 先按文件路径重算哈希（不读内容，
-   *  覆盖还没写回 id 的手建文件）；路径没命中再看 id 行——写回过 id 的文件改名或搬家后路径哈希已变，frontmatter 里的 id 才是它的身份。 */
-  private async scanForId(id: string, dirs: readonly ScopeDir[]): Promise<Slot[]> {
-    const derived = isDerivedFileId(id)
-    const idLine = new RegExp(`^id:\\s*["']?${escapeRegExp(id)}["']?\\s*$`, 'm')
+  /** 文件里的 id：frontmatter 的 id 行；没有 id 行的手建文件按路径派生。读不出返回 null。 */
+  private async idInFile(filePath: string): Promise<string | null> {
+    try {
+      const written = HINT_ID_RE.exec(frontmatterOf(await readFile(filePath, 'utf8')))?.[1]
+      return written !== undefined && written !== '' ? written : deriveFileId(relative(this.opts.root, filePath))
+    } catch {
+      return null
+    }
+  }
+
+  /** 一层里这些文件各自的 stat 签名；取不到（刚被删、不是普通文件）记空串。 */
+  private fileSigs(level: string, names: readonly string[]): Promise<string[]> {
+    return Promise.all(names.map(name => stat(join(level, name)).then(s => (s.isFile() ? sigOf(s) : ''), () => '')))
+  }
+
+  /** 给这些文件各读一条提示。签名在读内容之前取：签名不会比读到的内容新。 */
+  private readHints(level: string, names: readonly string[]): Promise<HintRow[]> {
+    return Promise.all(names.map(async (name) => {
+      const filePath = join(level, name)
+      const sig = await stat(filePath).then(s => (s.isFile() ? sigOf(s) : ''), () => '')
+      return [name, sig === '' ? null : await this.idInFile(filePath), sig] as const
+    }))
+  }
+
+  /**
+   * 这一层里哪些文件记着这个 id，逐个文件读出来；有派生库就顺手把整层的提示重记一遍。目录读不了返回 undefined。
+   * 目录的修改时间在列目录之前取：之后才发生的改动会让它和记下的不一样，下次再补。
+   */
+  private async scanLevel(level: string, id: string): Promise<string[] | undefined> {
+    const prior = this.index?.levelScan(level)
+    const scannedAt = Date.now()
+    const at = await stat(level).catch(() => undefined)
+    const listed = await this.listMemoryFiles(level)
+    if ('note' in listed) return undefined
+    const names = listed.names.sort()
+    const rows = await this.readHints(level, names)
+    if (at !== undefined) {
+      this.index?.replaceLevel(level, { mtimeMs: at.mtimeMs, ino: at.ino, scannedAt, listing: listingOf(names) }, rows, prior?.rev)
+    }
+    return rows.filter(([, fileId]) => fileId === id).map(([name]) => name)
+  }
+
+  /**
+   * 目录的修改时间距核对的时刻多久才算稳妥。时间戳只到整秒的文件系统（修改时间正好是整秒）等 3 秒；
+   * 带小数的说明粒度细，等过内核打时间戳的刻度（毫秒级）就够。测试给了 hintRacyMs 就按给的。
+   */
+  private racyWindowMs(mtimeMs: number): number {
+    return this.hintRacyMs ?? (Number.isInteger(mtimeMs / 1000) ? 3000 : 20)
+  }
+
+  /**
+   * 按派生库的提示找这一层里记着这个 id 的文件名。
+   * 返回 undefined：没有可用的提示（没有库、这一层没核对过、目录被整个换掉、库写不进去、目录读不了），调用方逐个读。
+   *  - 目录的修改时间和上次核对时一样，而且那次核对离这个修改时间够久：直接用。
+   *  - 修改时间一样、但离得太近（同一个时间刻度里的后续改动看不出来）：列一次目录，文件名都没变就用。
+   *  - 其余（目录变过）：列目录，每个文件取一次 stat。新出现的、签名变了的（同名文件被换掉、被改过）重读 id，不在了的去掉。
+   * 提示只是线索：原地改了 id 而签名恰好没变、或同一个时间刻度里被换掉的同名文件，这里看不出来（见 scanForId 怎么兜）。
+   */
+  private async hintedNames(level: string, id: string): Promise<string[] | undefined> {
+    const index = this.index
+    if (index === undefined) return undefined
+    const scan = index.levelScan(level)
+    if (scan === undefined) return undefined
+    const scannedAt = Date.now()
+    let at: { mtimeMs: number; ino: number }
+    try {
+      at = await stat(level)
+    } catch (err) {
+      if (errnoCode(err) !== 'ENOENT') return undefined
+      index.dropLevel(level)
+      return []
+    }
+    if (at.ino !== scan.ino) return undefined
+    const isSameTime = scan.mtimeMs === at.mtimeMs
+    if (isSameTime && scan.scannedAt - at.mtimeMs >= this.racyWindowMs(at.mtimeMs)) return index.namesOf(level, id)
+    const listed = await this.listMemoryFiles(level)
+    if ('note' in listed) return undefined
+    const names = listed.names.sort()
+    const stamp = { mtimeMs: at.mtimeMs, ino: at.ino, scannedAt, listing: listingOf(names) }
+    if (isSameTime && stamp.listing === scan.listing) {
+      // 把核对的时刻往后记，过了时间刻度之后就能直接用；记不上（别人刚写过）不要紧
+      index.patchLevel(level, stamp, [], [], scan.rev)
+      return index.namesOf(level, id)
+    }
+    const known = index.hints(level)
+    const sigs = await this.fileSigs(level, names)
+    const current = new Set(names)
+    const removed = [...known.keys()].filter(name => !current.has(name))
+    const changed = names.filter((name, i) => sigs[i] === '' || known.get(name)?.sig !== sigs[i])
+    const added = await this.readHints(level, changed)
+    if (!index.patchLevel(level, stamp, removed, added, scan.rev)) return undefined
+    return index.namesOf(level, id)
+  }
+
+  /** 这几层里，派生库的提示此刻和目录对得上（目录的修改时间和 inode 没变）的那些，连同当时的扫描记录。写入动手前问一次（见 settleHints）。 */
+  private async currentLevels(levels: Iterable<string>): Promise<Map<string, LevelScan>> {
+    const current = new Map<string, LevelScan>()
+    const index = this.index
+    if (index === undefined) return current
+    for (const level of new Set(levels)) {
+      const scan = index.levelScan(level)
+      if (scan === undefined) continue
+      const at = await stat(level).catch(() => undefined)
+      if (at !== undefined && at.mtimeMs === scan.mtimeMs && at.ino === scan.ino) current.set(level, scan)
+    }
+    return current
+  }
+
+  /**
+   * 写入方把自己的改动直接记进派生库，下一次查找不用为自己刚做的改动逐个核对文件。changes 里给了 id 的是写下的文件，没给的是删掉的。
+   * 只在能证明「这一层的变化全是自己这次写入造成的」时才记：动手前提示和目录对得上（currentLevels），写完重列一次目录，
+   * 文件名列表正好等于原来的加上自己增减的。对不上（别人也动过这一层）、原来的列表摘要不知道、或这期间别人改过提示（版本号变了），
+   * 就什么都不记，留给下一次查找逐个核对。
+   */
+  private async settleHints(current: ReadonlyMap<string, LevelScan>, changes: ReadonlyArray<{ path: string; id?: string }>): Promise<void> {
+    const index = this.index
+    if (index === undefined) return
+    for (const [level, scan] of current) {
+      const own = changes.filter(c => dirname(c.path) === level && isMemoryFileName(basename(c.path)))
+      const added = own.filter(c => c.id !== undefined)
+      const addedNames = new Set(added.map(c => basename(c.path)))
+      const removed = own.filter(c => c.id === undefined && !addedNames.has(basename(c.path))).map(c => basename(c.path))
+      // 摘要只按提示里实际增减的名字算：写下的文件原来就在（原地覆盖）不算新增，删掉的文件提示里本来没有不算减少
+      const fresh = [...addedNames].filter(name => !index.hasName(level, name))
+      const gone = removed.filter(name => index.hasName(level, name))
+      const expected = listingWith(scan.listing, gone, fresh)
+      if (expected === undefined) continue
+      const scannedAt = Date.now()
+      const at = await stat(level).catch(() => undefined)
+      const listed = await this.listMemoryFiles(level)
+      if (at === undefined || at.ino !== scan.ino || 'note' in listed || listingOf(listed.names) !== expected) continue
+      const sigs = await this.fileSigs(level, [...addedNames])
+      const rows = [...addedNames].map((name, i) => [name, added.find(c => basename(c.path) === name)!.id!, sigs[i]!] as const)
+      index.patchLevel(level, { mtimeMs: at.mtimeMs, ino: at.ino, scannedAt, listing: expected }, removed, rows, scan.rev)
+    }
+  }
+
+  /**
+   * 在一组目录（顶层 + .archive/）里找 id 的全部候选，只解析命中的文件并核对 id。没写回 id 的手建文件按路径派生的 id 找；
+   * 写回过 id 的文件改名或搬家后，frontmatter 里的 id 才是它的身份。
+   * 有派生库时先按提示找（见 hintedNames），找到的文件少读很多：
+   *  - 提示指的文件对不上（不在了、id 变了）：那一层逐个读一遍。
+   *  - 按提示哪一层都没找到：不算没有，这几层都逐个读一遍。找不到的情形（给错 id、彻底删除后的确认）开销和没有库时一样。
+   * isExhaustive：不看提示，每一层都逐个读。要「这个 id 的全部副本」、漏一份就会做错决定的调用方用它（列副本所在的作用域、彻底删除时清副本）。
+   * 按提示找到了就不再逐个读：同 id 的另一份副本若是原地改出来的（文件签名恰好没变），要等快照冻结时的维护点重记提示才看得到。
+   */
+  private async scanForId(id: string, dirs: readonly ScopeDir[], isExhaustive = false): Promise<Slot[]> {
     const found: Slot[] = []
     const statsRows = new Map(await this.opts.stats.list())
+    const hintedOnly: Array<{ level: string; dir: string; loc: FileLocation }> = []
+    const read = async (level: string, dir: string, loc: FileLocation, names: readonly string[]) => {
+      const slots: Slot[] = []
+      for (const name of names) {
+        const r = await this.readMemoryFile(join(level, name), dir, loc, NO_PREFILTER, statsRows)
+        if (r !== undefined && 'slot' in r && r.slot.record.id === id) slots.push(r.slot)
+      }
+      return slots
+    }
+    const rescan = async (level: string, dir: string, loc: FileLocation) => read(level, dir, loc, await this.scanLevel(level, id) ?? [])
     for (const { dir, loc } of dirs) {
       for (const level of [dir, join(dir, ARCHIVE_DIR)]) {
-        const listed = await this.listMemoryFiles(level)
-        if ('note' in listed) continue
-        // 非命中文件只读原文做正则，不解析；命中的再走完整解析并核对 id
-        const hits = await Promise.all(listed.names.sort().map(async name => {
-          const filePath = join(level, name)
-          if (derived && deriveFileId(relative(this.opts.root, filePath)) === id) return filePath
-          try { return idLine.test(frontmatterOf(await readFile(filePath, 'utf8'))) ? filePath : undefined } catch { return undefined }
-        }))
-        for (const filePath of hits) {
-          if (filePath === undefined) continue
-          const r = await this.readMemoryFile(filePath, dir, loc, NO_PREFILTER, statsRows)
-          if (r !== undefined && 'slot' in r && r.slot.record.id === id) found.push(r.slot)
-        }
+        const hinted = isExhaustive ? undefined : await this.hintedNames(level, id)
+        if (hinted === undefined) { found.push(...await rescan(level, dir, loc)); continue }
+        const slots = await read(level, dir, loc, hinted)
+        if (slots.length !== hinted.length) { found.push(...await rescan(level, dir, loc)); continue }
+        found.push(...slots)
+        hintedOnly.push({ level, dir, loc })
       }
+    }
+    if (found.length === 0) {
+      for (const { level, dir, loc } of hintedOnly) found.push(...await rescan(level, dir, loc))
     }
     return found
   }
@@ -490,7 +691,7 @@ export class FileTable implements MemoryTable {
       // 每个项目看的目录与给作用域定位时相同（hintDirs）：标准目录在就不看同一项目的改名目录，按这里返回的作用域定位才找得到
       const listing = await this.listWorkspaceDirs()
       const workspaces = await Promise.all([...new Set(listing.entries.map(e => e.workspacePath))].map(p => this.hintDirs(p, listing)))
-      const copies = await this.scanForId(id, [{ dir: this.globalDir, loc: { scope: 'global' } }, ...workspaces.flat()])
+      const copies = await this.scanForId(id, [{ dir: this.globalDir, loc: { scope: 'global' } }, ...workspaces.flat()], true)
       return scopesOf(copies.map(c => c.record))
     })
   }
@@ -502,7 +703,8 @@ export class FileTable implements MemoryTable {
   }
 
   /**
-   * 维护点（写路径末尾与快照冻结时调用；锁内，只动给定目录，幂等）。每个目录读顶层 + .archive/ 一遍，逐文件：
+   * 维护点（快照冻结时调用；锁内，只动给定目录，幂等）。写路径末尾不做：它的开销和目录大小成正比，写入只处理自己动到的文件
+   * （见 persist、patchIndexLine）。每个目录读顶层 + .archive/ 一遍，逐文件：
    *  - .archive/ 里 status 仍为 active 的按位置归一成 deleted（位置即作用域，不搬回顶层）；deleted 缺 deletedAt 用 mtime 补
    *  - ③ .archive/ 里 deletedAt 超保留期的物理删除，哪层都没有这个 id 了才清召回统计行（superseded 不清）
    *  - ④ 手建 / 手编回写：digest 认识且不匹配 → updatedAt 与 lastConfirmedAt 取 mtime；缺 id / 缺 digest / 时间戳形态 /
@@ -511,6 +713,7 @@ export class FileTable implements MemoryTable {
    *  - ① 再生 MEMORY.md：顶层 active 且未过期，同 id 取一份，name 再 id 排序，内容不变不写
    *  - ⑤ 陈旧 tmp 清理
    * 同 id 副本不在这里删（只在写该 id 时清理，见 persist）。
+   * 读完顺手把派生库里这两层的提示按读到的记录重记一遍：没改目录修改时间的手编（原地改了 id）靠这里补上。
    * 写锁挡不住用户手编、git，写锁不可用时也挡不住别的进程：回写、搬家、过期删除动手前都复核磁盘原文，读后被改过的文件本轮跳过，下次维护再处理。
    */
   private async maintainDirs(dirs: readonly string[]): Promise<void> {
@@ -520,7 +723,17 @@ export class FileTable implements MemoryTable {
     for (const sd of scopeDirs) {
       const archive = join(sd.dir, ARCHIVE_DIR)
       const seen = new Map<string, string>()
+      const scannedAt = Date.now()
+      const priorRevs = [sd.dir, archive].map(level => this.index?.levelScan(level)?.rev)
+      const levelStats = await Promise.all([sd.dir, archive].map(level => stat(level).then(s => ({ mtimeMs: s.mtimeMs, ino: s.ino }), () => undefined)))
       const { slots } = await this.readDirs([sd], { includeArchive: true }, seen)
+      for (const [i, level] of [sd.dir, archive].entries()) {
+        const at = levelStats[i]
+        if (at === undefined) continue
+        const rows = slots.filter(s => dirname(s.filePath) === level).map(s => [basename(s.filePath), s.record.id, s.statSig] as const)
+        // 文件名列表的摘要不知道（读目录时不留名单）：记空串，下次目录有变时逐个核对一遍再补上
+        this.index?.replaceLevel(level, { ...at, scannedAt, listing: '' }, rows, priorRevs[i])
+      }
       const kept: LocatedRecord[] = []
       for (const slot of slots) {
         const inArchive = dirname(slot.filePath) === archive
@@ -601,15 +814,23 @@ export class FileTable implements MemoryTable {
   /**
    * 写该 id 之后清掉可见集合（global + 该记录所在目录，含各自 .archive/）里的其余副本；其他项目的副本不动；给作用域的写只清该目录。
    * 给了 known（写路径传 locate 读到的副本）就只删其中此后没变过的：读之后才出现或被改过的是别的进程刚写的，两边都删对方的副本会一份不剩，
-   * 留下的同 id 副本由读路径取舍、下一次写清掉。不给（删除路径）就当场扫、全删。
+   * 留下的同 id 副本由读路径取舍、下一次写清掉。不给（删除路径）就当场扫、全删。返回删过副本的记忆目录。
    */
-  private async removeOtherCopies(id: string, keepPath: string, dir: string, isOwnDirOnly: boolean, known?: readonly Slot[]): Promise<void> {
+  private async removeOtherCopies(
+    id: string, keepPath: string, dir: string, isOwnDirOnly: boolean, known?: readonly Slot[], changes?: Array<{ path: string; id?: string }>,
+  ): Promise<Set<string>> {
     const dirs = new Set(isOwnDirOnly ? [dir] : [this.globalDir, dir])
-    const copies = known ?? await this.scanForId(id, (await this.resolveDirs([...dirs])).scopeDirs)
+    const copies = known ?? await this.scanForId(id, (await this.resolveDirs([...dirs])).scopeDirs, true)
+    const removedFrom = new Set<string>()
     for (const copy of copies) {
       if (!dirs.has(copy.dir) || copy.filePath.toLowerCase() === keepPath.toLowerCase()) continue
-      if (known === undefined || await this.unchangedSince(copy)) await this.removeFile(copy.filePath)
+      if (known === undefined || await this.unchangedSince(copy)) {
+        await this.removeFile(copy.filePath)
+        changes?.push({ path: copy.filePath })
+        removedFrom.add(copy.dir)
+      }
     }
+    return removedFrom
   }
 
   /** 占名后发现源文件变了：撤回刚写的新文件，只在它仍是本轮写的原文时撤回；已被改过是别人的写入，留着交给重来的那轮。
@@ -648,7 +869,38 @@ export class FileTable implements MemoryTable {
     const located = active.slice().sort(({ record: a }, { record: b }) =>
       a.name < b.name ? -1 : a.name > b.name ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
     const lines = located.map(l => fmt(l.record, basename(l.filePath)))
-    return `# Memory Index\n\n${lines.join('\n')}${lines.length ? '\n' : ''}`
+    return `${INDEX_HEADER}${lines.join('\n')}${lines.length ? '\n' : ''}`
+  }
+
+  /**
+   * 写入结束时只改这条记忆在 MEMORY.md 里的那一行，不重读目录：去掉这个 id 原来的行，entry 给了（顶层、在用、没过期）就按名字插回去。
+   * 行的位置按行文字比，和整份重新生成的顺序只在名字相同、或一个名字是另一个名字的开头时可能不同；快照冻结时的维护点会按确定的顺序重写。
+   * 按行改不了的时候对这个目录做一次完整维护（它写完会复核目录、收敛到全的那份）：
+   *  - 索引还不存在，或不是「开头加一行一条记忆」的样子（手改过、名字或摘要里带换行的记忆占了几行）；
+   *  - 写锁此刻不是跨进程互斥的：另一个进程可能正拿着旧索引往回写，按行改会把它刚删的行带回来。
+   * 索引是生成物，失败不致命。
+   */
+  private async patchIndexLine(dir: string, id: string, entry?: LocatedRecord): Promise<void> {
+    const path = join(dir, INDEX_FILE)
+    const fmt = this.opts.formatIndexLine ?? ((r: MemoryRecord, file: string) => formatIndexLine(r, { passive: false, file }))
+    const line = entry === undefined ? undefined : fmt(entry.record, basename(entry.filePath))
+    const prev = await readFile(path, 'utf8').catch(() => undefined)
+    const lines = prev?.startsWith(INDEX_HEADER) ? prev.slice(INDEX_HEADER.length).split('\n').filter(l => l !== '') : undefined
+    const isLineWise = lines !== undefined && lines.every(l => INDEX_LINE_RE.test(l)) && (line === undefined || (!line.includes('\n') && INDEX_LINE_RE.test(line)))
+    if (prev === undefined || lines === undefined || !isLineWise || this.lock.isExclusive?.() === false) {
+      await this.maintainDirs([dir])
+      return
+    }
+    try {
+      const own = `- [${id}] `
+      const kept = lines.filter(l => !l.startsWith(own))
+      if (line !== undefined) {
+        const at = kept.findIndex(l => l.slice(l.indexOf('] ') + 2) > entry!.record.name)
+        kept.splice(at === -1 ? kept.length : at, 0, line)
+      }
+      const text = `${INDEX_HEADER}${kept.join('\n')}${kept.length ? '\n' : ''}`
+      if (text !== prev) await this.atomicWrite(path, text)
+    } catch { /* 冻结时的维护点会重写 */ }
   }
 
   /** 写索引，内容不变不写；返回是否写了。 */
@@ -772,7 +1024,8 @@ export class FileTable implements MemoryTable {
   /**
    * 写路径（锁内）：选目录（scope；workspace 目录不存在则 mkdir + 写标记）→ 选层（status 离开 active 进
    * .archive/，deleted 缺 deletedAt 补 now；回到 active 搬回顶层）→ 编码 → 已定位到自己文件且目录、层、slug 都没变就原地
-   * tmp + rename 覆盖，否则排他占名 → 搬家删旧 → 清可见集合里该 id 的其余副本 → 本目录（搬家时两个）维护点。返回实际写出的记录。
+   * tmp + rename 覆盖，否则排他占名 → 搬家删旧 → 清可见集合里该 id 的其余副本 → 改这条在索引里的行（搬走、清掉副本的目录去掉它的行）。
+   * 不做整目录维护：别的文件的手编回写、归档搬家、过期清扫等快照冻结时的维护点。返回实际写出的记录。
    * 覆盖、占名、删旧之前都复核 prev 的原文，变了抛 StaleReadError（占名后才发现的先撤回新文件），由调用方重来。
    */
   private async persist(key: string, prev: LocatedSlot | undefined, value: MemoryRecord, isOwnDirOnly = false, given?: WriteOp): Promise<MemoryRecord> {
@@ -795,6 +1048,9 @@ export class FileTable implements MemoryTable {
         && slugifyName(next.name).toLowerCase() !== slugifyName(prev.record.name).toLowerCase()
       const text = encodeRecord({ ...next, lastWriteOp: op.id }, prev?.extras ?? {})   // 易变字段由 encodeRecord 剔除
       const isInPlace = prev !== undefined && !moved && !renamed && dirname(prev.filePath) === level
+      // 这次会动到的几层：新文件那层、原文件那层、要清的副本那几层，还有改索引的顶层
+      const current = await this.currentLevels([level, dir, ...(prev === undefined ? [] : [dirname(prev.filePath), prev.dir, ...prev.copies.map(c => dirname(c.filePath))])])
+      const changes: Array<{ path: string; id?: string }> = []
       this.beginOp(op, {
         kind: 'write', memoryId: key, dir: level, fields: changedFields(prev?.record, next),
         ...(prev !== undefined ? { before: fingerprintOf(prev.raw) } : {}), after: fingerprintOf(text),
@@ -818,10 +1074,17 @@ export class FileTable implements MemoryTable {
             throw new StaleReadError()
           }
           await this.removeFile(prev.filePath)
+          changes.push({ path: prev.filePath })
         }
       }
-      await this.removeOtherCopies(key, filePath, dir, isOwnDirOnly, prev?.copies ?? [])
-      await this.maintainDirs(moved ? [dir, prev!.dir] : [dir])
+      changes.push({ path: filePath, id: key })
+      const removedFrom = await this.removeOtherCopies(key, filePath, dir, isOwnDirOnly, prev?.copies ?? [], changes)
+      const isIndexed = next.status === 'active' && withinValidity(next, this.now())
+      await this.patchIndexLine(dir, key, isIndexed ? { record: next, filePath, dir } : undefined)
+      if (moved) removedFrom.add(prev.dir)
+      removedFrom.delete(dir)
+      for (const other of removedFrom) await this.patchIndexLine(other, key)
+      await this.settleHints(current, changes)
       // 调用方给的操作还有账要记，由它做完再结（finishOp）；自己建的到这里就做完了
       if (given === undefined) this.endOp(op.id)
     }
@@ -1034,10 +1297,17 @@ export class FileTable implements MemoryTable {
       await this.removeFile(slot.filePath)
       // 彻底删除（密钥硬删、最近删除里的彻底删除）的承诺是「可见集合里再没有它」：global 与该记录目录里同 id 的其余副本
       // （含 .archive/）一并物理删除；给作用域时只删该目录里的，别的作用域里的同 id 副本是另一张卡
-      await this.removeOtherCopies(id, slot.filePath, slot.dir, isScopeTarget(at))
+      const removed: Array<{ path: string }> = [{ path: slot.filePath }]
+      const removedFrom = await this.removeOtherCopies(id, slot.filePath, slot.dir, isScopeTarget(at), undefined, removed)
+      // 派生库里不留彻底删掉的文件名
+      for (const level of new Set(removed.map(c => dirname(c.path)))) {
+        this.index?.forgetNames(level, removed.filter(c => dirname(c.path) === level).map(c => basename(c.path)))
+      }
       // 召回统计按 id 一行，别的作用域还有副本时是它的，留着
       if ((await this.locateSlot(id)) === undefined) await this.opts.stats.delete(id)
-      await this.maintainDirs([...new Set([slot.dir, this.globalDir])])
+      // 彻底删除后索引里不留它的名字和摘要：当场整份重写，不等冻结。不按行改：它的摘要带换行时占了几行，
+      // 后面几行可以长得像别的记忆的行，按行认不出来
+      await this.maintainDirs([...removedFrom.add(slot.dir)])
       if (given === undefined) this.endOp(op.id)
       return true
     })

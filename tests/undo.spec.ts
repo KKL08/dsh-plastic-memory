@@ -233,7 +233,7 @@ describe('PA-35 之后又被改过：六种撤销一律 stale，什么都不动�
   it.each([
     ['冲突删一方：败方从最近删除恢复后又改过', async (e: Env) => {
       const id = await seedConflict(e)
-      await e.store.restoreArchived({ id: 'mem_b' }, { at: GLOBAL })
+      await e.store.restoreArchived({ id: 'mem_b' }, { at: GLOBAL, now: e.clock.now })
       await e.store.update({ id: 'mem_b' }, r => ({ ...r, content: '恢复后又改的' }), GLOBAL)
       return { id, check: async () => expect(await contentOf(e, 'mem_b')).toBe('恢复后又改的') }
     }],

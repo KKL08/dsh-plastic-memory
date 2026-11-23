@@ -12,6 +12,9 @@ import type { OverflowLevel } from './contract-codes.ts'
 import { relaxedCap, type SessionView, type SnapshotOrigin } from './gui/contract.ts'
 import { ledgerLabel, scopeOfLedger, type Scope } from './scope.ts'
 
+/** 每次冻结最多清这么多条过期的改前快照：平时过期的没几条，积了很多时分几次清完，不让一次冻结等太久。 */
+const SNAPSHOT_SWEEP_BATCH = 50
+
 /**
  * 快照的预读：global + 当前 workspace 顶层的 active 记录（同 id 按取舍规则留一份，口径同 queryScope 的默认查询），
  * 外加 id → 文件路径（相对记忆根目录：`<目录名>/<文件名>`），索引行末尾用它。走 readRaw 是为了拿到文件路径——
@@ -78,6 +81,8 @@ export interface SnapshotCacheDeps {
   overflow?: OverflowMode
   /** 给出时，每次冻结按会话所属项目（无项目为 'global'）同步超限提醒。 */
   overflowLedger?: OverflowLedger
+  /** 改前快照的清扫口：每次冻结清一批过了保留窗口的。 */
+  snapshots?: { sweep(now: number, limit?: number): Promise<void> }
   /** 冻结之后调用（会话视图的写入口，接线在 index.ts）。失败只记日志。 */
   onFrozen?: (session: object, info: FrozenSnapshotInfo) => void | Promise<void>
   /** 宿主会话。缺省（纯测试场景）时不自愈解析项目、来历按新开、不带本会话的待确认记录。 */
@@ -208,11 +213,17 @@ export class SnapshotCache {
     this.compactions.delete(session)
     this.cache.set(session, { text, generation, core: new Map(coreIds.map(id => [id, contentOf.get(id)!])), origin })
     await this.markRecalled(session, coreIds)
-    // 快照冻结是两个维护点之一（另一个在写路径末尾；读路径不写盘，索引再生、归档搬家只能在这两处做）：对 global + 当前 workspace 做维护；失败只记日志，不拖垮注入
+    // 快照冻结是维护点（写入只处理自己动到的文件，读路径不写盘；手编回写、归档搬家、过期清扫、整份重写索引都在这里做）：
+    // 对 global + 当前 workspace 做维护，再清一批过期的改前快照；失败只记日志，不拖垮注入
     try {
       await this.deps.store.maintain({ kind: 'visible', workspacePath })
     } catch (err) {
       this.log.error('[plastic-memory] 记忆目录维护失败:', err)
+    }
+    try {
+      await this.deps.snapshots?.sweep(now, SNAPSHOT_SWEEP_BATCH)
+    } catch (err) {
+      this.log.error('[plastic-memory] 清理过期的改前快照失败:', err)
     }
     await this.afterFreeze(deps, session, workspacePath, now, { ...usage, ...origin, coreIds })
     return text

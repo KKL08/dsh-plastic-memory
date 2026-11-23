@@ -137,16 +137,19 @@ export class SnapshotStore {
     await this.table.put(snapshot.id, snapshot)
     const findGone = this.findGone
     if (findGone !== undefined) await this.redactGoneNow(snapshot.id, findGone)
-    await this.sweep(now)  // 顺手清理超窗口的旧快照
+    // 不在这里清过期快照：每次写入都扫一遍快照表，开销随快照数增长。清扫在快照冻结时分批做，快照工具和撤销的入口也各清一遍
     return snapshot
   }
 
-  /** 清扫超保留窗口的旧快照。capture 内复用，工具入口也调用——否则停用 forget/promote 后
-   * 旧快照会永留侧表。 */
-  async sweep(now: number): Promise<void> {
+  /** 清扫超保留窗口的旧快照。快照冻结时分批调用（给 limit，一次最多清这么多条，剩下的下次再清），快照工具和撤销的入口整份清。
+   *  过期没清掉的快照不会被拿来恢复：快照工具和撤销在读之前先整份清一遍，恢复时还按保留窗口再判一次。 */
+  async sweep(now: number, limit = Infinity): Promise<void> {
     const cutoff = now - SNAPSHOT_RETENTION_MS
+    let swept = 0
     for (const [key, snap] of await this.table.list()) {
-      if (snap.createdAt < cutoff) await this.table.delete(key)
+      if (snap.createdAt >= cutoff) continue
+      if (swept++ >= limit) return
+      await this.table.delete(key)
     }
   }
 
