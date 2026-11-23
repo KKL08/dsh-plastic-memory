@@ -1,7 +1,7 @@
 import { mkdirSync, rmSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
-import { loadSqliteQuietly, type SqliteModule } from './root-lock.ts'
+import { isSqliteBusy, loadSqliteQuietly, type SqliteModule } from './root-lock.ts'
 import { describeError } from './state-files.ts'
 import type { MemoryLogger, OpStep } from './table.ts'
 
@@ -149,6 +149,11 @@ export class OpJournal {
         this.db = openJournal(sqlite, this.path)
       } catch (err) {
         if (err instanceof NewerSchemaError) throw err
+        // 库正被别的连接占着：不是坏了，里面的待完成行还要用。这一次不记，下次再开
+        if (isSqliteBusy(err)) {
+          this.log.warn(`[plastic-memory] 操作日志库正忙，这一次不记：${this.path}（${describeError(err)}）`)
+          return undefined
+        }
         // 损坏的库换一个新的：丢掉的只是原来的待完成行
         this.log.warn(`[plastic-memory] 操作日志库打不开，已换新库，被打断的写入不再补做：${this.path}（${describeError(err)}）`)
         for (const suffix of ['', '-wal', '-shm']) rmSync(this.path + suffix, { force: true })

@@ -65,6 +65,10 @@ All notable changes to this project are documented here. The format follows
 - A deleted memory whose 14 days in Recently deleted had run out could
   still be restored until the next cleanup removed it. Restoring it is now
   refused.
+- When the record of interrupted writes was briefly in use by another
+  window at startup, it was replaced with an empty one, so a write cut off
+  by a crash was not finished afterwards. It is now left in place and
+  opened again on the next write.
 - A memory file whose timestamp was a number outside the range of a date was
   read as normal, and the next change to that memory failed. Such files now go
   to quarantine, like other malformed files.
