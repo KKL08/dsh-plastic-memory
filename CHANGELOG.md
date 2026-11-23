@@ -69,8 +69,8 @@ All notable changes to this project are documented here. The format follows
 - After merging two conflicting memories into one, the only way to undo the
   merge was the result card, which went away once you left the view;
   Recently deleted could bring back only the merged-away memory. Its row
-  there now also has Undo merge, which puts both memories back as they were
-  and returns the conflict to Waiting on you.
+  there now also has Undo this merge, which puts both memories back as they
+  were and returns the conflict to Waiting on you.
 - Undoing something that had already been undone or had expired showed an
   internal message with an id, in Chinese even in the English interface. It
   now says plainly that nothing was undone.

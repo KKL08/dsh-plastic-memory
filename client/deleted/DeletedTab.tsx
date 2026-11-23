@@ -3,7 +3,7 @@
  * 都默认展开、不截断（截断会把快到期的藏起来），「全部」里卡片写范围名。每行写何时删；裁决时删掉的标来源
  * （「以「胜方名」为准时删除」，次文字色，不用颜色），下一行提示恢复后冲突会回到待处理。行尾「还能恢复 N 天 · 彻底删除… · 恢复」：
  * 恢复发 `/memory restore`；「彻底删除…」在行内确认一次，确认后发 `/memory hard-delete`，不等到期。别处正在处理这一条时上方写明没有生效。
- * 融合时并入删掉的，提示下面多一个「撤销融合」，按来源里的条目和改前快照发 `/memory undo`（期间撤销后又重新处理过的不再动手）：两条都退回融合前。入口只靠视图，离开处理视图、刷新后都还在。
+ * 融合时并入删掉的，提示下面多一个「撤销本次融合」，按来源里的条目和改前快照发 `/memory undo`（期间撤销后又重新处理过的不再动手）：两条都退回融合前。入口只靠视图，离开处理视图、刷新后都还在。
  * 密钥是物理删除，不在这里，空状态写明。
  */
 import { Fragment, useState } from 'react'
@@ -41,7 +41,7 @@ const counterpartName = (cause: NonNullable<DeletedItem['cause']>, names: Readon
   cause.counterpartId === undefined ? '' : names.get(cause.counterpartId) ?? cause.counterpartId
 
 /**
- * 恢复之后会怎样：删一方的裁决恢复即撤销、冲突回到待处理；融合时并入的只带回这一条，融合稿不退回，要两条都退回用「撤销融合」
+ * 恢复之后会怎样：删一方的裁决恢复即撤销、冲突回到待处理；融合时并入的只带回这一条，融合稿不退回，要两条都退回用「撤销本次融合」
  * （体检关闭时撤销不了，不提）。
  */
 function restoreHint(cause: NonNullable<DeletedItem['cause']>, names: ReadonlyMap<string, string>, canUndoMerge: boolean, t: Translate): string {
@@ -71,7 +71,7 @@ export function DeletedTab({ nav, scope, session, fold, isGovernanceEnabled = tr
   session: BorrowedSession
   /** 折叠状态：记忆页持有，这次打开期间保留；不给时用自己的一份。 */
   fold?: FoldMemory
-  /** 体检关闭时不给「撤销融合」（服务端会拒绝）。 */
+  /** 体检关闭时不给「撤销本次融合」（服务端会拒绝）。 */
   isGovernanceEnabled?: boolean
   now?: number
 }) {
@@ -219,7 +219,7 @@ export const deletedTabCss = `
 .pm-del-actions { align-items: center; }
 .pm-del-note { margin: 0; padding: 0 16px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-del-hint { margin: 0; padding-left: 14px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
-/* 「撤销融合」单占一行，字和提示的左缘对齐（悬停底色向左多出按钮的内边距） */
+/* 「撤销本次融合」单占一行，字和提示的左缘对齐（悬停底色向左多出按钮的内边距） */
 .pm-del-hint-action { padding-left: 14px; }
 .pm-del-hint-action > .pm-btn { margin-left: -10px; }
 .pm-del-left { font-size: 12px; line-height: 1.5; color: var(--pm-text-2); white-space: nowrap; }
