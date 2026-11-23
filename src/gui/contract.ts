@@ -814,8 +814,9 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   }).refine(c => (c.suggestionId === undefined) !== (c.proposal === undefined), { message: 'suggestionId 与 proposal 恰好给一个' }),
   /** 撤销一条已裁决条目：去掉 settled，记了快照的按它恢复败方（提升为全局则恢复原位）；直接改、移到项目的撤销后条目移出账本；
    *  模型改写、替代（全部记忆视图的 modelChanges）按改前快照恢复，撤销后条目标已撤销留着。
-   *  六类撤销遇到目标之后又被改过（或已不在原处）一律回 stale、条目留着；合并的撤销不会只恢复一半：要么都不动，要么写回的那条中途被第三方改过、停在第三方的版本。 */
-  z.object({ cmd: z.literal('undo'), decisionId: z.string(), allowCrossWorkspace }),
+   *  六类撤销遇到目标之后又被改过（或已不在原处）一律回 stale、条目留着；合并的撤销不会只恢复一半：要么都不动，要么写回的那条中途被第三方改过、停在第三方的版本。
+   *  snapshotId 可选：界面看到的那次结清的改前快照（最近删除里来源的 snapshotId），条目期间撤销后又重新裁决过、对不上的回 stale、什么都不动。 */
+  z.object({ cmd: z.literal('undo'), decisionId: z.string(), snapshotId: z.string().optional(), allowCrossWorkspace }),
   z.object({ cmd: z.literal('promote'), decisionId: z.string(), target: z.enum(['global', 'agents-md']), allowCrossWorkspace }),
   z.object({ cmd: z.literal('keep-local'), decisionId: z.string(), allowCrossWorkspace }),
   /**

@@ -748,7 +748,7 @@ async function dispatch(
     }
 
     case 'undo':
-      return fromUndo(await executeUndo({ decisionId: command.decisionId, allowCrossWorkspace: command.allowCrossWorkspace }, gov, undoDeps))
+      return fromUndo(await executeUndo({ decisionId: command.decisionId, snapshotId: command.snapshotId, allowCrossWorkspace: command.allowCrossWorkspace }, gov, undoDeps))
 
     case 'restore': {
       const r = await restoreDeleted({ memoryId: command.memoryId, scope: command.layer, allowCrossWorkspace: command.allowCrossWorkspace }, gov, undoDeps)

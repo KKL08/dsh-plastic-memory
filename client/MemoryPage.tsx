@@ -245,7 +245,7 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
                 ? null
                 : target.view === 'library'
                   ? <LibraryTab key={checkupKey(scope)} nav={nav} scope={scope} session={session} fold={fold} />
-                  : <DeletedTab key={checkupKey(scope)} nav={nav} scope={scope} session={session} fold={fold} />}
+                  : <DeletedTab key={checkupKey(scope)} nav={nav} scope={scope} session={session} fold={fold} isGovernanceEnabled={isGovernanceEnabled} />}
           </div>
         </main>
       </div>

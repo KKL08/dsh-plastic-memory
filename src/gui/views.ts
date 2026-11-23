@@ -23,7 +23,7 @@ import {
   type MemoryCommandResult, type ModelChange, type PendingItem, type PendingView, type SessionView,
 } from './contract.ts'
 import { isInScope, scopeCacheKey, scopeKey, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
-import { isCopyOf } from '../tools/workspace-gate.ts'
+import { isCopyOf, workspaceLabel } from '../tools/workspace-gate.ts'
 
 /**
  * 视图生成（纯函数）：预读数据 + 账本 → 界面要读的视图 JSON（契约见 contract.ts）。不读存储、不写盘。
@@ -502,7 +502,17 @@ function copyIn(input: ViewInput, entryId: string, memoryId: string, at: Scope):
   return r !== undefined && isCopyOf(r, at) ? r : input.entryCopies?.get(entryId)?.record
 }
 
-/** 最近删除：保留窗口内软删的记忆；裁决删掉的从已裁决条目找来源（同一条记忆被多次裁决取最近的）。 */
+/** 这份副本是不是条目里的败方那一份：条目记了各方所在的作用域（workspaces，与 memoryIds 一一对应）时按它核对，旧条目没记的不核对。 */
+function isLoserCopy(entry: PendingDecision, r: MemoryRecord): boolean {
+  if (entry.workspaces === undefined) return true
+  return entry.workspaces[entry.memoryIds.indexOf(r.id)] === workspaceLabel(r)
+}
+
+/**
+ * 最近删除：保留窗口内软删的记忆；裁决删掉的从已裁决条目找来源（同一条记忆被多次裁决取最近的）。
+ * 同 id 在别的作用域另有一份、被单独删掉的，不算这次裁决删的：来源只挂在条目记的败方作用域那份上；融合另要删除时刻等于结清时刻
+ * （被并入那条软删和结清用同一个时刻），不给整体撤销。
+ */
 export function buildDeletedView(input: ViewInput): DeletedView {
   const cutoff = input.now - RETENTION_MS
   const causeById = new Map<string, PendingDecision>()
@@ -523,7 +533,8 @@ export function buildDeletedView(input: ViewInput): DeletedView {
     .filter(({ deletedAt }) => deletedAt >= cutoff)
     .sort((a, b) => b.deletedAt - a.deletedAt || (a.r.id < b.r.id ? -1 : 1))
     .map(({ r, filePath, deletedAt }) => {
-      const e = causeById.get(r.id)
+      const latest = causeById.get(r.id)
+      const e = latest === undefined || !isLoserCopy(latest, r) || (latest.settled!.verdict === 'plan-applied' && latest.settled!.at !== deletedAt) ? undefined : latest
       const verdict = e?.settled?.verdict
       const cause = e === undefined || (verdict !== 'keep-left' && verdict !== 'keep-right' && verdict !== 'plan-applied') ? undefined : {
         decisionId: e.id, verdict,

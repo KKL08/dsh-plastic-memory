@@ -116,6 +116,16 @@ describe('左栏范围', () => {
     ])
   })
 
+  it('配置文件关掉体检：最近删除里融合时并入删掉的那一行不给「撤销融合」', () => {
+    const merged: DeletedView = { version: GUI_VIEW_VERSION, items: [{ memory: a1, deletedAt: NOW - 1000, purgeAt: NOW + 5 * 86_400_000, cause: { decisionId: 'c1', verdict: 'plan-applied', counterpartId: 'g1', snapshotId: 's1' } }] }
+    const gateway = (governanceEnabled: boolean) => createFakeGateway({ currentWorkspace: '/w/app', views: { ...views, deleted: merged, health: { ...health, governanceEnabled } } })
+    open({ view: 'deleted' }, gateway(true))
+    expect(within(panel()).getByRole('button', { name: '撤销融合' })).toBeInTheDocument()
+    cleanup()
+    open({ view: 'deleted' }, gateway(false))
+    expect(within(panel()).queryByRole('button', { name: '撤销融合' })).toBeNull()
+  })
+
   it('有事要处理的行带标记和件数：密钥红三角，其余琥珀圆点；读屏念「N 件待处理」，含密钥时说明；「全部」按条目去重', () => {
     open()
     const marker = (name: string) => railRow(name).querySelector('.pm-marker')?.getAttribute('data-pm-marker')

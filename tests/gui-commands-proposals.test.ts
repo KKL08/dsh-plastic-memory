@@ -8,7 +8,7 @@ import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { deletedViewSchema, pendingViewSchema, type MemoryCommand } from '../src/gui/contract.ts'
 import type { ReadEventFn } from '../src/tools/source.ts'
 import { scopeAt, type Scope } from '../src/scope.ts'
-import { locateCopy } from '../src/tools/workspace-gate.ts'
+import { locateCopy, workspaceLabel } from '../src/tools/workspace-gate.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
@@ -265,6 +265,97 @@ describe('apply-proposal（采纳融合建议：保留方改写成融合稿，�
     expect((await e.decisions.get(entry.id))!.fingerprint).toBe(entry.fingerprint)
     expect((await horizontalOf(e, entry.id)).suggestion).toMatchObject({ id: suggestion.id, action: 'merge' })
     expect(await deletedItems(e)).toEqual([])
+  })
+
+  it('离开视图后从最近删除整体撤销：按视图里被并入那条的来源撤销这次融合，两条回到融合前，最近删除不留残余', async () => {
+    const { e, entry, suggestion } = await merged()
+    const before = await files(e)
+    e.clock.now = LATER
+    ok(await adopt(e, entry.id, suggestion.id))
+    // 结果卡已经收起：手上只有重新读出的最近删除视图
+    const [dropped] = await deletedItems(e)
+    expect(dropped!.cause).toMatchObject({ verdict: 'plan-applied', counterpartId: 'mem_a' })
+    const undone = ok(await e.run({ cmd: 'undo', decisionId: dropped!.cause!.decisionId, snapshotId: dropped!.cause!.snapshotId }))
+    expect([...undone.memoryIds!].sort()).toEqual(['mem_a', 'mem_b'])
+    expect(await files(e)).toEqual(before)
+    expect(await deletedItems(e)).toEqual([])
+    expect((await horizontalOf(e, entry.id)).suggestion).toMatchObject({ id: suggestion.id, action: 'merge' })
+  })
+
+  it('最近删除里看到的融合之后被撤销、又改成保留一方：按旧来源发来的整体撤销回 stale，新裁决原样留着', async () => {
+    const { e, entry, suggestion } = await merged()
+    ok(await adopt(e, entry.id, suggestion.id))
+    const [dropped] = await deletedItems(e)
+    const delayed = { cmd: 'undo', decisionId: dropped!.cause!.decisionId, snapshotId: dropped!.cause!.snapshotId } as const
+    e.clock.now = LATER
+    ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
+    ok(await e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-left' }))
+    const resettled = (await e.decisions.listSettled()).map(d => d.settled)
+
+    expect(err(await e.run(delayed)).code).toBe('stale')
+    expect((await e.store.get('mem_b'))!.status).toBe('deleted')
+    expect((await e.decisions.listSettled()).map(d => d.settled)).toEqual(resettled)
+    expect(resettled[0]).toMatchObject({ verdict: 'keep-left' })
+  })
+
+  it('同 id 在别的作用域另有一份、之后被单独删掉：最近删除里那一行不挂这次融合的来源，不给整体撤销', async () => {
+    const e = env({ llm: answering(said()) })
+    await e.store.create(record({ id: 'mem_a', name: '甲', content: '用 pnpm', scope: 'workspace', workspacePath: SESSION_WS, createdAt: 1 }))
+    await e.store.create(record({ id: 'mem_b', name: '乙', content: '用 npm', createdAt: 5 }))
+    const { entry, suggestion } = await suggestMerge(e)
+    ok(await adopt(e, entry.id, suggestion.id))
+    expect((await deletedItems(e)).map(i => [i.memory.name, i.cause?.decisionId])).toEqual([['甲', entry.id]])
+    await e.store.create(record({ id: 'mem_a', name: '无关的全局副本', content: '别的内容' }))
+    e.clock.now = LATER
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_a', layer: GLOBAL }))
+    expect((await deletedItems(e)).map(i => [i.memory.name, i.cause])).toEqual([['无关的全局副本', undefined]])
+  })
+
+  describe('同 id 在别的作用域另有一份，和这次裁决落在同一毫秒被单独删掉（条目记着各自所在的作用域）', () => {
+    /** 项目 A、全局 B 一对冲突，条目按体检的写法带 workspaces；另建一份无关的全局 A。 */
+    async function crossScoped() {
+      const e = env({ llm: answering(said()) })
+      await e.store.create(record({ id: 'mem_a', name: '甲', content: '用 pnpm', scope: 'workspace', workspacePath: SESSION_WS, createdAt: 1 }))
+      await e.store.create(record({ id: 'mem_b', name: '乙', content: '用 npm', createdAt: 5 }))
+      const pair = [(await locateCopy(e.store, 'mem_a', OWN))!, (await locateCopy(e.store, 'mem_b', GLOBAL))!]
+      const { entry } = await e.decisions.upsert({
+        memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', workspaces: pair.map(workspaceLabel), fingerprint: conflictFingerprint(pair),
+      }, 2)
+      expect(entry.workspaces).toEqual([SESSION_WS, 'global'])
+      return { e, entry }
+    }
+    const unrelatedGlobalA = (e: ReturnType<typeof env>) => e.store.create(record({ id: 'mem_a', name: '无关的全局副本', content: '别的内容' }))
+
+    it('融合：结清后条目的 workspaces 原样按 memoryIds 的顺序留着；全局那份不挂融合的来源', async () => {
+      const { e, entry } = await crossScoped()
+      ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))
+      ok(await adopt(e, entry.id, (await e.decisions.get(entry.id))!.suggestion!.id))
+      expect((await e.decisions.listSettled()).map(d => [d.settled!.verdict, d.workspaces])).toEqual([['plan-applied', [SESSION_WS, 'global']]])
+      await unrelatedGlobalA(e)
+      ok(await e.run({ cmd: 'forget', memoryId: 'mem_a', layer: GLOBAL }))
+      const [row] = await deletedItems(e)
+      expect(row!.deletedAt).toBe((await e.decisions.listSettled())[0]!.settled!.at)
+      expect((await deletedItems(e)).map(i => [i.memory.name, i.cause])).toEqual([['无关的全局副本', undefined]])
+    })
+
+    it('保留 B（删项目 A）：结清后 workspaces 原样留着；全局那份不挂这次裁决的来源；被删的项目 A 自己照旧挂', async () => {
+      const { e, entry } = await crossScoped()
+      ok(await e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-right' }))
+      expect((await e.decisions.listSettled()).map(d => [d.settled!.verdict, d.workspaces])).toEqual([['keep-right', [SESSION_WS, 'global']]])
+      expect((await deletedItems(e)).map(i => [i.memory.name, i.cause?.decisionId])).toEqual([['甲', entry.id]])
+      await unrelatedGlobalA(e)
+      ok(await e.run({ cmd: 'forget', memoryId: 'mem_a', layer: GLOBAL }))
+      expect((await deletedItems(e)).map(i => [i.memory.name, i.cause])).toEqual([['无关的全局副本', undefined]])
+    })
+  })
+
+  it('被并入那条的删除时刻就是条目的结清时刻（时钟在命令执行中一直走也一样）', async () => {
+    const { e, entry, suggestion } = await merged()
+    let t = NOW
+    Object.defineProperty(e.clock, 'now', { get: () => (t += 7) })
+    ok(await adopt(e, entry.id, suggestion.id))
+    const [settled] = await e.decisions.listSettled()
+    expect((await e.store.get('mem_b'))!.deletedAt).toBe(settled!.settled!.at)
   })
 
   it('撤销时融合稿在落盘后又被改过：回 stale，什么都不动', async () => {
