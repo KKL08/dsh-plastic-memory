@@ -3,6 +3,7 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { computeDigest, encodeRecord, splitFrontmatter } from '../src/storage/frontmatter.ts'
+import { editFingerprint } from '../src/governance/snapshots.ts'
 import { GLOBAL_DIR, INDEX_FILE } from '../src/storage/paths.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { RETENTION_MS } from '../src/retention.ts'
@@ -269,7 +270,7 @@ describe('edit-memory（建议整理的直接改）', () => {
       const r = record({ id: 'mem_s', content: '旧正文', scope: 'workspace', workspacePath: SESSION_WS, delegation: creator })
       await e.store.create(r)
       // 子会话里 refresh-views 也只读，卡片版本按文件里的算
-      const base = { updatedAt: r.updatedAt, digest: computeDigest(r.name, r.summary, r.content) }
+      const base = { updatedAt: r.updatedAt, digest: editFingerprint(r) }
       expect(err(await e.run(edit('mem_s', SESSION_WS, base))).code).toBe('subagent-readonly')
       const after = (await e.store.get('mem_s', { workspacePath: SESSION_WS }))!
       expect([after.content, after.delegation]).toEqual(['旧正文', creator])
@@ -295,9 +296,10 @@ describe('edit-memory（建议整理的直接改）', () => {
     const body = err(await e.run(edit('mem_s', SESSION_WS, base)))
     expect(body.code).toBe('stale')
     expect(await readFile(path, 'utf8')).toBe(handEdited)
-    // 别处更新：正文没变，updatedAt 对不上
+    // 别处更新：卡片指纹按此刻的内容算、对得上，只有 updatedAt 对不上
     await e.store.update({ id: 'mem_s', workspacePath: SESSION_WS }, r => ({ ...r, tags: ['别处加的'], updatedAt: 99 }))
-    expect(err(await e.run(edit('mem_s', SESSION_WS, { ...base, digest: computeDigest('甲', '摘要', '手改的正文') }))).code).toBe('stale')
+    const current = (await e.store.get('mem_s', { workspacePath: SESSION_WS }))!
+    expect(err(await e.run(edit('mem_s', SESSION_WS, { ...base, digest: editFingerprint(current) }))).code).toBe('stale')
     expect((await e.store.get('mem_s', { workspacePath: SESSION_WS }))!.tags).toEqual(['别处加的'])
     expect(await e.snapshots.list()).toEqual([])
     expect(await allEntries(e)).toEqual([])

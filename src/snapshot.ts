@@ -13,6 +13,8 @@ import { SNAPSHOT_MESSAGE_PREFIX } from './snapshot-message.ts'
 export type { OverflowMode }
 
 export const COLD_START_TEXT = `记忆库当前为空。如果时机合适，可以问一句用户是否愿意介绍自己的背景（角色、常用技术、工作习惯），愿意就用 memory_save 记下来；不愿意就在后续任务中自然积累，不要追问。`
+export const UNREADABLE_MEMORY_TEXT = '本次记忆目录读取失败，请依据当前对话继续，待目录恢复可读后再查阅记忆。'
+export const PARTIAL_MEMORY_TEXT = '本次部分记忆目录读取失败，以下仅包含可读取的记忆。'
 
 /** 可见集合为空、但两个目录里有解析失败的文件：不能说「记忆库为空」，否则模型会反过来向用户索要背景。 */
 export function coldStartUnparseableText(count: number): string {
@@ -126,13 +128,15 @@ export function assembleSnapshot(deps: {
   overflow?: OverflowMode
   /** 持久型子会话自己的会话 id：它创建的待确认记录照常注入。缺省（主会话、一次性子会话）一条待确认记录都不带。 */
   ownSessionId?: string
+  /** 本次可见目录中有目录读取失败。 */
+  unreadable?: boolean
 }): { text: string; coreIds: string[] } & SnapshotUsage {
   const { registry, now } = deps
   // 待确认记录（子 agent 写入、还没升档）不归这次注入：在这里滤掉，不进预算、不进省略数，冷启动也按滤后的判
   const visible = deps.records.filter(r => !isPendingDelegated(r) || r.delegation!.sessionId === deps.ownSessionId)
   if (visible.length === 0) {
     const broken = deps.quarantinedCount ?? 0
-    const text = broken > 0 ? coldStartUnparseableText(broken) : COLD_START_TEXT
+    const text = deps.unreadable ? UNREADABLE_MEMORY_TEXT : broken > 0 ? coldStartUnparseableText(broken) : COLD_START_TEXT
     const fixed = estimateTokens(text) + estimateTokens(SNAPSHOT_MESSAGE_PREFIX)
     return { text, coreIds: [], tokens: { workspace: 0, global: 0, fixed }, usedTokens: 0, injectedIds: [], titleOnlyIds: [], omittedCount: 0 }
   }
@@ -154,9 +158,10 @@ export function assembleSnapshot(deps: {
   ]
 
   const parts: string[] = ['# 长期记忆']
+  if (deps.unreadable) parts.push(PARTIAL_MEMORY_TEXT)
   let used = estimateTokens(parts[0])
   // 取代句在消息里、不在快照文本里，也不计上限，归固定说明
-  const tokens = { workspace: 0, global: 0, fixed: used + estimateTokens(SNAPSHOT_MESSAGE_PREFIX) }
+  const tokens = { workspace: 0, global: 0, fixed: used + estimateTokens(SNAPSHOT_MESSAGE_PREFIX) + (deps.unreadable ? estimateTokens(parts[1]) : 0) }
   // 附注：引用块与条目之间空一行；不计上限，归固定说明
   const compactionNote = `\n> ${COMPACTION_ENGINE_NOTE}\n`
   parts.push(compactionNote)

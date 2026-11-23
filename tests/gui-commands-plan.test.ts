@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { computeDigest, encodeRecord } from '../src/storage/frontmatter.ts'
+import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { ARCHIVE_DIR, GLOBAL_DIR, workspaceDirName } from '../src/storage/paths.ts'
 import { type PendingTable } from '../src/governance/decisions.ts'
 import { editFingerprint } from '../src/governance/snapshots.ts'
@@ -435,7 +435,7 @@ describe('plan-edits（整理所选：模型出整理计划）', () => {
   /** 卡片上的引用：作用域和此刻的版本。 */
   async function refOf(e: ReturnType<typeof env>, id: string, layer: Scope = wsScope) {
     const r = (await locateCopy(e.store, id, layer))!
-    return { memoryId: id, layer, base: { updatedAt: r.updatedAt, digest: computeDigest(r.name, r.summary, r.content) } }
+    return { memoryId: id, layer, base: { updatedAt: r.updatedAt, digest: editFingerprint(r) } }
   }
   const planOf = async (e: ReturnType<typeof env>, ids: readonly string[] = SEED.map(m => m.id), request = REQUEST): Promise<MemoryCommand> =>
     ({ cmd: 'plan-edits', memories: await Promise.all(ids.map(id => refOf(e, id))), request }) as MemoryCommand
@@ -662,7 +662,7 @@ describe('draft-plan（整理所选：按计划出稿）', () => {
   }
   async function refOf(e: ReturnType<typeof env>, id: string, layer: Scope = wsScope) {
     const r = (await locateCopy(e.store, id, layer))!
-    return { memoryId: id, layer, base: { updatedAt: r.updatedAt, digest: computeDigest(r.name, r.summary, r.content) } }
+    return { memoryId: id, layer, base: { updatedAt: r.updatedAt, digest: editFingerprint(r) } }
   }
   /** 计划：p 删除并入 c，c、e 改写（e 带提问），b 不动。 */
   const OPS: Op[] = [
@@ -1156,7 +1156,7 @@ describe('apply-edits（整理所选：应用全部）', () => {
   }
   async function refOf(e: ReturnType<typeof env>, id: string, layer: Scope = wsScope): Promise<Ref> {
     const r = (await locateCopy(e.store, id, layer))!
-    return { memoryId: id, layer, base: { updatedAt: r.updatedAt, digest: computeDigest(r.name, r.summary, r.content) } }
+    return { memoryId: id, layer, base: { updatedAt: r.updatedAt, digest: editFingerprint(r) } }
   }
   const edit = async (e: ReturnType<typeof env>, id: string, fields: object = {}, layer?: Scope) =>
     ({ kind: 'edit' as const, ...await refOf(e, id, layer), content: `${id} 改写后`, name: `${id} 新名`, summary: `${id} 新摘要`, tags: ['biome'], ...fields })
@@ -1363,7 +1363,7 @@ describe('apply-edits（整理所选：应用全部）', () => {
       expect(deletedViewSchema.parse(await e.readView('deleted')).items).toEqual([])
     })
 
-    it('软删时刚被写进密钥（标签里，版本核对不看标签）：已写的退回，回 has-secret', async () => {
+    it('软删时标签刚被改成密钥：判陈旧，已写的退回', async () => {
       const e = env()
       await seed(e)
       const command = { ops: [await edit(e, 'mem_c'), await forget(e, 'mem_p', 'mem_c')] }
@@ -1372,7 +1372,7 @@ describe('apply-edits（整理所选：应用全部）', () => {
         if (id === 'mem_p') await e.store.update({ id, workspacePath: SESSION_WS }, r => ({ ...r, tags: [`token ${FAKE_SECRET.sk}`] }), scopeAt(SESSION_WS))
         return call()
       })
-      expect(err(await apply(e, command)).code).toBe('has-secret')
+      expect(err(await apply(e, command)).code).toBe('stale')
       expect((await files(e))[C]).toEqual(before[C])
       expect(await allEntries(e)).toEqual([])
     })

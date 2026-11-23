@@ -6,7 +6,7 @@ import { checkSequence, sequenceCase } from './helpers/random-sequence.ts'
 import { record, candidate } from './helpers/record.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
-import { computeDigest } from '../src/storage/frontmatter.ts'
+import { editFingerprint } from '../src/governance/snapshots.ts'
 import { executeSnapshotTool } from '../src/tools/snapshot.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 
@@ -19,7 +19,7 @@ const base = memorySubject(initial)
 const kinds = ['新建', '整条更新', '精确修改', '删除', '提升', '界面批量写入'] as const
 type Kind = typeof kinds[number]
 interface Write { writer: number; index: number; kind: Kind }
-const ref = (r: MemoryRecord) => ({ memoryId: r.id, layer: { kind: 'workspace' as const, workspacePath: W }, base: { updatedAt: r.updatedAt, digest: computeDigest(r.name, r.summary, r.content) } })
+const ref = (r: MemoryRecord) => ({ memoryId: r.id, layer: { kind: 'workspace' as const, workspacePath: W }, base: { updatedAt: r.updatedAt, digest: editFingerprint(r) } })
 
 /** 每种写法集中定义生成器和断言；执行器只负责调度、记录完成及检查撤销隔离。 */
 const generators: Record<Kind, (w: MemoryWorld, op: Write, before: MemoryRecord) => Promise<void>> = {

@@ -10,10 +10,9 @@ import fc from 'fast-check'
 import { FileTable } from '../../src/storage/file-table.ts'
 import { SidecarStore } from '../../src/storage/sidecar.ts'
 import { createAgentsMdWriter } from '../../src/storage/agents-md.ts'
-import { computeDigest } from '../../src/storage/frontmatter.ts'
 import { ARCHIVE_DIR, GLOBAL_DIR, STATE_DIR, isMemoryFileName, workspaceDirName } from '../../src/storage/paths.ts'
 import { MemoryStore } from '../../src/store.ts'
-import { SnapshotStore } from '../../src/governance/snapshots.ts'
+import { SnapshotStore, editFingerprint } from '../../src/governance/snapshots.ts'
 import { PendingDecisionsStore } from '../../src/governance/decisions.ts'
 import { CheckupRecordStore } from '../../src/governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from '../../src/governance/auto-checkups.ts'
@@ -247,7 +246,7 @@ async function runMemOp(w: MemoryWorld, op: MemOp, index: number, hooks: OpHooks
       const base = w.bases.get(op.id)
       if (base === undefined) return 'no-card'
       return runGui(w, hooks, t, {
-        cmd: 'edit-memory', memoryId: base.id, base: { updatedAt: base.updatedAt, digest: computeDigest(base.name, base.summary, base.content) },
+        cmd: 'edit-memory', memoryId: base.id, base: { updatedAt: base.updatedAt, digest: editFingerprint(base) },
         content: `界面改 ${index}`, name: base.name, summary: base.summary, tags: base.tags,
       })
     }
@@ -259,7 +258,7 @@ async function runMemOp(w: MemoryWorld, op: MemOp, index: number, hooks: OpHooks
         ops: records.map(r => ({
           kind: 'edit', memoryId: r!.id,
           layer: scopeOfMemory(r!)!,
-          base: { updatedAt: r!.updatedAt, digest: computeDigest(r!.name, r!.summary, r!.content) },
+          base: { updatedAt: r!.updatedAt, digest: editFingerprint(r!) },
           name: r!.name, summary: r!.summary, tags: r!.tags, content: `批量改写 ${index}`,
         })),
       })

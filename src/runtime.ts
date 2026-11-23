@@ -2,7 +2,8 @@ import { realpath } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import type { MemoryLogger, MemoryStore } from './store.ts'
 import type { MemoryRecord } from './record-schema.ts'
-import { resolveLiveFirst } from './storage/table.ts'
+import { maskDiagnostic } from './secrets.ts'
+import { resolveLiveFirst, type DirectoryNote } from './storage/table.ts'
 import { memoryRelativePath } from './storage/paths.ts'
 import type { TypeRegistry } from './type-registry.ts'
 import type { EvidenceLookupLevel } from './evidence-guidance.ts'
@@ -14,17 +15,18 @@ import { ledgerLabel, scopeOfLedger, type Scope } from './scope.ts'
 /**
  * 快照的预读：global + 当前 workspace 顶层的 active 记录（同 id 按取舍规则留一份，口径同 queryScope 的默认查询），
  * 外加 id → 文件路径（相对记忆根目录：`<目录名>/<文件名>`），索引行末尾用它。走 readRaw 是为了拿到文件路径——
- * queryScope 只回记录。同一次读取的隔离文件数给冷启动文案用。
+ * queryScope 只回记录。同一次读取的隔离文件数给冷启动文案用；读不出的目录（unreadableNotes）给注入说明和日志用。
  */
 export async function prereadSnapshot(store: MemoryStore, workspacePath: string | undefined): Promise<{
-  records: MemoryRecord[]; files: Map<string, string>; quarantinedCount: number
+  records: MemoryRecord[]; files: Map<string, string>; quarantinedCount: number; unreadable: boolean; unreadableNotes: DirectoryNote[]
 }> {
   const read = await store.readRaw({ kind: 'visible', workspacePath })
+  const unreadableNotes = read.directoryNotes.filter(note => note.code === 'dir-unreadable')
   const located = resolveLiveFirst(read.records, { workspacePath }).filter(l => l.record.status === 'active')
   return {
     records: located.map(l => l.record),
     files: new Map(located.map(l => [l.record.id, memoryRelativePath(l.dir, l.filePath)])),
-    quarantinedCount: read.quarantined.length,
+    quarantinedCount: read.quarantined.length, unreadable: unreadableNotes.length > 0, unreadableNotes,
   }
 }
 
@@ -107,6 +109,9 @@ export class SnapshotCache {
   private recalled = new WeakMap<object, Set<string>>()
   /** 在途 lazy 解析（按 session memoize 的 Promise）：防同一 session 重发解析，且可被 awaitResolved 等待。 */
   private resolving = new WeakMap<object, Promise<void>>()
+  /** 本运行期记过日志、还没恢复的读不出目录：路径 → 当时的说明、哪些读取范围（账本标签）看到过它。
+   *  同一目录同一原因不重复记；看到过它的范围再读时它不在了，记一行恢复。 */
+  private unreadableDirs = new Map<string, { text: string; scopes: Set<string> }>()
 
   private deps: SnapshotCacheDeps
   private readonly log: MemoryLogger
@@ -154,6 +159,7 @@ export class SnapshotCache {
   /** 发送点的入口，返回本次的快照文本（原文）。
    *  解析落定：缓存存在且未过期直接用；否则读盘组装、冻结、计召回（每会话每条一次）。
    *  解析超时（或未注入 resolver 且未显式喂）：global-only 临时文本，只给本次用，不冻结、不计召回。
+   *  有目录读不出：同样只给本次用，不冻结、不计召回、不做维护和超限同步，下一个发送点重读。
    *  组装失败只记日志、回 undefined（这次不发），已冻结的旧快照不动，不拖垮宿主这一步。
    *  构建期间被标过期就按新代次重建，连续作废到上限回 undefined（这次不发），保证发出去的都冻结过。 */
   async assemble(session: object, timeoutMs = 1500): Promise<string | undefined> {
@@ -182,8 +188,10 @@ export class SnapshotCache {
     // 预读范围：只读 active，global + 当前 workspace（未解析时 global-only）；同一次读取的隔离文件数给冷启动文案用
     const now = deps.now?.() ?? Date.now()
     const preread = await prereadSnapshot(deps.store, workspacePath)
+    this.reportUnreadable(workspacePath, preread.unreadableNotes)
     const { text, coreIds, ...usage } = assembleSnapshot({ ...deps, ...preread, workspacePath, now, ownSessionId: deps.host?.ownSessionIdOf(session) })
-    if (!isResolved) return text
+    // 有目录读不出时这份不完整：冻结了会一直挂在会话里，维护会按缺了的清单重写索引，计召回、超限同步也会按缺了的用量算
+    if (!isResolved || preread.unreadable) return text
     // 构建期间被标过期（压缩、配置热更新）：这份作废，按新代次重建，冻结后再交出去，模型看到的就是冻结的那份。
     // 连续作废到上限还不稳定，这次不给文本，下一个发送点再来；不交出没冻结的文本
     if (this.generationOf(session) !== generation) return retries > 0 ? this.build(session, retries - 1) : undefined
@@ -245,10 +253,32 @@ export class SnapshotCache {
     for (const scope of new Set(scopes)) {
       const own = scopeOfLedger(scope)
       const workspacePath = own.kind === 'global' ? undefined : own.workspacePath
-      const { text: _text, coreIds: _coreIds, ...usage } = assembleSnapshot({ ...deps, ...(await prereadSnapshot(deps.store, workspacePath)), workspacePath, now })
+      const preread = await prereadSnapshot(deps.store, workspacePath)
+      this.reportUnreadable(workspacePath, preread.unreadableNotes)
+      // 读不出时用量不准：不动这个范围的提醒，等目录恢复后的下一次冻结或重算
+      if (preread.unreadable) continue
+      const { text: _text, coreIds: _coreIds, ...usage } = assembleSnapshot({ ...deps, ...preread, workspacePath, now })
       const level = overflowLevel(mode, usage.usedTokens, deps.budget)
       await deps.overflowLedger.syncOverflow(scope, level, now, level ? overflowSummary(level, usage, deps.budget) : '')
     }
+  }
+
+  /** 读不出的目录记日志（遮盖密钥）：新出现或原因变了的记一行失败；这个读取范围看到过、这次不在了的记一行恢复。 */
+  private reportUnreadable(workspacePath: string | undefined, notes: readonly DirectoryNote[]): void {
+    const scope = ledgerLabel(workspacePath === undefined ? { kind: 'global' } : { kind: 'workspace', workspacePath })
+    const changed: DirectoryNote[] = []
+    for (const note of notes) {
+      const seen = this.unreadableDirs.get(note.path)
+      if (seen?.text === note.text) { seen.scopes.add(scope); continue }
+      this.unreadableDirs.set(note.path, { text: note.text, scopes: new Set([scope]) })
+      changed.push(note)
+    }
+    const failing = new Set(notes.map(n => n.path))
+    const recovered = [...this.unreadableDirs].filter(([path, seen]) => !failing.has(path) && seen.scopes.has(scope)).map(([path]) => path)
+    for (const path of recovered) this.unreadableDirs.delete(path)
+    const oneLine = (text: string) => maskDiagnostic(text).replace(/[\r\n]+/g, ' ')
+    if (changed.length > 0) this.log.warn('[plastic-memory] 记忆目录读取失败:', oneLine(changed.map(n => n.text).join('；')))
+    if (recovered.length > 0) this.log.info('[plastic-memory] 记忆目录恢复可读:', oneLine(recovered.join('；')))
   }
 
   /** 该会话当前冻结快照（过期的也算，下一次组装前它仍是模型最后看到的那份）里带入全文的 core 记忆；没有冻结快照回 undefined。 */

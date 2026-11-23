@@ -170,7 +170,7 @@ export type FrontmatterErrorCode =
 export const DIRECTORY_NOTE_CODES = [
   'reserved-keys',     // frontmatter 写了保留键（scope、workspacePath、召回统计、content），已忽略
   'marker-missing',    // workspace 目录缺 .workspace 标记（或标记为空），目录不进清单、文件不读
-  'dir-unreadable',    // 目录不可读（权限等），计空
+  'dir-unreadable',    // 目录不可读（权限等）：这次读取不完整，不当成空目录
   'dir-empty',         // workspace 目录顶层没有记忆文件（只剩归档或全空），不进体检清单
   'duplicate-id',      // 同一 id 有多个文件：读取时按取舍规则用一份，其余副本不自动删（health / scan 报出）
 ] as const

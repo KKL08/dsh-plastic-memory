@@ -8,7 +8,6 @@ import type { AgentsMdWriter } from '../storage/agents-md.ts'
 import { isPendingDelegated, type MemoryRecord } from '../record-schema.ts'
 import { RecordNotFoundError } from '../errors.ts'
 import { detectSecrets, hasCriticalSecret, hasSecret } from '../secrets.ts'
-import { computeDigest } from '../storage/frontmatter.ts'
 import {
   baselineBasisOf, candidateFingerprint, conflictFingerprint, isBaselineCurrent, isBasisCurrent, suggestionBasis, type MisplacedIgnore, type PendingDecisionsStore,
 } from '../governance/decisions.ts'
@@ -187,9 +186,9 @@ async function isEditUndo(decisions: PendingDecisionsStore, command: MemoryComma
   return command.cmd === 'undo' && (await decisions.listSettled()).some(d => d.id === command.decisionId && (kindOf(d) === 'edit' || isModelChange(d)))
 }
 
-/** 记忆和卡片加载时的版本对不上：updatedAt 变了（插件写过），或名称、摘要、正文的摘要变了（手改过文件）。 */
+/** 记忆和卡片加载时的版本对不上：updatedAt 变了（插件写过），或卡片内容指纹变了（手改过文件）。 */
 function isStale(r: MemoryRecord, base: { updatedAt: number; digest: string }): boolean {
-  return r.updatedAt !== base.updatedAt || computeDigest(r.name, r.summary, r.content) !== base.digest
+  return r.updatedAt !== base.updatedAt || editFingerprint(r) !== base.digest
 }
 
 /** 不改写的结论每条记忆的操作，按条目的记忆顺序（横向 A、B；垂直只有那一条记忆）。 */
@@ -936,7 +935,8 @@ async function dispatch(
       if (mine === undefined) return stale()
       // 另一条走删除的老路：软删进最近删除，账本里指向它的条目一并清掉（同 forget）；快照上面已经拍过。
       // 锁内再按卡片版本核对一次：核对之后被改过的不删，保留的那条退回改前（之间没被别处再改的话），整体回 stale；
-      // 核对之后另一个会话才写进密钥的不删（极少见），这次只算改了保留的那条
+      // 核对之后另一个会话才写进密钥的不删，这次只算改了保留的那条。卡片指纹含标签在内的全部内容字段，写进密钥必然先判成被改过，
+      // 这一支在卡片路径上走不到，只留作密钥的防线
       const outcome = removed === undefined ? 'deleted'
         : await deps.store.softDeleteUnlessSecret(removed.record, { at: scopeAt(removed.record.workspacePath), now, isChanged: cur => cur.status !== 'active' || isStale(cur, removed.base) })
       if (outcome === 'changed') {
@@ -989,6 +989,7 @@ async function dispatch(
       const { kept, unrecorded } = await rollBackBatch(writes, snapshot, deps)
       if (kept.length === 0 && unrecorded.length === 0) {
         if (failure.kind === 'thrown') throw failure.error
+        // 锁内写进密钥必然先判成被改过（卡片指纹含全部内容字段），这一支只留作密钥的防线
         if (failure.kind === 'has-secret') return fail(cmd, 'has-secret', `记忆 ${failure.memoryId} 刚被写进密钥，没有删除；已写的都已退回`)
         return behind(failure.kind, [failure.memoryId], '有记忆刚被改过，界面已换成最新内容；已写的都已退回')
       }
