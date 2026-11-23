@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { parse as parseYaml, stringify as stringifyYaml, YAMLParseError } from 'yaml'
 import { FrontmatterError } from '../errors.ts'
-import { memoryRecordSchema, CONFIDENCE_BY_SOURCE, isDateMs, type MemoryRecord } from '../record-schema.ts'
+import { memoryRecordSchema, anchorSourceMode, CONFIDENCE_BY_SOURCE, isDateMs, type MemoryRecord } from '../record-schema.ts'
 import type { CodedNote, DirectoryNoteCode } from '../contract-codes.ts'
 import type { QuarantineEntry } from './table.ts'
 import { deriveFileId } from './paths.ts'
@@ -186,8 +186,10 @@ export function decodeRecord(parsed: ParsedMemoryFile, loc: FileLocation, opts: 
   }
   const r = fileRecordSchema.safeParse(assembled) // eventRange 二元组由 z.tuple 强制
   if (!r.success) throw new FrontmatterError('schema-invalid', `schema 校验失败：${r.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('；')}`)
-  // confidence：无 source 缺省按用户亲写档位；有 source 与写入管线同一规则——只能下调，上限是 sourceMode 档位
-  const cap = r.data.source ? CONFIDENCE_BY_SOURCE[r.data.source.sourceMode] : undefined
+  // confidence：无 source 缺省按用户亲写档位；有 source 与写入管线同一规则——只能下调，上限是来源方式的档位。
+  // 当前这一版有几处出处时取其中最强的一档：较弱的来源来补证，不把原有的把握压下去
+  const modes = r.data.source ? [r.data.source.sourceMode, ...(r.data.sourceTrail ?? []).map(anchorSourceMode)] : []
+  const cap = modes.length > 0 ? Math.max(...modes.map(m => CONFIDENCE_BY_SOURCE[m])) : undefined
   const confidence = cap === undefined ? (r.data.confidence ?? HAND_WRITTEN_CONFIDENCE) : Math.min(r.data.confidence ?? cap, cap)
   const record: MemoryRecord = { ...r.data, confidence }
   const notes: DecodeNote[] = reserved.length === 0 ? [] : [{

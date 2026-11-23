@@ -81,7 +81,7 @@ describe('撤销条目记本次提交的记录', () => {
     const reached = new Promise<void>((resolve) => { entered = resolve })
     // A 改了摘要：写完记忆文件后维护点要重写索引，就停在写索引的临时文件上
     writeGate.current = { match: p => p.startsWith(join(dir, INDEX_FILE)), entered, release: new Promise((resolve) => { release = resolve }) }
-    const saving = e.save({ action: 'update', id: 'mem_r', name: '名', summary: 'A 的摘要', content: 'A 改写的' })
+    const saving = e.save({ action: 'update', change: 'correct', id: 'mem_r', name: '名', summary: 'A 的摘要', content: 'A 改写的' })
     await reached
     const a = (await e.store.get('mem_r', scopeAt(WS)))!
     expect(a.content).toBe('A 改写的')

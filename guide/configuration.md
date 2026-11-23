@@ -19,6 +19,7 @@
 | `governance.enabled`             | `true`            | 是否启用主动治理层（体检、健康分、冲突裁决、提权、子 agent 写入等），只能在配置文件里改 |
 | `governance.health.sensitivity`  | `'normal'`        | 健康警报灵敏度：`conservative` / `normal` / `proactive`              |
 | `governance.globalPromoteTarget` | `'plugin-global'` | 提权目标：`plugin-global`（插件全局域）或 `agents-md`（`${DSH_HOME:-~/.dsh}/AGENTS.md`） |
+| `history.mergeWindowMinutes`     | `60`              | 同一个对话在这么多分钟里接连改同一条记忆的状态，只留一个历史版本（只能在配置文件里改），改了下一次保存生效 |
 | `subagent.maxSavesPerSession`    | `10`              | 每个子 agent 会话最多新建几条记忆（只能在配置文件里改），改了下一次保存生效 |
 | `accent`                         | `'ella'`          | 界面主题色：`ella`（艾拉主题色）/ `blue-whale`（大肥鱼主题色，跟随 DeepSeek Harness 品牌蓝） |
 | `memoryRoot`                     | `''`              | 存储根路径，缺省为 `${DSH_HOME:-~/.dsh}/memories`；改了要重启 DeepSeek Harness 才生效                     |

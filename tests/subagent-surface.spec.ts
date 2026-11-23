@@ -268,12 +268,12 @@ describe('权限面：子 agent 调每个工具只触发权限内的副作用', 
     expect(downgraded.warnings?.map(w => w.code)).toContain('subagent-scope-local')
     writes.push({ ...effects })
 
-    const updated = await h.call(child, 'memory_save', { ...childSave('新观察'), action: 'update', id: created.record!.id, content: '子会话看到「新观察」又补了一句' })
+    const updated = await h.call(child, 'memory_save', { ...childSave('新观察'), action: 'update', change: 'correct', id: created.record!.id, content: '子会话看到「新观察」又补了一句' })
     expect(updated.kind).toBe('updated')
     writes.push({ ...effects })
 
     // 被拒的两种：改全局那条、带 supersedes
-    for (const args of [{ ...childSave('改全局'), action: 'update', id: global.id }, childSave('替代', { supersedes: [global.id] })]) {
+    for (const args of [{ ...childSave('改全局'), action: 'update', change: 'correct', id: global.id }, childSave('替代', { supersedes: [global.id] })]) {
       expect(await h.call(child, 'memory_save', args)).toMatchObject({ kind: 'rejected', code: 'subagent-restricted' })
       expect(effects.recordWrites).toEqual([])
       writes.push({ ...effects })

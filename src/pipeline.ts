@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto'
-import { isDeepStrictEqual } from 'node:util'
 import { applyEdits, type SaveEdit } from './edits.ts'
-import type { MemoryRecord, SourceMode } from './record-schema.ts'
+import type { ChangeKind, MemoryRecord, SourceMode } from './record-schema.ts'
 import type { CodedNote, RejectCode, WarningCode } from './contract-codes.ts'
-import { ALREADY_REVIEWED_REASON, CONFIDENCE_BY_SOURCE, NOT_DELEGATED_REASON, isPendingDelegated, memoryRecordSchema } from './record-schema.ts'
+import { ALREADY_REVIEWED_REASON, CHANGE_KINDS, CONFIDENCE_BY_SOURCE, NOT_DELEGATED_REASON, isPendingDelegated, memoryRecordSchema } from './record-schema.ts'
+import { applyChange, initialProvenance, type ChangeFields } from './change.ts'
+import { commitChange } from './commit-change.ts'
+import { UNKNOWN_SESSION_ID } from './session-id.ts'
 import type { MemoryStore } from './store.ts'
 import { newWriteOp } from './storage/table.ts'
 import { MODEL_CHANGE_STEP, ledgerSteps, modelChangeStep } from './governance/op-steps.ts'
@@ -34,6 +36,10 @@ export interface SaveCandidate {
   force?: boolean
   /** update 的目标是全局记忆时，模型确认这次改动对所有项目都成立：填引导里给的确认码（见 globalConfirmCode）；项目会话里不带或不对就回引导、不写入。 */
   confirmGlobal?: string
+  /** update 必填：这次改动的性质，决定旧内容怎么处置（见 CHANGE_GUIDE）。create 不用。 */
+  change?: ChangeKind
+  /** 状态变化的原因，随历史版本留着。 */
+  changeReason?: string
 }
 
 export type { SaveEdit } from './edits.ts'
@@ -229,8 +235,9 @@ function editTarget(target: MemoryRecord, edits: readonly SaveEdit[]): { content
  * 读到目标后在它的正文上应用 edits，没传的字段沿用目标的，返回的 base 就是这份读数——后面写入时的读后被改复核以它为准，
  * 别处在这之后改过就不拿旧读数算出的正文去盖。
  */
-async function resolveInput(input: SaveInput, deps: PipelineDeps): Promise<{ candidate: SaveCandidate; base?: MemoryRecord } | Rejection> {
+async function resolveInput(input: SaveInput, deps: PipelineDeps): Promise<{ candidate: SaveCandidate; base?: MemoryRecord; ignored?: string[] } | Rejection> {
   const { edits, ...rest } = input
+  if (input.action === 'update' && input.change === 'corroborate') return resolveCorroboration(input, deps)
   if (edits === undefined) {
     const missing = WHOLE_WRITE_REQUIRED.filter(k => rest[k] === undefined)
     if (missing.length > 0) {
@@ -266,6 +273,50 @@ async function resolveInput(input: SaveInput, deps: PipelineDeps): Promise<{ can
     content: applied.content,
   }
   return { candidate, base: target }
+}
+
+/** 补证时不生效的参数：正文和别的内容字段都留着原样。 */
+const CORROBORATE_IGNORED = ['name', 'type', 'content', 'edits', 'summary', 'tags', 'supersedes', 'validFrom', 'validTo'] as const
+
+/**
+ * 补证（同一件事又被提到，内容不用改）：只要 id、依据和把握。内容参数不校验、不生效，候选按目标现在的样子补齐，
+ * 后面的检查都按目标自己的字段走；带了内容参数的在结果里说明。
+ */
+async function resolveCorroboration(input: SaveInput, deps: PipelineDeps): Promise<{ candidate: SaveCandidate; base: MemoryRecord; ignored: string[] } | Rejection> {
+  const read = input.id === undefined ? undefined : await deps.store.get(input.id, { workspacePath: deps.workspacePath })
+  const notWritable = deps.delegation ? subagentTargetProblem(input.id ?? '(缺 id)', read, deps.session.id) : undefined
+  if (notWritable !== undefined) return notWritable
+  const checked = checkUpdateTarget(input.id, read, deps.workspacePath)
+  if ('code' in checked) return checked
+  const { target } = checked
+  const candidate: SaveCandidate = {
+    action: 'update', id: input.id, change: 'corroborate', sourceMode: input.sourceMode, confidence: input.confidence, confirmGlobal: input.confirmGlobal,
+    name: target.name, type: target.type, scope: target.scope, content: target.content, summary: target.summary, tags: target.tags,
+  }
+  return { candidate, base: target, ignored: CORROBORATE_IGNORED.filter(k => input[k] !== undefined) }
+}
+
+/** 缺改动性质的引导里，当前正文最多带多少字符。 */
+const CHANGE_GUIDE_CONTENT_LIMIT = 2000
+
+/**
+ * update 没声明改动性质时回给模型的引导（renderSaveResult 前面接「未保存：」）：带上这条记忆现在的内容和三个判断问题，
+ * 模型照着判完带 change 重发。内容会进模型上下文：先对整条遮密钥（疑似的也遮）、再限长，截断后的密钥规则认不出来。
+ */
+export function changeKindGuide(target: MemoryRecord, given: unknown): string {
+  const masked = maskSecretSurface(target, { severity: 'suspected' })
+  const body = masked.content.length > CHANGE_GUIDE_CONTENT_LIMIT
+    ? `${masked.content.slice(0, CHANGE_GUIDE_CONTENT_LIMIT)}\n（正文共 ${masked.content.length} 字符，以上是前 ${CHANGE_GUIDE_CONTENT_LIMIT} 个）`
+    : masked.content
+  const head = given === undefined
+    ? '更新记忆要用 change 声明这次改动的性质'
+    : `change=${JSON.stringify(given)} 不是可用的取值，可用：${CHANGE_KINDS.join('、')}`
+  return `${head}。「${masked.name.replace(/\s+/g, ' ').trim()}」（${target.id}）现在的内容是：\n${body}\n`
+    + '对照它依次判断：\n'
+    + '1. 正文要不要改？不用改，只是同一件事又被提到：change=corroborate，只传 id 和 sourceMode。\n'
+    + '2. 旧内容现在是否仍全部成立？成立，只是补条件、原因、步骤、例外：change=refine，只增不删。\n'
+    + '3. 旧内容当时成立吗？当时成立、现在变了：change=state-change，旧内容留成历史版本，changeReason 写变化的原因；当时就不对：change=correct。拿不准当时成不成立，按 state-change。\n'
+    + '带上 change 重发这次 update。'
 }
 
 /** 子 agent 能用的依据：它收到的指令来自委派方，用户明说、用户行为、经用户确认的动作都无从谈起。 */
@@ -312,13 +363,6 @@ function subagentTargetProblem(id: string, target: MemoryRecord | undefined, ses
     return { code: 'subagent-restricted', subcode: 'subagent-not-own', reason: `子 agent 只能改本会话存下、还没被接受的记忆；${id} ${why}。要改的内容带回主会话。` }
   }
   return undefined
-}
-
-/** 召回统计之外整条相等。update 锁内复核用：清候选标记、搬作用域这类改动不碰 updatedAt，也要算改过。 */
-function isSameRecord(a: MemoryRecord, b: MemoryRecord): boolean {
-  const { recallCount: _ra, lastRecalledAt: _la, ...restA } = a
-  const { recallCount: _rb, lastRecalledAt: _lb, ...restB } = b
-  return isDeepStrictEqual(restA, restB)
 }
 
 /**
@@ -400,6 +444,13 @@ export async function runSavePipeline(
     delegation?: SaveDelegation
     /** 子会话新建配额（配置 subagent.maxSavesPerSession，调用时现读），缺省 SUBAGENT_MAX_SAVES_DEFAULT。 */
     maxSubagentSaves?: number
+    /**
+     * 本会话里哪些记忆已经回过缺改动性质的引导。只在内存里（接线层按会话建），不落盘；
+     * 引导过一次后同一条再缺，按状态变化写下、结果里说明，模型不会卡在引导上。不给时每次都回引导。
+     */
+    guided?: { has(memoryId: string): boolean; add(memoryId: string): void }
+    /** 状态变化的合并窗口，毫秒（配置 history.mergeWindowMinutes，调用时现读）；缺省见 commit-change.ts。 */
+    mergeWindowMs?: number
     /** 写入时刻（createdAt、updatedAt、有效期、快照与撤销记录）的时钟，缺省取当前时间。 */
     now?: () => number
   },
@@ -424,6 +475,7 @@ export async function runSavePipeline(
   let globalCandidate: true | undefined
   const scopeWarnings: SaveWarning[] = []
   let target: MemoryRecord | undefined
+  let change: ChangeKind | undefined
   if (candidate.action === 'update') {
     // 精确修改用算新正文时的那份读数，不再读一次：之后的改动都要在写入时的复核里拦下
     const checked = resolved.base !== undefined
@@ -442,6 +494,21 @@ export async function runSavePipeline(
       if (!isConfirmCodeMatch(candidate.confirmGlobal, code)) {
         return { kind: 'rejected', code: 'global-update-unconfirmed', reason: globalUpdateGuide(target, code, candidate.confirmGlobal) }
       }
+    }
+    // 改动性质：排在确认码之后，两道都过才往下走。没声明（或取值不认识）先回引导；本会话对这条引导过一次还缺，
+    // 按状态变化写：改前的内容留成历史版本，四种里只有它不丢东西
+    if (!(CHANGE_KINDS as readonly unknown[]).includes(candidate.change)) {
+      if (deps.guided?.has(target.id) !== true) {
+        deps.guided?.add(target.id)
+        return { kind: 'rejected', code: 'change-kind-missing', reason: changeKindGuide(target, candidate.change) }
+      }
+      change = 'state-change'
+      scopeWarnings.push({ code: 'change-kind-assumed', text: '没有声明改动性质（change），已按状态变化（state-change）保存：改前的内容留成了历史版本。旧内容当时就不对的话，下次用 change=correct' })
+    } else {
+      change = candidate.change!
+    }
+    if (resolved.ignored !== undefined && resolved.ignored.length > 0) {
+      scopeWarnings.push({ code: 'corroborate-fields-ignored', text: `补证只刷新确认时间、记下出处，${resolved.ignored.join('、')} 没有生效；要改内容，按改动的性质用 refine、correct 或 state-change 重发` })
     }
     if (candidate.scope === 'global' && target.scope === 'workspace') {
       // 模型对 workspace 记录重申 global 意图：转成提升候选（已是候选则静默幂等）
@@ -467,6 +534,7 @@ export async function runSavePipeline(
   // 有效期：换算成毫秒并校验，不合格的拒存、告诉模型怎么改；两个都没传时取值与以往一致（update 保留原值）
   const validity = resolveValidity(candidate, target, now)
   if ('code' in validity) return { kind: 'rejected', ...validity }
+  const isCorroboration = change === 'corroborate'
 
   // 本次要标 superseded 的旧记忆：目标必须与本次写入记录同属一个作用域——跨作用域替代会绕过用户确认闸、无快照、无复活路径，
   // 作用域不同的目标跳过不置 superseded，仅给一条警告。目标不存在维持静默跳过；只替代在用的，已删除的留在最近删除、
@@ -485,9 +553,10 @@ export async function runSavePipeline(
     else if (old.status === 'active') replaced.push(old)
   }
 
-  // 2. confidence 决议：只能下调
+  // 2. confidence 决议：只能下调。补证没给把握就不动，给了也不超过这次依据的上限（落盘时和原值取高的）
   const cap = CONFIDENCE_BY_SOURCE[candidate.sourceMode]
   const confidence = Math.min(candidate.confidence ?? cap, cap)
+  const corroboratedConfidence = candidate.confidence === undefined ? undefined : confidence
 
   // 3. 结构去重（仅 create，force 跳过）：实体重叠与 bigram 相似度级联，非两轴恒开。
   // 实体是强信号；bigram 相似度只定位为实体盲区的兜底（纯中文散文提不出实体，实体轴对它失明）。
@@ -517,20 +586,21 @@ export async function runSavePipeline(
   // 证据锚（这条记忆出自会话的哪段事件）：eventRange = [当轮 turn/start, save 时刻]，两个数都是机械事实。
   // 模型上下文里没有 seq 标注，任何模型填的区间都是编造——锚只能由绑定层填。
   const anchorStart = Math.min(session.turnStartSeq ?? 0, session.lastSeq)
-  const source = { sessionId: session.id, eventRange: [anchorStart, session.lastSeq] as [number, number], sourceMode: candidate.sourceMode }
+  const anchor = { sessionId: session.id, eventRange: [anchorStart, session.lastSeq] as [number, number], sourceMode: candidate.sourceMode }
+  const by = deps.delegation ? 'subagent' : 'main'
+  // update 要改的字段：怎么落到记录上由改动性质定（change.ts 的落盘行为表），补证只带把握
+  let fields: ChangeFields = {}
   let record: MemoryRecord
   if (candidate.action === 'update') {
     // scope/workspacePath 从 target 原样继承（见上方 scope 决议），不吃当前会话上下文
-    record = {
-      ...target!,
+    fields = isCorroboration ? { confidence: corroboratedConfidence } : {
       name: candidate.name, type: candidate.type, tags: candidate.tags,
       content: candidate.content, summary: candidate.summary,
-      source, confidence,
+      confidence,
       // 可选字段统一"不传即保留"：update 是内容编辑，不重传 validTo 就清掉时效窗口
       // 会让有时效的记忆变成永不过期（有效期的回退在 resolveValidity 里）
       validFrom: validity.validFrom,
       validTo: validity.validTo,
-      updatedAt: now, lastConfirmedAt: now,
       supersedes: candidate.supersedes ?? target!.supersedes,
       globalCandidate: globalCandidate || target!.globalCandidate,
       // 创建者四个字段永不改。子 agent 改写：内容仍是子级写的，reviewed 一律去掉（回到待确认）；
@@ -539,13 +609,16 @@ export async function runSavePipeline(
         ? target!.delegation && { ...target!.delegation, reviewed: undefined }
         : target!.delegation && { ...target!.delegation, reviewed: target!.delegation.reviewed ?? { by: 'main', at: now } },
     }
+    // 先按同一张表拼一遍，过格式校验；真正落盘的那条在写入段里带着操作 id 再拼
+    record = applyChange(target!, { kind: change!, fields, anchor, by, op: 'op_preview', at: now })
   } else {
     record = {
       id: `mem_${now.toString(36)}${Math.random().toString(36).slice(2, 8)}`,
       name: candidate.name, type: candidate.type, scope,
       workspacePath: scope === 'workspace' ? deps.workspacePath : undefined,
       tags: candidate.tags, content: candidate.content, summary: candidate.summary,
-      source, createdAt: now, updatedAt: now, lastConfirmedAt: now,
+      ...initialProvenance(anchor, by, now),
+      createdAt: now, updatedAt: now, lastConfirmedAt: now,
       lastRecalledAt: null, recallCount: 0,
       validFrom: validity.validFrom, validTo: validity.validTo,
       status: 'active', confidence, supersedes: candidate.supersedes,
@@ -564,8 +637,9 @@ export async function runSavePipeline(
 
   // 5. 写盘前 secret 检查：高危（明确厂商特征）直接拦截、不落盘；疑似拦下待确认，force 放行并保留警告。
   // summary 进注入索引、name 进文件名、tags 进索引行——密钥藏在哪个字段都会外泄，四个面一起查；
-  // supersedes 落进文件、体检的孤儿说明会把它引出来，一并查。
-  const secretHits = detectSecrets(`${candidate.content}\n${candidate.name}\n${candidate.summary}\n${candidate.tags.join(' ')}\n${(candidate.supersedes ?? []).join(' ')}`)
+  // supersedes 落进文件、体检的孤儿说明会把它引出来，变化原因随历史版本落盘，一并查。补证不写内容，不查。
+  const secretHits = isCorroboration ? [] : detectSecrets(
+    `${candidate.content}\n${candidate.name}\n${candidate.summary}\n${candidate.tags.join(' ')}\n${(candidate.supersedes ?? []).join(' ')}\n${candidate.changeReason ?? ''}`)
   const critical = secretHits.filter(h => h.severity === 'critical')
   if (critical.length > 0) {
     return {
@@ -588,53 +662,52 @@ export async function runSavePipeline(
   // 从拍快照到记账本是一条记忆的一次改动，整段在一个写入段里：中途拿锁超时不会写了文件却没留撤销，
   // 同进程别的写入也插不进中间。段内只读写文件，不等模型
   return await store.writeSection(async () => {
-    // 改写、替代前拍快照（快照先行）：forget 有 14 天快照，update 覆盖旧内容、supersedes 让旧记忆失效却无恢复手段是
-    // 不对称的。global、workspace 目标都拍，改写的目标与要替代的旧记忆同拍一份；对话卡与右侧栏的「撤销修改」按它恢复。
-    const changed = [...(candidate.action === 'update' ? [target!] : []), ...replaced]
-    const snapshot = changed.length > 0
-      ? await deps.snapshots.capture({
-        operation: 'pre-update',
-        description: candidate.action === 'update' ? `更新记忆 ${target!.id} 前` : `替代记忆 ${replaced.map(r => r.id).join('、')} 前`,
-        records: changed,
-      }, now)
-      : undefined
-    // 模型自报的警告只对 global 目标给（与以往一致）：项目记忆的快照只供界面撤销，不增加给模型的文字
-    const updateSnapshotId = candidate.action === 'update' && target!.scope === 'global' ? snapshot?.id : undefined
-
-    const clean = pruneUndefined(parsed.data)
-    // 新 id 不定位（create 排他占名）；update 走 put：锁内定位旧文件，scope 没变就原地覆盖。
-    // 锁内复核：读到目标之后它又被改过（召回统计之外有字段不同，按位置看已归档，或已不在可见集合里）就不写——界面直接改、
-    // 别的会话改写、删除、归档、提升、清候选标记夹在读和写之间时，整条替换会把它们盖掉。只删了本层、定位落到别层同 id 副本的，
-    // 作用域不同同样拦下。子 agent 改写的归属已按读到的目标判过，其间被接受、提升的在这里一并拦下
     // 撤销记录是写成之后才补的账：随这次写入登记成提交后的步骤，写完就做；中途被打断，下一次进写入段时按日志补上
     const origin = { sessionId: session.id, callId: deps.callId ?? '' }
-    const ledgerOp = (change: 'rewrite' | 'supersede', by?: string) => {
-      if (snapshot === undefined || deps.decisions === undefined) return undefined
+    const ledgerStep = (kind: 'rewrite' | 'supersede', snapshotId: string, writer?: string) => {
+      if (deps.decisions === undefined) return []
       // 接线层启动时登记过（带它的日志）就不换；单独用流水线时在这里补上
       if (!store.hasStep(MODEL_CHANGE_STEP)) store.registerSteps(ledgerSteps(deps.decisions))
-      return newWriteOp({ steps: [modelChangeStep({ change, snapshotId: snapshot.id, at: now, origin: by === undefined ? origin : { ...origin, by } })] })
+      return [modelChangeStep({ change: kind, snapshotId, at: now, origin: writer === undefined ? origin : { ...origin, by: writer } })]
     }
-    if (candidate.action === 'create') await store.create(clean)
-    else {
-      const seen: { current?: MemoryRecord } = {}
-      const isChangedSinceRead = (current: MemoryRecord | undefined) => {
-        seen.current = current
-        if (current === undefined || !isSameRecord(current, target!)) return true
-        // 子 agent 的归属按锁内这一份再判：归属检查之后、target 读到之前被接受的，target 本身已是接受后的版本
-        return deps.delegation !== undefined && (current.status !== 'active' || notOwnPending(current, deps.session.id) !== undefined)
-      }
-      const op = ledgerOp('rewrite')
-      const rewritten = await store.put(clean, undefined, isChangedSinceRead, op)
-      if (rewritten === undefined) return changedAfterRead(clean.id, seen.current, deps.delegation !== undefined)
-      // 指纹按这次写下的那条（put 的返回值），撤销前据此确认之后没被别处改过
-      if (op !== undefined) await store.finishOp(op, rewritten)
+    let clean: MemoryRecord
+    // 改写、替代前的快照（快照先行）：改写的目标与要替代的旧记忆同拍一份，对话卡与右侧栏的「撤销修改」按它恢复
+    let snapshotId: string | undefined
+    if (candidate.action === 'create') {
+      snapshotId = replaced.length === 0 ? undefined : (await deps.snapshots.capture({
+        operation: 'pre-update', description: `替代记忆 ${replaced.map(r => r.id).join('、')} 前`, records: replaced,
+      }, now)).id
+      clean = pruneUndefined(parsed.data)
+      // 新 id 不定位（create 排他占名）
+      await store.create(clean)
+    } else {
+      // 落盘走不带前台门禁的原语：锁内复核（读到目标之后它又被改过、删除、归档、提升就不写）、改前快照、
+      // 按改动性质拼记录、状态变化留历史版本都在里面。子 agent 的归属按锁内那一份再判：其间被接受、提升的一并拦下
+      const committed = await commitChange({
+        target: target!, kind: change!, fields, anchor, by, at: now,
+        reason: candidate.changeReason,
+        // 合并窗口按会话开；认不出是哪个会话的不并
+        ...(session.id !== UNKNOWN_SESSION_ID ? { sessionId: session.id } : {}),
+        alsoSnapshot: replaced,
+        // 补证不改内容，没有可撤的
+        steps: id => isCorroboration ? [] : ledgerStep('rewrite', id),
+        ...(deps.delegation !== undefined
+          ? { isBlocked: (current: MemoryRecord) => current.status !== 'active' || notOwnPending(current, deps.session.id) !== undefined }
+          : {}),
+      }, { store, snapshots: deps.snapshots, mergeWindowMs: deps.mergeWindowMs })
+      if (committed.kind === 'changed') return changedAfterRead(target!.id, committed.current, deps.delegation !== undefined)
+      if (committed.kind === 'invalid') return { kind: 'rejected', code: 'schema-invalid', reason: `字段校验失败：${committed.reason}` }
+      clean = committed.record
+      snapshotId = committed.snapshotId
     }
+    // 模型自报的警告只对 global 目标给（与以往一致）：项目记忆的快照只供界面撤销，不增加给模型的文字
+    const updateSnapshotId = candidate.action === 'update' && target!.scope === 'global' ? snapshotId : undefined
 
     // 6. supersedes 处理：读到时在用的同作用域目标置 superseded（见上方 replaced）；锁内再看一次，其间被删除、被取代、
     // 被改写或搬到别的作用域的不动
     for (const old of replaced) {
       try {
-        const op = ledgerOp('supersede', clean.id)
+        const op = snapshotId === undefined ? undefined : newWriteOp({ steps: ledgerStep('supersede', snapshotId, clean.id) })
         const written = await store.update(old, (r) => {
           // 抛出即不写（同 updateIfLive）
           if (r.status !== 'active' || r.updatedAt !== old.updatedAt || !isSameScope(r)) throw new RecordNotFoundError(r.id)

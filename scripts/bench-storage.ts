@@ -289,7 +289,7 @@ try {
     await bench('memory_save（update）', async round => {
       const target = updateTargets[(round + 1) % updateTargets.length]
       const r = await executeSave({
-        action: 'update', id: target.id, name: target.name, type: target.type, scope: 'workspace',
+        action: 'update', id: target.id, change: 'refine', name: target.name, type: target.type, scope: 'workspace',
         content: `${target.content}（第 ${round + 2} 次更新）`, summary: target.summary, sourceMode: 'user-explicit',
       }, exec, { store, registry, snapshots, host: { saveContextOf: contextOf } })
       if (r.kind !== 'updated') throw new Error(`update 未落盘：${r.kind}`)

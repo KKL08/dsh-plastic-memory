@@ -10,15 +10,17 @@
     <name 的 slug>.md         # 一条记忆一个文件（YAML Frontmatter + 正文）
     MEMORY.md                # 生成的索引：列出当前有效的记忆，手改会被覆盖
     .archive/                # 已遗忘、已取代的记忆；遗忘 14 天后自动清理
+    .history/<记忆 id>/       # 历史版本：状态变了的记忆，变化前的整条内容
   <项目slug>-<hash>/         # 项目记忆（按工作区隔离）
     .workspace               # 一行：该项目的本地绝对路径
     <name 的 slug>.md
     MEMORY.md
     .archive/
+    .history/
   .state/                    # 插件自用：快照、待决事项、扫描缓存、召回统计、体检设置与记录等
 ```
 
-备份或换机时复制整个 `<memoryRoot>`，包括隐藏的 `.archive/` 和 `.state/`：撤销快照、待决事项、忽略记录都在 `.state/` 里，没法从记忆文件重建。
+备份或换机时复制整个 `<memoryRoot>`，包括隐藏的 `.archive/`、`.history/` 和 `.state/`：撤销快照、待决事项、忽略记录都在 `.state/` 里，没法从记忆文件重建。
 
 全局记忆由你确认提升后才进 `global/`：模型要新建全局记忆时，记忆先落在当前项目、标为提升候选。
 

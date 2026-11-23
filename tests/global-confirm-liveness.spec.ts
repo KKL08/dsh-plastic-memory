@@ -55,7 +55,7 @@ describe('改写全局记忆的确认码：活性', () => {
       const intents = new Map<number, Intent>()
       let serial = 0
       const update = (i: number, content: string, code?: string) =>
-        runSavePipeline(candidate({ action: 'update', id: ids[i], scope: 'global', name: `全局规范${i}`, content, ...(code === undefined ? {} : { confirmGlobal: code }) }), deps())
+        runSavePipeline(candidate({ action: 'update', change: 'correct', id: ids[i], scope: 'global', name: `全局规范${i}`, content, ...(code === undefined ? {} : { confirmGlobal: code }) }), deps())
       // 带码重发一次：写成了就核对正文、调用次数并结束这个意图；没写成只能是新引导（其间被手改，码变了）
       const resend = async (i: number) => {
         const intent = intents.get(i)!

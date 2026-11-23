@@ -230,7 +230,7 @@ describe('edit-memory（建议整理的直接改）', () => {
     const e = env()
     await e.store.create(record({ id: 'mem_g', name: '甲', content: '旧正文', scope: 'workspace', workspacePath: SESSION_WS }))
     ok(await e.run(edit('mem_g', SESSION_WS, await baseOf(e, 'mem_g'))))
-    const r = await runSavePipeline(candidate({ action: 'update', id: 'mem_g', scope: 'workspace', content: '模型想写的' }), {
+    const r = await runSavePipeline(candidate({ action: 'update', change: 'correct', id: 'mem_g', scope: 'workspace', content: '模型想写的' }), {
       store: e.store, registry, workspacePath: SESSION_WS, session: { id: 'sess-1', lastSeq: 1 }, snapshots: e.snapshots, decisions: e.decisions,
     })
     expect(r.kind).toBe('updated')

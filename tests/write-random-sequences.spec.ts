@@ -16,7 +16,7 @@ const hooks = { beforeCommit: async () => {} }
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 const initial = { a: 'workspace', b: 'workspace', isSameName: false } as const
 const base = memorySubject(initial)
-const kinds = ['新建', '整条更新', '精确修改', '删除', '提升', '界面批量写入'] as const
+const kinds = ['新建', '整条更新', '精确修改', '补证', '删除', '提升', '界面批量写入'] as const
 type Kind = typeof kinds[number]
 interface Write { writer: number; index: number; kind: Kind }
 const ref = (r: MemoryRecord) => ({ memoryId: r.id, layer: { kind: 'workspace' as const, workspacePath: W }, base: { updatedAt: r.updatedAt, digest: editFingerprint(r) } })
@@ -30,15 +30,20 @@ const generators: Record<Kind, (w: MemoryWorld, op: Write, before: MemoryRecord)
   },
   整条更新: async (w, op, before) => {
     const content = `整条替换${op.index}`
-    const result = await runSavePipeline(candidate({ action: 'update', id: before.id, name: before.name, content, force: true }), { store: w.store, registry, workspacePath: W, snapshots: w.snapshots, session: { id: `会话${op.writer}`, lastSeq: op.index + 1 }, now: () => STORE_NOW })
+    const result = await runSavePipeline(candidate({ action: 'update', change: 'correct', id: before.id, name: before.name, content, force: true }), { store: w.store, registry, workspacePath: W, snapshots: w.snapshots, session: { id: `会话${op.writer}`, lastSeq: op.index + 1 }, now: () => STORE_NOW })
     expect(result.kind).toBe('updated')
     expect(await w.store.get(before.id, { workspacePath: W })).toMatchObject({ content })
   },
   精确修改: async (w, op, before) => {
     const content = `精确修改${op.index}`
-    const result = await runSavePipeline({ action: 'update', id: before.id, sourceMode: 'user-explicit', edits: [{ oldString: before.content, newString: content }] }, { store: w.store, registry, workspacePath: W, snapshots: w.snapshots, session: { id: `会话${op.writer}`, lastSeq: op.index + 1 }, now: () => STORE_NOW })
+    const result = await runSavePipeline({ action: 'update', change: 'correct', id: before.id, sourceMode: 'user-explicit', edits: [{ oldString: before.content, newString: content }] }, { store: w.store, registry, workspacePath: W, snapshots: w.snapshots, session: { id: `会话${op.writer}`, lastSeq: op.index + 1 }, now: () => STORE_NOW })
     expect(result.kind).toBe('updated')
     expect(await w.store.get(before.id, { workspacePath: W })).toMatchObject({ content })
+  },
+  补证: async (w, op, before) => {
+    const result = await runSavePipeline({ action: 'update', change: 'corroborate', id: before.id, sourceMode: 'user-explicit' }, { store: w.store, registry, workspacePath: W, snapshots: w.snapshots, session: { id: `会话${op.writer}`, lastSeq: op.index + 1 }, now: () => STORE_NOW })
+    expect(result.kind).toBe('updated')
+    expect(await w.store.get(before.id, { workspacePath: W })).toMatchObject({ content: before.content, updatedAt: before.updatedAt, lastConfirmedAt: STORE_NOW })
   },
   删除: async (w, _op, before) => {
     await w.store.softDelete({ id: before.id, workspacePath: W }, { now: STORE_NOW })
@@ -92,7 +97,7 @@ const firstSeed = interleaveSeed()
 const seeds = Array.from({ length: interleaveRuns(4) }, (_, index) => firstSeed + index)
 describe('多写者随机序列', () => {
   for (const seed of seeds.slice(0, 2)) it(`种子 ${seed}：合法写入全部完成且落盘内容不丢失`, async () => {
-    const [ops, turns] = sequenceCase(seed, fc.shuffledSubarray([...kinds], { minLength: 6, maxLength: 6 }))
+    const [ops, turns] = sequenceCase(seed, fc.shuffledSubarray([...kinds], { minLength: kinds.length, maxLength: kinds.length }))
     // 每种写法恰好出现一次；提升和删除放在所属写者的末尾，之后不向已移动或已删除的目标写入。
     const input = ops.map((kind, index) => ({ kind, index, writer: kind === '提升' ? 0 : kind === '删除' ? 1 : index % 2 }))
       .sort((a, b) => Number(a.kind === '提升' || a.kind === '删除') - Number(b.kind === '提升' || b.kind === '删除'))
@@ -104,6 +109,7 @@ describe('多写者随机序列', () => {
 const concurrentOpArb = fc.oneof(
   writeOpArb,
   fc.record({ kind: fc.constant('preciseEdit' as const), id: keyArb }),
+  fc.record({ kind: fc.constant('corroborate' as const), id: keyArb }),
   fc.constant<MemOp>({ kind: 'guiBatch' }),
 )
 for (const seed of seeds) it(`种子 ${seed}：共享记忆的并发写入结果及盘面与串行一致`, async () => {
@@ -119,6 +125,9 @@ const undoNames: Record<UndoKind, string> = {
   modelRewrite: '整条更新', preciseEdit: '精确修改', guiEdit: '界面编辑',
   guiBatch: '界面批量写入', forget: '删除', promote: '提升',
 }
+/** 前序写法：可撤的几种之外再混入补证（不拍快照、不记撤销条目）。 */
+const prefixKinds = ['modelRewrite', 'preciseEdit', 'guiEdit', 'guiBatch', 'corroborate'] as const
+type PrefixKind = typeof prefixKinds[number]
 const undoGenerators: Record<UndoKind, (id: 'a' | 'b') => MemOp> = {
   modelRewrite: id => ({ kind: 'modelRewrite', id, isForced: true }),
   preciseEdit: id => ({ kind: 'preciseEdit', id }),
@@ -126,6 +135,11 @@ const undoGenerators: Record<UndoKind, (id: 'a' | 'b') => MemOp> = {
   guiBatch: () => ({ kind: 'guiBatch' }),
   forget: id => ({ kind: 'forget', id }),
   promote: id => ({ kind: 'promote', id }),
+}
+const prefixGenerators: Record<PrefixKind, (id: 'a' | 'b') => MemOp> = {
+  modelRewrite: undoGenerators.modelRewrite, preciseEdit: undoGenerators.preciseEdit,
+  guiEdit: undoGenerators.guiEdit, guiBatch: undoGenerators.guiBatch,
+  corroborate: id => ({ kind: 'corroborate', id }),
 }
 const recordsOf = async (w: MemoryWorld) => Promise.all(
   (['a', 'b'] as const).map(key => w.store.get(IDS[key], { workspacePath: W })),
@@ -136,14 +150,14 @@ for (const [kindIndex, kind] of undoKinds.entries()) {
     const seed = seeds[kindIndex % seeds.length]!
     // 选中位置、目标、前序写法由种子决定；每种写法都覆盖可撤与后来又改过两支。
     const [[prefix, id], turns] = sequenceCase(seed, fc.tuple(
-      fc.array(fc.constantFrom<UndoKind>('modelRewrite', 'preciseEdit', 'guiEdit', 'guiBatch'), { minLength: 0, maxLength: 2 }),
+      fc.array(fc.constantFrom<PrefixKind>(...prefixKinds), { minLength: 0, maxLength: 2 }),
       keyArb,
     ))
     const selected = prefix.length
     const later = isChanged ? id : id === 'a' ? 'b' : 'a'
     const suffix: MemOp[] = isChanged || kind !== 'guiBatch'
       ? [{ kind: 'modelRewrite', id: later, isForced: true }] : []
-    const ops = [...prefix.map(k => undoGenerators[k](id)), undoGenerators[kind](id), ...suffix]
+    const ops = [...prefix.map(k => prefixGenerators[k](id)), undoGenerators[kind](id), ...suffix]
     await checkSequence(seed, ops, turns, async (sequence, scheduler) => {
       // 缩减仍按原对象辨认所选操作；删掉它不构成撤销性质的反例。
       if (!sequence.includes(ops[selected]!)) return
@@ -163,7 +177,7 @@ for (const [kindIndex, kind] of undoKinds.entries()) {
             const current = await recordsOf(w)
             const oldSnapshots = new Set((await w.snapshots.list()).map(s => s.id))
             const result = await base.run(w, op, index, hooks)
-            if (op.kind === 'modelRewrite' || op.kind === 'preciseEdit') expect(result).toMatchObject({ kind: 'updated' })
+            if (op.kind === 'modelRewrite' || op.kind === 'preciseEdit' || op.kind === 'corroborate') expect(result).toMatchObject({ kind: 'updated' })
             else if (op.kind === 'promote') expect(result).toMatchObject({ promoted: [{ id: IDS[id] }] })
             else expect(result).toMatchObject({ ok: true })
             if (op === ops[selected]) {

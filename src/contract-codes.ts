@@ -20,6 +20,7 @@ export type RejectCode =
   | 'edit-invalid'         // edits 用法不对：配了 create、和 content 同传、空数组、oldString 为空或与 newString 相同
   | 'edit-not-found'       // edits 某处的 oldString 在正文里找不到；原因带当前正文
   | 'edit-ambiguous'       // edits 某处的 oldString 命中多处又没带 replaceAll
+  | 'change-kind-missing'  // update 没声明改动性质（change）：回引导（当前内容和三个判断问题）、不写入；同一会话对同一条再缺一次就按状态变化写
   | 'subagent-restricted'  // 子 agent 会话（delegationDepth ≥ 1）越过写入约束：依据、类型、替代、force、改写归属、新建配额，原因按条区分
 
 /**
@@ -51,6 +52,8 @@ export type WarningCode =
   | 'auto-snapshot'           // 更新 global 记忆前已自动快照
   | 'secret-suspected'        // 疑似密钥（无厂商特征），带 force: true 放行落盘，仍建议改写
   | 'subagent-scope-local'    // 子 agent 填 global：落当前项目、不标提升候选
+  | 'change-kind-assumed'     // update 两次都没声明改动性质：按状态变化写了，改前的内容留成历史版本
+  | 'corroborate-fields-ignored' // 补证带了正文等内容参数：没有生效
 
 /** memory_scan 的说明性 note（scan.ts）。 */
 export const SCAN_NOTE_CODES = [

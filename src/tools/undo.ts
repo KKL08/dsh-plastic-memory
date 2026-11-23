@@ -7,6 +7,7 @@ import { verdictLoser, type MemorySnapshot, type SnapshotRecord } from '../gover
 import type { MemoryRecord } from '../record-schema.ts'
 import { RecordNotFoundError } from '../errors.ts'
 import { scopeAt, type Scope } from '../scope.ts'
+import { layerOf } from '../storage/history.ts'
 import { crossWorkspaceNote, gateRecords, isCopyOf, isVisible, locateCopy, type CrossWorkspaceRejection, type GovernanceContext } from './workspace-gate.ts'
 
 export interface UndoDeps {
@@ -112,6 +113,25 @@ async function gateRestore(records: readonly SnapshotRecord[], target: 'exact' |
 }
 
 /**
+ * 撤销一次状态变化前，先把它在历史版本里留下的撤掉：这一版是它留的档就删掉，是并进别人留的那版就拿掉它那一笔（连同它给的原因）。
+ * 按改前快照的 id 认是哪一次写入。先撤版本、再恢复记忆：中途断掉只是少一个历史版本，不会留下和当前页内容相同的版本。
+ * 返回放回去的函数：恢复没成时照原样放回。
+ */
+export async function withdrawVersion(store: MemoryStore, before: SnapshotRecord, snapshotId: string): Promise<() => Promise<void>> {
+  const found = await store.locate(before.id, scopeAt(before.workspacePath))
+  if (found === undefined) return async () => {}
+  const layer = layerOf(found)
+  for (const version of await store.history.list(layer, before.id)) {
+    const index = version.writes.findIndex(w => w.snapshot === snapshotId)
+    if (index < 0) continue
+    if (index === 0) await store.history.remove(layer, before.id, version.versionId)
+    else await store.history.write(layer, { ...version, writes: version.writes.filter((_, i) => i !== index) })
+    return () => store.history.write(layer, version)
+  }
+  return async () => {}
+}
+
+/**
  * 按指纹判的种类（直接改与合并、整理所选的应用、模型改写与替代）：主条此刻仍是那次写下的，合并删掉的那条内容仍同快照
  * （在最近删除里或已恢复都行），才按改前快照恢复；整理所选的每一项都按回执比（删掉的那条单独恢复过也算对不上），一项不符整批不动，
  * 快照缺任一项就撤不了。不留半截：先写容易被争用的（合并、整理里删掉的：最近删除里能被恢复、恢复后能被改），再写其余的；
@@ -159,10 +179,21 @@ async function restoreOwnWrites(entry: UndoableEntry, rule: UndoRule, allow: boo
   const order = isByReceipt ? [...records.filter(isDeleted), ...records.filter(r => !isDeleted(r))] : [...others, main]
   const written: SnapshotRecord[] = []
   let inFlight: SnapshotRecord | undefined
+  let putVersionBack = async () => {}
   try {
     for (const rec of order) {
       inFlight = rec
-      const r = await deps.snapshots.restore(snapshot, [rec.id], deps.store, { target: 'exact', overwrite: isOwn(rec), now })
+      // 主条的历史版本和记忆文件在同一个写入段里动：别的写入插不进两步中间
+      const r = await deps.store.writeSection(async () => {
+        if (rec === main) putVersionBack = await withdrawVersion(deps.store, rec, snapshot.id)
+        const restored = await deps.snapshots.restore(snapshot, [rec.id], deps.store, { target: 'exact', overwrite: isOwn(rec), now })
+        // 没恢复成：版本在同一段里放回去，别的写入看不到缺了它的那一刻
+        if (rec === main && restored.restored.length === 0) {
+          await putVersionBack()
+          putVersionBack = async () => {}
+        }
+        return restored
+      })
       if (r.restored.length === 0) {
         const isAnyKept = await withdraw(written, seen, deps.store)
         return changed(rec.id, r.redacted.length > 0 ? 'redacted' : isAnyKept ? 'kept-third-party' : 'changed')
@@ -173,6 +204,8 @@ async function restoreOwnWrites(entry: UndoableEntry, rule: UndoRule, allow: boo
   } catch (err) {
     // 写盘出错同样不留半截：已写回的照样退回，再把错误抛出去。出错的那一项可能已写回、之后才抛（维护目录、写统计），
     // 一并交给 withdraw：它只退仍是刚写回那一版的，没写成的原样不动
+    // 放回版本自己出错不盖掉原来的错
+    await putVersionBack().catch(() => {})
     await withdraw(inFlight === undefined ? written : [...written, inFlight], seen, deps.store)
     throw err
   }

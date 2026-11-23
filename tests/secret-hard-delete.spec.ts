@@ -295,7 +295,7 @@ describe('密钥硬删', () => {
     expect(forced.warnings?.map(w => w.code)).toEqual([SECRET_SUSPECTED_WARNING])
 
     // update 同样拦截，force 放行
-    const update = { action: 'update' as const, id: forced.record.id, scope: 'workspace' as const, content: '密码:TESTONLYpassw0rd' }
+    const update = { action: 'update' as const, change: 'correct' as const, id: forced.record.id, scope: 'workspace' as const, content: '密码:TESTONLYpassw0rd' }
     expect(await runSavePipeline(candidate(update), deps)).toMatchObject({ kind: 'rejected', code: SECRET_SUSPECTED_REJECT })
     const updated = await runSavePipeline(candidate({ ...update, force: true }), deps)
     if (updated.kind !== 'updated') throw new Error(updated.kind)

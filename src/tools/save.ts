@@ -32,6 +32,10 @@ export interface SaveToolDeps {
   onSaved?: (sessionId: string, memoryId: string) => void
   /** 子会话新建配额（配置 subagent.maxSavesPerSession），每次调用现读；缺省按管线的默认值。 */
   maxSubagentSaves?: () => number
+  /** 某个会话里已经回过缺改动性质引导的记忆（进程内存，见管线的 guided）；接线层按会话给，测试可缺省。 */
+  guidedIn?: (sessionId: string) => { has(memoryId: string): boolean; add(memoryId: string): void }
+  /** 状态变化的合并窗口，分钟（配置 history.mergeWindowMinutes），每次调用现读；缺省按落盘原语的默认值。 */
+  mergeWindowMinutes?: () => number
 }
 
 /** 成功保存、改写时附在第一行末：记录是过程动作，界面已展示写入的记忆，回复里不必再报。 */
@@ -85,6 +89,11 @@ export function renderSaveResult(result: PipelineResult): string {
   return text
 }
 
+/** 配置里的分钟数换成毫秒；0 是不合并，负数和不是数的按缺省（不给）。 */
+function mergeWindowMs(minutes: number | undefined): number | undefined {
+  return minutes !== undefined && Number.isFinite(minutes) && minutes >= 0 ? minutes * 60_000 : undefined
+}
+
 /**
  * memory_save 工具的真正执行逻辑：解析上下文、归一化候选、跑写入管线。
  * 不依赖任何 dsh 框架包，测试直接调它。
@@ -108,6 +117,8 @@ export async function executeSave(
     // 委派信息只从上下文来：args 里同名字段不进候选、也不传到这里
     delegation: context.delegation,
     maxSubagentSaves: deps.maxSubagentSaves?.(),
+    guided: deps.guidedIn?.(context.session.id),
+    mergeWindowMs: mergeWindowMs(deps.mergeWindowMinutes?.()),
   })
   if (result.kind === 'saved') deps.onSaved?.(context.session.id, result.record.id)
   return result

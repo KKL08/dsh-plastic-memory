@@ -37,6 +37,20 @@ All notable changes to this project are documented here. The format follows
   and holds no memory text.
 - Testing: each kind of memory write is stopped before every disk call and
   checked after the next write.
+- When the model updates a memory it now says what kind of change it is
+  (`change`): the same thing came up again, a detail was added, a mistake
+  was corrected, or the situation changed. When the situation changed, the
+  memory as it was is kept as a history version under `.history/` next to
+  the memory file, with when it stopped being current and why; undoing the
+  update removes that version again. Several such changes to one memory
+  from the same conversation within an hour keep one version
+  (`history.mergeWindowMinutes`).
+- Each memory file lists the conversations it came from (`sourceTrail`, the
+  eight most recent), and `lastChange` records the last change to its
+  content, with the reason when one was given.
+- Testing: `pnpm host:contract` checks on a real host that an update without
+  `change` is sent back with the memory's current content, and that the
+  earlier content is kept under `.history/` when it is written.
 
 ### Changed
 - The recall options of a memory type are renamed after what each chat
@@ -48,6 +62,11 @@ All notable changes to this project are documented here. The format follows
   that lets you undo it) now runs as one step under the memory folder's
   write lock. If the lock stays busy, the change fails as a whole and can
   be retried, instead of stopping partway.
+- A model update to a memory's text no longer counts as confirming it,
+  unless the user stated the new content or the update records that the
+  situation changed. Noting that the same thing came up again does count.
+  The "not confirmed in a while" reminder follows this, and so do the
+  places that order memories by when they were last confirmed.
 - Saving or changing a memory no longer reads every file in the memory
   folder, so a write no longer slows down as the folder grows. The write
   updates its own line in `MEMORY.md`. Files edited by hand are picked up,
