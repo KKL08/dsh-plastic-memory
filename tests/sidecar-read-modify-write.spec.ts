@@ -14,7 +14,7 @@ import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { type MemorySnapshot } from '../src/governance/schema.ts'
 import { executeConfirm } from '../src/tools/confirm.ts'
 import { goneCopies } from '../src/tools/workspace-gate.ts'
-import type { RootLock } from '../src/root-lock.ts'
+import type { SectionLock } from '../src/root-lock.ts'
 import { record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 import { noInstructions } from './helpers/instructions.ts'
@@ -43,7 +43,7 @@ afterEach(async () => {
 })
 
 /** 本进程这边按接线层搭一套（布置数据、读结果用），写锁是另一个实例，与子进程互斥。 */
-function wired(lock: RootLock = createRootLock({ root, log: quietLog })) {
+function wired(lock: SectionLock = createRootLock({ root, log: quietLog })) {
   const sidecar = new SidecarStore({ root, schemas, lock, log: quietLog })
   const store = new MemoryStore(new FileTable({ root, lock, stats: sidecar.recallStats, log: quietLog }), quietLog, sidecar.recallStats)
   const snapshots = new SnapshotStore(sidecar.snapshots, { findGone: goneCopies(store) })
@@ -179,11 +179,12 @@ describe('RL-10 裁决冲突（败方含高危密钥）与改写败方交错', (
 // RL-13 是测量：一千份快照下裁决败方含高危密钥的冲突，整段持锁多久。默认跳过，PM_RL13=1 开启，结果打到日志。
 describe.skipIf(process.env.PM_RL13 !== '1')('RL-13 裁决段持锁时长', () => {
   /** 量持锁时长的写锁：同一实例里最外层 run 从拿到锁到放开算一段。 */
-  function timedLock(inner: RootLock) {
+  function timedLock(inner: SectionLock) {
     const heldMs: number[] = []
     let depth = 0
     let start = 0
-    const lock: RootLock = {
+    const lock: SectionLock = {
+      runUnqueued: fn => inner.runUnqueued(fn),
       run: fn => inner.run(async () => {
         if (depth++ === 0) start = performance.now()
         try {

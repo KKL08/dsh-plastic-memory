@@ -23,7 +23,7 @@ import { PendingDecisionsStore } from '../../src/governance/decisions.ts'
 import { executeConfirm } from '../../src/tools/confirm.ts'
 import { goneCopies } from '../../src/tools/workspace-gate.ts'
 import { RecordNotFoundError } from '../../src/errors.ts'
-import type { RootLock } from '../../src/root-lock.ts'
+import type { SectionLock } from '../../src/root-lock.ts'
 import { barrierLock } from './lock-barrier.ts'
 import { noInstructions } from './instructions.ts'
 
@@ -34,9 +34,10 @@ const toStderr = (message: string) => { process.stderr.write(`${message}\n`) }
 const log = { info: () => {}, warn: toStderr, error: toStderr }
 let pauseAt = 0
 let runs = 0
-const barrier = barrierLock(createRootLock({ root, log }), { dir: signalDir, name: tag, pause: n => n === pauseAt })
-// 屏障按 run 的调用次数编号，这里同步数一遍，arm / peek 才知道下一次是第几次
-const lock: RootLock = { run: fn => { runs++; return barrier.run(fn) } }
+const raw = createRootLock({ root, log })
+const barrier = barrierLock(raw, { dir: signalDir, name: tag, pause: n => n === pauseAt })
+// 屏障按 run 的调用次数编号，这里同步数一遍，arm / peek 才知道下一次是第几次。导入走不排队入口，不进屏障、不计数
+const lock: SectionLock = { run: fn => { runs++; return barrier.run(fn) }, runUnqueued: fn => raw.runUnqueued(fn) }
 
 const sidecar = new SidecarStore({
   root, lock, log, schemas: sidecarSchemas,

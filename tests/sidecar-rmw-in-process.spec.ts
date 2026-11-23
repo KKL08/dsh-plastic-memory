@@ -13,7 +13,7 @@ import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { type MemorySnapshot } from '../src/governance/schema.ts'
 import { executeForget } from '../src/tools/forget.ts'
 import { goneCopies } from '../src/tools/workspace-gate.ts'
-import type { RootLock } from '../src/root-lock.ts'
+import type { SectionLock } from '../src/root-lock.ts'
 import { record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 
@@ -50,7 +50,7 @@ afterEach(async () => {
 })
 
 /** 按接线层搭一套：一个侧表实例、一把写锁，快照落盘后按副本复核。 */
-function wired(lock: RootLock = createRootLock({ root, log: quietLog })) {
+function wired(lock: SectionLock = createRootLock({ root, log: quietLog })) {
   const sidecar = new SidecarStore({ root, schemas, lock, log: quietLog })
   const store = new MemoryStore(new FileTable({ root, lock, stats: sidecar.recallStats, log: quietLog }), quietLog, sidecar.recallStats)
   const snapshots = new SnapshotStore(sidecar.snapshots, { findGone: goneCopies(store) })

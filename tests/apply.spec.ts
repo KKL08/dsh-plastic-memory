@@ -359,11 +359,12 @@ describe('apply', () => {
   })
 })
 
-/** 启动时那遍视图写入是旁路（不 await）：等四个全局视图都落盘，免得它和用例的后续写入、afterEach 的清理交错。 */
+/** 启动时那遍视图写入是旁路（不 await）：等四个全局视图都落盘，免得它和用例的后续写入、afterEach 的清理交错。
+ *  只是等它写完，不是在量快慢：给足 10 秒，负载高的 CI 机器上也等得到。 */
 async function startupViews(memoryRoot: string): Promise<void> {
   await vi.waitFor(async () => {
     for (const file of Object.values(GUI_VIEW_FILES)) await stat(join(memoryRoot, GUI_VIEW_DIR, file))
-  })
+  }, { timeout: 10_000 })
 }
 
 /** GUI 半侧的服务端接线：commands 服务在时注册 /memory 命令处理器，缺席时静默跳过；加载期都不碰磁盘。 */

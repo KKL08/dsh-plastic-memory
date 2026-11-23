@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createRootLock, isSqliteBusy, type RootLockOptions } from '../src/storage/root-lock.ts'
+import { createCrossProcessLock, isSqliteBusy, type RootLockOptions } from '../src/storage/root-lock.ts'
 import { RootLockTimeoutError } from '../src/errors.ts'
 import { fireUntilSettled, manualTimers } from './helpers/manual-timers.ts'
 import { signal, waitForSignal } from './helpers/signal-files.ts'
@@ -32,11 +32,12 @@ afterEach(async () => {
 /** 锁协议的路径是跨版本契约，这里写死，不从实现取。 */
 const lockPath = () => join(root, '.state', 'lock', 'write-lock.sqlite')
 
+/** 这份测试测的是跨进程那一层（锁协议、持有计数）；外面套的写入段另见 write-section.spec.ts。 */
 function newLock(extra: Partial<RootLockOptions> = {}) {
   const warnings: string[] = []
   const timers = manualTimers()
   const log = { info: () => {}, warn: (m: string) => { warnings.push(m) }, error: (m: string) => { warnings.push(m) } }
-  return { lock: createRootLock({ root, log, timers, ...extra }), timers, warnings }
+  return { lock: createCrossProcessLock({ root, log, timers, ...extra }), timers, warnings }
 }
 
 function deferred() {

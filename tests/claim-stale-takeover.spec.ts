@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { createRootLock } from '../src/storage/root-lock.ts'
-import type { RootLock } from '../src/root-lock.ts'
+import type { SectionLock } from '../src/root-lock.ts'
 import type { RefreshableClaim } from '../src/kv-table.ts'
 
 // 清残留认领与持有者刷新交错：真侧表、真写锁、真临时目录。清残留先把认领改名挪开再核对，
@@ -39,9 +39,10 @@ afterEach(async () => {
 })
 
 /** 每次 run 先跑一次 beforeRun（只跑一次），再去拿真锁：固定「锁外判定之后、进锁之前」这段。 */
-function hookedLock(inner: RootLock) {
+function hookedLock(inner: SectionLock) {
   let beforeRun: (() => Promise<void>) | undefined
-  const lock: RootLock = {
+  const lock: SectionLock = {
+    runUnqueued: fn => inner.runUnqueued(fn),
     async run(fn) {
       const hook = beforeRun
       beforeRun = undefined

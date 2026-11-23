@@ -77,6 +77,21 @@ describe('新旧版本共用一个记忆根（0.2.0 发布包）', () => {
     expect(pick(after!.record)).toEqual(Object.fromEntries(NEW_KEYS.map(k => [k, undefined])))
   })
 
+  it('两边同时改同一条（各 10 次，交错发起）：一次都不丢，跨版本共用同一把写锁', async () => {
+    const rec = record({ name: '交替写入', tags: [] })
+    const table = current()
+    await table.create(rec)
+    const old = await openRelease020Table({ root, stats })
+    const addTag = (tag: string) => (r: MemoryRecord): MemoryRecord => ({ ...r, tags: [...r.tags, tag] })
+    const writes = Array.from({ length: 10 }, (_, i) => [
+      old.update(rec.id, global, addTag(`old-${i}`)),
+      table.update(rec.id, global, addTag(`new-${i}`)),
+    ]).flat()
+    await Promise.all(writes)
+    const tags = (await table.locate(rec.id, global))!.record.tags
+    expect([...tags].sort()).toEqual([...Array.from({ length: 10 }, (_, i) => [`new-${i}`, `old-${i}`]).flat()].sort())
+  })
+
   it('两边轮流写同一条：键的顺序一致，只改正文时文件里只有正文和 digest 两行变', async () => {
     const rec = withNewKeys()
     await current().create(rec)

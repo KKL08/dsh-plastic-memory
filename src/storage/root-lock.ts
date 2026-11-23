@@ -6,6 +6,7 @@ import { RootLockTimeoutError } from '../errors.ts'
 import { STATE_DIR } from './paths.ts'
 import { describeError } from './state-files.ts'
 import type { MemoryLogger } from './table.ts'
+import { WriteSection } from './write-section.ts'
 
 /**
  * 记忆根写锁的实现：`<memoryRoot>/.state/lock/write-lock.sqlite` 是一个不存数据的 SQLite 库，
@@ -48,17 +49,23 @@ export function isSqliteBusy(err: unknown): boolean {
   return e?.code === 'ERR_SQLITE_ERROR' && typeof e.errcode === 'number' && (e.errcode & 0xff) === 5
 }
 
-export function createRootLock(opts: RootLockOptions): RootLock {
+/** 写入点注入的锁：跨进程锁外面套一层写入段（进程内也互斥、可重入，见 write-section.ts）。 */
+export function createRootLock(opts: RootLockOptions): WriteSection {
+  return new WriteSection(createCrossProcessLock(opts))
+}
+
+/** 只有跨进程互斥的那一层：同一实例内可嵌套、可并发进入（按持有计数），不提供进程内互斥。写入点不直接用它。 */
+export function createCrossProcessLock(opts: RootLockOptions): RootLock {
   return new SqliteRootLock(opts)
 }
 
-const defaultLocks = new Map<string, RootLock>()
+const defaultLocks = new Map<string, WriteSection>()
 
 /**
- * 文件表、侧表没注入写锁时用的缺省锁：同一进程里同一个记忆根共用一个实例，文件表在锁内写侧表时按计数嵌套，不会自己等自己。
+ * 文件表、侧表没注入写锁时用的缺省锁：同一进程里同一个记忆根共用一个实例，文件表在锁内写侧表时是段内再进，不会自己等自己。
  * 插件接线层不用它：每个插件实例自己建一个注入各写入点，热重载时新旧实例才互斥。
  */
-export function defaultRootLock(root: string, log: MemoryLogger): RootLock {
+export function defaultRootLock(root: string, log: MemoryLogger): WriteSection {
   let lock = defaultLocks.get(root)
   if (lock === undefined) defaultLocks.set(root, lock = createRootLock({ root, log }))
   return lock

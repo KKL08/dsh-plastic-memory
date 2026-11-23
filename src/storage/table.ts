@@ -141,6 +141,11 @@ export interface MemoryTable {
    * 写路径末尾对被写的目录自动调用；快照冻结时由调用方对 global + 当前 workspace 调用。不删同 id 副本。
    */
   maintain(dirs: string[]): Promise<void>
+  /**
+   * 在写入段里执行 fn：一条记忆的一次改动（快照、记忆文件、账本）都在这一段里，段内的读写是再进、不另排队。
+   * 没有写锁的实现（内存表）直接执行。
+   */
+  inSection?<T>(fn: () => Promise<T>): Promise<T>
 }
 
 /**

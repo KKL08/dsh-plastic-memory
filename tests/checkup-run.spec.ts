@@ -17,7 +17,7 @@ import { record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 import { instructionsOf, noInstructions } from './helpers/instructions.ts'
 import type { ReadInstructions } from '../src/governance/instructions.ts'
-import type { RootLock } from '../src/root-lock.ts'
+import type { SectionLock } from '../src/root-lock.ts'
 import { createRootLock } from '../src/storage/root-lock.ts'
 import { RootLockTimeoutError } from '../src/errors.ts'
 import { fireUntilSettled, manualTimers } from './helpers/manual-timers.ts'
@@ -58,7 +58,7 @@ function manualHeartbeat() {
 function env(opts: {
   log?: CheckupRunDeps['log']; views?: (w: ViewWriter) => CheckupRunDeps['views']; onClaimChanged?: () => Promise<void>; instructions?: ReadInstructions
   /** 写锁（缺省同一记忆根共用的那把）：接线层同款，注入侧表、文件表、待决账本。 */
-  lock?: RootLock
+  lock?: SectionLock
 } = {}) {
   const clock = { now: NOW }
   const lock = opts.lock !== undefined ? { lock: opts.lock } : {}
@@ -606,7 +606,7 @@ describe('心跳与写锁', () => {
     const real = createRootLock({ root, log: quietLog, timers })
     // 记下每次进锁的结果：心跳刷新是哪一次，就等哪一次
     const runs: Array<Promise<unknown>> = []
-    const lock: RootLock = { run: fn => { const p = real.run(fn); runs.push(p); return p } }
+    const lock: SectionLock = { run: fn => { const p = real.run(fn); runs.push(p); return p }, runUnqueued: fn => real.runUnqueued(fn) }
     const warnings: string[] = []
     let open!: () => void
     const m = answering([], { gate: new Promise<void>(resolve => { open = resolve }) })

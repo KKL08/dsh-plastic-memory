@@ -124,8 +124,20 @@ describe('SnapshotStore.diff / restore', () => {
   })
 })
 
-describe('SnapshotStore.restore：盘上快照只在写前、写后各读一次', () => {
-  it('恢复多少条都只读两次快照；写后才脱敏的记录统一撤回，计入 redacted，顺序同快照', async () => {
+describe('SnapshotStore.restore：盘上快照的读取次数不随条数增长', () => {
+  it('恢复途中快照没变：20 条也只在写前、写后各读一次，逐条只比对版本标记', async () => {
+    const kv = new InMemoryKvTable<MemorySnapshot>()
+    const s = new SnapshotStore(kv)
+    const records = Array.from({ length: 20 }, (_, i) => record({ id: `mem_${String(i).padStart(2, '0')}` }))
+    const snap = await s.capture({ operation: 'manual', description: '大快照', records }, 100)
+    const store = await memoryStore()
+    const reads = vi.spyOn(kv, 'get')
+    const r = await s.restore(snap, undefined, store, restoring)
+    expect(reads).toHaveBeenCalledTimes(2)
+    expect(r.restored).toEqual(records.map(x => x.id))
+  })
+
+  it('恢复途中别处脱敏两次：只在变了之后各重读一次；写后才脱敏的记录统一撤回，计入 redacted，顺序同快照', async () => {
     const kv = new InMemoryKvTable<MemorySnapshot>()
     const s = new SnapshotStore(kv)
     const records = Array.from({ length: 20 }, (_, i) => record({ id: `mem_${String(i).padStart(2, '0')}` }))
@@ -135,7 +147,7 @@ describe('SnapshotStore.restore：盘上快照只在写前、写后各读一次'
     duringPut(store, async rec => { if (rec.id === 'mem_03' || rec.id === 'mem_11') await s.redact(new Set([rec.id])) })
     const reads = vi.spyOn(kv, 'get')
     const r = await s.restore(snap, undefined, store, restoring)
-    expect(reads).toHaveBeenCalledTimes(2)
+    expect(reads).toHaveBeenCalledTimes(4)
     expect(r.redacted).toEqual(['mem_03', 'mem_11'])
     expect(r.skipped).toEqual(['mem_03', 'mem_11'])
     expect(r.restored).toEqual(records.map(x => x.id).filter(id => id !== 'mem_03' && id !== 'mem_11'))

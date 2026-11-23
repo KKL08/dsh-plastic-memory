@@ -77,6 +77,8 @@ export class MemoryStore {
   /** 这个 id 在哪些作用域有副本（任何状态，含只在 .archive/ 里的）：全局在前，项目按路径排序。 */
   copiesOf(id: string): Promise<Scope[]> { return this.table.copiesOf(id) }
   listWorkspaceDirs() { return this.table.listWorkspaceDirs() }
+  /** 一条记忆的一次改动整段在一个写入段里：中途拿锁超时不会只做一半，同进程别的写入也插不进中间。 */
+  writeSection<T>(fn: () => Promise<T>): Promise<T> { return this.table.inSection !== undefined ? this.table.inSection(fn) : fn() }
   /** 新记录：不定位，排他占名（save create 用）。 */
   create(record: MemoryRecord) { return this.table.create(record) }
   /** 整条替换。from：跨 scope 搬家时传原记录的作用域，让定位到的是门放行的那份；缺省按 record 自己的 workspace 做会话视角定位。
@@ -226,7 +228,7 @@ export class MemoryStore {
   }
 
   /** 召回统计只读改写侧表，不经 table.update——记忆文件不因召回而重写。一次调用是侧表的一次读改写（mergeMany：
-   *  进程内链加写锁，一次读、内存合并、一次写，单文件表只换一次文件），同一进程并发、跨进程都不少计（写锁不可用时只保证同一进程）。
+   *  在写入段里一次读、内存合并、一次写，单文件表只换一次文件），同一进程并发、跨进程都不少计（写锁不可用时只保证同一进程）。
    *  ids 取自调用方同一次读取的结果（search 命中、快照 core 区），存活由那次读保证，这里不再逐 id 定位。 */
   async markRecalled(ids: string[], now = Date.now()): Promise<void> {
     try {

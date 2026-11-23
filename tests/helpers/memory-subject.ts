@@ -29,7 +29,7 @@ import { MEMORY_COMMAND_NAME, encodeMemoryCommand, type MemoryCommand } from '..
 import type { MemoryRecord } from '../../src/record-schema.ts'
 import type { MemoryLogger } from '../../src/storage/table.ts'
 import { createRootLock } from '../../src/storage/root-lock.ts'
-import type { RootLock } from '../../src/root-lock.ts'
+import type { SectionLock } from '../../src/root-lock.ts'
 import { scopeKey, scopeOfMemory } from '../../src/scope.ts'
 import { record, candidate } from './record.ts'
 import { NOW } from './clock.ts'
@@ -97,7 +97,7 @@ export interface MemoryWorld {
   decisionId?: string
 }
 
-const newSidecar = (root: string, lock: RootLock) => new SidecarStore({
+const newSidecar = (root: string, lock: SectionLock) => new SidecarStore({
   root,
   lock,
   schemas: sidecarSchemas,
@@ -121,8 +121,11 @@ function memoryWorld(root: string, lock: WriteLock | undefined): MemoryWorld {
   return { root, sidecar, store, snapshots, decisions, ignores, views, bases: new Map() }
 }
 
-/** 第一次写记忆之前停在提交点（见 OpHooks）；读不拦。 */
-const MUTATING = new Set<PropertyKey>(['create', 'put', 'update', 'updateIfLive', 'hardDelete', 'softDelete', 'restoreArchived', 'softDeleteUnlessSecret'])
+/**
+ * 第一次写记忆之前停在提交点（见 OpHooks）；读不拦。进写入段（writeSection）也算：段里的读写别的操作插不进来，
+ * 在段里停住的话排在中间的操作进不了段、跑不完，所以停在拿段之前。
+ */
+const MUTATING = new Set<PropertyKey>(['create', 'put', 'update', 'updateIfLive', 'hardDelete', 'softDelete', 'restoreArchived', 'softDeleteUnlessSecret', 'writeSection'])
 function withCommitPoint(store: MemoryStore, hooks: OpHooks): MemoryStore {
   return new Proxy(store, {
     get(target, prop) {

@@ -157,8 +157,8 @@ export async function apply(ctx: Context, config: Config) {
   }
 
   const memoryRoot = resolveMemoryRoot(config.memoryRoot)
-  // 记忆根写锁：一个插件实例一把，注入文件表、侧表、待决账本、视图写入器（同实例内按计数嵌套）。懒打开，没有关闭步骤，卸载不用处理它：
-  // 卸载后迟到的写入照样拿锁，和热重载后的新实例互斥
+  // 记忆根写锁（写入段）：一个插件实例一把，注入文件表、侧表、待决账本、视图写入器、指令文件写入器（进程内也互斥，段内再进不等待）。
+  // 懒打开，没有关闭步骤，卸载不用处理它：卸载后迟到的写入照样拿锁，和热重载后的新实例互斥
   const rootLock = createRootLock({ root: memoryRoot, log: ctx.logger })
   // 侧表（快照、待决账本、扫描缓存、召回统计）住 <memoryRoot>/.state/，构造不做 I/O。
   // storageDomain 不再是必需注入：只为首次侧表访问时导入旧 KV 的快照与待决账本（0.3.0 移除）。
@@ -275,7 +275,7 @@ export async function apply(ctx: Context, config: Config) {
 
   // AGENTS.md 位置从 DSH_HOME 独立解析（不从 memoryRoot 反推——自定义 root 时会指向 dsh 不读的文件）；
   // memory_promote 与 /memory promote 共用一个写入器（进程内串行）
-  const agentsMd = createAgentsMdWriter(agentsMdPath())
+  const agentsMd = createAgentsMdWriter(agentsMdPath(), rootLock)
 
   // 子 agent 只读门：写入与治理工具在注册处统一套门，子 agent 会话（delegationDepth ≥ 1）调用即拒；allowSubagent 给出放行条件的才放行。
   // 门内的执行结束后（成功、失败都算，失败前可能已写了一部分）请求重写全局视图：模型改了记忆或账本，记忆页跟着变

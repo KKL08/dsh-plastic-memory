@@ -24,7 +24,7 @@ export class CheckupRecordStore {
 
   /**
    * 认领这些范围：全部认领到才算，返回各自的认领（持有者要定时刷新，见 gui/checkup-run.ts holdCheckups）；
-   * 有一个认领不到就把已认领的立刻放掉，返回那个正在体检的范围。放掉是尽力而为：每个都试（一起试，共用一次拿锁），
+   * 有一个认领不到就把已认领的立刻放掉，返回那个正在体检的范围。放掉是尽力而为：每个都试（一起试，拿锁超时只等一轮），
    * 放不掉的（写锁被别处占满上限、删不掉文件）不再刷新，60 秒后按残留处理，不把「正在体检」改报成出错。
    */
   async claim(scopes: readonly Scope[]): Promise<{ claims: RefreshableClaim[] } | { busy: Scope }> {

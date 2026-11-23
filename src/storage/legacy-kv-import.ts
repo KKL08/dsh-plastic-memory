@@ -14,7 +14,7 @@ import { SAFE_KEY_RE, atomicWrite, breakStaleLock, createExclusive, describeErro
  *   .state/kv-import.lock           导入期间的跨进程锁，导完即删
  *
  * 侧表（sidecar.ts）的快照、待决账本、扫描缓存每个读写方法先 await 一次 ensureImported（memoize；先在锁外读一次标记，
- * 已结清就不进锁；否则在侧表的进程内锁里、再持跨进程锁文件执行，锁内重查标记）。导入只碰那两个目录和自己的标记、锁文件。
+ * 已结清就不进锁；否则持记忆根写锁的跨进程那一层、不排写入段的队，再持跨进程锁文件执行，锁内重查标记）。导入只碰那两个目录和自己的标记、锁文件。
  */
 
 export const KV_IMPORT_MARKER = 'kv-import.json'
@@ -41,7 +41,8 @@ export interface LegacyKvImportOptions<S, P> {
   schemas: { snapshots: ZodType<S>; pending: ZodType<P> }
   /** 见 SidecarOptions.openLegacyKv。 */
   openLegacyKv: (() => Promise<LegacyKvTables | undefined>) | undefined
-  /** 侧表的进程内锁：导入与侧表写串行。 */
+  /** 记忆根写锁的不排队入口（SectionLock.runUnqueued）：跨进程互斥，进程内不排写入段的队。侧表的每次读写先等导入，
+   *  段内的读写也等；导入排进写入段的队就和等它的段互相等。进程内不会和侧表写重叠：侧表写都先等导入。 */
   locked: <R>(fn: () => Promise<R>) => Promise<R>
   log: MemoryLogger
   now: () => number

@@ -584,87 +584,91 @@ export async function runSavePipeline(
     }
   }
 
-  // 改写、替代前拍快照（快照先行）：forget 有 14 天快照，update 覆盖旧内容、supersedes 让旧记忆失效却无恢复手段是
-  // 不对称的。global、workspace 目标都拍，改写的目标与要替代的旧记忆同拍一份；对话卡与右侧栏的「撤销修改」按它恢复。
-  const changed = [...(candidate.action === 'update' ? [target!] : []), ...replaced]
-  const snapshot = changed.length > 0
-    ? await deps.snapshots.capture({
-      operation: 'pre-update',
-      description: candidate.action === 'update' ? `更新记忆 ${target!.id} 前` : `替代记忆 ${replaced.map(r => r.id).join('、')} 前`,
-      records: changed,
-    }, now)
-    : undefined
-  // 模型自报的警告只对 global 目标给（与以往一致）：项目记忆的快照只供界面撤销，不增加给模型的文字
-  const updateSnapshotId = candidate.action === 'update' && target!.scope === 'global' ? snapshot?.id : undefined
+  // 从拍快照到记账本是一条记忆的一次改动，整段在一个写入段里：中途拿锁超时不会写了文件却没留撤销，
+  // 同进程别的写入也插不进中间。段内只读写文件，不等模型
+  return await store.writeSection(async () => {
+    // 改写、替代前拍快照（快照先行）：forget 有 14 天快照，update 覆盖旧内容、supersedes 让旧记忆失效却无恢复手段是
+    // 不对称的。global、workspace 目标都拍，改写的目标与要替代的旧记忆同拍一份；对话卡与右侧栏的「撤销修改」按它恢复。
+    const changed = [...(candidate.action === 'update' ? [target!] : []), ...replaced]
+    const snapshot = changed.length > 0
+      ? await deps.snapshots.capture({
+        operation: 'pre-update',
+        description: candidate.action === 'update' ? `更新记忆 ${target!.id} 前` : `替代记忆 ${replaced.map(r => r.id).join('、')} 前`,
+        records: changed,
+      }, now)
+      : undefined
+    // 模型自报的警告只对 global 目标给（与以往一致）：项目记忆的快照只供界面撤销，不增加给模型的文字
+    const updateSnapshotId = candidate.action === 'update' && target!.scope === 'global' ? snapshot?.id : undefined
 
-  const clean = pruneUndefined(parsed.data)
-  // 新 id 不定位（create 排他占名）；update 走 put：锁内定位旧文件，scope 没变就原地覆盖。
-  // 锁内复核：读到目标之后它又被改过（召回统计之外有字段不同，按位置看已归档，或已不在可见集合里）就不写——界面直接改、
-  // 别的会话改写、删除、归档、提升、清候选标记夹在读和写之间时，整条替换会把它们盖掉。只删了本层、定位落到别层同 id 副本的，
-  // 作用域不同同样拦下。子 agent 改写的归属已按读到的目标判过，其间被接受、提升的在这里一并拦下
-  let rewritten: MemoryRecord | undefined
-  if (candidate.action === 'create') await store.create(clean)
-  else {
-    const seen: { current?: MemoryRecord } = {}
-    const isChangedSinceRead = (current: MemoryRecord | undefined) => {
-      seen.current = current
-      if (current === undefined || !isSameRecord(current, target!)) return true
-      // 子 agent 的归属按锁内这一份再判：归属检查之后、target 读到之前被接受的，target 本身已是接受后的版本
-      return deps.delegation !== undefined && (current.status !== 'active' || notOwnPending(current, deps.session.id) !== undefined)
+    const clean = pruneUndefined(parsed.data)
+    // 新 id 不定位（create 排他占名）；update 走 put：锁内定位旧文件，scope 没变就原地覆盖。
+    // 锁内复核：读到目标之后它又被改过（召回统计之外有字段不同，按位置看已归档，或已不在可见集合里）就不写——界面直接改、
+    // 别的会话改写、删除、归档、提升、清候选标记夹在读和写之间时，整条替换会把它们盖掉。只删了本层、定位落到别层同 id 副本的，
+    // 作用域不同同样拦下。子 agent 改写的归属已按读到的目标判过，其间被接受、提升的在这里一并拦下
+    let rewritten: MemoryRecord | undefined
+    if (candidate.action === 'create') await store.create(clean)
+    else {
+      const seen: { current?: MemoryRecord } = {}
+      const isChangedSinceRead = (current: MemoryRecord | undefined) => {
+        seen.current = current
+        if (current === undefined || !isSameRecord(current, target!)) return true
+        // 子 agent 的归属按锁内这一份再判：归属检查之后、target 读到之前被接受的，target 本身已是接受后的版本
+        return deps.delegation !== undefined && (current.status !== 'active' || notOwnPending(current, deps.session.id) !== undefined)
+      }
+      rewritten = await store.put(clean, undefined, isChangedSinceRead)
+      if (rewritten === undefined) return changedAfterRead(clean.id, seen.current, deps.delegation !== undefined)
     }
-    rewritten = await store.put(clean, undefined, isChangedSinceRead)
-    if (rewritten === undefined) return changedAfterRead(clean.id, seen.current, deps.delegation !== undefined)
-  }
 
-  // 6. supersedes 处理：读到时在用的同作用域目标置 superseded（见上方 replaced）；锁内再看一次，其间被删除、被取代、
-  // 被改写或搬到别的作用域的不动
-  const superseded: MemoryRecord[] = []
-  for (const old of replaced) {
-    try {
-      const written = await store.update(old, (r) => {
-        // 抛出即不写（同 updateIfLive）
-        if (r.status !== 'active' || r.updatedAt !== old.updatedAt || !isSameScope(r)) throw new RecordNotFoundError(r.id)
-        return { ...r, status: 'superseded', updatedAt: now }
-      })
-      superseded.push(written)
-    } catch (err) {
-      if (!(err instanceof RecordNotFoundError)) throw err   // 读到之后被别处动过：静默跳过
+    // 6. supersedes 处理：读到时在用的同作用域目标置 superseded（见上方 replaced）；锁内再看一次，其间被删除、被取代、
+    // 被改写或搬到别的作用域的不动
+    const superseded: MemoryRecord[] = []
+    for (const old of replaced) {
+      try {
+        const written = await store.update(old, (r) => {
+          // 抛出即不写（同 updateIfLive）
+          if (r.status !== 'active' || r.updatedAt !== old.updatedAt || !isSameScope(r)) throw new RecordNotFoundError(r.id)
+          return { ...r, status: 'superseded', updatedAt: now }
+        })
+        superseded.push(written)
+      } catch (err) {
+        if (!(err instanceof RecordNotFoundError)) throw err   // 读到之后被别处动过：静默跳过
+      }
     }
-  }
 
-  // 7. 撤销记录：改写、替代各记一条已结清的条目，指纹按这次写下的那条（put / update 的返回值），撤销前据此确认之后没被别处改过
-  if (snapshot && deps.decisions) {
-    const origin = { sessionId: session.id, callId: deps.callId ?? '' }
-    const workspaceOf = (r: MemoryRecord) => {
-      const scope = scopeOfMemory(r)
-      return scope === undefined ? '' : ledgerLabel(scope)
+    // 7. 撤销记录：改写、替代各记一条已结清的条目，指纹按这次写下的那条（put / update 的返回值），撤销前据此确认之后没被别处改过
+    if (snapshot && deps.decisions) {
+      const origin = { sessionId: session.id, callId: deps.callId ?? '' }
+      const workspaceOf = (r: MemoryRecord) => {
+        const scope = scopeOfMemory(r)
+        return scope === undefined ? '' : ledgerLabel(scope)
+      }
+      if (rewritten !== undefined) {
+        await deps.decisions.addModelChange(rewritten, { kind: 'rewrite', workspace: workspaceOf(rewritten), origin }, snapshot.id, now)
+      }
+      for (const old of superseded) {
+        await deps.decisions.addModelChange(old, { kind: 'supersede', workspace: workspaceOf(old), origin: { ...origin, by: clean.id } }, snapshot.id, now)
+      }
     }
-    if (rewritten !== undefined) {
-      await deps.decisions.addModelChange(rewritten, { kind: 'rewrite', workspace: workspaceOf(rewritten), origin }, snapshot.id, now)
-    }
-    for (const old of superseded) {
-      await deps.decisions.addModelChange(old, { kind: 'supersede', workspace: workspaceOf(old), origin: { ...origin, by: clean.id } }, snapshot.id, now)
-    }
-  }
 
-  const baseResult = candidate.action === 'update'
-    ? { kind: 'updated' as const, record: clean }
-    : { kind: 'saved' as const, record: clean }
+    const baseResult = candidate.action === 'update'
+      ? { kind: 'updated' as const, record: clean }
+      : { kind: 'saved' as const, record: clean }
 
-  const warnings: SaveWarning[] = [
-    ...subagent.warnings,
-    ...scopeWarnings,
-    ...(hasCrossScopeSupersede
-      ? [{ code: 'cross-bucket-supersede' as const, text: '不允许跨作用域替代：supersedes 目标和本次写入的记忆不在同一作用域，已跳过不置 superseded。global 记忆的矛盾走 memory_scan 的冲突裁决，跨层提升合并走 memory_promote' }]
-      : []),
-    ...(updateSnapshotId
-      ? [{ code: 'auto-snapshot' as const, text: `已自动快照（${updateSnapshotId}），14 天内可用 memory_snapshot 恢复` }]
-      : []),
-    ...(suspected.length > 0
-      ? [{ code: 'secret-suspected' as const, text: `疑似密钥（${suspected.map(h => h.name).join('、')}），建议改写后再存——记忆将来可能随同步离开本机` }]
-      : []),
-  ]
-  if (warnings.length > 0) return { ...baseResult, warnings }
+    const warnings: SaveWarning[] = [
+      ...subagent.warnings,
+      ...scopeWarnings,
+      ...(hasCrossScopeSupersede
+        ? [{ code: 'cross-bucket-supersede' as const, text: '不允许跨作用域替代：supersedes 目标和本次写入的记忆不在同一作用域，已跳过不置 superseded。global 记忆的矛盾走 memory_scan 的冲突裁决，跨层提升合并走 memory_promote' }]
+        : []),
+      ...(updateSnapshotId
+        ? [{ code: 'auto-snapshot' as const, text: `已自动快照（${updateSnapshotId}），14 天内可用 memory_snapshot 恢复` }]
+        : []),
+      ...(suspected.length > 0
+        ? [{ code: 'secret-suspected' as const, text: `疑似密钥（${suspected.map(h => h.name).join('、')}），建议改写后再存——记忆将来可能随同步离开本机` }]
+        : []),
+    ]
+    if (warnings.length > 0) return { ...baseResult, warnings }
 
-  return baseResult
+    return baseResult
+  })
 }
