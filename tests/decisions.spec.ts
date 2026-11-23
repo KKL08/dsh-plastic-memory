@@ -380,6 +380,16 @@ describe('处理建议存在账本条目上', () => {
     expect(saved).not.toHaveProperty('suggestionFailure')
   })
 
+  it('读不出的失败带卡在哪一步，存盘后原样读回；没有这一项的旧条目照常读', async () => {
+    const { s, entry } = await seeded()
+    const failure = { basis: suggestionBasis(entry, [a, b]), cause: { kind: 'unparseable' as const, stage: 'shape' as const, fields: ['draft.summary'] }, at: 2 }
+    expect(await s.writeSuggestion(entry.id, { failure }, read([a, b]))).toBe('written')
+    expect((await s.get(entry.id))?.suggestionFailure).toEqual(failure)
+    const legacy = { ...failure, cause: { kind: 'unparseable' as const } }
+    expect(pendingDecisionSchema.parse({ ...entry, suggestionFailure: legacy }).suggestionFailure).toEqual(legacy)
+    expect(pendingDecisionSchema.safeParse({ ...entry, suggestionFailure: { ...failure, cause: { kind: 'unparseable', stage: 'guess' } } }).success).toBe(false)
+  })
+
   it('已有当前依据的建议时不覆盖，失败也不记', async () => {
     const { s, entry } = await seeded()
     await s.writeSuggestion(entry.id, { suggestion: suggestionOf(entry, [a, b], 'sg_1') }, read([a, b]))

@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { memoryRecordSchema } from '../record-schema.ts'
-import { MODEL_CHANGE_KINDS, PROPOSAL_ACTIONS, PROPOSAL_SOURCES, SUGGESTION_FAILURE_KINDS } from '../contract-codes.ts'
+import { MODEL_CHANGE_KINDS, PROPOSAL_ACTIONS, PROPOSAL_SOURCES, SUGGESTION_FAILURE_KINDS, SUGGESTION_PARSE_STAGES } from '../contract-codes.ts'
 
 /** 与 mem_ id 同模式（pipeline.ts），不引入 nanoid。 */
 export function genId(prefix: string): string {
@@ -112,11 +112,14 @@ export type StoredSuggestion = z.infer<typeof storedSuggestionSchema>
 
 /**
  * 处理建议最近一次没生成成：依据版本（同建议，对不上就不算数）、原因（kind 见 SUGGESTION_FAILURE_KINDS，原话已脱敏；
- * undecided 带模型说明的理由 reason，已按疑似级遮盖），时刻。
+ * undecided 带模型说明的理由 reason，已按疑似级遮盖；unparseable 带卡在哪一步 stage，见 SUGGESTION_PARSE_STAGES；字段不合要求时带不合的字段名 fields，如 draft.summary），时刻。
  */
 export const suggestionFailureSchema = z.object({
   basis: suggestionBasisSchema,
-  cause: z.object({ kind: z.enum(SUGGESTION_FAILURE_KINDS), hostCode: z.string().optional(), message: z.string().optional(), reason: z.string().optional() }),
+  cause: z.object({
+    kind: z.enum(SUGGESTION_FAILURE_KINDS), hostCode: z.string().optional(), message: z.string().optional(), reason: z.string().optional(),
+    stage: z.enum(SUGGESTION_PARSE_STAGES).optional(), fields: z.array(z.string()).optional(),
+  }),
   at: z.number(),
 })
 export type SuggestionFailure = z.infer<typeof suggestionFailureSchema>

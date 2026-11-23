@@ -236,6 +236,16 @@ describe('suggest（补上建议）', () => {
     expect((await horizontalOf(e, entry.id)).noSuggestion).toEqual({ code: 'failed', cause: { kind: 'secret-in-draft' } })
   })
 
+  it('回复读不出：回 llm-invalid-output，条目上记下卡在哪一步，不留回复原文；视图原因码 failed 照旧', async () => {
+    const e = env({ llm: scripted('结论：先比较 {scopes}，{"action":"keep-a","reason":"A 更').llm })
+    const entry = await seedPair(e)
+    expect(err(await e.run({ cmd: 'suggest', decisionId: entry.id })).code).toBe('llm-invalid-output')
+    const saved = (await e.decisions.get(entry.id))!
+    expect(saved.suggestionFailure?.cause).toEqual({ kind: 'unparseable', stage: 'syntax' })
+    expect(JSON.stringify(await allEntries(e))).not.toContain('scopes')
+    expect((await horizontalOf(e, entry.id)).noSuggestion).toEqual({ code: 'failed', cause: { kind: 'unparseable' } })
+  })
+
   it('模型报错：原话脱敏后回 llm-failed 并记进视图；鉴权错误只给错误码；之后再试成功会清掉失败', async () => {
     const { llm } = scripted(new Error(`upstream said ${FAKE_SECRET.sk}`), Object.assign(new Error(`401 ${FAKE_SECRET.sk}`), { code: 'AUTH' }), KEEP_A)
     const e = env({ llm })

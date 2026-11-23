@@ -120,6 +120,14 @@ export type ProposalSource = (typeof PROPOSAL_SOURCES)[number]
  */
 export const SUGGESTION_FAILURE_KINDS = ['model-error', 'unparseable', 'secret-in-draft', 'undecided', 'quota-exhausted', 'no-baseline'] as const
 
+/**
+ * 读不出（unparseable）卡在哪一步，只记枚举、不留回复原文：no-object = 回复里没有花括号；
+ * syntax = 有花括号，但没有一段解析得了（回复被截断落在这里）；shape = 解析出了对象，但结论、理由、稿不合要求，
+ * 或解析得了的对象不止一个、分不出哪个是答案。这一项之前写下的条目没有它，照常读。
+ */
+export const SUGGESTION_PARSE_STAGES = ['no-object', 'syntax', 'shape'] as const
+export type SuggestionParseStage = (typeof SUGGESTION_PARSE_STAGES)[number]
+
 /** memory_health 建议的分层并列结构（health.ts）：独占层单元素，行动项层多元素，无事为空数组。 */
 export type HealthRecommendationKind =
   | 'secret'                  // 本层红线门：检出密钥（独占）

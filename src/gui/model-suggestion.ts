@@ -3,10 +3,10 @@ import { z } from 'zod'
 import type { MemoryRecord } from '../record-schema.ts'
 import { modelError, type SemanticLlm } from '../governance/semantic-scan.ts'
 import type { ProposalOp, SuggestionFailure } from '../governance/schema.ts'
-import { HORIZONTAL_PROPOSAL_ACTIONS, VERTICAL_PROPOSAL_ACTIONS, type ProposalAction } from '../contract-codes.ts'
+import { HORIZONTAL_PROPOSAL_ACTIONS, VERTICAL_PROPOSAL_ACTIONS, type ProposalAction, type SuggestionParseStage } from '../contract-codes.ts'
 import { detectSecrets, maskSecrets, secretValues } from '../secrets.ts'
 import { mergeKeeperIndex } from './contract.ts'
-import { draftOutputSchema, jsonObjectIn, toMemoryDraft } from './model-draft.ts'
+import { draftOutputSchema, readJsonObject, toMemoryDraft } from './model-draft.ts'
 import type { SourceExcerpt } from './suggestion-source.ts'
 
 /**
@@ -131,13 +131,28 @@ const outputSchema = z.object({
 type HorizontalAction = (typeof HORIZONTAL_PROPOSAL_ACTIONS)[number]
 type ParsedSuggestion = { action: HorizontalAction; reason: string; draft?: ReturnType<typeof toMemoryDraft> }
 
-/** 解析模型输出；不合格式（含融合没给稿）为 null。 */
-export function parseSuggestionOutput(raw: string): ParsedSuggestion | { action: 'unsure'; reason: string } | null {
-  const parsed = outputSchema.safeParse(jsonObjectIn(raw))
-  if (!parsed.success) return null
+/** 读不出：卡在哪一步；不合 schema 时带上不合的字段名（schema 里的键名，不含回复内容）。 */
+type ParseFailure = { ok: false; stage: SuggestionParseStage; fields?: string[] }
+
+/** 按 schema 读模型回复：JSON 对象读不出时卡在哪一步由 readJsonObject 判断；读出了但不合 schema 是 shape。 */
+function parseReply<T extends z.ZodType>(schema: T, raw: string): { ok: true; data: z.infer<T> } | ParseFailure {
+  const read = readJsonObject(raw)
+  if (!read.ok) return read
+  const parsed = schema.safeParse(read.value)
+  return parsed.success ? { ok: true, data: parsed.data } : { ok: false, stage: 'shape', fields: [...new Set(parsed.error.issues.map(issue => issue.path.join('.')))] }
+}
+
+const unparseable = ({ stage, fields }: Omit<ParseFailure, 'ok'>) => ({ kind: 'unparseable' as const, stage, ...(fields !== undefined && fields.length > 0 ? { fields } : {}) })
+/** 该带稿的结论没带稿。 */
+const NO_DRAFT: Omit<ParseFailure, 'ok'> = { stage: 'shape', fields: ['draft'] }
+
+/** 解析模型输出；不合格式（含融合没给稿）给卡在哪一步。 */
+export function parseSuggestionOutput(raw: string): ParsedSuggestion | { action: 'unsure'; reason: string } | Omit<ParseFailure, 'ok'> {
+  const parsed = parseReply(outputSchema, raw)
+  if (!parsed.ok) return { stage: parsed.stage, ...(parsed.fields !== undefined ? { fields: parsed.fields } : {}) }
   const { action, reason, draft } = parsed.data
   if (action !== 'merge') return { action, reason }
-  return draft == null ? null : { action, reason, draft: toMemoryDraft(draft) }
+  return draft == null ? NO_DRAFT : { action, reason, draft: toMemoryDraft(draft) }
 }
 
 /**
@@ -197,7 +212,7 @@ export async function generateSuggestion(input: SuggestionInput, llm: SemanticLl
     return { ok: false, cause: modelError(error) }
   }
   const parsed = parseSuggestionOutput(raw)
-  if (parsed === null) return { ok: false, cause: { kind: 'unparseable' } }
+  if ('stage' in parsed) return { ok: false, cause: unparseable(parsed) }
   if (parsed.action === 'unsure') return { ok: false, cause: { kind: 'undecided', reason: maskSecrets(parsed.reason, { severity: 'suspected' }) } }
   const ops = proposalOps(parsed, input.records)
   if (hasForeignSecret(ops, input.records)) return { ok: false, cause: { kind: 'secret-in-draft' } }
@@ -302,12 +317,12 @@ export async function generateProposal(input: SuggestionInput & { request: Propo
   } catch (error) {
     return { ok: false, cause: modelError(error) }
   }
-  const parsed = proposalOutputSchema.safeParse(jsonObjectIn(raw))
-  if (!parsed.success) return { ok: false, cause: { kind: 'unparseable' } }
+  const parsed = parseReply(proposalOutputSchema, raw)
+  if (!parsed.ok) return { ok: false, cause: unparseable(parsed) }
   const { action, draft } = parsed.data
   const reason = maskSecrets(parsed.data.reason, { severity: 'suspected' })
   if (action === 'infeasible') return { ok: true, action, reason }
-  if (action === 'merge' && draft == null) return { ok: false, cause: { kind: 'unparseable' } }
+  if (action === 'merge' && draft == null) return { ok: false, cause: unparseable(NO_DRAFT) }
   const ops = proposalOps(action === 'merge' ? { action, reason, draft: toMemoryDraft(draft!) } : { action, reason }, input.records)
   return { ok: true, action, reason, ops }
 }
@@ -427,12 +442,12 @@ export async function generateVerticalSuggestion(input: VerticalSuggestionInput,
   } catch (error) {
     return { ok: false, cause: modelError(error) }
   }
-  const parsed = verticalOutputSchema.safeParse(jsonObjectIn(raw))
-  if (!parsed.success) return { ok: false, cause: { kind: 'unparseable' } }
+  const parsed = parseReply(verticalOutputSchema, raw)
+  if (!parsed.ok) return { ok: false, cause: unparseable(parsed) }
   const { action, draft } = parsed.data
   const reason = maskSecrets(parsed.data.reason, { severity: 'suspected' })
   if (action === 'unsure') return { ok: false, cause: { kind: 'undecided', reason } }
-  if (action === 'rewrite' && draft == null) return { ok: false, cause: { kind: 'unparseable' } }
+  if (action === 'rewrite' && draft == null) return { ok: false, cause: unparseable(NO_DRAFT) }
   const ops = verticalOps(action, draft == null ? undefined : toMemoryDraft(draft), input.record)
   if (hasForeignSecret(ops, [input.record])) return { ok: false, cause: { kind: 'secret-in-draft' } }
   return { ok: true, action, reason, ops, isSourced: verticalSourceOf(input) !== undefined }
@@ -497,11 +512,11 @@ export async function generateVerticalProposal(input: VerticalSuggestionInput & 
   } catch (error) {
     return { ok: false, cause: modelError(error) }
   }
-  const parsed = verticalProposalOutputSchema.safeParse(jsonObjectIn(raw))
-  if (!parsed.success) return { ok: false, cause: { kind: 'unparseable' } }
+  const parsed = parseReply(verticalProposalOutputSchema, raw)
+  if (!parsed.ok) return { ok: false, cause: unparseable(parsed) }
   const { action, draft } = parsed.data
   const reason = maskSecrets(parsed.data.reason, { severity: 'suspected' })
   if (action === 'infeasible') return { ok: true, action, reason }
-  if (action === 'rewrite' && draft == null) return { ok: false, cause: { kind: 'unparseable' } }
+  if (action === 'rewrite' && draft == null) return { ok: false, cause: unparseable(NO_DRAFT) }
   return { ok: true, action, reason, ops: verticalOps(action, draft == null ? undefined : toMemoryDraft(draft), input.record) }
 }
