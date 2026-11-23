@@ -1,10 +1,12 @@
 import { sidecarSchemas } from './helpers/sidecar-schemas.ts'
 import { describe, expect, it, vi } from 'vitest'
-import { readFile, rm, stat } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { SidecarStore } from '../src/storage/sidecar.ts'
-import { STATE_DIR } from '../src/storage/paths.ts'
+import { STATE_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
+import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { MemoryStore } from '../src/store.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { GUI_VIEW_DIR, GUI_VIEW_FILES, checkupKey, healthViewSchema, pendingViewSchema, type MemoryCommand } from '../src/gui/contract.ts'
@@ -15,6 +17,16 @@ import { record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 import { noInstructions } from './helpers/instructions.ts'
 import { NOW, SESSION_WS, OTHER_WS, registry, root, env, ok, err, seedPair, ledgerItems } from './helpers/gui-command-env.ts'
+
+/** 建一个临时文件夹给用例用，用例结束删掉；fn 拿到它的路径。 */
+async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
+  const dir = await mkdtemp(join(tmpdir(), 'pm-cmd-fs-'))
+  try {
+    return await fn(dir)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+}
 
 
 describe('scan', () => {
@@ -105,6 +117,15 @@ describe('scan', () => {
     await e.store.create(record({ id: 'mem_w', scope: 'workspace', workspacePath: OTHER_WS }))
     const body = ok(await e.run({ cmd: 'scan', workspacePath: OTHER_WS }))
     expect(body.notes).toContain('baseline-truncated')
+  })
+
+  it('手动体检读不到指令文件：baseline-missing 说明和原因透传到命令响应，体检视图里这个项目的最近一次结果也记下它', async () => {
+    const e = env({ llm: { complete: async () => '{"findings":[]}' }, instructions: { [SESSION_WS]: { kind: 'unavailable', reason: 'EACCES: permission denied' } } })
+    await e.store.create(record({ id: 'mem_s', scope: 'workspace', workspacePath: SESSION_WS }))
+    const body = ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+    expect(body.notes).toContain('baseline-missing')
+    const entry = (await e.readCheckupView()).scopes.find(s => s.scope.kind === 'workspace' && s.scope.workspacePath === SESSION_WS)
+    expect(entry?.lastResult?.notes).toEqual([{ code: 'baseline-missing', cause: { kind: 'error', message: 'EACCES: permission denied' } }])
   })
 
   it('分了批：带回 semantic-batched 与批数；用量是宿主报的合计，每次体检各算各的', async () => {
@@ -418,13 +439,16 @@ describe('scan：上次体检与完成记录', () => {
     expect(await lastCheckups(e)).toEqual({ global: null, [SESSION_WS]: NOW - 5000, [OTHER_WS]: NOW - 3000 })
   })
 
-  it('项目目录不在了：它的完成记录在视图生成时清掉，其余的留着', async () => {
-    const e = env({ llm: quiet })
-    await seedScopes(e)
-    const GONE = { kind: 'workspace' as const, workspacePath: '/tmp/pm-cmd-gone' }
-    await e.checkups.complete([GLOBAL, SESSION, GONE], { startedAt: NOW, completedAt: NOW, by: 'manual' })
-    ok(await e.run({ cmd: 'refresh-views' }))
-    expect((await e.checkups.list()).map(r => r.id).sort()).toEqual([checkupKey(GLOBAL), checkupKey(SESSION)].sort())
+  it('项目真正删掉了（记忆根下没有它的目录，项目文件夹也不在）：它的完成记录在视图生成时清掉，其余的留着', async () => {
+    await withTempDir(async parent => {
+      const e = env({ llm: quiet })
+      await seedScopes(e)
+      // 上级文件夹在、项目文件夹不在：确定是删掉了
+      const GONE = { kind: 'workspace' as const, workspacePath: join(parent, 'gone') }
+      await e.checkups.complete([GLOBAL, SESSION, GONE], { startedAt: NOW, completedAt: NOW, by: 'manual' })
+      ok(await e.run({ cmd: 'refresh-views' }))
+      expect((await e.checkups.list()).map(r => r.id).sort()).toEqual([checkupKey(GLOBAL), checkupKey(SESSION)].sort())
+    })
   })
 })
 
@@ -704,15 +728,131 @@ describe('set-auto-checkup', () => {
     ])
   })
 
-  it('项目目录不在了，它的设置在视图生成时清掉（全部、全局不动）', async () => {
+  it('项目真正删掉了（记忆根下没有它的目录，项目文件夹也不在），它的设置在视图生成时清掉（全部、全局不动）', async () => {
+    await withTempDir(async parent => {
+      const e = env()
+      await e.store.create(record({ id: 'mem_s', scope: 'workspace', workspacePath: SESSION_WS }))
+      ok(await e.run({ cmd: 'set-auto-checkup', scope: ALL, frequency: 7 }))
+      ok(await e.run({ cmd: 'set-auto-checkup', scope: { kind: 'global' }, frequency: 1 }))
+      ok(await e.run({ cmd: 'set-auto-checkup', scope: { kind: 'workspace', workspacePath: SESSION_WS }, frequency: 1 }))
+      ok(await e.run({ cmd: 'set-auto-checkup', scope: { kind: 'workspace', workspacePath: join(parent, 'gone') }, frequency: 1 }))
+      ok(await e.run({ cmd: 'refresh-views' }))
+      expect(await settings(e)).toEqual({ all: 7, global: 1, [SESSION_WS]: 1 })
+    })
+  })
+
+  it('项目路径变成了普通文件、或上级路径变成了普通文件：都算真正删掉，单独设置在视图生成时清掉', async () => {
+    await withTempDir(async parent => {
+      const e = env()
+      const asFile = join(parent, 'proj')
+      await writeFile(asFile, '')
+      // 上级是普通文件：取项目文件夹报 ENOTDIR
+      const underFile = join(asFile, 'sub')
+      ok(await e.run({ cmd: 'set-auto-checkup', scope: { kind: 'workspace', workspacePath: asFile }, frequency: 1 }))
+      ok(await e.run({ cmd: 'set-auto-checkup', scope: { kind: 'workspace', workspacePath: underFile }, frequency: 1 }))
+      ok(await e.run({ cmd: 'refresh-views' }))
+      expect(await settings(e)).toEqual({})
+    })
+  })
+
+  it('项目文件夹和它的上级都不在（像外接盘没挂载）：分不清是不是删掉了，单独设置留着', async () => {
+    await withTempDir(async parent => {
+      const e = env()
+      const unmounted = join(parent, 'volume', 'proj')
+      ok(await e.run({ cmd: 'set-auto-checkup', scope: { kind: 'workspace', workspacePath: unmounted }, frequency: 3 }))
+      ok(await e.run({ cmd: 'refresh-views' }))
+      expect(await settings(e)).toEqual({ [unmounted]: 3 })
+    })
+  })
+
+  it('项目文件夹不在、上级文件夹还在：算真正删掉，单独设置清掉', async () => {
+    await withTempDir(async parent => {
+      const e = env()
+      const removed = join(parent, 'proj')
+      ok(await e.run({ cmd: 'set-auto-checkup', scope: { kind: 'workspace', workspacePath: removed }, frequency: 3 }))
+      ok(await e.run({ cmd: 'refresh-views' }))
+      expect(await settings(e)).toEqual({})
+    })
+  })
+
+  it('还没有自己记忆的项目（记忆根下没有它的目录，项目文件夹还在）：单独设置和体检记录在视图生成后留着，体检视图写它的设置、不可体检、不到期', async () => {
+    const project = await mkdtemp(join(tmpdir(), 'pm-cmd-project-'))
+    try {
+      const e = env()
+      await e.store.create(record({ id: 'mem_g' }))
+      ok(await e.run({ cmd: 'set-auto-checkup', scope: { kind: 'workspace', workspacePath: project }, frequency: 3 }))
+      await e.checkups.recordResults([{ key: project, result: { checkupId: 'ck1', by: 'manual', completedAt: NOW, added: { keys: [], pending: 0, advice: 0 }, notes: [] } }])
+      ok(await e.run({ cmd: 'refresh-views' }))
+      expect(await settings(e)).toEqual({ [project]: 3 })
+      expect((await e.checkups.list()).map(r => r.id)).toEqual([project])
+      expect((await e.readCheckupView()).scopes).toEqual([
+        expect.objectContaining({ scope: { kind: 'global' } }),
+        expect.objectContaining({ scope: { kind: 'workspace', workspacePath: project }, isCheckable: false, frequency: 3, isOwn: true, lastCheckupAt: null, nextCheckupAt: null, isDue: false }),
+      ])
+      // 有了第一条记忆：照这个设置自动体检（从没体检过，开着就到期）
+      await e.store.create(record({ id: 'mem_p', scope: 'workspace', workspacePath: project }))
+      ok(await e.run({ cmd: 'refresh-views' }))
+      expect((await e.readCheckupView()).scopes[1]).toMatchObject({ isCheckable: true, frequency: 3, isOwn: true, isDue: true })
+    } finally {
+      await rm(project, { recursive: true, force: true })
+    }
+  })
+
+  it('项目记忆删光了：单独设置和完成记录都留着；体检视图写单独设置、上次体检，不可体检；恢复后照旧按原设置和上次体检算下次', async () => {
+    const DAY = 86_400_000
     const e = env()
-    await e.store.create(record({ id: 'mem_s', scope: 'workspace', workspacePath: SESSION_WS }))
-    ok(await e.run({ cmd: 'set-auto-checkup', scope: ALL, frequency: 7 }))
-    ok(await e.run({ cmd: 'set-auto-checkup', scope: { kind: 'global' }, frequency: 1 }))
-    ok(await e.run({ cmd: 'set-auto-checkup', scope: { kind: 'workspace', workspacePath: SESSION_WS }, frequency: 1 }))
-    ok(await e.run({ cmd: 'set-auto-checkup', scope: { kind: 'workspace', workspacePath: '/tmp/pm-cmd-gone' }, frequency: 1 }))
+    // 会话所在的项目：删除、恢复不用越项目确认
+    const SESSION = { kind: 'workspace' as const, workspacePath: SESSION_WS }
+    await e.store.create(record({ id: 'mem_d', scope: 'workspace', workspacePath: SESSION_WS }))
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: SESSION, frequency: 3 }))
+    await e.checkups.complete([SESSION], { startedAt: NOW - DAY, completedAt: NOW - DAY, by: 'manual' })
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_d', layer: SESSION }))
     ok(await e.run({ cmd: 'refresh-views' }))
-    expect(await settings(e)).toEqual({ all: 7, global: 1, [SESSION_WS]: 1 })
+    expect(await settings(e)).toEqual({ [SESSION_WS]: 3 })
+    expect((await e.checkups.list()).map(r => r.id)).toEqual([SESSION_WS])
+    const deleted = (await e.readCheckupView()).scopes.find(s => s.scope.kind === 'workspace')
+    expect(deleted).toMatchObject({ scope: SESSION, isCheckable: false, frequency: 3, isOwn: true, lastCheckupAt: NOW - DAY, nextCheckupAt: null, isDue: false })
+    // 健康视图不列它（没有在用的记忆）
+    expect(healthViewSchema.parse(await e.readView('health')).layers.map(l => l.layer)).toEqual([{ kind: 'global' }])
+    ok(await e.run({ cmd: 'restore', memoryId: 'mem_d', layer: SESSION }))
+    ok(await e.run({ cmd: 'refresh-views' }))
+    expect((await e.readCheckupView()).scopes.find(s => s.scope.kind === 'workspace'))
+      .toMatchObject({ scope: SESSION, isCheckable: true, frequency: 3, isOwn: true, lastCheckupAt: NOW - DAY, nextCheckupAt: NOW + 2 * DAY, isDue: false })
+    expect(healthViewSchema.parse(await e.readView('health')).layers.find(l => l.layer.kind === 'workspace')).toMatchObject({ layer: SESSION, lastCheckupAt: NOW - DAY })
+  })
+
+  it('项目顶层只有非在用的记录（手改了 status）：体检这个项目照常写完成记录，之后按设置不再到期', async () => {
+    const e = env({ llm: { complete: async () => '{"findings":[]}' } })
+    const SESSION = { kind: 'workspace' as const, workspacePath: SESSION_WS }
+    await e.store.create(record({ id: 'mem_g' }))
+    const dir = join(root, workspaceDirName(SESSION_WS))
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, WORKSPACE_MARKER), SESSION_WS + '\n')
+    await writeFile(join(dir, 'old.md'), encodeRecord(record({ id: 'mem_old', scope: 'workspace', workspacePath: SESSION_WS, status: 'deleted', deletedAt: NOW }), {}))
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: SESSION, frequency: 1 }))
+    ok(await e.run({ cmd: 'refresh-views' }))
+    expect((await e.readCheckupView()).scopes.find(s => s.scope.kind === 'workspace')).toMatchObject({ scope: SESSION, isCheckable: true, isDue: true })
+    ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+    expect((await e.checkups.list()).find(r => r.id === SESSION_WS)?.completed?.completedAt).toBe(NOW)
+    ok(await e.run({ cmd: 'refresh-views' }))
+    expect((await e.readCheckupView()).scopes.find(s => s.scope.kind === 'workspace')).toMatchObject({ scope: SESSION, isCheckable: true, lastCheckupAt: NOW, isDue: false })
+  })
+
+  it('项目记忆全在最近删除时体检这个项目：不写完成记录；恢复后上次体检、下次体检和到期照旧按删除前的那次算', async () => {
+    const DAY = 86_400_000
+    const e = env({ llm: { complete: async () => '{"findings":[]}' } })
+    const SESSION = { kind: 'workspace' as const, workspacePath: SESSION_WS }
+    await e.store.create(record({ id: 'mem_d', scope: 'workspace', workspacePath: SESSION_WS }))
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: SESSION, frequency: 3 }))
+    await e.checkups.complete([SESSION], { startedAt: NOW - DAY, completedAt: NOW - DAY, by: 'manual' })
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_d', layer: SESSION }))
+    ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+    expect((await e.checkups.list()).find(r => r.id === SESSION_WS)?.completed?.completedAt).toBe(NOW - DAY)
+    ok(await e.run({ cmd: 'restore', memoryId: 'mem_d', layer: SESSION }))
+    ok(await e.run({ cmd: 'refresh-views' }))
+    expect((await e.readCheckupView()).scopes.find(s => s.scope.kind === 'workspace'))
+      .toMatchObject({ scope: SESSION, isCheckable: true, lastCheckupAt: NOW - DAY, nextCheckupAt: NOW + 2 * DAY, isDue: false })
+    expect(healthViewSchema.parse(await e.readView('health')).layers.find(l => l.layer.kind === 'workspace')).toMatchObject({ layer: SESSION, lastCheckupAt: NOW - DAY })
   })
 })
 

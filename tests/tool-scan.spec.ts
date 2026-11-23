@@ -30,7 +30,7 @@ import { InMemoryTable } from './helpers/in-memory-table.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 import { instructionsOf, noInstructions } from './helpers/instructions.ts'
 import type { ScanNote } from '../src/tools/scan.ts'
-import type { Scope } from '../src/scope.ts'
+import { scopeCacheKey, type Scope } from '../src/scope.ts'
 
 /** host 只给要换的方法，其余用无会话的缺省。 */
 type DepsOverrides = Partial<Omit<ScanToolDeps, 'host'>> & { host?: Partial<ScanToolDeps['host']> }
@@ -491,6 +491,66 @@ describe('executeScan 全库体检', () => {
     expect(await deps.cache.get('cache_/gone-ws')).toBeUndefined()
     expect(await deps.cache.get('cache_all')).toBeUndefined()
     expect(await deps.cache.get('cache_/proj-a')).toBeDefined()
+  })
+
+  it('项目记忆全在最近删除时跑全库体检：记忆根下它的目录还在，语义缓存留着（和体检记录、自动体检设置同一口径）', async () => {
+    const deps = makeDeps()
+    await seedTwoWs(deps)
+    const kept = { id: 'cache_/proj-a', scannedAt: 1, scope: '/proj-a', findings: [], isTrackedByCheckups: true }
+    await deps.cache.put('cache_/proj-a', kept)
+    expect(await deps.store.softDelete({ id: 'mem_a1', workspacePath: '/proj-a' })).toBe(true)
+    await executeScan({ scope: 'all', layers: 'rule' }, deps, fakeExec())
+    expect(await deps.cache.get('cache_/proj-a')).toEqual(kept)
+  })
+
+  /** 全库体检收尾清缓存按「项目真正删掉」判断：项目路径用真实临时目录，用例结束删掉。 */
+  async function cleanupCase(project: (parent: string) => Promise<string>, opts: { midScan?: boolean } = {}) {
+    const parent = await mkdtemp(join(tmpdir(), 'pm-scan-folder-'))
+    roots.push(parent)
+    const deps = makeDeps()
+    await seedTwoWs(deps)
+    const ws = await project(parent)
+    const key = scopeCacheKey({ kind: 'workspace', workspacePath: ws })
+    const entry = { id: key, scannedAt: 1, scope: ws, findings: [], isTrackedByCheckups: true }
+    if (opts.midScan === true) {
+      // 列完目录之后另一个会话写进这个项目的第一条记忆、给它写了语义缓存：这次的目录清单里没有它
+      const listDirs = deps.store.listWorkspaceDirs.bind(deps.store)
+      deps.store.listWorkspaceDirs = async () => {
+        const listing = await listDirs()
+        deps.store.listWorkspaceDirs = listDirs
+        await deps.store.put(record({ id: 'mem_new', scope: 'workspace', workspacePath: ws }))
+        await deps.cache.put(key, entry)
+        return listing
+      }
+    } else {
+      await deps.cache.put(key, entry)
+    }
+    await executeScan({ scope: 'all', layers: 'rule' }, deps, fakeExec())
+    return { cached: await deps.cache.get(key), entry }
+  }
+
+  it('全库体检收尾：项目文件夹还在、记忆根下没有它的目录（还没有自己的记忆），语义缓存留着', async () => {
+    const { cached, entry } = await cleanupCase(async parent => parent)
+    expect(cached).toEqual(entry)
+  })
+
+  it('全库体检收尾：项目文件夹没了、上级文件夹还在，算真正删掉，语义缓存清掉', async () => {
+    const { cached } = await cleanupCase(async parent => join(parent, 'gone'))
+    expect(cached).toBeUndefined()
+  })
+
+  it('全库体检收尾：项目文件夹和上级都不在（像外接盘没挂载），分不清是不是删掉了，语义缓存留着', async () => {
+    const { cached, entry } = await cleanupCase(async parent => join(parent, 'volume', 'proj'))
+    expect(cached).toEqual(entry)
+  })
+
+  it('全库体检收尾：扫描列完目录之后才建的项目，刚写的语义缓存留着', async () => {
+    const { cached, entry } = await cleanupCase(async parent => {
+      const dir = join(parent, 'new')
+      await mkdir(dir)
+      return dir
+    }, { midScan: true })
+    expect(cached).toEqual(entry)
   })
 
   it('global 视角二：同一 global 记忆被 ≥2 个项目反对时聚合高亮', async () => {

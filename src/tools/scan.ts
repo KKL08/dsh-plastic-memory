@@ -1,3 +1,4 @@
+import { isAbsolute } from 'node:path'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { MemoryStore } from '../store.ts'
 import type { CheckupInitiator, CodedNote, ScanNoteCode } from '../contract-codes.ts'
@@ -18,6 +19,7 @@ import { applyIgnores, type AdviceIgnoreStore } from '../governance/advice-ignor
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
 import { prereadScopes, listingNotes, checkupWorkspaces, renderDirectoryNotes } from './scope-preread.ts'
 import type { DirectoryNote } from '../storage/table.ts'
+import { isWorkspaceGone } from '../storage/project-folder.ts'
 import { runCrossWsScan, findEntityDuplicates, type CrossWsDuplicate } from '../governance/cross-ws.ts'
 import { decisionWorkspaces, decisionWorkspacesNote, workspaceLabel } from './workspace-gate.ts'
 import { scopeCacheKey, scopeKey, type Scope } from '../scope.ts'
@@ -238,6 +240,8 @@ async function scanPass(
   now: number,
   signal?: AbortSignal,
   onUsage?: (tokens: number) => void,
+  /** 结果写不写进语义缓存：还没有自己记忆的项目不写，留着已有的缓存（升级前的缓存还兼作上次体检的时间）。 */
+  isCacheWritten = true,
 ): Promise<ScanPass> {
   const notes: ScanNote[] = []
   const findings: Finding[] = []
@@ -287,14 +291,16 @@ async function scanPass(
         findings.push(...semantic.findings)
         // 写缓存前设检查点：取消后不留下半截的语义结果。
         signal?.throwIfAborted()
-        // 不回退：别的扫描开始得比这次晚、已经写过的，留着它的
-        const entry = {
-          id: cacheId, scannedAt: now, scope: scopeLabel, findings: semantic.findings,
-          fingerprints: findingFingerprints(semantic.findings, byId),
-          isTrackedByCheckups: true,
+        if (isCacheWritten) {
+          // 不回退：别的扫描开始得比这次晚、已经写过的，留着它的
+          const entry = {
+            id: cacheId, scannedAt: now, scope: scopeLabel, findings: semantic.findings,
+            fingerprints: findingFingerprints(semantic.findings, byId),
+            isTrackedByCheckups: true,
+          }
+          const isWritten = await deps.cache.update(cacheId, cur => (cur !== undefined && cur.scannedAt > now ? undefined : entry))
+          semanticCachedAt = isWritten ? now : (await deps.cache.get(cacheId))?.scannedAt ?? now
         }
-        const isWritten = await deps.cache.update(cacheId, cur => (cur !== undefined && cur.scannedAt > now ? undefined : entry))
-        semanticCachedAt = isWritten ? now : (await deps.cache.get(cacheId))?.scannedAt ?? now
         isSemanticDone = true
       }
     }
@@ -445,7 +451,8 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
   })
   /**
    * 扫完之后的收尾管道：扫到的项目同步提升候选；全局做完了就按全局层的指令文件清全局记忆的遗留垂直条目（取不到时不清）；
-   * 再给做完的作用域写完成记录（开始时间是这次扫描开始的时刻，完成时间现读）。byId 是这次扫描读到的记忆。
+   * 再给做完的作用域写完成记录（开始时间是这次扫描开始的时刻，完成时间现读；还没有自己记忆的项目不写，见 hasOwnMemories）。
+   * byId 是这次扫描读到的记忆。
    */
   const settle = async (workspaces: readonly string[], checked: readonly Scope[], byId: ReadonlyMap<string, MemoryRecord>) => {
     signal?.throwIfAborted()
@@ -455,9 +462,10 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
       signal?.throwIfAborted()
       if (globalFiles.kind !== 'unavailable') await deps.decisions.dropStaleGlobalVertical(instructionTexts(globalFiles), id => byId.get(id))
     }
-    if (deps.checkups !== undefined && checked.length > 0) {
+    const committed = checked.filter(hasOwnMemories)
+    if (deps.checkups !== undefined && committed.length > 0) {
       signal?.throwIfAborted()
-      await deps.checkups.complete(checked, { startedAt: now, completedAt: deps.now?.() ?? Date.now(), by: run.by ?? 'agent' })
+      await deps.checkups.complete(committed, { startedAt: now, completedAt: deps.now?.() ?? Date.now(), by: run.by ?? 'agent' })
     }
     run.onCommitted?.()
   }
@@ -487,6 +495,15 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
   const isGlobal = (r: MemoryRecord) => r.scope === 'global'
   // malformed 按扫描的作用域归属（与 memory_health 的 scoreScope 同口径）：隔离文件按读到它的目录归作用域
   const quarantinedIn = (scope: Scope) => data.quarantined.get(scopeCacheKey(scope)) ?? []
+  /**
+   * 这个范围算有自己的记忆（全局总算有）：项目要么这次读到它在用的记忆或坏文件（列完目录才写进的第一条记忆也算），
+   * 要么扫描开头的目录清单里它顶层有记忆文件（和调度认的可体检范围一致，顶层只剩手改成非在用的记录也算）。
+   * 都没有的（记忆删光、全在最近删除、还没写过）可见的只有全局记忆，本项目没有可体检的内容：不写完成记录、不覆盖语义缓存。
+   */
+  const hasOwnMemories = (scope: Scope) => scope.kind === 'global'
+    || [...data.byId.values()].some(r => r.status === 'active' && r.scope === 'workspace' && r.workspacePath === scope.workspacePath)
+    || quarantinedIn(scope).length > 0
+    || listing.entries.some(e => e.workspacePath === scope.workspacePath && e.hasActiveTopLevel)
 
   if (checkup) {
     const wsList = requestedWs ?? listWorkspaces(data.byId.values())
@@ -514,7 +531,7 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
       signal?.throwIfAborted()
       const visible = active(visibleTo(ws))
       const scope: Scope = { kind: 'workspace', workspacePath: ws }
-      const pass = await scanPass(deps, data.byId, visible, scope, quarantinedIn(scope), layers, llm, instructions, now, signal, onUsage)
+      const pass = await scanPass(deps, data.byId, visible, scope, quarantinedIn(scope), layers, llm, instructions, now, signal, onUsage, hasOwnMemories(scope))
       collect(pass)
       run.onScopeNotes?.(scope, pass.notes)
       if (pass.isChecked) checked.push(scope)
@@ -570,12 +587,16 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
       }
     }
 
-    // 体检收尾：清理孤儿语义缓存条目（废弃 workspace 的、历史遗留键）——体检本就是全库视角，
-    // 天然的清扫时机；合法缓存键按"库里现存的全部 workspace"算，不受本次 scopes 子集影响
+    // 体检收尾：清理孤儿语义缓存条目（真正删掉的项目的、历史遗留键）——体检本就是全库视角，天然的清扫时机，不受本次 scopes 子集影响。
+    // 项目键按「真正删掉」判断（同体检记录、自动体检设置的清理口径）：在这次目录清单里、或项目文件夹判为还在，就留——
+    // 记忆全在最近删除、还没有自己记忆、列完目录才建的项目都留着；不是项目路径的历史遗留键照旧清
     signal?.throwIfAborted()
-    const validKeys = new Set([GLOBAL_CACHE_KEY, ...checkupWorkspaces(listing).map(workspacePath => scopeCacheKey({ kind: 'workspace', workspacePath }))])
+    const listed = new Set(listing.entries.map(e => e.workspacePath))
     for (const key of scored.cache.keys()) {
-      if (!validKeys.has(key)) await deps.cache.delete(key)
+      if (key === GLOBAL_CACHE_KEY) continue
+      const workspacePath = key.slice(scopeCacheKey({ kind: 'workspace', workspacePath: '' }).length)
+      const isProjectKey = isAbsolute(workspacePath) && scopeCacheKey({ kind: 'workspace', workspacePath }) === key
+      if (!isProjectKey || await isWorkspaceGone(listed, workspacePath)) await deps.cache.delete(key)
     }
 
     signal?.throwIfAborted()
@@ -594,7 +615,7 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
   // 跨作用域的冲突也要双方同在 prompt 里才可判；分数归属的拆分在 memory_health（scoreScope）做。
   const records = active(wsPath !== undefined ? visibleTo(wsPath) : isGlobal)
   signal?.throwIfAborted()
-  const pass = await scanPass(deps, data.byId, records, target, quarantinedIn(target), layers, llm, instructions, now, signal, onUsage)
+  const pass = await scanPass(deps, data.byId, records, target, quarantinedIn(target), layers, llm, instructions, now, signal, onUsage, hasOwnMemories(target))
   await settle(wsPath !== undefined ? [wsPath] : [], pass.isChecked ? [target] : [], data.byId)
   const notes = [...pass.notes]
 

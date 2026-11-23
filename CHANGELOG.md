@@ -44,6 +44,16 @@ All notable changes to this project are documented here. The format follows
 - Submitting a memory card on the memory page could undo tags edited in the
   file while the card was open. A card now asks for a refresh when the
   memory's name, type, tags, summary or content changed after it opened.
+- After a checkup, a project with no memories of its own was reported as never
+  semantically scanned, and its own automatic checkup setting and checkup
+  history could be removed. The health page now says the project has no
+  memories of its own yet, and the setting and history stay until the project
+  folder is gone. A folder on a drive that is not connected counts as still
+  there.
+- A full checkup no longer clears the stored semantic scan results of a
+  project that has no memories at the moment, for example when they are all
+  in recently deleted. The results stay until the project folder itself is
+  gone.
 
 ## [0.2.0] - 2026-11-21
 

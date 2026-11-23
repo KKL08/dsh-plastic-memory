@@ -1,8 +1,9 @@
 import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import type { MemoryStore, MemoryLogger } from '../store.ts'
 import type { KvTable } from '../kv-table.ts'
 import type { RootLock } from '../root-lock.ts'
+import { isWorkspaceGone } from '../storage/project-folder.ts'
 import { byPosition, type LocatedRecord } from '../storage/table.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { PendingDecisionsStore } from '../governance/decisions.ts'
@@ -31,7 +32,7 @@ export interface ViewSourceDeps {
   ignores?: AdviceIgnoreStore
   /** 体检记录表：健康视图的上次体检取它的完成记录；缺省按没有完成记录算、不做清理。 */
   checkups?: CheckupRecordStore
-  /** 自动体检设置表：项目目录不在了，它的设置在这里清掉；缺省不做清理。 */
+  /** 自动体检设置表：项目真正删掉了，它的设置在这里清掉；缺省不做清理。 */
   autoCheckups?: AutoCheckupSettingStore
   registry: TypeRegistry
   memoryRoot: string
@@ -50,7 +51,8 @@ export interface ViewSourceDeps {
  * 预读 → 四个全局视图。读 global + 全部 workspace 目录（含 .archive/；只剩归档的项目也读，最近删除要用），
  * 健康只列 global + 体检清单，与 memory_health 体检同一批作用域、同一个预读函数。
  * 顺带是建议忽略表的清理点：读的是全部作用域，引用的记忆已不在用（删除、归档、彻底删除）或内容变了的记录在这里删掉；
- * 也是体检记录表、自动体检设置表的清理点：项目目录不在了，它的记录和设置在这里删掉。
+ * 也是体检记录表、自动体检设置表的清理点：项目真正删掉了（记忆根下没有它的目录，项目文件夹本身也不在了），它的记录和设置在这里删掉。
+ * 还没有自己记忆的项目（记忆根下没有目录、项目文件夹还在）不算，单独设的自动体检留着，有了记忆就照它体检。
  */
 export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalViews> {
   const now = deps.now?.() ?? Date.now()
@@ -95,13 +97,14 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
   const isListingComplete = !notes.some(n => n.code === 'marker-missing' || n.code === 'dir-unreadable')
   if (isListingComplete) {
     const present = new Set(listing.entries.map(e => e.workspacePath))
+    const isGone = (workspacePath: string) => isWorkspaceGone(present, workspacePath)
     try {
-      await deps.checkups?.removeMissingWorkspaces(present)
+      await deps.checkups?.removeMissingWorkspaces(isGone)
     } catch (err) {
       log.warn('[plastic-memory] 体检记录表清理失败，下次生成视图再试', err)
     }
     try {
-      await deps.autoCheckups?.removeMissingWorkspaces(present)
+      await deps.autoCheckups?.removeMissingWorkspaces(isGone)
     } catch (err) {
       log.warn('[plastic-memory] 自动体检设置表清理失败，下次生成视图再试', err)
     }
@@ -141,14 +144,16 @@ export interface CheckupSourceDeps {
 
 /**
  * 体检视图：只读目录清单、两张小侧表、各范围的认领文件和缓存的时间，不读记忆文件，调度器每次检查都可以读。
- * 列目录里的全部项目（同全局视图的读取范围），体检清单之外的标成不可体检。
+ * 列目录里的全部项目（同全局视图的读取范围），加上还没有自己记忆、单独设了自动体检的项目（菜单才显示得出它的设置）；
+ * 体检清单之外的标成不可体检。
  */
 export async function collectCheckupView(deps: CheckupSourceDeps): Promise<CheckupView> {
   const now = deps.now?.() ?? Date.now()
   const listing = await deps.store.listWorkspaceDirs()
   const checkable = new Set(checkupWorkspaces(listing))
-  const scopes: Scope[] = [{ kind: 'global' }, ...[...new Set(listing.entries.map(e => e.workspacePath))].sort().map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
   const [settings, records] = await Promise.all([deps.autoCheckups.read(), deps.checkups.list()])
+  const ownSettings = [...settings.keys()].filter(key => isAbsolute(key))
+  const scopes: Scope[] = [{ kind: 'global' }, ...[...new Set([...listing.entries.map(e => e.workspacePath), ...ownSettings])].sort().map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
   const byKey = new Map(records.map(r => [r.id, r]))
   const last = new Map<Scope, number | null>()
   const inProgress = new Set<Scope>()
