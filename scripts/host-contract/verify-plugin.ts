@@ -526,9 +526,9 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       const dangling = `dangling-${Math.random().toString(36).slice(2, 8)}`
       writeFileSync(path, readFileSync(path, 'utf8').replace(`sessionId: ${r.record.source.sessionId}`, `sessionId: ${dangling}`), 'utf8')
       const s = await call('memory_source', { memoryId: r.record.id }, exec) as { kind: string; memoryId?: string; reason?: string }
-      // 记录存在但其会话 id 不在 store 也未持久化：readEvent 报无此会话，工具须降级 unavailable
+      // 记录存在但原始会话读不到：适配器返回 null，工具须降级 unavailable
       // （not-found/forbidden 都是别的分支），且带回同一 memoryId
-      return { ok: s.kind === 'unavailable' && s.memoryId === r.record.id && (s.reason ?? '').includes(dangling) && snapshotJsonValue(s) !== undefined, detail: `kind=${s.kind} memoryId=${s.memoryId} reason=${s.reason}` }
+      return { ok: s.kind === 'unavailable' && s.memoryId === r.record.id && s.reason === '原始会话读不到（可能已删除）' && snapshotJsonValue(s) !== undefined, detail: `kind=${s.kind} memoryId=${s.memoryId} reason=${s.reason}` }
     })
 
     // H9b 证据锚下钻真会话：真 Session 里落一条用户消息，保存后 memory_source 读回原文
@@ -690,7 +690,8 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       const pendingHit = (searched.hits ?? []).find(h => h.id === id)
       const searchOk = order.length === 2 && order[0] === settled.record?.id && order[1] === id && (pendingHit?.sourceNote ?? '').includes('子 agent 写入，未确认')
 
-      const own = await call('memory_source', { memoryId: id }, execOf(child)) as { kind: string; lines?: string[] }
+      // 子会话的观察在工具结果里，要带上工具调用和结果才看得到
+      const own = await call('memory_source', { memoryId: id, include: 'all' }, execOf(child)) as { kind: string; lines?: string[] }
       const ownOk = own.kind === 'ok' && (own.lines ?? []).some(l => l.includes(observed) && l.includes('tool:'))
       const other = await call('memory_source', { memoryId: settled.record?.id }, execOf(child)) as { kind: string; code?: string }
       const otherOk = other.kind === 'rejected' && other.code === 'subagent-restricted'

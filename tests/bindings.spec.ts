@@ -1,3 +1,4 @@
+import { sourceHost } from './helpers/source-host.ts'
 import { describe, expect, it } from 'vitest'
 import { fakeExec } from './helpers/exec.ts'
 import { snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
@@ -457,8 +458,8 @@ describe('memory_source 绑定', () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_s', scope: 'workspace', workspacePath: '/proj' }))
     return createSourceTool({
-      store, getReadEvent: () => null, // 会话查询服务不可用 → unavailable
-      host: { contextOf: async () => ({ workspacePath: '/proj' }) },
+      store,
+      host: { ...sourceHost(), contextOf: async () => ({ workspacePath: '/proj' }) },
     })
   }
 

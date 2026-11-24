@@ -5,7 +5,7 @@ import { toToolOutput } from './output.ts'
 import type { ContextHost } from './host-session.ts'
 
 export interface SourceToolBindingDeps extends SourceToolDeps {
-  host: ContextHost<Parameters<typeof executeSource>[1]>
+  host: SourceToolDeps['host'] & ContextHost<Parameters<typeof executeSource>[1]>
 }
 
 /**
@@ -17,12 +17,17 @@ export function createSourceTool(deps: SourceToolBindingDeps): ToolDefinition {
   return defineTool({
     name: 'memory_source',
     description: [
-      '回查一条长期记忆的原始出处：读取产生这条记忆的会话轨迹片段（当时的对话原文）。',
-      '用于核对记忆的来源语境，例如记忆之间矛盾、或治理裁决前想看当时用户怎么说的。',
+      '回查一条长期记忆的全部出处，可选择出处、前后翻页、按关键词找、带上工具调用和结果、追溯父子会话。',
       '只读，只能回查当前项目和全局记忆；原始会话已不可读时会明确告知。',
     ].join(''),
     parameters: {
       memoryId: { type: 'string', required: true, description: '要回查的记忆 id（快照/搜索结果里的 mem_ 开头 id）' },
+      anchor: { type: 'number', description: '出处清单中的编号，从 1 起，缺省 1（最新的）' },
+      mode: { type: 'string', enum: ['window', 'page', 'find'], description: 'window 围绕出处开窗（缺省），page 接着翻，find 按关键词找' },
+      cursor: { type: 'string', description: '上次返回的 before:<seq> 或 after:<seq>，find 只支持 after' },
+      query: { type: 'string', description: 'find 的关键词，去首尾空白后 1–200 个字符' },
+      include: { type: 'string', enum: ['text', 'all'], description: 'text 只读对话文字（缺省），all 带上工具调用和结果' },
+      hop: { type: 'string', enum: ['parent', 'child'], description: 'parent 读父会话委派前后，child 读子会话原始过程' },
       window: { type: 'number', description: '读取的事件条数，缺省覆盖记忆产生的当轮对话，上限 24' },
     },
     output: {

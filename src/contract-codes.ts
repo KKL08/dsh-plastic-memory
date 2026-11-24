@@ -156,7 +156,9 @@ export type HealthRecommendationKind =
 export type ToolGateCode = 'subagent-readonly' // 子 agent 会话（delegationDepth ≥ 1）不可写
 
 /** memory_source 拒绝回查的原因（tools/source.ts）。 */
-export type SourceRejectCode = Extract<RejectCode, 'subagent-restricted'> // 子 agent 会话只能回查出处是本会话的记录，码与写入门共用一处定义
+export type SourceRejectCode =
+  | 'invalid-args' // 下钻参数互斥或出处编号越界
+  | Extract<RejectCode, 'subagent-restricted'> // 子 agent 会话只能回查出处是本会话的记录，码与写入门共用一处定义
 
 /** memory_search 的说明性 note（search.ts）。 */
 export type SearchNoteCode =

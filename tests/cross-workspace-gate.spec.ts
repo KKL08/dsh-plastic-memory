@@ -1,3 +1,4 @@
+import { sourceHost } from './helpers/source-host.ts'
 import { afterEach, describe, expect, it } from 'vitest'
 import { access, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -473,7 +474,7 @@ describe('memory_save update 的 cross-workspace 与 memory_source 的 forbidden
 
   it('memory_save / memory_source 的参数 schema 里没有 allowCrossWorkspace', () => {
     const save = createSaveTool({ store: w.store, snapshots: w.snapshots, registry, host: { saveContextOf: ctx, readSessionLog: userTurnLog } })
-    const source = createSourceTool({ store: w.store, host: { contextOf: ctx }, getReadEvent: () => null })
+    const source = createSourceTool({ store: w.store, host: { ...sourceHost(), contextOf: ctx } })
     for (const tool of [save, source]) {
       const schema = schemaOf(tool) as { properties: Record<string, unknown> }
       expect(Object.keys(schema.properties)).not.toContain('allowCrossWorkspace')
@@ -495,7 +496,7 @@ describe('memory_save update 的 cross-workspace 与 memory_source 的 forbidden
   it('source 硬塞 allowCrossWorkspace: true 仍返回 forbidden', async () => {
     const w2 = world()
     await w2.seed(inB('mem_b'))
-    const r = await executeSource({ memoryId: 'mem_b', allowCrossWorkspace: true } as never, IN_A, { store: w2.store, getReadEvent: () => null })
+    const r = await executeSource({ memoryId: 'mem_b', allowCrossWorkspace: true } as never, IN_A, { store: w2.store, host: sourceHost() })
     expect(r.kind).toBe('forbidden')
   })
 })

@@ -13,7 +13,7 @@ import { COLD_START_TEXT, coldStartUnparseableText } from '../src/snapshot.ts'
 import { executeSearch, renderSearchResult } from '../src/tools/search.ts'
 import { executeHealth, renderHealthResult, type HealthToolDeps } from '../src/tools/health.ts'
 import { executeScan, renderScanResult, type ScanToolDeps } from '../src/tools/scan.ts'
-import { executeSource, renderSourceResult, type ReadEventFn } from '../src/tools/source.ts'
+import { executeSource, renderSourceResult } from '../src/tools/source.ts'
 import { executeSave } from '../src/tools/save.ts'
 import { executeForget } from '../src/tools/forget.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
@@ -30,9 +30,10 @@ import { SECRET_MASK } from '../src/secrets.ts'
 import { writesDuring } from './helpers/fs-writes.ts'
 import { noInstructions } from './helpers/instructions.ts'
 import { userTurnLog } from './helpers/session-log.ts'
+import { sourceHost, sessionLog, user } from './helpers/source-host.ts'
 
 // 执行器切到按范围读取与两级定位。全部用真实目录（FileTable + .state 侧表），
-// 只 mock 进程边界（sessionQuery.readEvent）；文件直接写盘模拟用户手编、git、其他进程。
+// 只 mock 进程边界（宿主会话日志）；文件直接写盘模拟用户手编、git、其他进程。
 // 「零写入」看 node:fs/promises 的写调用记录（透传，见 helpers/fs-writes.ts），不比 mtime。
 vi.mock('node:fs/promises', async importOriginal => (await import('./helpers/fs-writes.ts')).recordWrites(await importOriginal()))
 
@@ -81,7 +82,7 @@ async function writeRaw(dir: string, fileName: string, text: string, ws?: string
 /** 用户手写的记忆文件：只有 name / type / 正文。 */
 const handBuilt = (name: string, body: string, type = 'preference') => `---\nname: ${name}\ntype: ${type}\n---\n\n${body}\n`
 
-function harness(opts: { readEvent?: ReadEventFn; now?: number } = {}) {
+function harness(opts: { host?: ReturnType<typeof sourceHost>; now?: number } = {}) {
   const sidecar = new SidecarStore({ root, schemas: sidecarSchemas })
   const table = new FileTable({ root, stats: sidecar.recallStats })
   const store = new MemoryStore(table, undefined, sidecar.recallStats)
@@ -110,7 +111,7 @@ function harness(opts: { readEvent?: ReadEventFn; now?: number } = {}) {
     health: async (args: { scope?: string } = {}, ws: string | null = WS) => executeHealth(args, healthDeps(ws), fakeExec()),
     scan: async (args: { scope?: string; scopes?: string[] } = {}, ws: string | null = WS) => executeScan({ layers: 'rule', ...args }, scanDeps(ws), fakeExec()),
     source: (memoryId: string, ws: string | null = WS) =>
-      executeSource({ memoryId }, { workspacePath: ws ?? undefined }, { store, getReadEvent: () => opts.readEvent ?? null }),
+      executeSource({ memoryId }, { workspacePath: ws ?? undefined }, { store, host: opts.host ?? sourceHost() }),
     save: (args: Parameters<typeof executeSave>[0], ws: string | null = WS) =>
       executeSave(args, fakeExec(), { store, registry, host: { saveContextOf: ctx(ws), readSessionLog: userTurnLog }, snapshots }),
     forget: (ids: string[]) => executeForget({ ids, reason: '测试' }, { workspacePath: WS }, { store, snapshots, decisions }),
@@ -409,8 +410,8 @@ describe('执行器走按范围读取与两级定位', () => {
     const path = await writeMem(wsDir(WS), 'edit.md', edited, WS)
     await writeFile(path, (await readFile(path, 'utf8')).replace('原文', '手编探针 用户改过的正文'))
     await writeRaw(wsDir(WS), 'nosrc.md', handBuilt('无出处探针', '手编探针 手写的'))
-    const readEvent: ReadEventFn = async () => ({ events: [{ type: 'agent/inbox/spliced', seq: 3, data: { inserted: [{ role: 'user', content: [{ type: 'text', text: '当时的话' }] }] } }] })
-    const h = harness({ readEvent })
+    const host = sourceHost({ 'sess-1': sessionLog([user(3, '当时的话')]) })
+    const h = harness({ host })
 
     const hit = (await h.search('用户改过')).hits[0]
     expect(hit.id).toBe('mem_edit')

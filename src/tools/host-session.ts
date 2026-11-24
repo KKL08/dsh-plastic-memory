@@ -52,6 +52,8 @@ export interface HostSession {
   ownSessionIdOf(session: object): string | undefined
   /** 会话所属项目：按会话的 cwd 解析，没有工作目录为 undefined。 */
   workspaceOf(session: object): Promise<string | undefined>
+  /** 会话标题；没有标题、服务缺席或读取抛错为 undefined。 */
+  sessionTitleOf(sessionId: string): Promise<string | undefined>
   /** 一个会话的整份日志（活会话取当下的样子，没打开的读落盘的）；读不到为 null。 */
   readSessionLog(sessionId: string): Promise<SessionLog | null>
 }

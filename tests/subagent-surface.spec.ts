@@ -109,7 +109,7 @@ afterEach(async () => {
  * 起插件：最小宿主 ctx（工具注册、事件、commands 与 timer 可选注册）；llm、sessionQuery、sessionProjections、
  * agentDefaultModel 是进程边界上的替身，调用记进 effects。modes 给出各子会话的 subagent 投影（缺省按一次性）。
  */
-async function boot() {
+async function boot(trackSourceReads = false) {
   const defs = new Map<string, ToolDef>()
   const listeners = new Map<string, (...args: unknown[]) => unknown>()
   let command: MemoryCommandDefinition | undefined
@@ -129,7 +129,12 @@ async function boot() {
   })
   const headers = new Map<string, Pick<SessionHeader, 'id' | 'delegationDepth' | 'parentSession'>>()
   const sessionQuery = {
-    readSession: readUserTurn,
+    readSession: async (sessionId: string) => {
+      const log = await readUserTurn()
+      if (!trackSourceReads) return log
+      effects.readEvents.push({ sessionId })
+      return { ...log, events: [...log.events, toolResult(2, `${sessionId} 的工具输出`)] }
+    },
     readEvent: async (request: { sessionId: string; seq: number }) => {
       effects.readEvents.push({ sessionId: request.sessionId })
       return { events: [toolResult(request.seq, `${request.sessionId} 的工具输出`)], startSeq: 0, endSeq: request.seq }
@@ -309,13 +314,13 @@ describe('权限面：子 agent 调每个工具只触发权限内的副作用', 
   })
 
   it('memory_source：只读自己会话的事件；查出处在别的会话的记录回 subagent-restricted，不读那个会话', async () => {
-    const h = await boot()
+    const h = await boot(true)
     const main = h.session('sess-main')
     const child = h.session('sess-child', { delegationDepth: 1, parentSession: 'sess-main' })
     const own = await h.prepare(child, 'memory_save', childSave('自己的观察'))
     const theirs = await h.prepare(main, 'memory_save', mainSave('主会话的', '主会话的「事实」'))
 
-    const ok = await h.call(child, 'memory_source', { memoryId: own.record!.id })
+    const ok = await h.call(child, 'memory_source', { memoryId: own.record!.id, include: 'all' })
     expect(ok.kind).toBe('ok')
     expect(ok.lines!.join('\n')).toContain('sess-child 的工具输出')
     expect(effects.readEvents).toEqual([{ sessionId: 'sess-child' }])
