@@ -82,6 +82,30 @@ describe('SnapshotStore.diff / restore', () => {
     expect((await store.get('mem_a'))?.content).toBe('原文')
   })
 
+  it('强制覆盖一条快照后又改过的记录：内容回到快照，算现在的一次内容改动（修改时间、状态起点、最近一次改动按现在记，出处清单取快照的）', async () => {
+    const s = makeStore()
+    const trail = [{ sessionId: 's0', eventRange: [0, 1] as [number, number], sourceMode: 'user-explicit' as const, at: 40 }]
+    const original = record({ id: 'mem_a', content: '原文', updatedAt: 50, stateSince: 50, sourceTrail: trail, lastChange: { kind: 'refine', at: 50, op: 'op_old' } })
+    const snap = await s.capture({ operation: 'pre-update', description: 'd', records: [original] }, 100)
+    const store = await memoryStore({ ...original, content: '改过', updatedAt: 150, stateSince: 150, lastChange: { kind: 'correct', at: 150, op: 'op_later' } })
+
+    const r = await s.restore(snap, undefined, store, { ...restoring, overwrite: true, now: () => 900 })
+    expect(r.restored).toEqual(['mem_a'])
+    const after = (await store.get('mem_a'))!
+    expect(after).toMatchObject({ content: '原文', updatedAt: 900, stateSince: 900, sourceTrail: trail, lastChange: { kind: 'correct', at: 900, by: 'snapshot-restore' } })
+    expect(after.lastChange!.op).not.toBe('op_old')
+  })
+
+  it('现状没被改过（或已删除）时恢复：状态起点、最近一次改动回到快照里的值', async () => {
+    const s = makeStore()
+    const original = record({ id: 'mem_a', content: '原文', updatedAt: 50, stateSince: 50, lastChange: { kind: 'refine', at: 50, op: 'op_old' } })
+    const snap = await s.capture({ operation: 'pre-forget', description: 'd', records: [original] }, 100)
+    const store = await memoryStore({ ...original, status: 'deleted', deletedAt: 120, updatedAt: 120 })
+
+    await s.restore(snap, undefined, store, { ...restoring, overwrite: true, now: () => 900 })
+    expect(await store.get('mem_a')).toMatchObject({ status: 'active', stateSince: 50, lastChange: { kind: 'refine', at: 50, op: 'op_old' } })
+  })
+
   it.each<[string, Partial<MemoryRecord>]>([
     ['事实时间', { factTime: '2026-12' }], ['关联', { related: ['mem_other'] }], ['前提', { premises: [{ id: 'mem_p', digest: 'd1' }] }],
     ['单条注入档位', { recall: 'unlisted' }], ['锁', { locked: true }], ['锁到期', { lockedUntil: 5000 }],

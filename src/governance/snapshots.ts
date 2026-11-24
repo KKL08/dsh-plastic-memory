@@ -90,6 +90,9 @@ export function redactRecord(r: SnapshotRecord): SnapshotRecord {
   return next
 }
 
+/** 强制覆盖式恢复记在「最近一次内容改动」和操作日志里的发起方。 */
+const RESTORE_INITIATOR = 'snapshot-restore'
+
 /** 快照说明可能是 agent 写的原文（forget 的原因、手动快照的说明）：落盘前两级密钥都遮。 */
 const maskDescription = (text: string) => maskSecrets(text, { severity: 'suspected' })
 
@@ -240,7 +243,7 @@ export class SnapshotStore {
 
   /**
    * 选择性恢复，写回与撤回都在这里做：ids 为 undefined 恢复全部。快照后被修改过的记录默认跳过（冲突保护），
-   * overwrite=true 才覆盖；给函数时只写它认可的现状（撤销：现状就是那次写下的内容），已删除的、定位不到的也不例外，
+   * overwrite=true 才覆盖（覆盖掉改过的那一版算现在的一次内容改动，见写入处）；给函数时只写它认可的现状（撤销：现状就是那次写下的内容），已删除的、定位不到的也不例外，
    * 否则之后被别处删掉的会被盖回在用、被搬走的会在原处重建旧版。冲突在写入那一刻按锁内最新内容判（put 的 skipIf），判中即按「快照后被修改」跳过。
    * target：'exact' 写回快照里这条记录自己的作用域；'hint' 按它的 workspacePath 提示定位（当前项目优先），留给 agent 工具。
    * 脱敏记录（密钥硬删）一律跳过，计入 skipped 并单列在 redacted。恢复动作本身只写旧数据，不做二次快照。
@@ -255,7 +258,7 @@ export class SnapshotStore {
   async restore(
     snapshot: MemorySnapshot,
     ids: string[] | undefined,
-    store: Pick<MemoryStore, 'put' | 'hardDelete' | 'writeSection'>,
+    store: Pick<MemoryStore, 'get' | 'put' | 'newOp' | 'finishOp' | 'hardDelete' | 'writeSection'>,
     { target, overwrite, now = Date.now }: RestoreOptions,
   ): Promise<{ restored: string[]; skipped: string[]; redacted: string[] }> {
     const targets = ids ? snapshot.data.filter(r => ids.includes(r.id)) : snapshot.data
@@ -291,13 +294,22 @@ export class SnapshotStore {
           // 现状已和快照里这条完全相同：不写，也不进撤回名单。撤回删的是「刚写回的那一版」，这时删掉的其实是原来那份，
           // 正在删它的那次密钥硬删随后找不到它，回报删了 0 条、待决账本也清不到
           let isAlreadyThere = false
+          const from = target === 'exact' ? scopeAt(rec.workspacePath) : { workspacePath: rec.workspacePath }
+          // 强制覆盖一条快照之后又被改过、还在用的记录：内容取快照的，但这是现在发生的一次内容改动，状态起点和最近一次内容改动
+          // 连同修改时间按现在记，不拿快照里那几项盖回去（那样时间线上这一版会比被它盖掉的版本还早）。其余情况（现状就是要撤的那次写入、
+          // 已删除、已不在）回到快照里的值
+          const seen = overwrite === true && latest !== undefined ? await store.get(rec.id, from) : undefined
+          const op = isConflicting(seen, rec) ? store.newOp({ initiator: RESTORE_INITIATOR }) : undefined
+          const at = now()
+          const next = op === undefined ? rec : { ...rec, updatedAt: at, stateSince: at, lastChange: { kind: 'correct', at, op: op.id, by: RESTORE_INITIATOR } }
           const put = latest === undefined ? undefined
-            : await store.put(rec, target === 'exact' ? scopeAt(rec.workspacePath) : { workspacePath: rec.workspacePath }, cur => {
+            : await store.put(next, from, cur => {
               isAlreadyThere = false
               if (overwrite !== true && blocks(cur, rec)) return true
               isAlreadyThere = isSameRecord(cur, rec)
               return isAlreadyThere
-            })
+            }, op)
+          if (op !== undefined && put !== undefined) await store.finishOp(op, put)
           if (put !== undefined) written.set(i, put)
           return put === undefined && !isAlreadyThere ? 'skipped' : 'restored'
         }))
