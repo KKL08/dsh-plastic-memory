@@ -534,6 +534,7 @@ describe('写入读的文件数不随目录大小增长', () => {
     const large = await filesReadPerWrite(300)
     // 耗时受机器抖动影响，这里数读了哪些文件：逐个读时会跟着条数涨
     expect(large).toEqual(small)
-    expect(new Set(large)).toEqual(new Set(['m1.md']))
+    // 改的那条先读一遍；写下的两条各回读一遍，链接反向索引按回读到的内容记
+    expect(new Set(large)).toEqual(new Set(['m1.md', '新条目.md']))
   })
 })

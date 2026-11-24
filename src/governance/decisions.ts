@@ -4,7 +4,7 @@ import type { RootLock } from '../root-lock.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { OverflowLevel } from '../contract-codes.ts'
 import {
-  genId, kindOf, verdictLoser, type BatchReceipt, type IndexReceipt, type IndexRun, type PendingDecision, type PendingKind, type SettledProposal, type SettledVerdict, type StoredSuggestion,
+  genId, kindOf, verdictLoser, type BatchReceipt, type IndexReceipt, type IndexRun, type LinkIds, type PendingDecision, type PendingKind, type SettledProposal, type SettledVerdict, type StoredSuggestion,
   type SuggestionBasis, type SuggestionFailure,
 } from './schema.ts'
 import { isUndoExpired } from './undo-rules.ts'
@@ -344,7 +344,7 @@ export class PendingDecisionsStore {
    */
   async settle(
     id: string, verdict: SettledVerdict, now: number,
-    opts: { snapshotId?: string; fingerprint?: string; isBornSettled?: true; misplacedIgnore?: MisplacedIgnore; proposal?: SettledProposal } = {},
+    opts: { snapshotId?: string; fingerprint?: string; isBornSettled?: true; misplacedIgnore?: MisplacedIgnore; proposal?: SettledProposal; droppedLinks?: LinkIds } = {},
   ): Promise<boolean> {
     const entry = await this.table.get(id)
     if (!entry) return false
@@ -359,6 +359,7 @@ export class PendingDecisionsStore {
         verdict, at: now, ...(opts.snapshotId !== undefined ? { snapshotId: opts.snapshotId } : {}), ...(opts.isBornSettled ? { isBornSettled: true as const } : {}),
         ...(opts.misplacedIgnore !== undefined ? { misplacedIgnore: opts.misplacedIgnore } : {}),
         ...(opts.proposal !== undefined ? { proposal: opts.proposal } : {}),
+        ...(opts.droppedLinks !== undefined ? { droppedLinks: opts.droppedLinks } : {}),
       },
     })
     await this.sweep(now)
@@ -544,9 +545,9 @@ export class PendingDecisionsStore {
    * 撤销记录走下面按种类的方法；就地处理时才记的提升、留下也直接用它（isBornSettled 见 schema）。超出保留窗口由 sweep 清掉。
    */
   async addSettled(
-    input: { kind: PendingKind; memoryIds: string[]; summary: string; workspaces: string[]; fingerprint?: string; receipts?: BatchReceipt[]; origin?: PendingDecision['origin']; indexRun?: IndexRun },
+    input: { kind: PendingKind; memoryIds: string[]; summary: string; workspaces: string[]; fingerprint?: string; receipts?: BatchReceipt[]; origin?: PendingDecision['origin']; indexRun?: IndexRun; links?: LinkIds },
     verdict: SettledVerdict, now: number,
-    opts: { snapshotId?: string; isBornSettled?: true; misplacedIgnore?: MisplacedIgnore; id?: string } = {},
+    opts: { snapshotId?: string; isBornSettled?: true; misplacedIgnore?: MisplacedIgnore; id?: string; droppedLinks?: LinkIds } = {},
   ): Promise<PendingDecision> {
     // 调用方定好 id 的（写入前就定下、中断后补记的）：已经记过就不再记
     const existing = opts.id === undefined ? undefined : await this.table.get(opts.id)
@@ -554,6 +555,7 @@ export class PendingDecisionsStore {
     const settled = {
       verdict, at: now, ...(opts.snapshotId !== undefined ? { snapshotId: opts.snapshotId } : {}), ...(opts.isBornSettled ? { isBornSettled: true as const } : {}),
       ...(opts.misplacedIgnore !== undefined ? { misplacedIgnore: opts.misplacedIgnore } : {}),
+      ...(opts.droppedLinks !== undefined ? { droppedLinks: opts.droppedLinks } : {}),
     }
     const entry: PendingDecision = { id: opts.id ?? genId('pd'), ...input, firstSeenAt: now, settled }
     await this.table.put(entry.id, entry)
@@ -578,8 +580,11 @@ export class PendingDecisionsStore {
   }
 
   /** 全局记忆移到项目：written 是移过去的那一份。 */
-  addMove(written: MemoryRecord, input: { summary: string; workspace: string }, snapshotId: string, now: number) {
-    return this.addSettled({ kind: 'move', memoryIds: [written.id], summary: input.summary, workspaces: [input.workspace], fingerprint: editFingerprint(written) }, 'moved', now, { snapshotId })
+  /** droppedLinks：移过去时越界去掉的关联和前提，撤销时从改前快照放回去。 */
+  addMove(written: MemoryRecord, input: { summary: string; workspace: string; droppedLinks?: LinkIds }, snapshotId: string, now: number) {
+    return this.addSettled({ kind: 'move', memoryIds: [written.id], summary: input.summary, workspaces: [input.workspace], fingerprint: editFingerprint(written) }, 'moved', now, {
+      snapshotId, ...(input.droppedLinks !== undefined ? { droppedLinks: input.droppedLinks } : {}),
+    })
   }
 
   /** 模型改写、替代：written 是改写后的那条、标成已取代的那条。id 给了就用它当条目 id，这个 id 已有条目时不再记。 */
@@ -587,6 +592,16 @@ export class PendingDecisionsStore {
     return this.addSettled({
       kind: input.kind, memoryIds: [written.id], summary: written.name, workspaces: [input.workspace], fingerprint: editFingerprint(written), origin: input.origin,
     }, input.kind === 'rewrite' ? 'rewritten' : 'superseded', now, { snapshotId, ...(id !== undefined ? { id } : {}) })
+  }
+
+  /**
+   * 只挂关联、前提的一次保存：written 是挂上之后的那条，added 是这次新加的 id。id 给了就用它当条目 id，这个 id 已有条目时不再记。
+   * 不记指纹：撤销只看它加的还在不在，期间别处的改动不挡它。
+   */
+  addLinkChange(written: MemoryRecord, input: { added: LinkIds; workspace: string; origin: NonNullable<PendingDecision['origin']> }, now: number, id?: string) {
+    return this.addSettled({
+      kind: 'link', memoryIds: [written.id], summary: written.name, workspaces: [input.workspace], origin: input.origin, links: input.added,
+    }, 'linked', now, id !== undefined ? { id } : {})
   }
 
   /**

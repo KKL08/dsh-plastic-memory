@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { memoryRecordSchema } from '../record-schema.ts'
+import { linkIdsSchema, memoryRecordSchema } from '../record-schema.ts'
 import type { IndexPlan } from '../topic-ops.ts'
 import { MODEL_CHANGE_KINDS, PROPOSAL_ACTIONS, PROPOSAL_SOURCES, SUGGESTION_FAILURE_KINDS, SUGGESTION_PARSE_STAGES } from '../contract-codes.ts'
 
@@ -14,8 +14,9 @@ export function genId(prefix: string): string {
  * rewrite、supersede 是模型用 memory_save 改写、替代已有记忆留的撤销记录：同样生来就已结清、不进待处理；撤销后标 isUndone 留到保留窗口结束，
  * 对话卡与右侧栏据此显示「已撤销」。
  * index-organize 是一次「整理索引」留的撤销记录：同样生来就已结清，memoryIds 为空，做过的每个索引操作各有一条回执（indexRun），撤销时逐条倒着撤。
+ * link 是一次只挂关联、前提的保存（只改元数据，不拍快照）留的回执：生来就已结清，links 记这次新加的 id，撤销时只去掉这些，撤后标 isUndone。
  */
-export const PENDING_KINDS = ['conflict', 'promote-candidate', 'overflow', 'edit', 'move', ...MODEL_CHANGE_KINDS, 'index-organize'] as const
+export const PENDING_KINDS = ['conflict', 'promote-candidate', 'overflow', 'edit', 'move', ...MODEL_CHANGE_KINDS, 'index-organize', 'link'] as const
 export type PendingKind = (typeof PENDING_KINDS)[number]
 
 /** 条目种类，缺省即冲突（旧条目）。 */
@@ -36,8 +37,9 @@ export function kindOf(entry: { kind?: PendingKind }): PendingKind {
  * plan-applied：冲突按处理方案改写了记忆（融合、垂直改写），记在冲突条目自己身上：settled 里有改前快照 snapshotId、逐项回执 receipts、
  * 依据和结论代码 proposal、改前的冲突指纹 priorFingerprint；条目 fingerprint 换成改后的。
  * index-organized：一次整理索引（种类 index-organize），回执在条目的 indexRun 里。
+ * linked：一次只挂关联、前提的保存（种类 link），新加的 id 在条目的 links 里。
  */
-export const SETTLED_VERDICTS = ['keep-both', 'dismiss', 'keep-left', 'keep-right', 'keep-local', 'promoted', 'edited', 'merged', 'moved', 'rewritten', 'superseded', 'batch-edited', 'plan-applied', 'index-organized'] as const
+export const SETTLED_VERDICTS = ['keep-both', 'dismiss', 'keep-left', 'keep-right', 'keep-local', 'promoted', 'edited', 'merged', 'moved', 'rewritten', 'superseded', 'batch-edited', 'plan-applied', 'index-organized', 'linked'] as const
 export type SettledVerdict = (typeof SETTLED_VERDICTS)[number]
 
 /**
@@ -159,6 +161,8 @@ export type IndexReceipt = z.infer<typeof indexReceiptSchema>
 export const indexRunSchema = z.object({ receipts: z.array(indexReceiptSchema) })
 export type IndexRun = z.infer<typeof indexRunSchema>
 
+export { linkIdsSchema, type LinkIds } from '../record-schema.ts'
+
 export const pendingDecisionSchema = z.object({
   id: z.string(),
   kind: z.enum(PENDING_KINDS).optional(),
@@ -175,6 +179,8 @@ export const pendingDecisionSchema = z.object({
   receipts: z.array(batchReceiptSchema).optional(),
   /** 整理索引（index-organize）：这一次做过的索引操作。其余条目没有此字段。 */
   indexRun: indexRunSchema.optional(),
+  /** 只挂关联、前提的保存（link）：这一次新加的 id（已有的不算）。撤销只去掉这些。其余条目没有此字段。 */
+  links: linkIdsSchema.optional(),
   /** 模型改写、替代：哪个会话里哪次 memory_save 调用改的（对话卡按 callId、右侧栏按 sessionId 认领）；替代时 by 是替代它的那条。 */
   origin: z.object({ sessionId: z.string(), callId: z.string(), by: z.string().optional() }).optional(),
   /** 冲突：模型给的处理建议，见 storedSuggestionSchema。依据版本对不上时视图当作没有建议。其余条目没有此字段。 */
@@ -190,6 +196,8 @@ export const pendingDecisionSchema = z.object({
    * misplacedIgnore：「留在本项目」顺带写进建议忽略表的那条「放错层」忽略（忽略时间、记忆指纹 adviceFingerprint）；
    * 记忆原本没有放错层的忽略才写、才记。撤销时只在忽略表里那一条仍是它（时间、指纹都对得上）时才删。旧条目没有此字段，撤销不碰忽略表。
    * proposal：冲突按处理方案落盘时的依据和结论代码（见 settledProposalSchema）；撤销时随 settled 一起去掉，条目上的处理建议不动。
+   * droppedLinks：换作用域时越界去掉的关联和前提（promoted、moved 上，没去掉的不记）。撤销提升核对全局那份时按「改前快照去掉这些」比，
+   * 快照恢复时它们随作用域一起回来；撤销移到项目时从改前快照放回去。放回来的都按要回到的作用域再重验一次。
    * receipts、priorFingerprint 只在 plan-applied 上：逐项回执（同整理所选，按写入顺序；整理所选的回执在条目顶层，这里在结清信息里，
    * 撤销、账本清理随结清信息一起处理），和结清前条目的冲突指纹（旧条目没有指纹时缺省），撤销时还原。
    */
@@ -203,6 +211,7 @@ export const pendingDecisionSchema = z.object({
     proposal: settledProposalSchema.optional(),
     receipts: z.array(batchReceiptSchema).optional(),
     priorFingerprint: z.string().optional(),
+    droppedLinks: linkIdsSchema.optional(),
   }).optional(),
 })
 export type PendingDecision = z.infer<typeof pendingDecisionSchema>

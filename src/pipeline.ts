@@ -9,7 +9,9 @@ import { UNKNOWN_SESSION_ID } from './session-id.ts'
 import { anchorRangeOf, type AnchorFacts } from './session-log.ts'
 import type { MemoryStore, QueryScope } from './store.ts'
 import { newWriteOp } from './storage/table.ts'
-import { MODEL_CHANGE_STEP, ledgerSteps, modelChangeStep } from './governance/op-steps.ts'
+import { LINK_CHANGE_STEP, MODEL_CHANGE_STEP, ledgerSteps, linkChangeStep, modelChangeStep } from './governance/op-steps.ts'
+import { linkShapeProblem, mergeLinks, resolveLinks, type ResolvedLinks } from './links.ts'
+import { scopeOfMemory, type Scope } from './scope.ts'
 import type { TypeRegistry } from './type-registry.ts'
 import type { PendingDecisionsStore } from './governance/decisions.ts'
 import type { SnapshotStore } from './governance/snapshots.ts'
@@ -46,6 +48,10 @@ export interface SaveCandidate {
   change?: ChangeKind
   /** 状态变化的原因，随历史版本留着。 */
   changeReason?: string
+  /** 相关记忆的 id：追加在已有的后面，不删已有。只传它（和 premises）的 update 是只改元数据的操作，不用填 change。 */
+  related?: string[]
+  /** 决定依据的前提：被依据记忆的 id；插件记下 id 和那条记忆当时的内容摘要。追加规则同 related。 */
+  premises?: string[]
 }
 
 export type { SaveEdit } from './edits.ts'
@@ -316,7 +322,7 @@ async function resolveInput(input: SaveInput, deps: PipelineDeps): Promise<{ can
 }
 
 /** 补证时不生效的参数：正文和别的内容字段都留着原样。 */
-const CORROBORATE_IGNORED = ['name', 'type', 'content', 'edits', 'summary', 'tags', 'supersedes', 'validFrom', 'validTo'] as const
+const CORROBORATE_IGNORED = ['name', 'type', 'content', 'edits', 'summary', 'tags', 'supersedes', 'validFrom', 'validTo', 'related', 'premises'] as const
 
 /**
  * 补证（同一件事又被提到，内容不用改）：只要 id、依据和把握。内容参数不校验、不生效，候选按目标现在的样子补齐，
@@ -473,6 +479,92 @@ async function checkSubagentWrite(
   return { candidate, warnings }
 }
 
+/** 带了要挂的关联或前提。 */
+function hasLinks(input: Pick<SaveInput, 'related' | 'premises'>): boolean {
+  return (input.related?.length ?? 0) > 0 || (input.premises?.length ?? 0) > 0
+}
+
+/** 改内容的参数：update 带了其中任何一个就是一次内容改动；一个都没带、只带关联和前提的是只改元数据的操作。 */
+const CONTENT_KEYS = ['name', 'type', 'content', 'edits', 'summary', 'tags', 'supersedes', 'validFrom', 'validTo'] as const
+
+/**
+ * 只挂关联、前提的 update：带了 related 或 premises（空列表也算），没带任何改内容的参数。补证照常走补证（关联在那里不生效，结果里说明）。
+ */
+function isLinkOnly(input: SaveInput): boolean {
+  return input.action === 'update' && input.change !== 'corroborate' && (input.related !== undefined || input.premises !== undefined)
+    && CONTENT_KEYS.every(k => input[k] === undefined)
+}
+
+/** 只挂关联、前提时不生效的参数：作用域不随更新变，把握和改动性质只跟内容改动走，force 只管新建。 */
+const LINK_ONLY_IGNORED = ['scope', 'confidence', 'change', 'changeReason', 'force'] as const
+
+/** 只挂关联时带了不生效的参数：结果里说明，写法同补证那条。 */
+function linkOnlyWarnings(input: SaveInput): SaveWarning[] {
+  const ignored = LINK_ONLY_IGNORED.filter(k => input[k] !== undefined)
+  if (ignored.length === 0) return []
+  return [{ code: 'link-only-params-ignored', text: `只挂关联、前提的 update 只追加 related、premises，${ignored.join('、')} 没有生效；要改内容或把握，带上要改的字段和 change 另发一次 update` }]
+}
+
+function linkRejection(problem: string): PipelineResult {
+  return { kind: 'rejected', code: 'link-invalid', reason: `关联没有挂上：${problem}未保存。` }
+}
+
+/**
+ * 只挂关联、前提的 update：只改元数据，不用填改动性质，不动修改时间、最近一次内容改动和出处，不拍快照。照常经写入段、带提交标记，
+ * 新加的 id 记一条回执，撤销时只去掉这些。目标的检查同 update（存在、在本项目、没被取代、子 agent 只改自己待确认的、全局记忆要确认码）；
+ * 落盘时在写入段里重读目标、核对要挂的 id，追加到最新的那一版上：两个会话同时追加，两次都在。
+ */
+async function runLinkOnly(input: SaveInput, deps: PipelineDeps, now: number): Promise<PipelineResult> {
+  const { store, session } = deps
+  const read = input.id === undefined ? undefined : await store.get(input.id, { workspacePath: deps.workspacePath })
+  const notWritable = deps.delegation ? subagentTargetProblem(input.id ?? '(缺 id)', read, session.id) : undefined
+  if (notWritable !== undefined) return { kind: 'rejected', ...notWritable }
+  const checked = await checkUpdateTarget(input.id, read, deps)
+  if ('code' in checked) return { kind: 'rejected', ...checked }
+  const { target } = checked
+  const ignored = linkOnlyWarnings(input)
+  const withNotes = (result: PipelineResult): PipelineResult => (result.kind === 'updated' && ignored.length > 0 ? { ...result, warnings: [...(result.warnings ?? []), ...ignored] } : result)
+  if (!hasLinks(input)) {
+    return withNotes({ kind: 'updated', record: target, warnings: [{ code: 'links-empty', text: 'related、premises 都是空列表，没有要挂的 id，什么都没写；要挂就把那几条记忆的 id 填进去再发' }] })
+  }
+  if (target.scope === 'global' && deps.workspacePath !== undefined) {
+    const code = globalConfirmCode(session.id, target)
+    if (!isConfirmCodeMatch(input.confirmGlobal, code)) return { kind: 'rejected', code: 'global-update-unconfirmed', reason: globalUpdateGuide(target, code, input.confirmGlobal) }
+  }
+  const scope: Scope | undefined = scopeOfMemory(target)
+  if (scope === undefined) return { kind: 'rejected', code: 'target-missing', reason: `更新目标不存在或已删除：${target.id}` }
+  const by = deps.delegation ? 'subagent' : 'main'
+  return withNotes(await store.writeSection(async (): Promise<PipelineResult> => {
+    const current = await store.get(target.id, scope)
+    const isSamePlace = current !== undefined && current.status === 'active' && current.scope === target.scope && current.workspacePath === target.workspacePath
+    if (!isSamePlace || (deps.delegation !== undefined && notOwnPending(current, session.id) !== undefined)) {
+      return changedAfterRead(target.id, current, deps.delegation !== undefined)
+    }
+    const links = await resolveLinks(store, { id: current.id, scope }, input)
+    if ('problem' in links) return linkRejection(links.problem)
+    const merged = mergeLinks(current, links)
+    if ('problem' in merged) return linkRejection(merged.problem)
+    // 都已经挂着：没有要写的，也没有可撤的
+    if (merged.added.related.length === 0 && merged.added.premises.length === 0) return { kind: 'updated', record: current }
+    const steps = []
+    if (deps.decisions !== undefined) {
+      if (!store.hasStep(LINK_CHANGE_STEP)) store.registerSteps(ledgerSteps(deps.decisions))
+      steps.push(linkChangeStep({ added: merged.added, at: now, origin: { sessionId: session.id, callId: deps.callId ?? '' } }))
+    }
+    const op = newWriteOp({ initiator: by, steps })
+    // 写入段挡不住手改文件：落盘那一刻和刚读到的不是同一版就不写、不记回执（回执里的「新加」按刚读到的这版算），让模型重读
+    const seen: { latest?: MemoryRecord } = {}
+    const isChangedSinceRead = (latest: MemoryRecord | undefined) => {
+      seen.latest = latest
+      return latest === undefined || !isSameRecord(latest, current)
+    }
+    const written = await store.put({ ...current, ...merged.fields }, scope, isChangedSinceRead, op)
+    if (written === undefined) return changedAfterRead(target.id, seen.latest, deps.delegation !== undefined)
+    await store.finishOp(op, written)
+    return { kind: 'updated', record: written }
+  }))
+}
+
 export async function runSavePipeline(
   input: SaveInput,
   deps: {
@@ -513,6 +605,10 @@ export async function runSavePipeline(
 ): Promise<PipelineResult> {
   const { store, registry, session } = deps
   const now = deps.now?.() ?? Date.now()
+  // 关联和前提的每一项先按记忆 id 的形状校验，各条路径（新建、改内容、补证、只挂关联）都过这一道
+  const badLinks = linkShapeProblem(input)
+  if (badLinks !== undefined) return linkRejection(badLinks)
+  if (isLinkOnly(input)) return runLinkOnly(input, deps, now)
 
   // 0. 入参补成完整候选（精确修改在这里读目标、算出新正文），再过子 agent 写入约束（主会话没有 delegation，原样往下走）
   const resolved = await resolveInput(input, deps)
@@ -577,7 +673,9 @@ export async function runSavePipeline(
       change = candidate.change!
     }
     if (resolved.ignored !== undefined && resolved.ignored.length > 0) {
-      scopeWarnings.push({ code: 'corroborate-fields-ignored', text: `补证只刷新确认时间、记下出处，${resolved.ignored.join('、')} 没有生效；要改内容，按改动的性质用 refine、correct 或 state-change 重发` })
+      const isLinkIgnored = resolved.ignored.some(k => k === 'related' || k === 'premises')
+      const linkHint = isLinkIgnored ? '；要挂关联、前提，对这条记忆再调一次 update，不带 change，只传 id 和 related、premises' : ''
+      scopeWarnings.push({ code: 'corroborate-fields-ignored', text: `补证只刷新确认时间、记下出处，${resolved.ignored.join('、')} 没有生效；要改内容，按改动的性质用 refine、correct 或 state-change 重发${linkHint}` })
     }
     if (candidate.scope === 'global' && target.scope === 'workspace') {
       // 模型对 workspace 记录重申 global 意图：转成提升候选（已是候选则静默幂等）
@@ -750,11 +848,25 @@ export async function runSavePipeline(
     let clean: MemoryRecord
     // 改写、替代前的快照（快照先行）：改写的目标与要替代的旧记忆同拍一份，对话卡与右侧栏的「撤销修改」按它恢复
     let snapshotId: string | undefined
+    // 要挂的关联和前提在写入段里核对：核对和落盘之间别的写入插不进来，期间被删掉、搬走的这里就看得到
+    let links: ResolvedLinks | undefined
+    if (hasLinks(candidate)) {
+      const owner = candidate.action === 'create' ? { id: parsed.data.id, scope: scopeOfMemory(parsed.data)! } : { id: target!.id, scope: scopeOfMemory(target!)! }
+      const checked = await resolveLinks(store, owner, candidate)
+      if ('problem' in checked) return linkRejection(checked.problem)
+      links = checked
+    }
     if (candidate.action === 'create') {
+      let created = parsed.data
+      if (links !== undefined) {
+        const merged = mergeLinks({}, links)
+        if ('problem' in merged) return linkRejection(merged.problem)
+        created = { ...created, ...merged.fields }
+      }
       snapshotId = replaced.length === 0 ? undefined : (await deps.snapshots.capture({
         operation: 'pre-update', description: `替代记忆 ${replaced.map(r => r.id).join('、')} 前`, records: replaced,
       }, now)).id
-      clean = pruneUndefined(parsed.data)
+      clean = pruneUndefined(created)
       // 新 id 不定位（create 排他占名）
       await store.create(clean)
     } else {
@@ -780,7 +892,13 @@ export async function runSavePipeline(
           }
           const valid = resolveValidity(candidate, current, now)
           if ('code' in valid) return { stop: { kind: 'rejected', ...valid } }
-          const fields = fieldsOn(current, content, valid)
+          let fields = fieldsOn(current, content, valid)
+          // 关联和前提追加到锁内最新的那一版上：期间别处挂上的都留着，追加后超上限就不写
+          if (links !== undefined && !isCorroboration) {
+            const linked = mergeLinks(current, links)
+            if ('problem' in linked) return { stop: linkRejection(linked.problem) }
+            fields = { ...fields, ...linked.fields }
+          }
           const merged = secretGate({ ...current, ...fields })
           if ('rejected' in merged) return { stop: merged.rejected }
           suspected = merged.suspected

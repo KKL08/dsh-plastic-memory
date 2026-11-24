@@ -53,6 +53,20 @@ export function isFactTime(text: string): boolean {
   return inRange(m[4], 23) && inRange(m[5], 59) && inRange(m[6], 59) && inRange(m[7], 23) && inRange(m[8], 59)
 }
 
+/**
+ * 保存工具收到的 related、premises 每一项先过这道形状校验。存储接受手建文件里写的任意字符串 id（比如 mem_manual-1），
+ * 这里只拦明显不是 id 的：空串、超过长度上限、带空白或控制字符。合形状的还要查得到记忆才挂；退回说明只报第几项、不回显原值。
+ */
+export const MEMORY_ID_MAX_LENGTH = 128
+
+export function isMemoryIdShaped(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= MEMORY_ID_MAX_LENGTH && !/[\s\p{Cc}]/u.test(value)
+}
+
+/** 一组关联和前提的 id：只挂关联的回执记新加的，换作用域时记越界去掉的，界面命令结果里列去掉的。 */
+export const linkIdsSchema = z.object({ related: z.array(z.string()), premises: z.array(z.string()) })
+export type LinkIds = z.infer<typeof linkIdsSchema>
+
 export const memoryRecordSchema = z.object({
   id: z.string(),
   name: z.string().min(1),

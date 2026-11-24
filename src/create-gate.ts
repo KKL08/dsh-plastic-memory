@@ -82,5 +82,5 @@ export async function runCreateGate(
 export function similarGuide(isFromSubagent: boolean): string {
   return isFromSubagent
     ? '和其中某条是同一件事时，在回复里向委派方说明（带上 id）。'
-    : '和其中某条是同一件事的新情况时，对那条用 action=update 并声明 change；是另一件事就不用处理。'
+    : '和其中某条是同一件事的新情况时，对那条用 action=update 并声明 change；是相关的另一件事（比如这条决定改变了某个项目的现状），对新记忆再调一次 update，只传 id 和 related；无关的不用处理。'
 }

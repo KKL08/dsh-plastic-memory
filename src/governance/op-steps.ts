@@ -1,7 +1,7 @@
 import type { MemoryLogger } from '../store.ts'
 import type { OpStep, OpStepHandler } from '../storage/table.ts'
 import { ledgerLabel, scopeOfMemory } from '../scope.ts'
-import { genId, type PendingDecision } from './schema.ts'
+import { genId, type LinkIds, type PendingDecision } from './schema.ts'
 import type { PendingDecisionsStore } from './decisions.ts'
 
 /**
@@ -28,7 +28,34 @@ export function indexReceiptUndoneStep(entryId: string, receiptOp: string): Inde
   return { kind: INDEX_RECEIPT_UNDONE_STEP, entryId, receiptOp }
 }
 
+/** 只挂关联、前提的保存：记一条已结清的回执（撤销入口），带这次新加的 id。条目 id 写入前就定好，补做重来不会多记一条。 */
+export const LINK_CHANGE_STEP = 'ledger-link-change'
+
 type Origin = NonNullable<PendingDecision['origin']>
+
+interface LinkChangeStep extends OpStep {
+  kind: typeof LINK_CHANGE_STEP
+  entryId: string
+  added: LinkIds
+  at: number
+  origin: Origin
+}
+
+export function linkChangeStep(input: { added: LinkIds; at: number; origin: Origin }): LinkChangeStep {
+  return { kind: LINK_CHANGE_STEP, entryId: genId('pd'), ...input }
+}
+
+/**
+ * 撤销只挂关联的那次保存：去掉链接的那次写入提交之后，把回执标成已撤销。和写文件记在同一个操作里，中途断掉下次进写入段补上，
+ * 重试的撤销看到回执已结清就不再动文件（不然会把之后重新挂上的同一个 id 也去掉）。
+ */
+export const LINK_UNDONE_STEP = 'ledger-link-undone'
+
+interface LinkUndoneStep extends OpStep { kind: typeof LINK_UNDONE_STEP; entryId: string }
+
+export function linkUndoneStep(entryId: string): LinkUndoneStep {
+  return { kind: LINK_UNDONE_STEP, entryId }
+}
 
 interface ModelChangeStep extends OpStep {
   kind: typeof MODEL_CHANGE_STEP
@@ -57,6 +84,16 @@ export function ledgerSteps(decisions: PendingDecisionsStore, log: MemoryLogger 
       await decisions.addModelChange(
         record, { kind: step.change, workspace: scope === undefined ? '' : ledgerLabel(scope), origin: step.origin }, step.snapshotId, step.at, step.entryId,
       )
+    },
+    [LINK_CHANGE_STEP]: async (raw, { record }) => {
+      const step = raw as LinkChangeStep
+      // 文件已不在（之后被彻底删除）：没有可撤的。撤销只看它加的 id 还在不在，写成之后又被改过也照记
+      if (record === undefined) return
+      const scope = scopeOfMemory(record)
+      await decisions.addLinkChange(record, { added: step.added, workspace: scope === undefined ? '' : ledgerLabel(scope), origin: step.origin }, step.at, step.entryId)
+    },
+    [LINK_UNDONE_STEP]: async (raw) => {
+      await decisions.markUndone((raw as LinkUndoneStep).entryId)
     },
     [INDEX_RECEIPT_STEP]: async (raw, { op }) => {
       const step = raw as IndexReceiptStep

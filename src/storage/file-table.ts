@@ -5,8 +5,8 @@ import { basename, dirname, join, relative } from 'node:path'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { Scope } from '../scope.ts'
 import {
-  byPosition, resolveDuplicates, pickLiveFirst, isScopeTarget, scopesOf, newWriteOp,
-  type MemoryTable, type WriteOp, type OpStep, type OpStepHandler, type MemoryLogger, type DirectoryNote, type QuarantineEntry, type LocatedFile, type LocatedRecord,
+  byPosition, resolveDuplicates, pickLiveFirst, isScopeTarget, scopesOf, newWriteOp, outgoingLinks, sortLinkRefs,
+  type LinkQuery, type LinkRef, type MemoryTable, type WriteOp, type OpStep, type OpStepHandler, type MemoryLogger, type DirectoryNote, type QuarantineEntry, type LocatedFile, type LocatedRecord,
   type LocateTarget, type LocateOptions, type ScopeReadOptions, type ScopeReadResult, type WorkspaceDirListing, type KeywordMatch,
 } from './table.ts'
 import type { KvTable } from '../kv-table.ts'
@@ -15,7 +15,7 @@ import { decodeFile, digestMismatch, encodeRecord, type DecodeOutcome, type File
 import { ParseCache, type CachedFile, type FileSignature } from './parse-cache.ts'
 import type { RootLock } from '../root-lock.ts'
 import type { OpJournal, PendingOp } from './op-journal.ts'
-import type { DerivedIndex, HintRow, LevelScan, TopicPageRow } from './derived-index.ts'
+import type { DerivedIndex, HintRow, LevelScan, LinkFileRow, TopicPageRow } from './derived-index.ts'
 import { defaultRootLock } from './root-lock.ts'
 import { describeError } from './state-files.ts'
 import {
@@ -190,6 +190,11 @@ const HINT_ID_RE = /^id:[ \t]*["']?(.*?)["']?[ \t]*$/m
 /** 一个文件的 stat 签名：inode、大小、修改时间。同名文件被换掉、被改过都会变。 */
 function sigOf(s: { ino: number; size: number; mtimeMs: number }): string {
   return `${s.ino}:${s.size}:${s.mtimeMs}`
+}
+
+/** 一个记忆文件在链接反向索引里的一行。 */
+function linkRowOf(name: string, sig: string, record: MemoryRecord | undefined): LinkFileRow {
+  return { name, sig, sourceId: record?.id ?? null, links: record === undefined ? [] : outgoingLinks(record) }
 }
 
 /** 一个文件名的两个 32 位哈希（FNV-1a，两个种子）。 */
@@ -748,6 +753,134 @@ export class FileTable implements MemoryTable {
     })
   }
 
+  /**
+   * 指向 id 的链接（见 MemoryTable.linksTo）。每一层列目录、逐个文件取 stat 签名，和派生库记着的比：新出现的、签名变了的重读，
+   * 不在了的去掉，再按核对过的行回答。没有派生库（或库不可用）时每个文件都读，结果相同。
+   * 目录读不了、有文件读不出的，结果标成不完整。不加锁：读到的是这一刻的文件。
+   * 不在写锁里，核对结果不写回库（写回会拿列目录时的旧名单盖掉并发写入刚记下的）；只在发现读不全时让这一层的核对标记作废。
+   */
+  async linksTo(id: string, dirs: readonly string[]): Promise<LinkQuery> {
+    const { scopeDirs, directoryNotes } = await this.resolveDirs([...new Set(dirs)])
+    const refs: LinkRef[] = []
+    let isComplete = !directoryNotes.some(isIncompleteNote)
+    for (const { dir, loc } of scopeDirs) {
+      for (const level of [dir, join(dir, ARCHIVE_DIR)]) {
+        const verified = await this.verifiedRefsTo(id, level, dir, loc, false)
+        if (!verified.isComplete) isComplete = false
+        refs.push(...verified.refs)
+      }
+    }
+    return { refs: sortLinkRefs(refs), isComplete }
+  }
+
+  /** 一层里指向 id 的链接，按文件签名核对过（见 verifiedLinkRows）。 */
+  private async verifiedRefsTo(id: string, level: string, dir: string, loc: FileLocation, isLocked: boolean): Promise<{ refs: LinkRef[]; isComplete: boolean }> {
+    const verified = await this.verifiedLinkRows(level, dir, loc, isLocked)
+    const refs: LinkRef[] = []
+    for (const row of verified.rows) {
+      if (row.sourceId === null) continue
+      for (const link of row.links) {
+        if (link.targetId === id) refs.push({ sourceId: row.sourceId, kind: link.kind, ...(link.digest !== undefined ? { digest: link.digest } : {}) })
+      }
+    }
+    return { refs, isComplete: verified.isComplete }
+  }
+
+  /**
+   * 指向 id 的链接，只按派生库的目标索引查（见 MemoryTable.indexedLinksTo）：核对过的层不列目录、不取文件签名。
+   * 还没核对过的层（新机器、删库之后、整份核对还没轮到的项目）这一次按签名核对一遍，顺带记下核对过，以后就只查索引。
+   * 没有派生库、库这一次用不了时退回 linksTo。目录、文件读不全时结果标成不完整。
+   * 在写入段里跑（调用方已在段里就是段内再进）：核对结果写回库时，不会有并发的写入在列目录和写回之间插进来。
+   */
+  indexedLinksTo(id: string, dirs: readonly string[]): Promise<LinkQuery> {
+    return this.lock.run(() => this.indexedLinksToLocked(id, dirs))
+  }
+
+  private async indexedLinksToLocked(id: string, dirs: readonly string[]): Promise<LinkQuery> {
+    if (this.index === undefined) return this.linksTo(id, dirs)
+    const { scopeDirs, directoryNotes } = await this.resolveDirs([...new Set(dirs)])
+    const levels = scopeDirs.flatMap(({ dir, loc }) => [dir, join(dir, ARCHIVE_DIR)].map(level => ({ level, dir, loc })))
+    const found = this.index.linksToTarget(id, levels.map(l => l.level))
+    if (found === undefined) return this.linksTo(id, dirs)
+    const unreconciled = new Set(found.unreconciled)
+    const refs: LinkRef[] = found.refs.filter(r => !unreconciled.has(r.level)).map(({ level: _level, ...ref }) => ref)
+    let isComplete = !directoryNotes.some(isIncompleteNote)
+    for (const { level, dir, loc } of levels.filter(l => unreconciled.has(l.level))) {
+      const verified = await this.verifiedRefsTo(id, level, dir, loc, true)
+      if (!verified.isComplete) isComplete = false
+      refs.push(...verified.refs)
+    }
+    return { refs: sortLinkRefs(refs), isComplete }
+  }
+
+  /**
+   * 一层里每个记忆文件的链接行，按文件签名核对过：记着的签名和文件现在的一样才用，其余重读。目录读不了、有文件读不出时 isComplete 为假。
+   * isLocked：调用方在写锁里，才把核对结果写回库、记下核对过；不在锁里只读（读不全时让核对标记作废，只往保守方向走）。
+   */
+  private async verifiedLinkRows(level: string, dir: string, loc: FileLocation, isLocked: boolean): Promise<{ rows: LinkFileRow[]; isComplete: boolean }> {
+    const listed = await this.listMemoryFiles(level)
+    if ('note' in listed) {
+      // 目录读不了：库里这一层记着的不再算核对过
+      this.index?.doubtLinkLevel(level)
+      return { rows: [], isComplete: false }
+    }
+    const names = listed.names.sort()
+    // 刚被删、不是普通文件的记空串；别的错（没有权限）记 undefined，这一层不算读全
+    const sigs = await Promise.all(names.map(name => stat(join(level, name)).then(
+      st => (st.isFile() ? sigOf(st) : ''), (err: unknown) => (errnoCode(err) === 'ENOENT' ? '' : undefined),
+    )))
+    const known = new Map((this.index?.linkRows(level) ?? []).map(r => [r.name, r]))
+    const rows: LinkFileRow[] = []
+    const fresh: LinkFileRow[] = []
+    let isComplete = true
+    for (const [i, name] of names.entries()) {
+      const sig = sigs[i]
+      if (sig === undefined) { isComplete = false; continue }
+      if (sig === '') continue   // 刚被删、不是普通文件
+      const kept = known.get(name)
+      if (kept !== undefined && kept.sig === sig) { rows.push(kept); continue }
+      const read = await this.readMemoryFile(join(level, name), dir, loc, NO_PREFILTER, new Map())
+      // 读不出、解析不了的文件里可能有链接：不当成没有
+      if (read !== undefined && 'quarantined' in read) { isComplete = false; continue }
+      // 签名取在读内容之前：读的途中又被改过，下次核对签名对不上再重读
+      const row = linkRowOf(name, read !== undefined ? read.slot.statSig : sig, read?.slot.record)
+      rows.push(row)
+      fresh.push(row)
+    }
+    // 没读全：原来记着的核对作废
+    if (!isComplete) this.index?.doubtLinkLevel(level)
+    if (!isLocked) return { rows, isComplete }
+    const present = new Set(names)
+    const removed = [...known.keys()].filter(name => !present.has(name))
+    // 整层都核对到了：库里补完就是整层的样子，没记过核对的这次记上
+    const isNewlyWhole = isComplete && this.index?.isLinkLevelReconciled(level) === false
+    if (fresh.length > 0 || removed.length > 0 || isNewlyWhole) this.index?.patchLinks(level, removed, fresh, isComplete)
+    return { rows, isComplete }
+  }
+
+  /**
+   * 写入方把自己动到的文件的链接直接记进派生库：删掉、搬走的去掉；写下的文件重读一遍，签名和链接出自读到的同一份内容
+   * （提交之后、记链接之前文件被手改过，记下的就是手改后的样子，不会把新签名配上提交时的链接）。读不出的这一条不记，留给查询时按签名核对。
+   */
+  private async noteLinks(changes: ReadonlyArray<{ path: string; id?: string }>, key: string, loc: FileLocation): Promise<void> {
+    const index = this.index
+    if (index === undefined) return
+    for (const change of changes) {
+      const level = dirname(change.path)
+      const name = basename(change.path)
+      if (change.id === undefined) { index.patchLinks(level, [name], []); continue }
+      if (change.id !== key) continue
+      const read = await this.readMemoryFile(change.path, layerDirOf(level), loc, NO_PREFILTER, new Map())
+      if (read === undefined || 'quarantined' in read) {
+        index.patchLinks(level, [name], [])
+        // 刚写下的文件读不出：它的链接不知道，这一层不再算核对过
+        if (read !== undefined) index.doubtLinkLevel(level)
+        continue
+      }
+      index.patchLinks(level, [], [linkRowOf(name, read.slot.statSig, read.slot.record)])
+    }
+  }
+
   // —— 写侧（锁内）——
 
   async maintain(dirs: string[]): Promise<void> {
@@ -792,6 +925,12 @@ export class FileTable implements MemoryTable {
         const rows = slots.filter(s => dirname(s.filePath) === level).map(s => [basename(s.filePath), s.record.id, s.statSig] as const)
         // 文件名列表的摘要不知道（读目录时不留名单）：记空串，下次目录有变时逐个核对一遍再补上
         this.index?.replaceLevel(level, { ...at, scannedAt, listing: '' }, rows, priorRevs[i])
+      }
+      // 链接反向索引整层重记：手改文件加的关联、旧版本写下的都按这次读到的补进来。
+      // 没读全（有文件读不出、目录读不了）时不整层重记，原来记着的核对作废，按目标查时再按文件核对
+      for (const level of [sd.dir, archive]) {
+        if (isLayerComplete) this.index?.replaceLinks(level, slots.filter(s => dirname(s.filePath) === level).map(s => linkRowOf(basename(s.filePath), s.statSig, s.record)))
+        else this.index?.doubtLinkLevel(level)
       }
       const kept: LocatedRecord[] = []
       const purged = new Set<Slot>()
@@ -1488,6 +1627,7 @@ export class FileTable implements MemoryTable {
       removedFrom.delete(dir)
       for (const other of removedFrom) await this.dropIndexMember(other, key)
       await this.settleHints(current, changes)
+      await this.noteLinks(changes, key, next.scope === 'global' ? { scope: 'global' } : { scope: 'workspace', workspacePath: next.workspacePath! })
       // 调用方给的操作还有账要记，由它做完再结（finishOp）；自己建的到这里就做完了
       if (isHistoryPending && given !== undefined && this.isJournaling()) this.unfinishedOwn.set(op.id, [historyMove!])
       if (given === undefined && !isHistoryPending) this.endOp(op.id)

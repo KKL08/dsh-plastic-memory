@@ -3,8 +3,8 @@ import type { MemoryRecord } from './record-schema.ts'
 import { RecordNotFoundError } from './errors.ts'
 import { expandQueryTerms, matchScore } from './text.ts'
 import {
-  byPosition, resolveLiveFirst,
-  type MemoryLogger, type MemoryTable, type LocateTarget, type LocateOptions, type ScopeReadOptions, type ScopeReadResult, type KeywordMatch,
+  byPosition, outgoingLinks, resolveLiveFirst, sortLinkRefs,
+  type LinkQuery, type MemoryLogger, type MemoryTable, type LocateTarget, type LocateOptions, type ScopeReadOptions, type ScopeReadResult, type KeywordMatch,
   type DirectoryNote, type QuarantineEntry, type OpStep, type OpStepHandler, type WriteOp, type IndexOpOptions, type IndexOpOutcome, type IndexUndoOutcome,
 } from './storage/table.ts'
 import type { BatchKvTable } from './kv-table.ts'
@@ -258,6 +258,47 @@ export class MemoryStore {
   /** 一个索引操作是不是提交了、还有步骤等着补做（见 MemoryTable.isOpPending）。 */
   isOpPending(op: string): boolean {
     return this.table.isOpPending?.(op) ?? false
+  }
+
+  /**
+   * 指向这条记忆的链接（前提、相关、取代，含归档里被取代、删除的记忆指过来的）。看的范围是能指向它的全部目录：
+   * 项目记忆看本项目；全局记忆看全局和所有项目（项目记忆的关联和前提可以指向全局）。
+   * 完整查询：按文件签名核对，手改了还没整份核对的也算进来；给界面和要看全貌的功能用。查不全时 isComplete 为假。
+   */
+  async linksTo(id: string, scope: Scope): Promise<LinkQuery> {
+    const { dirs, isListed } = await this.linkDirsOf(scope)
+    const found = this.table.linksTo !== undefined ? await this.table.linksTo(id, dirs) : await this.readLinksTo(id, dirs)
+    return isListed ? found : { ...found, isComplete: false }
+  }
+
+  /**
+   * 同 linksTo 的范围，只按派生库的目标索引查，不逐层列目录、不逐个文件取签名：写锁内要快的判断用它（被前提引用的版本一律留档）。
+   * 插件自己写入的链接写完就在；手改文件加的要到下次整份核对才算进来。没核对过的层、库用不了又读不全时 isComplete 为假。
+   */
+  async indexedLinksTo(id: string, scope: Scope): Promise<LinkQuery> {
+    if (this.table.indexedLinksTo === undefined) return this.linksTo(id, scope)
+    const { dirs, isListed } = await this.linkDirsOf(scope)
+    const found = await this.table.indexedLinksTo(id, dirs)
+    return isListed ? found : { ...found, isComplete: false }
+  }
+
+  /** 反向查询看的目录：全局记忆看全局和所有项目，项目记忆看本项目。列项目目录失败时 isListed 为假。 */
+  private async linkDirsOf(scope: Scope): Promise<{ dirs: string[]; isListed: boolean }> {
+    if (scope.kind === 'global') {
+      const listing = await this.table.listWorkspaceDirs()
+      return { dirs: [this.table.globalDir, ...listing.entries.map(e => e.dir)], isListed: !listing.directoryNotes.some(n => n.code === 'dir-unreadable') }
+    }
+    const own = await this.table.workspaceDirs(scope.workspacePath)
+    return { dirs: own.dirs, isListed: own.directoryNotes.length === 0 }
+  }
+
+  /** 表不提供反向查询时逐个读目录算。 */
+  private async readLinksTo(id: string, dirs: string[]): Promise<LinkQuery> {
+    const read = await this.table.readScope(dirs, { includeArchive: true })
+    const refs = sortLinkRefs(read.records.flatMap(({ record }) => outgoingLinks(record)
+      .filter(link => link.targetId === id)
+      .map(link => ({ sourceId: record.id, kind: link.kind, ...(link.digest !== undefined ? { digest: link.digest } : {}) }))))
+    return { refs, isComplete: read.quarantined.length === 0 && !read.directoryNotes.some(n => n.code === 'dir-unreadable') }
   }
 
   /** 维护点入口（快照冻结时调用）：scope 决定维护哪些目录；未解析 workspace 时只有 global。 */

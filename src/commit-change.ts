@@ -7,6 +7,7 @@ import { layerOf, newVersionId, STATE_CHANGE_VERSION, type HistoryVersion } from
 import { newWriteOp, type OpStep, type OpStepHandler } from './storage/table.ts'
 import { scopeOfMemory } from './scope.ts'
 import { toToolOutput } from './output.ts'
+import { isCurrentPremise } from './links.ts'
 
 /** 合并窗口的缺省长度：同一会话在这段时间里接连做的状态变化只留一次档。配置项 history.mergeWindowMinutes。 */
 export const MERGE_WINDOW_MINUTES_DEFAULT = 60
@@ -169,9 +170,11 @@ export async function commitChange<Stop = never>(input: CommitChangeInput<Stop>,
         const windowMs = deps.mergeWindowMs ?? MERGE_WINDOW_MINUTES_DEFAULT * 60_000
         // 接着改才并：当前这一版得是那个版本最后一笔写下的。中间别人改过正文（另一个会话纠错、界面里改）就另留一版，不然中间那一版哪里都不剩
         const lastWrite = last?.writes.at(-1)
+        // 当前这一版被某条决定引用为前提时也另留一版：决定依据的那个状态要留得住
         const isMerged = last !== undefined && last.kind === STATE_CHANGE_VERSION && input.sessionId !== undefined
           && last.sessionId === input.sessionId && at >= last.endedAt && at - last.endedAt < windowMs
           && lastWrite !== undefined && target.lastChange?.op === lastWrite.op && target.updatedAt === lastWrite.at
+          && !(await isCurrentPremise(store, target))
         history = {
           kind: HISTORY_STEP,
           mode: isMerged ? 'append' : 'archive',

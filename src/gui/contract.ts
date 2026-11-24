@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { memoryRecordSchema } from '../record-schema.ts'
+import { linkIdsSchema, memoryRecordSchema } from '../record-schema.ts'
 import { sameScope, scopeKey, scopeOfMemory, scopeSchema, type Scope } from '../scope.ts'
 import {
   CHECKUP_CAUSE_KINDS, CHECKUP_INITIATORS, DIRECTORY_NOTE_CODES, IGNORABLE_ADVICE_TYPES, MODEL_CHANGE_KINDS, OVERFLOW_MODES, PROPOSAL_ACTIONS, RETIRED_SCAN_NOTE_CODES, SCAN_NOTE_CODES,
@@ -1127,6 +1127,10 @@ export type GuiErrorCode = (typeof GUI_ERROR_CODES)[number]
 /** 说明界面落后于磁盘的失败码（卡片版本对不上、要动的已经不在）：什么都没动，但服务端会重写一次视图，客户端随之重读。 */
 export const VIEW_BEHIND_CODES: ReadonlySet<GuiErrorCode> = new Set(['stale', 'not-found'])
 
+/** 换作用域时越界去掉的关联和前提，一条记忆一项（只有 id）。 */
+export const droppedLinksSchema = linkIdsSchema.extend({ id: z.string() })
+export type DroppedLinksEntry = z.infer<typeof droppedLinksSchema>
+
 export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
   z.object({
     ok: z.literal(true),
@@ -1186,6 +1190,11 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
     organized: z.object({ applied: z.number().int().nonnegative(), skipped: z.number().int().nonnegative() }).optional(),
     /** undo 撤销一次整理索引：之后又被改过、没撤的操作数；全部撤掉时缺省。 */
     undoSkipped: z.number().int().positive().optional(),
+    /**
+     * promote、promote-memory（提升为全局）、move-memory（全局移到项目）：换了作用域之后够不着、去掉的关联和前提；
+     * undo（撤销提升、撤销移到项目）：放回原作用域后仍够不着、去掉的。没去掉的时候缺省。
+     */
+    droppedLinks: z.array(droppedLinksSchema).optional(),
     /** list-models：能选的模型，按提供方分组。 */
     providers: modelChoicesSchema.optional(),
     /** migrate-type：这次改了类型或移到最近删除的条数。 */

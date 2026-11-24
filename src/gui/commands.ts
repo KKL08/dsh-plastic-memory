@@ -14,7 +14,7 @@ import {
 } from '../governance/decisions.ts'
 import { isModelChange } from '../governance/undo-rules.ts'
 import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
-import { genId, kindOf, type MemorySnapshot, type PendingDecision, type ProposalOp, type ScanCacheEntry, type SnapshotRecord, type SuggestionBasis } from '../governance/schema.ts'
+import { genId, kindOf, type LinkIds, type MemorySnapshot, type PendingDecision, type ProposalOp, type ScanCacheEntry, type SnapshotRecord, type SuggestionBasis } from '../governance/schema.ts'
 import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import { baselineFor, type ReadInstructions } from '../governance/instructions.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
@@ -22,14 +22,15 @@ import type { AutoCheckupSettingStore } from '../governance/auto-checkups.ts'
 import { listModelChoices, type ModelSelectionStore } from '../governance/background-llm.ts'
 import { executeConfirm, type ConfirmOptions } from '../tools/confirm.ts'
 import { executeForget } from '../tools/forget.ts'
-import { executePromote } from '../tools/promote.ts'
+import { executePromote, type PromoteResult } from '../tools/promote.ts'
+import { hasDropped, linksOutside, withoutLinks } from '../links.ts'
 import { executeUndo, restoreDeleted, type UndoResult } from '../tools/undo.ts'
 import {
   copyHistory, crossWorkspaceNote, gateRecords, locateCopy, workspaceLabel, type CrossWorkspaceRejection, type GovernanceContext,
 } from '../tools/workspace-gate.ts'
 import {
   GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, VIEW_BEHIND_CODES, mergeKeeperIndex, parseMemoryCommand, sessionViewFile, verdictOfAction,
-  type ApplyEditOp, type DraftPlanOp, type GuiErrorCode, type MemoryCommand, type MemoryCommandResult, type ProposalSource, type RequestedProposal,
+  type ApplyEditOp, type DraftPlanOp, type DroppedLinksEntry, type GuiErrorCode, type MemoryCommand, type MemoryCommandResult, type ProposalSource, type RequestedProposal,
 } from './contract.ts'
 import type { ViewWriter } from './view-writer.ts'
 import { generateDraft } from './model-draft.ts'
@@ -205,9 +206,24 @@ function candidateCopy(entry: PendingDecision): { target?: Scope } {
   return scope?.kind === 'workspace' ? { target: scope } : {}
 }
 
-/** 撤销的是直接改、直接合并、模型改写与替代：改本身不受体检开关影响，撤销也不受。 */
+/** 撤销的是直接改、直接合并、模型改写与替代、只挂关联：改本身不受体检开关影响，撤销也不受。 */
 async function isEditUndo(decisions: PendingDecisionsStore, command: MemoryCommand): Promise<boolean> {
-  return command.cmd === 'undo' && (await decisions.listSettled()).some(d => d.id === command.decisionId && (kindOf(d) === 'edit' || kindOf(d) === 'index-organize' || isModelChange(d)))
+  return command.cmd === 'undo' && (await decisions.listSettled()).some(d => d.id === command.decisionId
+    && (kindOf(d) === 'edit' || kindOf(d) === 'index-organize' || kindOf(d) === 'link' || isModelChange(d)))
+}
+
+/** 命令结果里的 droppedLinks：没去掉的时候不带这个字段。 */
+function droppedField(entries: readonly DroppedLinksEntry[]): { droppedLinks?: DroppedLinksEntry[] } {
+  return entries.length > 0 ? { droppedLinks: [...entries] } : {}
+}
+
+/** 提升为全局结清时记下的：改前快照，和越界去掉的关联、前提（撤销时核对全局那份要用）。 */
+function promotedSettle(r: PromoteResult): { snapshotId?: string; droppedLinks?: LinkIds } {
+  const dropped = r.droppedLinks[0]
+  return {
+    ...(r.snapshotId !== null ? { snapshotId: r.snapshotId } : {}),
+    ...(dropped !== undefined ? { droppedLinks: { related: dropped.related, premises: dropped.premises } } : {}),
+  }
 }
 
 /** 记忆和卡片加载时的版本对不上：updatedAt 变了（插件写过），或卡片内容指纹变了（手改过文件）。 */
@@ -465,7 +481,10 @@ async function dispatch(
   const undoDeps = { store: deps.store, decisions: deps.decisions, snapshots: deps.snapshots, ignores: deps.ignores, now: () => deps.now?.() ?? Date.now() }
   const fromUndo = (r: UndoResult): MemoryCommandResult => (r.kind === 'error'
     ? fail(cmd, r.code, r.message, r.rejected)
-    : { ok: true, cmd, decisionId: r.decisionId, memoryIds: r.restored, ...(r.snapshotId !== undefined ? { snapshotId: r.snapshotId } : {}), ...(r.skipped !== undefined ? { undoSkipped: r.skipped } : {}) })
+    : {
+        ok: true, cmd, decisionId: r.decisionId, memoryIds: r.restored, ...(r.snapshotId !== undefined ? { snapshotId: r.snapshotId } : {}), ...(r.skipped !== undefined ? { undoSkipped: r.skipped } : {}),
+        ...droppedField(r.droppedLinks ?? []),
+      })
 
   const settledEntry = async (id: string) => (await deps.decisions.listSettled()).find(d => d.id === id)
   const openEntryOfKind = async (id: string, kind: ReturnType<typeof kindOf>): Promise<PendingDecision | Err> => {
@@ -494,7 +513,7 @@ async function dispatch(
   }
 
   /** 结清这次提升或留下，返回条目 id。 */
-  type SettleCandidate = (verdict: 'promoted' | 'keep-local', opts: { snapshotId?: string; fingerprint?: string; misplacedIgnore?: MisplacedIgnore }) => Promise<string>
+  type SettleCandidate = (verdict: 'promoted' | 'keep-local', opts: { snapshotId?: string; fingerprint?: string; misplacedIgnore?: MisplacedIgnore; droppedLinks?: LinkIds }) => Promise<string>
   /** 写进 AGENTS.md 后插件不再管理它：有条目就移出账本（返回它的 id），没有就什么都不记。 */
   type DropCandidate = () => Promise<string | undefined>
 
@@ -787,9 +806,9 @@ async function dispatch(
       if (r.taken.length > 0) return fail(cmd, 'target-taken', r.message)
       if (r.promoted.length === 0) return fail(cmd, 'failed', r.message)
       // 提升为全局留账供 14 天内撤销；写进 AGENTS.md 后插件不再管理它，条目移出账本
-      if (command.target === 'global') await deps.decisions.settle(entry.id, 'promoted', now, r.snapshotId !== null ? { snapshotId: r.snapshotId } : {})
+      if (command.target === 'global') await deps.decisions.settle(entry.id, 'promoted', now, promotedSettle(r))
       else await deps.decisions.remove(entry.id)
-      return { ok: true, cmd, decisionId: entry.id, memoryIds: r.promoted.map(p => p.id), ...(r.snapshotId !== null ? { snapshotId: r.snapshotId } : {}) }
+      return { ok: true, cmd, decisionId: entry.id, memoryIds: r.promoted.map(p => p.id), ...(r.snapshotId !== null ? { snapshotId: r.snapshotId } : {}), ...droppedField(r.droppedLinks) }
     }
 
     case 'promote-memory': {
@@ -807,8 +826,8 @@ async function dispatch(
         if (r.rejected.length > 0) return fail(cmd, 'cross-workspace', r.message, r.rejected)
         if (r.taken.length > 0) return fail(cmd, 'target-taken', r.message)
         if (r.promoted.length === 0) return fail(cmd, 'failed', r.message)
-        const decisionId = target === 'global' ? await settle('promoted', r.snapshotId !== null ? { snapshotId: r.snapshotId } : {}) : await drop()
-        return { ok: true, cmd, ...(decisionId !== undefined ? { decisionId } : {}), memoryIds: r.promoted.map(p => p.id), ...(r.snapshotId !== null ? { snapshotId: r.snapshotId } : {}) }
+        const decisionId = target === 'global' ? await settle('promoted', promotedSettle(r)) : await drop()
+        return { ok: true, cmd, ...(decisionId !== undefined ? { decisionId } : {}), memoryIds: r.promoted.map(p => p.id), ...(r.snapshotId !== null ? { snapshotId: r.snapshotId } : {}), ...droppedField(r.droppedLinks) }
       })
     }
 
@@ -833,20 +852,36 @@ async function dispatch(
         return fail(cmd, 'target-taken', `${workspacePath} 里已有记忆 ${rec.id}，未做任何改动`)
       }
       const snapshot = await deps.snapshots.capture({ operation: 'pre-update', description: `把记忆 ${rec.id} 从全局移到 ${workspacePath} 前`, records: [rec] }, now)
-      // 只搬全局这一份（只认层）：内容、id、出处、时间戳不动；撞名由文件表按规则换文件名
+      // 只搬全局这一份（只认层）：内容、id、出处、时间戳不动；撞名由文件表按规则换文件名。
+      // 在写入段里按目标项目重验关联和前提：指向别的项目的（手改出来的）去掉。
+      // 按快照里的这一版算：锁内内容和它不一样（期间被改过）就不搬、不记账，算出来的、记下的就是实际搬走的那一版
       let written: MemoryRecord | undefined
+      let isChangedInLock = false
+      let dropped: LinkIds = { related: [], premises: [] }
       try {
-        written = await deps.store.update(rec, (cur) => {
-          if (cur.status !== 'active') throw new RecordNotFoundError(cur.id)
-          return { ...cur, scope: 'workspace', workspacePath }
-        }, { kind: 'global' })
+        written = await deps.store.writeSection(async () => {
+          dropped = await linksOutside(deps.store, rec, { kind: 'workspace', workspacePath })
+          return deps.store.update(rec, (cur) => {
+            if (cur.status !== 'active') throw new RecordNotFoundError(cur.id)
+            if (editFingerprint(cur) !== editFingerprint(rec)) {
+              isChangedInLock = true
+              throw new RecordNotFoundError(cur.id)
+            }
+            return { ...withoutLinks(cur, dropped), scope: 'workspace', workspacePath }
+          }, { kind: 'global' })
+        })
       } catch (error) {
         if (!(error instanceof RecordNotFoundError)) throw error
       }
+      if (isChangedInLock) return fail(cmd, 'stale', '这条记忆刚被改过，界面已换成最新内容。未做任何改动')
       if (written === undefined) return notFound(memoryId)
-      const entry = await deps.decisions.addMove(written, { summary: rec.summary, workspace: workspacePath }, snapshot.id, now)
+      // 去掉的记进账本：撤销时从改前快照放回去
+      const entry = await deps.decisions.addMove(written, { summary: rec.summary, workspace: workspacePath, ...(hasDropped(dropped) ? { droppedLinks: dropped } : {}) }, snapshot.id, now)
       const located = await deps.store.locate(rec.id, scopeAt(workspacePath))
-      return { ok: true, cmd, decisionId: entry.id, memoryIds: [rec.id], snapshotId: snapshot.id, ...(located !== undefined ? { filePath: located.filePath } : {}) }
+      return {
+        ok: true, cmd, decisionId: entry.id, memoryIds: [rec.id], snapshotId: snapshot.id, ...(located !== undefined ? { filePath: located.filePath } : {}),
+        ...droppedField(hasDropped(dropped) ? [{ id: rec.id, ...dropped }] : []),
+      }
     }
 
     case 'keep-local': {

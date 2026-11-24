@@ -22,6 +22,7 @@ export type RejectCode =
   | 'edit-ambiguous'       // edits 某处的 oldString 命中多处又没带 replaceAll
   | 'change-kind-missing'  // update 没声明改动性质（change）：回引导（当前内容和三个判断问题）、不写入；同一会话对同一条再缺一次就按状态变化写
   | 'subagent-restricted'  // 子 agent 会话（delegationDepth ≥ 1）越过写入约束：依据、类型、替代、force、allowSecret、改写归属、新建配额，原因按条区分
+  | 'link-invalid'         // related、premises 指向的记忆不存在、不在用、越过作用域（全局只能指向全局，项目只能指向本项目和全局）、指向自己，或追加后超过上限
   | 'not-user-initiated'   // 这一轮不是用户本人开的（定时任务、别的 agent，或宿主给不出发起方），sourceMode 只能填 environment-observed、agent-inferred
 
 /** 本插件注册的工具名：它们的结果来自记忆本身，不算保存时的工具证据。 */
@@ -65,6 +66,8 @@ export type WarningCode =
   | 'subagent-scope-local'    // 子 agent 填 global：落当前项目、不标提升候选
   | 'change-kind-assumed'     // update 两次都没声明改动性质：按状态变化写了，改前的内容留成历史版本
   | 'corroborate-fields-ignored' // 补证带了正文等内容参数：没有生效
+  | 'link-only-params-ignored' // 只挂关联、前提的 update 带了 scope、confidence、change 这类参数：没有生效
+  | 'links-empty'             // 只挂关联、前提的 update 给的是空列表：没有要挂的，什么都没写
   | 'edit-rebased'            // 精确修改保存期间正文被别处改过：改在了最新正文上，附合并后的全文
 
 /** memory_scan 的说明性 note（scan.ts）。 */
