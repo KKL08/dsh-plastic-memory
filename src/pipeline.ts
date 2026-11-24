@@ -7,7 +7,7 @@ import { applyChange, initialProvenance, type ChangeAnchor, type ChangeFields } 
 import { commitChange, isSameRecord } from './commit-change.ts'
 import { UNKNOWN_SESSION_ID } from './session-id.ts'
 import { anchorRangeOf, type AnchorFacts } from './session-log.ts'
-import type { MemoryStore } from './store.ts'
+import type { MemoryStore, QueryScope } from './store.ts'
 import { newWriteOp } from './storage/table.ts'
 import { MODEL_CHANGE_STEP, ledgerSteps, modelChangeStep } from './governance/op-steps.ts'
 import type { TypeRegistry } from './type-registry.ts'
@@ -71,10 +71,12 @@ export type PipelineResult =
 /**
  * 同一个拒绝码下再分的内部子码：只给测试和日志区分分支，不是工具契约的稳定标识符（稳定码见 contract-codes.ts）。
  * changed-after-read：update 读到目标之后、写入之前，目标被别处改过或删掉了，这次没写。
+ * target-superseded：update 的目标已被取代（回 target-missing），原因指出取代它的那条。
  * subagent-*：子 agent 写入约束的各条（都回 subagent-restricted），见 checkSubagentWrite。
  */
 export type SaveRejectSubcode =
   | 'changed-after-read'
+  | 'target-superseded'
   | 'subagent-source-mode'
   | 'subagent-type'
   | 'subagent-supersedes'
@@ -136,12 +138,15 @@ function isConfirmCodeMatch(given: string | undefined, code: string): boolean {
   return CONFIRM_CODE_INPUT.test(text) && text.padStart(CONFIRM_CODE_DIGITS, '0') === code
 }
 
+/** 引导文字里点名一条记忆用的名称：会进模型上下文，疑似密钥也遮；压成一行。 */
+const guideName = (r: MemoryRecord) => maskSecretSurface(r, { severity: 'suspected' }).name.replace(/\s+/g, ' ').trim()
+
 /**
  * 项目会话里改全局记忆、确认码缺省或不对时回给模型的引导（renderSaveResult 前面接「未保存：」）。点名这条记忆、带上它现在的码，
  * 同时改几条时模型分得清哪个码给哪条；码不对时先说明，模型照着新码重发一次就能写。
  */
 export function globalUpdateGuide(target: MemoryRecord, code: string, given: string | undefined): string {
-  const name = maskSecretSurface(target, { severity: 'suspected' }).name.replace(/\s+/g, ' ').trim()
+  const name = guideName(target)
   const stale = given === undefined ? '' : `确认码 ${JSON.stringify(given)} 不是这条记忆现在的码（码按会话和记忆的当前内容生成，改过或换了会话就会变）。`
   return `${stale}「${name}」（${target.id}）是全局记忆，改动会影响所有项目。只适用于本项目的内容，改用 action=create、scope=workspace 另存一条项目记忆，全局这条保持原样；`
     + `确认仍适用于所有项目，对这条记忆重发这次 update，并填写 confirmGlobal: "${code}"。`
@@ -200,15 +205,40 @@ type Rejection = { code: RejectCode; subcode?: SaveRejectSubcode; reason: string
 /**
  * update 目标能不能改，能改时原样交回：不存在、已删除回 target-missing；workspace 记忆只能在其所属项目里更新（deps.workspacePath 为 undefined
  * 的无 cwd 会话也落此拦截），global 目标不受限——例行维护全局记忆是设计意图（快照先行兜底）。
+ * 已被取代的也回 target-missing：它不再带入，改了用不上、也撤不了，原因指出取代它的那条。只有这一支多读一次存储。
+ * 子 agent 会话不走这一支：它改不了别人的记录，指路也照做不了，交给归属检查和写入段里的复核。
  */
-function checkUpdateTarget(id: string | undefined, target: MemoryRecord | undefined, workspacePath: string | undefined): { target: MemoryRecord } | Rejection {
+async function checkUpdateTarget(id: string | undefined, target: MemoryRecord | undefined, deps: Pick<PipelineDeps, 'store' | 'workspacePath' | 'delegation'>): Promise<{ target: MemoryRecord } | Rejection> {
+  const { workspacePath } = deps
   if (!target || target.status === 'deleted') {
     return { code: 'target-missing', reason: `更新目标不存在或已删除：${id ?? '(缺 id)'}` }
   }
   if (target.scope === 'workspace' && target.workspacePath !== workspacePath) {
     return { code: 'cross-workspace', reason: `不能跨项目修改其他 workspace 的记忆：目标属于 ${target.workspacePath ?? '(未知项目)'}，当前会话在 ${workspacePath ?? '(无工作目录)'}。请在该项目的会话里更新。` }
   }
+  if (target.status === 'superseded' && deps.delegation === undefined) {
+    return { code: 'target-missing', subcode: 'target-superseded', reason: await supersededGuide(target, deps.store) }
+  }
   return { target }
+}
+
+/** 已被取代的目标最多列几条取代者。 */
+const SUCCESSOR_LIMIT = 3
+
+/**
+ * 更新目标已被取代时回给模型的原因：列出同一作用域里取代它的在用记忆，让模型改去更新那条；找不到就请它先检索。
+ */
+async function supersededGuide(target: MemoryRecord, store: MemoryStore): Promise<string> {
+  const scope: QueryScope = target.scope === 'workspace' ? { kind: 'workspace', workspacePath: target.workspacePath ?? '' } : { kind: 'global' }
+  const successors = (await store.query({ scope, status: ['active'] }))
+    .filter(r => r.supersedes?.includes(target.id))
+    .slice(0, SUCCESSOR_LIMIT)
+  const head = `记忆 ${target.id} 已被取代，不再使用。`
+  if (successors.length === 0) return `${head}先用 memory_search 找到在用的那条，再对它重发这次 update。`
+  const listed = successors
+    .map(r => `「${guideName(r)}」（${r.id}）`)
+    .join('、')
+  return `${head}取代它的是${listed}；把 id 换成${successors.length > 1 ? '其中要改的那条' : '它'}，重发这次 update。`
 }
 
 const WHOLE_WRITE_REQUIRED = ['name', 'type', 'scope', 'content', 'summary'] as const
@@ -262,7 +292,7 @@ async function resolveInput(input: SaveInput, deps: PipelineDeps): Promise<{ can
   // 子 agent 先看能不能改这条，再比对原文：改不了的不回找不到原文、不贴正文让它重试
   const notWritable = deps.delegation ? subagentTargetProblem(input.id ?? '(缺 id)', read, deps.session.id) : undefined
   if (notWritable !== undefined) return notWritable
-  const checked = checkUpdateTarget(input.id, read, deps.workspacePath)
+  const checked = await checkUpdateTarget(input.id, read, deps)
   if ('code' in checked) return checked
   const { target } = checked
   const applied = editTarget(target, edits)
@@ -290,7 +320,7 @@ async function resolveCorroboration(input: SaveInput, deps: PipelineDeps): Promi
   const read = input.id === undefined ? undefined : await deps.store.get(input.id, { workspacePath: deps.workspacePath })
   const notWritable = deps.delegation ? subagentTargetProblem(input.id ?? '(缺 id)', read, deps.session.id) : undefined
   if (notWritable !== undefined) return notWritable
-  const checked = checkUpdateTarget(input.id, read, deps.workspacePath)
+  const checked = await checkUpdateTarget(input.id, read, deps)
   if ('code' in checked) return checked
   const { target } = checked
   const candidate: SaveCandidate = {
@@ -507,7 +537,7 @@ export async function runSavePipeline(
     // 精确修改用算新正文时的那份读数，不再读一次：之后正文被别处改过，写入时在最新正文上重做
     const checked = resolved.base !== undefined
       ? { target: resolved.base }
-      : checkUpdateTarget(candidate.id, candidate.id ? await store.get(candidate.id, { workspacePath: deps.workspacePath }) : undefined, deps.workspacePath)
+      : await checkUpdateTarget(candidate.id, candidate.id ? await store.get(candidate.id, { workspacePath: deps.workspacePath }) : undefined, deps)
     if ('code' in checked) return { kind: 'rejected', ...checked }
     target = checked.target
     // scope 不随 update 变更——否则例行内容更新会把用户确认提升过的 global 记忆

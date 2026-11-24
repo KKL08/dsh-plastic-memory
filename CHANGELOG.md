@@ -187,6 +187,10 @@ All notable changes to this project are documented here. The format follows
 - Hiding secrets in a memory that held tens of thousands of secret-like
   values took time that grew with the square of their number. It now grows
   in step with the length of the text.
+- When the model updated a memory that another memory had already replaced,
+  the change was reported as saved but went to a memory that is no longer
+  used and could not be undone. `memory_save` now refuses it and tells the
+  model which memory replaced it, so the update goes there instead.
 
 ## [0.2.0] - 2026-11-21
 

@@ -6,7 +6,7 @@
 /** memory_save 拒存原因（pipeline.ts）。 */
 export type RejectCode =
   | 'unknown-type'      // 类型不在注册表
-  | 'target-missing'    // update 目标不存在或已删除；或这次保存期间被别处删掉、改写（内部子码 changed-after-read，见 pipeline.ts）
+  | 'target-missing'    // update 目标不存在或已删除；已被取代（内部子码 target-superseded，原因指出取代它的那条）；或这次保存期间被别处删掉、改写（内部子码 changed-after-read，见 pipeline.ts）
   | 'cross-workspace'   // update 指向其他 workspace 的记忆
   | 'no-workspace'      // 无工作目录的会话 create（无处归属）
   | 'global-update-unconfirmed' // 项目会话里 update 全局记忆没带或带错确认码：回引导（含这条的确认码）、不写入；内容对所有项目都成立再带码重发
