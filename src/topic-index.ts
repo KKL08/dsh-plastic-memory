@@ -32,28 +32,41 @@ export interface Topic {
 }
 
 /** 主题名判同：去首尾空白、不分大小写。 */
-const keyOf = (name: string) => name.trim().toLowerCase()
+export const keyOf = (name: string) => name.trim().toLowerCase()
 const oneLine = (text: string) => text.replace(/\s*[\r\n]+\s*/g, ' ').trim()
 // 文件名当一个路径段编码：# 和 ? 留着会被读成链接的片段和查询，括号留着会提前结束 Markdown 链接
-const encodePath = (name: string) => encodeURIComponent(name).replace(/\(/g, '%28').replace(/\)/g, '%29')
-const decodePath = (path: string) => { try { return decodeURIComponent(path) } catch { return path } }
-const unescape = (text: string) => text.replace(/\\(.)/g, '$1')
+export const encodePath = (name: string) => encodeURIComponent(name).replace(/\(/g, '%28').replace(/\)/g, '%29')
+export const decodePath = (path: string) => { try { return decodeURIComponent(path) } catch { return path } }
+export const unescape = (text: string) => text.replace(/\\(.)/g, '$1')
 const byText = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
 
 // 记忆 id 没有固定写法（手建的文件可以自己起），标题属性里按带转义的引号串认
-const MEMBER_RE = /^(\s*[-*+] )\[(?:\\.|[^\]\\])*\]\(\s*\S+\s+"((?:\\.|[^"\\])+)"\s*\)/
-const HEADING_RE = /^(#{1,2}) +(.+?)\s*$/
+export const MEMBER_RE = /^(\s*[-*+] )\[(?:\\.|[^\]\\])*\]\(\s*\S+\s+"((?:\\.|[^"\\])+)"\s*\)/
+export const HEADING_RE = /^(#{1,2}) +(.+?)\s*$/
 /** 入口里链到主题页的标题：`## [主题名](topics/文件名)`。 */
-const LINKED_HEADING_RE = /^\[((?:\\.|[^\]\\])*)\]\((?:\.\/)?topics\/([^)\s]+)\)$/
-const ALIASES_RE = /^曾用名[：:](.*)$/
-const STAMP_RE = /^---\r?\nlastWriteOp: (\S+)\r?\n---\r?\n/
+export const LINKED_HEADING_RE = /^\[((?:\\.|[^\]\\])*)\]\((?:\.\/)?topics\/([^)\s]+)\)$/
+export const ALIASES_RE = /^曾用名[：:](.*)$/
+/** 页头：开头一段 `---` 围起来的「键: 值」行。代码只认 lastWriteOp（提交标记）和 createdAt（建页时刻）两个键，别的键原样留着。 */
+export const HEADER_RE = /^---\r?\n((?:[A-Za-z][A-Za-z0-9]*: \S+\r?\n)+)---\r?\n/
+const STAMP_KEY = 'lastWriteOp'
+const CREATED_KEY = 'createdAt'
+const headerValue = (text: string, key: string) => {
+  const header = HEADER_RE.exec(text)?.[1]
+  return header === undefined ? undefined : new RegExp(`^${key}: (\\S+)\\r?$`, 'm').exec(header)?.[1]
+}
+/** 写页头里的一个键（已有就替换），别的键和正文不动；页头的换行跟正文走。 */
+function withHeaderValue(text: string, key: string, value: string): string {
+  const eol = /\r\n/.test(text) ? '\r\n' : '\n'
+  const lines = (HEADER_RE.exec(text)?.[1] ?? '').split(/\r?\n/).filter(l => l !== '' && !l.startsWith(`${key}: `))
+  return `---${eol}${[`${key}: ${value}`, ...lines].join(eol)}${eol}---${eol}${text.replace(HEADER_RE, '')}`
+}
 const FENCE_RE = /^\s*(```|~~~)/
 
 /**
  * 逐行过一遍，标出哪些行在围栏代码块里（围栏那两行也算）：代码块里的东西是示例，不当标题、曾用名、成员行认。
  * 行尾的回车留在 line 里，原样写回去。
  */
-function scan(text: string): Array<{ line: string; isCode: boolean }> {
+export function scan(text: string): Array<{ line: string; isCode: boolean }> {
   let fence: string | undefined
   return text.split('\n').map(line => {
     const mark = FENCE_RE.exec(line)?.[1]
@@ -96,22 +109,31 @@ export function maskIndexText(text: string, mask: (text: string) => string): str
 
 /** 页头里的提交标记：最近一次改写这一页的操作 id；没有页头为 undefined。 */
 export function stampOf(text: string): string | undefined {
-  return STAMP_RE.exec(text)?.[1]
+  return headerValue(text, STAMP_KEY)
+}
+
+/** 页头里的建页时刻（毫秒）；没有（手建的页、早先建的页）为 undefined。 */
+export function createdAtOf(text: string): number | undefined {
+  const at = Date.parse(headerValue(text, CREATED_KEY) ?? '')
+  return Number.isNaN(at) ? undefined : at
+}
+
+export function withCreatedAt(text: string, at: number): string {
+  return withHeaderValue(text, CREATED_KEY, new Date(at).toISOString())
 }
 
 /** 把提交标记写进页头（已有就替换），正文不动；页头的换行跟正文走。 */
 export function withStamp(text: string, op: string): string {
-  const eol = /\r\n/.test(text) ? '\r\n' : '\n'
-  return `---${eol}lastWriteOp: ${op}${eol}---${eol}${text.replace(STAMP_RE, '')}`
+  return withHeaderValue(text, STAMP_KEY, op)
 }
 
-interface PageFacts { fileName: string; name: string; aliases: string[]; memberIds: string[] }
+export interface PageFacts { fileName: string; name: string; aliases: string[]; memberIds: string[] }
 
 function pageFacts(fileName: string, text: string): PageFacts {
   let name: string | undefined
   const aliases: string[] = []
   const memberIds: string[] = []
-  for (const row of scan(text.replace(STAMP_RE, ''))) {
+  for (const row of scan(text.replace(HEADER_RE, ''))) {
     if (row.isCode) continue
     const line = row.line.replace(/\r$/, '')
     const member = MEMBER_RE.exec(line)
@@ -128,9 +150,9 @@ function pageFacts(fileName: string, text: string): PageFacts {
  * 入口里的主题：二级标题和标题下的第一段（压成一行）。标题可以只写主题名（按名字对主题页），
  * 也可以写成链到主题页的链接（按文件对，主题改名、重名都不会对错页）；fileName 只有后一种有。
  */
-function entryTopics(entry: string): Array<{ name: string; fileName: string | undefined; about: string }> {
+export function entryTopics(entry: string): Array<{ name: string; fileName: string | undefined; about: string }> {
   const topics: Array<{ name: string; fileName: string | undefined; about: string[]; isClosed: boolean }> = []
-  for (const row of scan(entry.replace(STAMP_RE, ''))) {
+  for (const row of scan(entry.replace(HEADER_RE, ''))) {
     if (row.isCode) continue
     const line = row.line.replace(/\r$/, '')
     const heading = HEADING_RE.exec(line)
@@ -153,7 +175,7 @@ function entryTopics(entry: string): Array<{ name: string; fileName: string | un
  * 主题页的先后：入口里出现的顺序在前，入口里没有的按文件名排在后。
  * 同一条记忆出现在两页、两个页同名时，都以这个顺序里靠前的为准。
  */
-function orderedPages(files: IndexFiles): Array<PageFacts & { about: string }> {
+export function orderedPages(files: IndexFiles): Array<PageFacts & { about: string }> {
   const listed = entryTopics(files.entry)
   const byFile = new Map<string, { at: number; about: string }>()
   const byName = new Map<string, { at: number; about: string }>()
@@ -240,7 +262,7 @@ export function reconcileIndex(
   const listed = entryTopics(source.entry)
   const linkedFiles = new Set(listed.flatMap(t => (t.fileName === undefined ? [] : [t.fileName])))
   const plainNames = new Set(listed.flatMap(t => (t.fileName === undefined ? [keyOf(t.name)] : [])))
-  let entry = source.entry.replace(STAMP_RE, '').trim() === '' ? `${source.entry}# ${ENTRY_TITLE}\n` : source.entry
+  let entry = source.entry.replace(HEADER_RE, '').trim() === '' ? `${source.entry}# ${ENTRY_TITLE}\n` : source.entry
   for (const page of ordered) {
     if (linkedFiles.has(page.fileName) || plainNames.has(keyOf(page.name))) continue
     plainNames.add(keyOf(page.name))
@@ -251,13 +273,22 @@ export function reconcileIndex(
   return { files: { entry, pages }, report }
 }
 
+/**
+ * 能不能当主题名（已去首尾空白）。带换行或以 # 开头的名字写成标题会把页的结构弄坏；
+ * 顿号和逗号是曾用名一行的分隔符，名字里带了，改名之后旧名会被拆成两个。
+ */
+export function isTopicName(name: string): boolean {
+  const reserved = [UNSORTED_TITLE, UNSORTED_PAGE.replace(/\.md$/, '')].map(keyOf)
+  return name !== '' && [...name].length <= TOPIC_NAME_MAX && !reserved.includes(keyOf(name)) && !/[\r\n、,，]|^#/.test(name)
+}
+
 export type TopicResolution =
   | { kind: 'existing'; fileName: string; name: string }
   /** 还没有这个主题，可以建：fileName 是要建的主题页。 */
   | { kind: 'new'; fileName: string; name: string }
   /** 主题数到上限，不建。 */
   | { kind: 'full' }
-  /** 不能当主题名：空的、太长、和「未整理」重名、带换行或以 # 开头。 */
+  /** 不能当主题名：空的、太长、和「未整理」重名、带换行或顿号逗号、以 # 开头。 */
   | { kind: 'invalid' }
 
 /**
@@ -267,9 +298,7 @@ export type TopicResolution =
 export function resolveTopic(files: IndexFiles, rawName: string, maxTopics: number): TopicResolution {
   const name = rawName.trim()
   const key = keyOf(name)
-  const reserved = [UNSORTED_TITLE, UNSORTED_PAGE.replace(/\.md$/, '')].map(keyOf)
-  // 带换行或以 # 开头的名字写成标题会把页的结构弄坏
-  if (name === '' || [...name].length > TOPIC_NAME_MAX || reserved.includes(key) || /[\r\n]|^#/.test(name)) return { kind: 'invalid' }
+  if (!isTopicName(name)) return { kind: 'invalid' }
   const topics = orderedPages(files)
   const existing = topics.find(t => keyOf(t.name) === key) ?? topics.find(t => t.aliases.some(a => keyOf(a) === key))
   if (existing) return { kind: 'existing', fileName: existing.fileName, name: existing.name }
