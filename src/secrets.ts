@@ -29,9 +29,9 @@ interface SecretMatch { index: number; match: string; value: string }
 
 // 「硬编码密码」的标签和分隔符，取值由 hardcodedPasswords 接着往后认。
 // PASSWORD_VALUE、NON_SPACE 和下面的 JWT 是模块级粘连正则，各处调用共用 lastIndex：设 lastIndex 到 exec/test 之间不能有 yield
-const PASSWORD_LABEL = /(?:password|passwd|pwd|密码)\s*[:=＝：]\s*/gi
-const PASSWORD_VALUE = /[^\s㐀-鿿]{6,}/iy
-const NON_SPACE = /\S*/y
+export const PASSWORD_LABEL = /(?:password|passwd|pwd|密码)\s*[:=＝：]\s*/gi
+export const PASSWORD_VALUE = /[^\s㐀-鿿]{6,}/iy
+export const NON_SPACE = /\S*/y
 
 /**
  * 「硬编码密码」逐处命中，与正则 (?:password|passwd|pwd|密码)\s*[:=＝：]\s*(?<value>(?=\S*[0-9])(?=\S*[A-Za-z])[^\s㐀-鿿]{6,})
@@ -70,8 +70,8 @@ function scanRun(text: string, from: number): { end: number; lastDigit: number; 
   return { end, lastDigit, lastLetter }
 }
 
-const JWT = /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/y
-const JWT_START = /\beyJ/g
+export const JWT = /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/y
+export const JWT_START = /\beyJ/g
 
 /**
  * JWT 逐处命中，与正则 JWT 不带 y 时的全局匹配逐处相同。第一段总是取到起点所在那段 [A-Za-z0-9_-] 连续字符的末尾，之后要接的内容

@@ -64,6 +64,10 @@ All notable changes to this project are documented here. The format follows
   whether a message from you or a tool result backs it.
 - Testing: `pnpm host:contract` also checks how many events a forked session
   inherits and that a save in a turn opened by a schedule is rejected.
+- Testing: every regular expression used to detect secrets is checked by
+  static analysis for backtracking that grows faster than the input, and the
+  private key block cases run under a time limit, so a regression fails the
+  test instead of hanging the run.
 
 ### Changed
 - Node.js 24.9 or later is now required; Node.js 22 is no longer supported.

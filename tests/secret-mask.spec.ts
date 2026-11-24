@@ -1,5 +1,10 @@
+import vm from 'node:vm'
+import { analyse } from 'scslre'
 import { describe, expect, it, vi } from 'vitest'
-import { detectSecrets, maskSecrets, maskSecretSurface, SECRET_MASK, hasSecret, secretFields, secretValues } from '../src/secrets.ts'
+import {
+  detectSecrets, maskSecrets, maskSecretSurface, SECRET_MASK, hasSecret, secretFields, secretValues,
+  SECRET_PATTERNS, PASSWORD_LABEL, PASSWORD_VALUE, NON_SPACE, JWT, JWT_START,
+} from '../src/secrets.ts'
 import { FAKE_SECRET, generatePrivateKeyPem } from './helpers/secrets.ts'
 
 describe('maskSecrets：只换命中片段', () => {
@@ -240,27 +245,51 @@ describe('PGP 私钥块：同 PEM，从 BEGIN 到对应的 END 整块遮住', ()
   }
 })
 
+/** 防卡死的限时，不是性能阈值：正常几毫秒跑完，只有回溯失控才会碰到。 */
+const TIME_LIMIT_MS = 2000
+
+/** 在 vm 上下文里限时执行 fn：正则是同步的，回溯失控时由 vm 的 timeout 打断、用例报错，而不是整个测试进程卡住。 */
+function withinTimeLimit<T>(fn: () => T): T {
+  return vm.runInContext('run()', vm.createContext({ run: fn }), { timeout: TIME_LIMIT_MS }) as T
+}
+
 describe('私钥块正则：行尾带空白的头字段、没有 END 行时不回溯爆炸', () => {
   const pgpBegin = ['-----BEGIN', 'PGP PRIVATE KEY BLOCK-----'].join(' ')
   const headers = (trailing: string) => `Note: something here${trailing}\n`.repeat(30)
 
   for (const [label, begin] of [['PEM', FAKE_SECRET.pem], ['PGP', pgpBegin]] as const) {
     for (const [desc, trailing] of [['一个空格', ' '], ['两个空格', '  '], ['NBSP', '\u00A0'], ['全角空格', '\u3000 ']] as const) {
-      it(`${label}：BEGIN 后 30 行头字段、行尾${desc}，检测在 50ms 内完成，头字段照样遮住`, () => {
+      it(`${label}：BEGIN 后 30 行头字段、行尾${desc}，检测和遮盖在限时内跑完，头字段照样遮住`, () => {
         const text = `前文\n${begin}\n${headers(trailing)}（后面省略）`
-        const t = performance.now()
-        expect(detectSecrets(text)).toEqual([{ name: `${label} 私钥块`, severity: 'critical' }])
-        expect(performance.now() - t).toBeLessThan(50)
-        expect(maskSecrets(text)).toBe(`前文\n${SECRET_MASK}\n（后面省略）`)
+        expect(withinTimeLimit(() => detectSecrets(text))).toEqual([{ name: `${label} 私钥块`, severity: 'critical' }])
+        expect(withinTimeLimit(() => maskSecrets(text))).toBe(`前文\n${SECRET_MASK}\n（后面省略）`)
       })
     }
 
-    it(`${label}：BEGIN 后 30 行头字段、行首行尾都是 NBSP，检测在 50ms 内完成，头字段照样遮住`, () => {
+    it(`${label}：BEGIN 后 30 行头字段、行首行尾都是 NBSP，检测和遮盖在限时内跑完，头字段照样遮住`, () => {
       const text = `前文\n${begin}\n${`\u00A0Note: something here\u00A0\n`.repeat(30)}（后面省略）`
-      const t = performance.now()
-      expect(detectSecrets(text)).toEqual([{ name: `${label} 私钥块`, severity: 'critical' }])
-      expect(performance.now() - t).toBeLessThan(50)
-      expect(maskSecrets(text)).toBe(`前文\n${SECRET_MASK}\n（后面省略）`)
+      expect(withinTimeLimit(() => detectSecrets(text))).toEqual([{ name: `${label} 私钥块`, severity: 'critical' }])
+      expect(withinTimeLimit(() => maskSecrets(text))).toBe(`前文\n${SECRET_MASK}\n（后面省略）`)
+    })
+  }
+})
+
+describe('密钥正则静态检查：没有超线性回溯', () => {
+  // 只查得出单个字符重复构成的攻击串（如私钥块头字段的值和行尾空白抢同一批空格）；多字符重复（如标签连写）查不出，
+  // 由下面逐字读取计数的用例兜着。规则正则在遮盖时会加 g 重建，不按「原样使用」推断能否构造出失败后缀，一律当可构造
+  const regexes: Array<[name: string, re: RegExp]> = [
+    ...SECRET_PATTERNS.flatMap((p): Array<[string, RegExp]> => ('re' in p ? [[p.name, p.re]] : [])),
+    ['PASSWORD_LABEL', PASSWORD_LABEL],
+    ['PASSWORD_VALUE', PASSWORD_VALUE],
+    ['NON_SPACE', NON_SPACE],
+    ['JWT', JWT],
+    ['JWT_START', JWT_START],
+  ]
+
+  for (const [name, re] of regexes) {
+    it(`${name}：静态分析不报超线性回溯`, () => {
+      const { reports } = analyse(re, { assumeRejectingSuffix: true })
+      expect(reports.map(r => ({ type: r.type, exponential: r.exponential, char: r.character.pick }))).toEqual([])
     })
   }
 })
@@ -283,6 +312,15 @@ const seeded = (seed: number) => () => {
   t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
   return ((t ^ (t >>> 14)) >>> 0) / 4294967296
 }
+
+describe('逐标签执行的正则：不带往后扫的断言', () => {
+  // 取值正则每个标签跑一次：带上 (?=\S*…) 这类往后扫到段尾的断言，标签连写时就是平方级，逐字读取计数和静态分析都看不出
+  for (const [name, re] of [['PASSWORD_VALUE', PASSWORD_VALUE], ['NON_SPACE', NON_SPACE]] as const) {
+    it(`${name}：没有前瞻、后顾`, () => {
+      expect(re.source).not.toMatch(/\(\?<?[=!]/)
+    })
+  }
+})
 
 describe('硬编码密码：标签再多，取值检查也只把每段字符读一遍', () => {
   const suspected = { severity: 'suspected' } as const
