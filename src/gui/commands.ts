@@ -40,6 +40,8 @@ import { generatePlan } from './model-plan.ts'
 import { generatePlanDrafts } from './model-draft-plan.ts'
 import { processInterval, runCheckup, type IntervalTimer } from './checkup-run.ts'
 import type { CheckupSuggestions } from './checkup-suggestions.ts'
+import { runOrganize } from './organize-run.ts'
+import { INDEX_MAX_TOPICS_DEFAULT } from '../topic-index.ts'
 import { sameScope, scopeAt, scopeKey, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
 import { UNKNOWN_SESSION_ID, type ContextHost, type HostSession } from '../tools/host-session.ts'
 import { scanOutcome } from './views.ts'
@@ -68,6 +70,8 @@ export interface MemoryCommandDeps {
   onAutoCheckupChanged?: () => void
   /** scan 持有范围认领期间的心跳计时；缺省用进程自己的 setInterval。 */
   heartbeat?: IntervalTimer
+  /** 主题数上限（organize-index 用，用时读配置）；缺省用默认值。 */
+  maxTopics?: () => number
   /** scan 做完之后的后续段（给冲突生成处理建议，不等它跑完就回结果）；缺省不生成。 */
   suggestions?: Pick<CheckupSuggestions, 'run'>
   /** 插件卸载的取消信号：传给 scan 之后的后续段。 */
@@ -119,6 +123,7 @@ const READ_ONLY_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['draft-ed
 
 /** 自己写视图的子命令：成功后不再按常规重写全部视图。 */
 const SELF_WRITING_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['scan', 'refresh-views', 'set-auto-checkup', 'set-model-selection'])
+// organize-index 不在 SECTION_COMMANDS 里：调模型在锁外，每个操作各进一次写入段
 
 /** 改待决项的子命令，先认领条目再执行，同一条同时只跑一个（resolve、undo 由执行器 executeConfirm、executeUndo 自己认领）。 */
 const CLAIMED_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['promote', 'keep-local', 'dismiss-overflow'])
@@ -202,7 +207,7 @@ function candidateCopy(entry: PendingDecision): { target?: Scope } {
 
 /** 撤销的是直接改、直接合并、模型改写与替代：改本身不受体检开关影响，撤销也不受。 */
 async function isEditUndo(decisions: PendingDecisionsStore, command: MemoryCommand): Promise<boolean> {
-  return command.cmd === 'undo' && (await decisions.listSettled()).some(d => d.id === command.decisionId && (kindOf(d) === 'edit' || isModelChange(d)))
+  return command.cmd === 'undo' && (await decisions.listSettled()).some(d => d.id === command.decisionId && (kindOf(d) === 'edit' || kindOf(d) === 'index-organize' || isModelChange(d)))
 }
 
 /** 记忆和卡片加载时的版本对不上：updatedAt 变了（插件写过），或卡片内容指纹变了（手改过文件）。 */
@@ -460,7 +465,7 @@ async function dispatch(
   const undoDeps = { store: deps.store, decisions: deps.decisions, snapshots: deps.snapshots, ignores: deps.ignores, now: () => deps.now?.() ?? Date.now() }
   const fromUndo = (r: UndoResult): MemoryCommandResult => (r.kind === 'error'
     ? fail(cmd, r.code, r.message, r.rejected)
-    : { ok: true, cmd, decisionId: r.decisionId, memoryIds: r.restored, ...(r.snapshotId !== undefined ? { snapshotId: r.snapshotId } : {}) })
+    : { ok: true, cmd, decisionId: r.decisionId, memoryIds: r.restored, ...(r.snapshotId !== undefined ? { snapshotId: r.snapshotId } : {}), ...(r.skipped !== undefined ? { undoSkipped: r.skipped } : {}) })
 
   const settledEntry = async (id: string) => (await deps.decisions.listSettled()).find(d => d.id === id)
   const openEntryOfKind = async (id: string, kind: ReturnType<typeof kindOf>): Promise<PendingDecision | Err> => {
@@ -757,8 +762,13 @@ async function dispatch(
       return await resolveConflict(entry.id, verdict, command.allowCrossWorkspace, { basis: { suggestionId: suggestion.id }, memoryIds: entry.memoryIds })
     }
 
-    case 'undo':
+    case 'undo': {
+      // 整理索引还在跑的时候不撤它那一条：回执还在往上记
+      const run = (await deps.decisions.listSettled()).find(d => d.id === command.decisionId && kindOf(d) === 'index-organize')
+      const organizing = run?.workspaces?.[0]
+      if (organizing !== undefined && await deps.checkups.isInProgress(scopeOfLedger(organizing))) return fail(cmd, 'busy', '这个范围正在整理或体检，做完再撤')
       return fromUndo(await executeUndo({ decisionId: command.decisionId, snapshotId: command.snapshotId, allowCrossWorkspace: command.allowCrossWorkspace }, gov, undoDeps))
+    }
 
     case 'restore': {
       const r = await restoreDeleted({ memoryId: command.memoryId, scope: command.layer, allowCrossWorkspace: command.allowCrossWorkspace }, gov, undoDeps)
@@ -1152,6 +1162,31 @@ async function dispatch(
         ...(r.semanticBatches !== undefined ? { semanticBatches: r.semanticBatches } : {}),
         ...(r.usageTokens !== undefined ? { usageTokens: r.usageTokens } : {}),
         ...(r.compared !== undefined ? scanOutcome(r.compared.before, r.compared.after, covered) : {}),
+      }
+    }
+
+    case 'organize-index': {
+      if (command.scope.kind === 'workspace' && !isAbsolute(command.scope.workspacePath)) {
+        return fail(cmd, 'invalid-args', `项目路径必须是绝对路径：${command.scope.workspacePath}`)
+      }
+      const llm = deps.host.llmOf(exec)
+      if (llm === null) return fail(cmd, 'llm-unavailable', '借用的会话拿不到模型')
+      const r = await runOrganize({ scope: command.scope, llm, ...(deps.signal !== undefined ? { signal: deps.signal } : {}) }, {
+        store: deps.store, decisions: deps.decisions, checkups: deps.checkups,
+        interval: deps.heartbeat ?? processInterval,
+        maxTopics: deps.maxTopics?.() ?? INDEX_MAX_TOPICS_DEFAULT,
+        onClaimChanged: () => deps.views.requestCheckups(),
+        now: () => deps.now?.() ?? Date.now(),
+        log: deps.log ?? console,
+      })
+      switch (r.kind) {
+        case 'busy': return fail(cmd, 'busy', `${r.scope.kind === 'global' ? '全局' : r.scope.workspacePath} 正在体检或整理，做完再来`)
+        case 'failed': return fail(cmd, 'failed', r.message)
+        case 'empty': return { ok: true, cmd, organized: { applied: 0, skipped: 0 } }
+      }
+      return {
+        ok: true, cmd, organized: { applied: r.applied, skipped: r.skipped },
+        ...(r.decisionId !== undefined ? { decisionId: r.decisionId } : {}), ...(r.isPartial ? { isPartial: true as const } : {}),
       }
     }
 

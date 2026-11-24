@@ -26,8 +26,9 @@ import { linkExclusive } from './exclusive-link.ts'
 import { FileVersionHistory, type VersionHistory } from './history.ts'
 import { maskDiagnostic, maskSecrets } from '../secrets.ts'
 import { isPendingDelegated } from '../record-schema.ts'
-import { UNSORTED_PAGE, UNSORTED_TITLE, maskIndexText, readIndex, reconcileIndex, renderProjection, withoutMember, type IndexFiles, type IndexedMemory } from '../topic-index.ts'
-import { INDEX_DIR, INDEX_TOPICS_DIR, IndexChangedError, readIndexFiles, writeIndexFiles } from './index-store.ts'
+import { UNSORTED_PAGE, UNSORTED_TITLE, maskIndexText, memberKeys, memberLines, placeholderIds, readIndex, reconcileIndex, renderProjection, stampOf, withMemberLinesAppended, withMemberText, withStamp, withoutMember, withoutMemberKeys, withoutMemberText, type IndexFiles, type IndexedMemory } from '../topic-index.ts'
+import { applyPlan, planForReplay, planIndexOp, targetOf, undoPlan, type IndexOp, type IndexPlan } from '../topic-ops.ts'
+import { INDEX_DIR, INDEX_TOPICS_DIR, IndexChangedError, indexFilePath, readIndexFile, readIndexFiles, replaceIndexFile, writeIndexFiles } from './index-store.ts'
 import { RETENTION_MS } from '../retention.ts'
 
 /** 软删记录清扫窗口：与快照保留共用 retention.ts 的单一来源（两者必须一致）。 */
@@ -49,6 +50,25 @@ const RECOVERY_ATTEMPTS = 3
 export const HISTORY_MOVE_STEP = 'history-move'
 interface HistoryMoveStep extends OpStep { kind: typeof HISTORY_MOVE_STEP; memoryId: string; from: string; to: string }
 
+/** 索引操作提交之后的一步：把计划在这个目录的索引上套完（重复做结果不变）。 */
+const INDEX_PLAN_STEP = 'index-plan'
+interface IndexPlanStep extends OpStep { kind: typeof INDEX_PLAN_STEP; dir: string; plan: IndexPlan }
+/**
+ * 撤销索引操作提交之后的一步：把算好的几个文件写下去、删掉该删的页。每个文件还是算的时候那份（按指纹比）就整份写，
+ * 已经是要写的内容就跳过；被别人改过的不盖，只把成员挪对：该在这页的补上，这一步里去了别的页的拿掉。
+ */
+const INDEX_WRITE_STEP = 'index-write'
+interface IndexWriteStep extends OpStep {
+  kind: typeof INDEX_WRITE_STEP
+  dir: string
+  /** text 里的成员行是只带 id 的占位（见 topic-index.ts withoutMemberText）。 */
+  writes: Array<{ file: string; before: string | null; text: string }>
+  deletes: Array<{ file: string; before: string }>
+}
+
+export type { IndexOpOutcome, IndexUndoOutcome, IndexOpOptions } from './table.ts'
+import type { IndexOpOutcome, IndexUndoOutcome, IndexOpOptions } from './table.ts'
+
 /** 维护点写索引后发现目录变了、按新清单重写的总次数上限（含第一次写）。 */
 const INDEX_ROUNDS = 3
 
@@ -62,7 +82,19 @@ function isKnownTarget(target: unknown): target is PendingOp['target'] {
   const isText = (key: string) => typeof t[key] === 'string'
   if (t.kind === 'write') return isText('memoryId') && isText('dir') && isText('after') && Array.isArray(t.fields)
   if (t.kind === 'delete') return isText('memoryId') && isText('dir') && isText('nameHash')
+  if (t.kind === 'index') return isText('dir') && isText('file')
   return false
+}
+
+/** 模型交来的主题名和说明遮一遍密钥再用。 */
+function maskOp(op: IndexOp): IndexOp {
+  switch (op.kind) {
+    case 'assign': return { ...op, to: maskSecrets(op.to), ...(op.about === undefined ? {} : { about: maskSecrets(op.about) }) }
+    case 'rename': return { ...op, name: maskSecrets(op.name) }
+    case 'merge': return { ...op, ...(op.about === undefined ? {} : { about: maskSecrets(op.about) }) }
+    case 'describe': return { ...op, about: maskSecrets(op.about) }
+    default: return op
+  }
 }
 
 /** 候选文件名都被别的 id 占着：不覆盖。写路径原样抛给调用方；维护点搬家时跳过这一个文件。 */
@@ -252,6 +284,8 @@ export class FileTable implements MemoryTable {
     if (this.journal !== undefined) this.lock.onEnter?.(() => this.recoverPending())
     this.globalDir = join(opts.root, GLOBAL_DIR)
     this.stepHandlers.set(HISTORY_MOVE_STEP, raw => this.followMove(raw as HistoryMoveStep))
+    this.stepHandlers.set(INDEX_PLAN_STEP, raw => this.finishIndexPlan(raw as IndexPlanStep))
+    this.stepHandlers.set(INDEX_WRITE_STEP, raw => this.finishIndexWrites(raw as IndexWriteStep))
   }
 
   inSection<T>(fn: () => Promise<T>): Promise<T> {
@@ -1056,6 +1090,197 @@ export class FileTable implements MemoryTable {
     }
   }
 
+  /** 落盘前遮一遍手写的文字：入口整份遮，主题页留着成员行。 */
+  private maskIndex(files: IndexFiles): IndexFiles {
+    return { entry: maskSecrets(files.entry), pages: Object.fromEntries(Object.entries(files.pages).map(([name, text]) => [name, maskIndexText(text, maskSecrets)])) }
+  }
+
+  /** 这个记忆目录里在索引中该有一行的记忆 id。目录读不了（没有标记、不存在）返回 undefined。 */
+  private async indexedIds(dir: string): Promise<Set<string> | undefined> {
+    const { scopeDirs } = await this.resolveDirs([dir])
+    if (scopeDirs.length === 0) return undefined
+    const read = await this.readDirs(scopeDirs, {})
+    return new Set(resolveDuplicates(read.slots.filter(s => s.record.status === 'active')).filter(l => !isPendingDelegated(l.record)).map(l => l.record.id))
+  }
+
+  readIndex(dir: string): Promise<IndexFiles | undefined> { return readIndexFiles(dir) }
+
+  /**
+   * 对一个记忆目录的主题索引做一个操作（归主题、改名、合并、调顺序、改说明）。在写入段里按当下的索引和记忆重新核对：
+   * 对不上的跳过。先写计划里的第一个文件（带提交标记），写下就算提交；其余的页接着改，中途断了由下一个拿到写锁的人补完。
+   * 模型交来的主题名和说明落盘前遮密钥。
+   */
+  async applyIndexOp(dir: string, op: IndexOp, opts: IndexOpOptions): Promise<IndexOpOutcome> {
+    return this.locked(async () => {
+      const safe = maskOp(op)
+      for (let round = 1; round <= INDEX_ROUNDS; round++) {
+        const raw = await readIndexFiles(dir)
+        const activeIds = await this.indexedIds(dir)
+        if (raw === undefined || activeIds === undefined) return { kind: 'skipped', reason: '这个目录还没有主题索引' }
+        // 按遮过密钥的索引定计划：计划里带的改前文字（曾用名、说明、整页）会存进回执
+        const before = this.maskIndex(raw)
+        const planned = planIndexOp(before, safe, { maxTopics: opts.maxTopics, activeIds, now: this.now() })
+        if (planned.kind === 'skipped') return planned
+        const { plan } = planned
+        const target = targetOf(plan)
+        const next = this.maskIndex(applyPlan(before, plan).files)
+        const id = newWriteOp().id
+        const steps = [...(await opts.prepare?.(id, plan) ?? [])]
+        // 日志里的计划只够再套一次：撤销用的改前全文不进日志
+        const planStep: IndexPlanStep = { kind: INDEX_PLAN_STEP, dir, plan: planForReplay(plan) }
+        if (this.isJournaling()) this.journal!.begin({ op: id, at: this.now(), target: { kind: 'index', dir, file: target }, steps: [planStep, ...steps] })
+        try {
+          const text = target === 'entry' ? next.entry : next.pages[target]!
+          await replaceIndexFile(dir, target, target === 'entry' ? raw.entry : raw.pages[target], withStamp(text, id), (filePath, body) => this.atomicWrite(filePath, body))
+        } catch (err) {
+          this.endOp(id)
+          if (err instanceof IndexChangedError) continue
+          throw err
+        }
+        if (this.isJournaling()) this.journal!.markCommitted(id)
+        // 提交之后的步骤没做成：行留在日志里，下一个进写入段的人补
+        try {
+          await this.finishIndexPlan(planStep)
+          await this.runSteps(id, steps, undefined)
+          this.endOp(id)
+        } catch (err) {
+          this.log.warn(`[plastic-memory] 索引操作 ${id} 提交后有一步没做成，留在日志里下次补做（${describeError(err)}）`)
+        }
+        return { kind: 'applied', op: id, plan }
+      }
+      return { kind: 'skipped', reason: '索引文件一直在被改，这一次没做' }
+    })
+  }
+
+  /** 把计划在索引上套完：重读、再套一次、写下还没改的页、删掉该删的页，记进派生库。索引文件期间被改过就按新内容重来。 */
+  private async finishIndexPlan(step: IndexPlanStep): Promise<void> {
+    for (let round = 1; ; round++) {
+      const raw = await readIndexFiles(step.dir)
+      if (raw === undefined) return
+      const applied = applyPlan(this.maskIndex(raw), step.plan)
+      const next = this.maskIndex(applied.files)
+      try {
+        await writeIndexFiles(step.dir, raw, next, (filePath, text) => this.atomicWrite(filePath, text), applied.deleted)
+        await this.recordTopicPages(step.dir, next)
+        return
+      } catch (err) {
+        if (!(err instanceof IndexChangedError) || round === INDEX_ROUNDS) throw err
+      }
+    }
+  }
+
+  /**
+   * 撤销一个做过的索引操作。按效果判：这一步写下的效果还在才撤（见 undoPlan），不在了返回 stale，什么都不动。
+   * 和做的时候一样先写一个文件算提交，其余的文件按算的时候的样子补写。
+   */
+  async undoIndexPlan(dir: string, plan: IndexPlan, opts: { steps?: (op: string) => readonly OpStep[] } = {}): Promise<IndexUndoOutcome> {
+    return this.locked(async () => {
+      for (let round = 1; round <= INDEX_ROUNDS; round++) {
+        const before = await readIndexFiles(dir)
+        if (before === undefined) return { kind: 'stale', reason: '这个目录的主题索引不在了' }
+        const result = undoPlan(this.maskIndex(before), plan)
+        if (result.kind === 'stale') return result
+        const id = newWriteOp().id
+        const next = this.maskIndex(result.files)
+        // 先写多出成员的页（和新放回来的页），再写别的页，入口最后：中途断在哪，记忆都至少在一页里
+        const changed = Object.keys(next.pages).filter(name => next.pages[name] !== before.pages[name])
+        const count = (name: string, text: string | undefined) => {
+          if (text === undefined) return 0
+          const read = readIndex({ entry: '', pages: { [name]: text } })
+          return name === UNSORTED_PAGE ? read.unsorted.length : read.topics[0]?.memberIds.length ?? 0
+        }
+        const gained = (name: string) => count(name, next.pages[name]) - count(name, before.pages[name])
+        const files = [...changed.sort((a, b) => gained(b) - gained(a)), ...(next.entry !== before.entry ? ['entry'] : [])]
+        const writes = files.map((file, i) => {
+          const was = file === 'entry' ? before.entry : before.pages[file]
+          const text = file === 'entry' ? next.entry : next.pages[file]!
+          return { file, before: was === undefined ? null : fingerprintOf(was), text: i === 0 ? withStamp(text, id) : text }
+        })
+        const deletes = result.deleted.map(file => ({ file, before: fingerprintOf(before.pages[file]!) }))
+        if (writes.length === 0) return { kind: 'stale', reason: '没有可撤的改动' }
+        // 日志里的页面文字不带成员行（只留记忆 id），补写时按那时索引里的成员行填回去
+        const step: IndexWriteStep = { kind: INDEX_WRITE_STEP, dir, writes: writes.map(w => ({ ...w, text: withoutMemberText(w.text) })), deletes }
+        const steps = [...(opts.steps?.(id) ?? [])]
+        const first = writes[0]!
+        if (this.isJournaling()) this.journal!.begin({ op: id, at: this.now(), target: { kind: 'index', dir, file: first.file }, steps: [step, ...steps] })
+        try {
+          await replaceIndexFile(dir, first.file, first.file === 'entry' ? before.entry : before.pages[first.file], first.text, (filePath, body) => this.atomicWrite(filePath, body))
+        } catch (err) {
+          this.endOp(id)
+          if (err instanceof IndexChangedError) continue
+          throw err
+        }
+        if (this.isJournaling()) this.journal!.markCommitted(id)
+        try {
+          await this.finishIndexWrites(step)
+          await this.runSteps(id, steps, undefined)
+          this.endOp(id)
+        } catch (err) {
+          this.log.warn(`[plastic-memory] 撤销索引操作 ${id} 提交后有一步没做成，留在日志里下次补做（${describeError(err)}）`)
+        }
+        return { kind: 'undone', op: id }
+      }
+      return { kind: 'stale', reason: '索引文件一直在被改，这一次没撤' }
+    })
+  }
+
+  private async finishIndexWrites(step: IndexWriteStep): Promise<void> {
+    await mkdir(join(step.dir, INDEX_DIR, INDEX_TOPICS_DIR), { recursive: true })
+    const now = await readIndexFiles(step.dir)
+    const lines = now === undefined ? new Map<string, string>() : memberLines(now)
+    // 这一步里每条记忆该在哪个文件。一条记忆确实成了那个文件的成员，才从别的文件拿掉：
+    // 那个文件算完之后被改过（成员行落进了代码块、页被删了）时，它留在原处，等整份核对安排
+    const homes = new Map(step.writes.map(w => [w.file, new Set(placeholderIds(w.text))]))
+    const homeOf = new Map([...homes].flatMap(([file, ids]) => [...ids].map(id => [id, file] as const)))
+    const hasArrived = async (id: string) => memberKeys(await readIndexFile(step.dir, homeOf.get(id)!) ?? '').includes(id)
+    /** 这个文件里现在的成员中，按这一步该去别的文件、而且确实已经到了的。 */
+    const departed = async (file: string, current: string) => {
+      const gone = new Set<string>()
+      for (const id of memberKeys(current)) if (homeOf.has(id) && homeOf.get(id) !== file && await hasArrived(id)) gone.add(id)
+      return gone
+    }
+    const leaving = (file: string, current: string) => memberKeys(current).filter(id => homeOf.has(id) && homeOf.get(id) !== file)
+    for (const stored of step.writes) {
+      const w = { ...stored, text: withMemberText(stored.text, id => lines.get(id)) }
+      const current = await readIndexFile(step.dir, w.file)
+      if (current === w.text) continue
+      const isAsComputed = w.before === null ? current === undefined || (w.file === 'entry' && current === '') : current !== undefined && fingerprintOf(current) === w.before
+      const gone = current === undefined ? new Set<string>() : await departed(w.file, current)
+      if (isAsComputed && gone.size === leaving(w.file, current ?? '').length) {
+        await this.atomicWrite(indexFilePath(step.dir, w.file), w.text)
+        continue
+      }
+      if (w.file === 'entry' || current === undefined) {
+        this.log.warn(`[plastic-memory] 撤销索引操作时有一个文件已经被改过，没有盖它：${w.file}`)
+        continue
+      }
+      // 这一页、或者它的成员要去的页算完之后被改过：留着现在的内容，只把成员挪对
+      const kept = withoutMemberKeys(current, gone)
+      const present = new Set(memberKeys(kept))
+      const next = withMemberLinesAppended(kept, [...homes.get(w.file)!].filter(id => !present.has(id)).flatMap(id => lines.get(id) ?? []))
+      if (next !== current) await this.atomicWrite(indexFilePath(step.dir, w.file), next)
+    }
+    for (const d of step.deletes) {
+      const current = await readIndexFile(step.dir, d.file)
+      if (current === undefined) continue
+      const gone = await departed(d.file, current)
+      if (fingerprintOf(current) === d.before && gone.size === leaving(d.file, current).length) {
+        await rm(indexFilePath(step.dir, d.file), { force: true })
+        continue
+      }
+      // 要删的页被改过、或者它的成员没都到别处：页留着，只拿掉确实到了别处的成员
+      const next = withoutMemberKeys(current, gone)
+      if (next !== current) await this.atomicWrite(indexFilePath(step.dir, d.file), next)
+    }
+    const after = await readIndexFiles(step.dir)
+    if (after !== undefined) await this.recordTopicPages(step.dir, after)
+  }
+
+  /** 这个操作是不是还在操作日志里等着补做（提交了、后面的步骤没走完）。没有操作日志时没有补做，一律为否。 */
+  isOpPending(op: string): boolean {
+    return this.isJournaling() && this.journal!.pending().some(row => row.op === op)
+  }
+
   private async syncTopicIndex(dir: string, active: readonly LocatedRecord[], now: number, isComplete: boolean): Promise<'written' | 'unchanged' | 'retry'> {
     try {
       const listed = resolveDuplicates(active).filter(l => !isPendingDelegated(l.record))
@@ -1362,6 +1587,10 @@ export class FileTable implements MemoryTable {
             if (target.source !== undefined && target.before !== undefined) await this.removeSourceIfUnchanged(target.source, target.before, committed.located.filePath)
             await this.runSteps(row.op, row.steps, committed.located.record, fingerprintOf(committed.raw) === target.after)
           }
+        } else if (target.kind === 'index') {
+          // 读不出（不是不存在）会抛：不能当成没提交而作废
+          const text = row.isCommitted === true ? undefined : await readIndexFile(target.dir, target.file)
+          if (row.isCommitted === true || (text !== undefined && stampOf(text) === row.op)) await this.runSteps(row.op, row.steps, undefined)
         } else if (!(await this.hasFileNamed(target.dir, target.nameHash))) {
           // 补做不删文件：名字不在了可能是删成了，也可能是中断后被人改了名，分不出来。同 id 还剩着的副本留给体检报
           if ((await this.locateSlot(target.memoryId)) === undefined) await this.opts.stats.delete(target.memoryId)

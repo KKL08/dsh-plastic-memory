@@ -4,7 +4,7 @@ import type { RootLock } from '../root-lock.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { OverflowLevel } from '../contract-codes.ts'
 import {
-  genId, kindOf, verdictLoser, type BatchReceipt, type PendingDecision, type PendingKind, type SettledProposal, type SettledVerdict, type StoredSuggestion,
+  genId, kindOf, verdictLoser, type BatchReceipt, type IndexReceipt, type IndexRun, type PendingDecision, type PendingKind, type SettledProposal, type SettledVerdict, type StoredSuggestion,
   type SuggestionBasis, type SuggestionFailure,
 } from './schema.ts'
 import { isUndoExpired } from './undo-rules.ts'
@@ -544,7 +544,7 @@ export class PendingDecisionsStore {
    * 撤销记录走下面按种类的方法；就地处理时才记的提升、留下也直接用它（isBornSettled 见 schema）。超出保留窗口由 sweep 清掉。
    */
   async addSettled(
-    input: { kind: PendingKind; memoryIds: string[]; summary: string; workspaces: string[]; fingerprint?: string; receipts?: BatchReceipt[]; origin?: PendingDecision['origin'] },
+    input: { kind: PendingKind; memoryIds: string[]; summary: string; workspaces: string[]; fingerprint?: string; receipts?: BatchReceipt[]; origin?: PendingDecision['origin']; indexRun?: IndexRun },
     verdict: SettledVerdict, now: number,
     opts: { snapshotId?: string; isBornSettled?: true; misplacedIgnore?: MisplacedIgnore; id?: string } = {},
   ): Promise<PendingDecision> {
@@ -587,6 +587,54 @@ export class PendingDecisionsStore {
     return this.addSettled({
       kind: input.kind, memoryIds: [written.id], summary: written.name, workspaces: [input.workspace], fingerprint: editFingerprint(written), origin: input.origin,
     }, input.kind === 'rewrite' ? 'rewritten' : 'superseded', now, { snapshotId, ...(id !== undefined ? { id } : {}) })
+  }
+
+  /**
+   * 一次整理索引开始应用操作之前记一条（id 由调用方定好，重复调用不多记）：每个操作动手前记回执（appendIndexReceipt）、提交后确认（confirmIndexReceipt），
+   * 做完调 finishIndexRun。workspace 是整理的那个作用域的账本标签。
+   */
+  addIndexRun(id: string, input: { summary: string; workspace: string }, now: number) {
+    return this.addSettled({ kind: 'index-organize', memoryIds: [], summary: input.summary, workspaces: [input.workspace], indexRun: { receipts: [] } }, 'index-organized', now, { id })
+  }
+
+  /** 一个索引操作动手之前先记下它的回执（还没确认）；条目已不在（整批已撤销）返回 false。在写入段里调用。 */
+  async appendIndexReceipt(id: string, receipt: Pick<IndexReceipt, 'op' | 'plan'>): Promise<boolean> {
+    const entry = await this.table.get(id)
+    if (entry?.indexRun === undefined) return false
+    if (entry.indexRun.receipts.some(r => r.op === receipt.op)) return true
+    await this.table.put(id, { ...entry, indexRun: { ...entry.indexRun, receipts: [...entry.indexRun.receipts, { op: receipt.op, plan: receipt.plan }] } })
+    return true
+  }
+
+  /** 一个索引操作提交了：确认它的回执；条目或回执已不在返回 false。在写入段里调用。 */
+  async confirmIndexReceipt(id: string, op: string): Promise<boolean> {
+    const entry = await this.table.get(id)
+    const receipt = entry?.indexRun?.receipts.find(r => r.op === op)
+    if (entry?.indexRun === undefined || receipt === undefined) return false
+    if (receipt.isConfirmed === true) return true
+    await this.table.put(id, { ...entry, indexRun: { ...entry.indexRun, receipts: entry.indexRun.receipts.map(r => (r.op === op ? { ...r, isConfirmed: true as const } : r)) } })
+    return true
+  }
+
+  /** 一条回执对应的操作撤掉了：拿掉这条回执。在写入段里调用。 */
+  async dropIndexReceipt(id: string, op: string): Promise<void> {
+    const entry = await this.table.get(id)
+    if (entry?.indexRun === undefined || !entry.indexRun.receipts.some(r => r.op === op)) return
+    await this.table.put(id, { ...entry, indexRun: { ...entry.indexRun, receipts: entry.indexRun.receipts.filter(r => r.op !== op) } })
+  }
+
+  /** 一次整理收尾：清掉没确认的回执（没做成的操作留下的；isPending 说还在等补做的留着，补做时确认）；一个操作都没做成的整条移出账本。返回留下的条目。在写入段里调用。 */
+  async finishIndexRun(id: string, isPending: (op: string) => boolean = () => false): Promise<PendingDecision | undefined> {
+    const entry = await this.table.get(id)
+    if (entry?.indexRun === undefined) return undefined
+    const receipts = entry.indexRun.receipts.filter(r => r.isConfirmed === true || isPending(r.op))
+    if (receipts.length === 0) {
+      await this.table.delete(id)
+      return undefined
+    }
+    const done = { ...entry, indexRun: { receipts } }
+    await this.table.put(id, done)
+    return done
   }
 
   /** 模型改写、替代已撤销：条目留到保留窗口结束（对话卡与右侧栏据此显示「已撤销」），不能再撤一次。条目不存在或未结清返回 false。 */

@@ -12,7 +12,7 @@
  * 宿主接口探针（H22–H30、H32，无 key）：sessionQuery 的会话列举、父子追溯、标题、事件时间与过滤；当轮用户消息的来源标记；本进程的空闲信号；
  * 指令文件的修改时间；会话存档状态（含跨进程，第二趟）；会话卸下后读事件、另一个进程写下的会话（第二趟）；fork 型子会话的快照；经插件自有来源的消息开一轮（含续接冷会话）；各种会话的继承前缀长度（H32）。
  * 有 DEEPSEEK_API_KEY 且宿主能选出默认模型时再跑语义扫描与取消两项、一次真实的自动体检（H17：无会话、宿主默认模型）、
- * 一次带出处的处理建议（H20：两条记忆的出处从真会话读回，交给真模型），否则标 SKIPPED。
+ * 一次带出处的处理建议（H20：两条记忆的出处从真会话读回，交给真模型）、一次整理索引再整批撤销（H35：真模型给操作，只验结构），否则标 SKIPPED。
  * run.sh 随后用同一个 DSH_HOME 再起一次宿主（HOST_CONTRACT_PHASE=restart）：第一趟把
  * 恢复的记录 id 写进交接文件，第二趟跑 H12，证明恢复结果过了进程重启仍可读。
  * 指令文件按项目现读（H14）：无 key 时装好的插件取到项目的 AGENTS.md，和宿主函数直接取到的一致（agent 工具裁决旧式条目时现算的指纹不用模型，
@@ -38,6 +38,9 @@ import { createCordisHostSession } from '../../src/cordis-host-session.ts'
 import { PendingDecisionsStore, baselineFingerprint, conflictFingerprint } from '../../src/governance/decisions.ts'
 import { INSTRUCTION_MAX_BYTES } from '../../src/governance/instructions.ts'
 import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../../src/governance/schema.ts'
+import { readIndexFiles } from '../../src/storage/index-store.ts'
+import { workspaceDirName } from '../../src/storage/paths.ts'
+import { readIndex } from '../../src/topic-index.ts'
 
 export const name = 'dsh-plastic-memory-host-contract'
 export const inject = ['tools', 'sessions']
@@ -1162,6 +1165,47 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
         ok: s.lastResult?.by === 'auto' && s.lastCheckupAt !== null && s.failure === null && s.modelUnavailable === null && !codes.includes('semantic-failed'),
         detail: `by=${s.lastResult?.by} lastCheckupAt=${s.lastCheckupAt} failure=${JSON.stringify(s.failure?.cause ?? null)} modelUnavailable=${JSON.stringify(s.modelUnavailable)} notes=${codes.join(',')}`,
       }
+    })
+    // H35 整理索引：一个项目里存六条记忆（三件事各两条），界面同一条路发 /memory organize-index，由真会话的模型给操作。
+    // 模型怎么分不验，只验结构：命令成功、结果合契约；整理后每条记忆在索引里恰好一行；做成过操作就再发 undo，撤完同样每条恰好一行。
+    await attempt('H35-ORGANIZE-INDEX', async () => {
+      const gate = semanticGate(); if (gate) return gate
+      const ws = mkWs('organize')
+      const ids: string[] = []
+      for (const [n, c] of [
+        ['发版前检查', '发版前跑 typecheck、test、build'], ['打 tag 的时机', 'tag 打在合并提交上，跟着 main 一起推'],
+        ['回复语言', '回复一律用中文'], ['提交信息写法', '提交信息用英文祈使句，不加句号'],
+        ['写锁超时', '拿写锁最多等 5 秒，超时报错不重试'], ['写锁的范围', '一条记忆的一次改动整段在一个写入段里'],
+      ]) {
+        const r = await call('memory_save', { action: 'create', name: n, summary: c, content: c, ...MEMORY_BASE, force: true }, mkExec(ws, sel)) as { record?: { id: string } }
+        if (r.record === undefined) return { ok: false, detail: `memory_save 没存下：${n}` }
+        ids.push(r.record.id)
+      }
+      const scope = { kind: 'workspace', workspacePath: ws }
+      const lines = async () => {
+        const files = await readIndexFiles(join(memoriesRoot, workspaceDirName(ws)))
+        if (files === undefined) return undefined
+        const { topics, unsorted } = readIndex(files)
+        return { topics: topics.length, members: [...topics.flatMap(t => t.memberIds), ...unsorted].sort() }
+      }
+      const isExactlyOnce = (seen: { members: string[] } | undefined) => seen !== undefined && JSON.stringify(seen.members) === JSON.stringify([...ids].sort())
+      const run = async (line: string) => {
+        const r = await runMemoryCommand(ws, line, sel)
+        if (typeof r === 'string') return r
+        const parsed = memoryCommandResultSchema.safeParse(JSON.parse(r.text ?? 'null'))
+        return parsed.success ? parsed.data : `结果不合 GUI 契约: ${r.text}`
+      }
+      const organized = await run(`/memory organize-index ${JSON.stringify({ scope })}`)
+      if (typeof organized === 'string') return { ok: false, detail: organized }
+      if (!organized.ok) return { ok: false, detail: `organize-index → ${organized.code}: ${organized.detail ?? ''}` }
+      const after = await lines()
+      const summary = `applied=${organized.organized?.applied} skipped=${organized.organized?.skipped} partial=${organized.isPartial === true} topics=${after?.topics}`
+      if (organized.organized === undefined || !isExactlyOnce(after)) return { ok: false, detail: `${summary} members=${JSON.stringify(after?.members)}` }
+      if (organized.decisionId === undefined) return { ok: organized.organized.applied === 0, detail: `${summary}（没有可撤的记录）` }
+      const undone = await run(`/memory undo ${JSON.stringify({ decisionId: organized.decisionId })}`)
+      if (typeof undone === 'string') return { ok: false, detail: `${summary}；undo → ${undone}` }
+      const restored = await lines()
+      return { ok: undone.ok && isExactlyOnce(restored), detail: `${summary}；undo ok=${undone.ok} topics=${restored?.topics} undoSkipped=${undone.ok ? undone.undoSkipped ?? 0 : '—'}` }
     })
     // H20 处理建议回查出处：两条项目记忆各在一个真会话里由用户说过一句（出处里带着各自适用的目录），
     // 账本里挂一条冲突（同体检挂账：记下两条所属的项目），界面同一条路发 /memory suggest，由真模型给建议。

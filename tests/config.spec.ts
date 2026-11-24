@@ -36,6 +36,7 @@ describe('Config schema', () => {
       governance: { enabled: true, health: { sensitivity: 'normal' }, globalPromoteTarget: 'plugin-global' },
       search: { source: 'memory', dialogueTokenBudget: 1500, memoryQuotes: false, queryExpansion: true, dialogueToolResults: true },
       history: { mergeWindowMinutes: 60 },
+      index: { maxTopics: 30 },
       subagent: { maxSavesPerSession: 10 },
       accent: 'ella',
       memoryRoot: '',
@@ -119,6 +120,12 @@ describe('Config schema', () => {
     expect(new Config({} as never).subagent.maxSavesPerSession.get()).toBe(10)
     expect(new Config(parse('subagent:\n  maxSavesPerSession: 3\n') as never).subagent.maxSavesPerSession.get()).toBe(3)
     expect(() => new Config({ subagent: { maxSavesPerSession: 'many' } } as never)).toThrow()
+  })
+
+  it('index.maxTopics 默认 30，只收正整数', () => {
+    expect(new Config({} as never).index.maxTopics.get()).toBe(30)
+    expect(new Config(parse('index:\n  maxTopics: 12\n') as never).index.maxTopics.get()).toBe(12)
+    for (const bad of [0, -3, 2.5, '30']) expect(() => new Config({ index: { maxTopics: bad } } as never)).toThrow()
   })
 
   it('search.userDictionaryPath 可选、volatile，YAML 可配', () => {

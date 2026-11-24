@@ -32,6 +32,15 @@ All notable changes to this project are documented here. The format follows
   kept. When a chat next loads its memories, memories missing from the
   index are added to the unsorted page, lines for memories that no longer
   exist are removed, and names and summaries are brought up to date.
+- The topic index of a memory folder can be organized in one pass. The model
+  of the current chat proposes changes: move memories into topics, split,
+  rename or merge topics, reorder them, rewrite a description. Each change
+  is checked against the files as they are at that moment and skipped if it
+  no longer fits; memories themselves are not changed. A renamed or merged
+  topic keeps its old name as a former name, so a chat that still has the
+  old name finds it. One pass can be undone as a whole, and lines added
+  to a topic afterwards stay. A folder holds at most 30 topics by default
+  (`index.maxTopics` in the config file).
 - Each memory type's confirmation period can now be changed, the five
   general types included: every type card on the settings page shows its
   period, and Edit opens the form where you change it. A memory left

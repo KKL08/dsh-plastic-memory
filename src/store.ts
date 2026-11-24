@@ -5,12 +5,14 @@ import { expandQueryTerms, matchScore } from './text.ts'
 import {
   byPosition, resolveLiveFirst,
   type MemoryLogger, type MemoryTable, type LocateTarget, type LocateOptions, type ScopeReadOptions, type ScopeReadResult, type KeywordMatch,
-  type DirectoryNote, type QuarantineEntry, type OpStepHandler, type WriteOp,
+  type DirectoryNote, type QuarantineEntry, type OpStep, type OpStepHandler, type WriteOp, type IndexOpOptions, type IndexOpOutcome, type IndexUndoOutcome,
 } from './storage/table.ts'
 import type { BatchKvTable } from './kv-table.ts'
 import type { RecallStats } from './storage/schema.ts'
 import { hasSecret } from './secrets.ts'
 import type { Scope } from './scope.ts'
+import type { IndexFiles } from './topic-index.ts'
+import type { IndexOp, IndexPlan } from './topic-ops.ts'
 import { RETENTION_MS } from './retention.ts'
 
 export type { MemoryLogger, MemoryTable, KeywordMatch, LocateTarget, LocateOptions, SessionTarget } from './storage/table.ts'
@@ -225,6 +227,37 @@ export class MemoryStore {
     const records = read.records.map(l =>
       l.record.status === 'active' && dirname(l.filePath) !== l.dir ? { ...l, record: { ...l.record, status: 'deleted' as const } } : l)
     return { ...read, records, directoryNotes: [...directoryNotes, ...read.directoryNotes] }
+  }
+
+  /** 一个作用域的记忆目录（主题索引就在它下面）：全局是全局目录；项目还没有目录、或这个实现没有主题索引时为空。 */
+  private async indexDirOf(scope: Scope): Promise<string | undefined> {
+    if (this.table.applyIndexOp === undefined) return undefined
+    return scope.kind === 'global' ? this.table.globalDir : (await this.table.workspaceDirs(scope.workspacePath)).dirs[0]
+  }
+
+  /** 一个作用域的主题索引文件，原样读出；还没有时为空。 */
+  async readIndex(scope: Scope): Promise<IndexFiles | undefined> {
+    const dir = await this.indexDirOf(scope)
+    return dir === undefined ? undefined : this.table.readIndex?.(dir)
+  }
+
+  /** 对一个作用域的主题索引做一个操作（见 MemoryTable.applyIndexOp）。 */
+  async applyIndexOp(scope: Scope, op: IndexOp, opts: IndexOpOptions): Promise<IndexOpOutcome> {
+    const dir = await this.indexDirOf(scope)
+    if (dir === undefined) return { kind: 'skipped', reason: '这个范围还没有主题索引' }
+    return this.table.applyIndexOp!(dir, op, opts)
+  }
+
+  /** 撤销一个做过的索引操作（见 MemoryTable.undoIndexPlan）。 */
+  async undoIndexPlan(scope: Scope, plan: IndexPlan, opts?: { steps?: (op: string) => readonly OpStep[] }): Promise<IndexUndoOutcome> {
+    const dir = await this.indexDirOf(scope)
+    if (dir === undefined || this.table.undoIndexPlan === undefined) return { kind: 'stale', reason: '这个范围的主题索引不在了' }
+    return this.table.undoIndexPlan(dir, plan, opts)
+  }
+
+  /** 一个索引操作是不是提交了、还有步骤等着补做（见 MemoryTable.isOpPending）。 */
+  isOpPending(op: string): boolean {
+    return this.table.isOpPending?.(op) ?? false
   }
 
   /** 维护点入口（快照冻结时调用）：scope 决定维护哪些目录；未解析 workspace 时只有 global。 */

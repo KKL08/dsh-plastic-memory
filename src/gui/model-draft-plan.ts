@@ -2,7 +2,8 @@ import { z } from 'zod'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { SemanticLlm } from '../governance/semantic-scan.ts'
 import type { DraftPlanOp, MemoryDraft } from './contract.ts'
-import { draftOutputSchema, jsonObjectIn, memoriesJson, planNoteLines, toMemoryDraft } from './model-draft.ts'
+import { jsonObjectIn } from '../json-reply.ts'
+import { draftOutputSchema, memoriesJson, planNoteLines, toMemoryDraft } from './model-draft.ts'
 
 /**
  * 「整理所选」按计划出稿：一次调用借来的会话的模型，为用户确认过的每个改写项出一稿。纯逻辑，模型经 SemanticLlm 注入；

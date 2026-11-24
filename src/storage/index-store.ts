@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { IndexFiles } from '../topic-index.ts'
 
@@ -53,18 +53,19 @@ export async function readIndexFiles(dir: string): Promise<IndexFiles | undefine
 
 /**
  * 把索引写回去：只写内容变了的文件，每个文件整份替换（write 由调用方给，是先写临时文件再改名的那种，读的人读不到写了一半的）。
- * 先写主题页、最后写入口：中途断了，入口里只会少主题，不会指向还没有的页。不删文件：去掉一个主题页是索引操作的事。
+ * 先写主题页、再写入口、最后删 deleted 里的主题页：中途断了，入口里只会少主题，不会指向还没有的页。
  * 这些文件用户可以随手改，改它们不经过插件的锁：每个文件写之前再读一次，和 before 里读到的不一样就抛 IndexChangedError，
  * 不拿按旧内容算出来的结果盖掉刚改的。返回写了哪些文件（相对记忆目录的路径）。
  */
 export async function writeIndexFiles(
   dir: string, before: IndexFiles | undefined, next: IndexFiles, write: (filePath: string, text: string) => Promise<void>,
+  deleted: readonly string[] = [],
 ): Promise<string[]> {
   const root = join(dir, INDEX_DIR)
   const written: string[] = []
   const changed = Object.keys(next.pages).filter(name => before?.pages[name] !== next.pages[name])
   const isEntryChanged = before === undefined || before.entry !== next.entry
-  if (changed.length === 0 && !isEntryChanged) return written
+  if (changed.length === 0 && !isEntryChanged && deleted.length === 0) return written
   await mkdir(join(root, INDEX_TOPICS_DIR), { recursive: true })
   const replace = async (filePath: string, was: string | undefined, text: string) => {
     const current = await readFile(filePath, 'utf8').catch(err => { if (isMissing(err)) return undefined; throw err })
@@ -80,5 +81,37 @@ export async function writeIndexFiles(
     await replace(join(root, INDEX_ENTRY_FILE), before?.entry, next.entry)
     written.push(join(INDEX_DIR, INDEX_ENTRY_FILE))
   }
+  for (const name of deleted) {
+    const filePath = join(root, INDEX_TOPICS_DIR, name)
+    const current = await readFile(filePath, 'utf8').catch(err => { if (isMissing(err)) return undefined; throw err })
+    if (current === undefined) continue
+    if (current !== before?.pages[name]) throw new IndexChangedError(filePath)
+    await rm(filePath, { force: true })
+    written.push(join(INDEX_DIR, INDEX_TOPICS_DIR, name))
+  }
   return written
+}
+
+/** 索引里的一个文件：'entry' 是入口，其余是主题页的文件名。 */
+export function indexFilePath(dir: string, file: string): string {
+  return file === 'entry' ? join(dir, INDEX_DIR, INDEX_ENTRY_FILE) : join(dir, INDEX_DIR, INDEX_TOPICS_DIR, file)
+}
+
+/** 读索引里的一个文件；不存在返回 undefined。 */
+export async function readIndexFile(dir: string, file: string): Promise<string | undefined> {
+  return readFile(indexFilePath(dir, file), 'utf8').catch(err => { if (isMissing(err)) return undefined; throw err })
+}
+
+/**
+ * 整份替换索引里的一个文件（索引操作先写的那一个）。写之前再读一次：和 was 不一样就抛 IndexChangedError。
+ * 入口缺了按空串算，主题页缺了是 undefined。
+ */
+export async function replaceIndexFile(
+  dir: string, file: string, was: string | undefined, text: string, write: (filePath: string, text: string) => Promise<void>,
+): Promise<void> {
+  const filePath = indexFilePath(dir, file)
+  await mkdir(join(dir, INDEX_DIR, INDEX_TOPICS_DIR), { recursive: true })
+  const current = await readIndexFile(dir, file)
+  if (file === 'entry' ? (current ?? '') !== (was ?? '') : current !== was) throw new IndexChangedError(filePath)
+  await write(filePath, text)
 }

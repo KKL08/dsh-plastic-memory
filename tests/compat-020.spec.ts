@@ -10,7 +10,10 @@ import { GLOBAL_DIR, HISTORY_DIR, workspaceDirName } from '../src/storage/paths.
 import type { RecallStats } from '../src/storage/schema.ts'
 import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
 import { record } from './helpers/record.ts'
-import { openRelease020Table } from './helpers/release-020.ts'
+import { openRelease020Pending, openRelease020Table } from './helpers/release-020.ts'
+import { SidecarStore } from '../src/storage/sidecar.ts'
+import { PendingDecisionsStore } from '../src/governance/decisions.ts'
+import { sidecarSchemas } from './helpers/sidecar-schemas.ts'
 
 // 新旧版本共用一个记忆根：用 0.2.0 发布包对同一个临时记忆根读写，再由新版本读，对照 spec「兼容与迁移」的表。
 // 这里覆盖格式定稿涉及的两行和历史版本涉及的「删除」「提升或移动」两行，后面的票各自补自己那一行。
@@ -160,5 +163,18 @@ describe('新旧版本共用一个记忆根（0.2.0 发布包）', () => {
     const fm = splitFrontmatter(await readFile(await globalFile(), 'utf8')).data
     expect(fm.source).not.toHaveProperty('initiator')
     expect((fm.sourceTrail as Array<Record<string, unknown>>)[0]).toMatchObject({ initiator: 'user', by: 'main' })
+  })
+
+  it('0.2.0 读待决账本：整理索引留的记录它解析不了，跳过并记日志；它认得的条目照读，那条记录原样留在盘上', async () => {
+    const decisions = new PendingDecisionsStore(new SidecarStore({ root, schemas: sidecarSchemas, log: quiet }).pending)
+    const { entry: conflict } = await decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '两条说法相反', fingerprint: 'fp' }, 1)
+    await decisions.addIndexRun('pd_organize', { summary: '整理了一次主题索引', workspace: 'global' }, 2)
+    await decisions.appendIndexReceipt('pd_organize', { op: 'op_1', plan: { kind: 'describe', page: '发版.md', about: '新说明。', before: '旧说明。' } })
+    await decisions.confirmIndexReceipt('pd_organize', 'op_1')
+    const warnings: string[] = []
+    const old = await openRelease020Pending({ root, warnings })
+    expect((await old.list()).map(([, e]) => e.id)).toEqual([conflict.id])
+    expect(warnings).toHaveLength(1)
+    expect((await decisions.listSettled()).map(e => [e.id, e.indexRun?.receipts.length])).toEqual([['pd_organize', 1]])
   })
 })

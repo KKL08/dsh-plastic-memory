@@ -12,6 +12,22 @@ import type { PendingDecisionsStore } from './decisions.ts'
 /** 模型改写、替代：记一条已结清的条目（撤销入口）。条目 id 写入前就定好，补做重来不会多记一条。 */
 export const MODEL_CHANGE_STEP = 'ledger-model-change'
 
+/** 整理索引：一个索引操作提交之后，确认它在那次整理的条目上的回执（回执动手前已记下）。步骤里只有条目 id。 */
+export const INDEX_RECEIPT_STEP = 'ledger-index-receipt'
+/** 整理索引的撤销：一个操作撤掉之后，把它的回执从条目里拿掉。 */
+export const INDEX_RECEIPT_UNDONE_STEP = 'ledger-index-receipt-undone'
+
+interface IndexReceiptStep extends OpStep { kind: typeof INDEX_RECEIPT_STEP; entryId: string }
+interface IndexReceiptUndoneStep extends OpStep { kind: typeof INDEX_RECEIPT_UNDONE_STEP; entryId: string; receiptOp: string }
+
+export function indexReceiptStep(entryId: string): IndexReceiptStep {
+  return { kind: INDEX_RECEIPT_STEP, entryId }
+}
+
+export function indexReceiptUndoneStep(entryId: string, receiptOp: string): IndexReceiptUndoneStep {
+  return { kind: INDEX_RECEIPT_UNDONE_STEP, entryId, receiptOp }
+}
+
 type Origin = NonNullable<PendingDecision['origin']>
 
 interface ModelChangeStep extends OpStep {
@@ -41,6 +57,16 @@ export function ledgerSteps(decisions: PendingDecisionsStore, log: MemoryLogger 
       await decisions.addModelChange(
         record, { kind: step.change, workspace: scope === undefined ? '' : ledgerLabel(scope), origin: step.origin }, step.snapshotId, step.at, step.entryId,
       )
+    },
+    [INDEX_RECEIPT_STEP]: async (raw, { op }) => {
+      const step = raw as IndexReceiptStep
+      if (!(await decisions.confirmIndexReceipt(step.entryId, op))) {
+        log.warn(`[plastic-memory] 索引操作 ${op} 做成了，但它那次整理的记录已经不在，没有撤销入口`)
+      }
+    },
+    [INDEX_RECEIPT_UNDONE_STEP]: async (raw) => {
+      const step = raw as IndexReceiptUndoneStep
+      await decisions.dropIndexReceipt(step.entryId, step.receiptOp)
     },
   }
 }
