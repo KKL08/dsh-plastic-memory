@@ -4,7 +4,7 @@
  * cwd 走创建选项）搭 exec 直调，断言宿主层面的契约：工具注册、输出深度无损 JSON、
  * 会话/工作目录解析、落盘布局、规则层/语义层 note 码、快照回路、提升候选 dismiss、
  * 证据锚悬空降级（H9a 把落盘记录的 sessionId 改成不存在的会话）、真会话下钻（H9b 读回原文）、
- * 当轮锚来自宿主 turnBoundary 投影（H13）、外部直接写进记忆目录的文件出现在新会话第一步的快照消息里（H15）、
+ * 当轮锚来自宿主 turnBoundary 投影（H13）、定时任务开的轮只能按观察或推断写且锚记着发起方（H33）、外部直接写进记忆目录的文件出现在新会话第一步的快照消息里（H15）、
  * 宿主 grep 工具搜记忆根目录时顶层命中、.archive/ 不命中（H16）、
  * 带委派 header 的真子会话存入待确认记忆、检索排在主档后、溯源只限自己的会话、父会话接受后进新会话的注入（H19）。
  * 无 key 也跑的宿主服务契约：经宿主 commands 服务执行 `/memory` 命令，结果过 GUI 契约 schema；自动体检调度器在宿主计时服务登记了定时器。
@@ -162,10 +162,14 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
     const sessions = ctx.get('sessions') as Sessions | undefined
     if (!sessions) throw new Error('sessions service unavailable after loader.await() — host boot incomplete')
     // 宿主真 Session 搭 exec：cwd 走创建选项，会话 id 由宿主分配、live 可读（sessionQuery 优先读活会话）。
-    const mkExec = (cwd: string | undefined, model: ModelOpts = {}, signal?: AbortSignal): Exec => ({
-      agent: { session: sessions.create(undefined, cwd !== undefined ? { meta: { cwd } } : undefined), options: model },
-      signal: signal ?? new AbortController().signal,
-    })
+    // 会话里先开一轮、落一条用户本人的消息：保存按当轮起点的来源判断发起方，用户本人开的轮才能填用户明说；
+    // 当轮起点经宿主 turnBoundary 投影读到这个 turn/start
+    const mkExec = (cwd: string | undefined, model: ModelOpts = {}, signal?: AbortSignal): Exec => {
+      const session = sessions.create(undefined, cwd !== undefined ? { meta: { cwd } } : undefined)
+      session.append('turn/start', { turn: 1 })
+      session.append('user/message', createUserMessage({ content: [{ type: 'text', text: '记一下' }], source: { kind: 'user' } }), { surfaceOp: 'append' })
+      return { agent: { session, options: model }, signal: signal ?? new AbortController().signal }
+    }
     const home = process.env.DSH_HOME ?? ''
     const memoriesRoot = join(home, 'memories')
     const wsRoot = mkdtempSync(join(tmpdir(), 'pm-host-ws-'))
@@ -564,6 +568,22 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       }
     })
 
+    // H33 当轮发起方：定时任务开的一轮（起点消息的来源是 schedule），填用户明说退回；按观察写下时锚记着 schedule。
+    // 读的是宿主真会话日志，验证来源标记、整份日志的读取在宿主上都对得上。
+    await attempt('H33-TURN-INITIATOR', async () => {
+      const session = sessions.create(undefined, { meta: { cwd: wsA } })
+      session.append('turn/start', { turn: 1 })
+      session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'H33 每天汇总构建结果' }], source: { kind: 'schedule' } as never }), { surfaceOp: 'append' })
+      const exec: Exec = { agent: { session, options: {} }, signal: new AbortController().signal }
+      const asUser = await call('memory_save', { action: 'create', name: 'h33-user', summary: '定时任务', content: 'H33 定时任务里填用户明说', ...MEMORY_BASE }, exec) as { kind: string; code?: string }
+      const observed = await call('memory_save', { action: 'create', name: 'h33-observed', summary: '定时任务', content: 'H33 定时任务里按观察写', ...MEMORY_BASE, sourceMode: 'environment-observed' }, exec) as { kind: string; record?: { sourceTrail?: Array<{ initiator?: string }> } }
+      const initiator = observed.record?.sourceTrail?.[0]?.initiator
+      return {
+        ok: asUser.kind === 'rejected' && asUser.code === 'not-user-initiated' && observed.kind === 'saved' && initiator === 'schedule',
+        detail: `asUser=${asUser.kind}/${asUser.code} observed=${observed.kind} initiator=${initiator}`,
+      }
+    })
+
     // H15 外部写入可见、快照走本插件自己的消息：插件已在 wsA 上跑过多次操作之后，绕过工具直接往该 workspace 的记忆目录
     // 写一个手建文件（只有 name / type / 正文），再经宿主 agent 工厂建一个真 Agent（不跑模型），照 agent 循环的派发方式
     // 走第一步的 agent/pre-step（带一条用户消息；宿主其他插件的 pre-step 监听照常参与）：返回的 decision 里要有本插件的
@@ -661,6 +681,9 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       const fileOk = block.includes(`sessionId: ${child.header.id}`) && block.includes('depth: 1') && block.includes(`parentSessionId: ${parent.header.id}`)
         && block.includes(`rootSessionId: ${parent.header.id}`) && !block.includes('reviewed')
 
+      // 主会话这一轮由用户本人开启，主档按用户明说写
+      parent.append('turn/start', { turn: 1 })
+      parent.append('user/message', createUserMessage({ content: [{ type: 'text', text: `记下 ${token}` }], source: { kind: 'user' } }), { surfaceOp: 'append' })
       const settled = await call('memory_save', { action: 'create', name: 'h19-main', summary: '主会话记下', content: `主会话记下 ${token}「主档」`, ...MEMORY_BASE }, execOf(parent)) as Saved
       const searched = await call('memory_search', { query: token }, execOf(parent)) as { hits?: Array<{ id: string; sourceNote: string }> }
       const order = (searched.hits ?? []).map(h => h.id)

@@ -24,8 +24,8 @@ export interface HostContext {
     id: string
     /** 证据锚终点：会话里最后一条事件的位置。 */
     lastSeq: number
-    /** 证据锚起点：当轮 turn/start 的位置；读不到为 0（整会话锚）。 */
-    turnStartSeq: number
+    /** 证据锚起点：当轮 turn/start 的位置；读不到为 undefined（锚退回整会话，判发起方时按保存点找当轮）。 */
+    turnStartSeq: number | undefined
     /** 宿主 session 对象本身：检索按它找本会话的冻结快照、做召回去重。 */
     handle?: Session
   }

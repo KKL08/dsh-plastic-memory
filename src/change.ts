@@ -8,6 +8,12 @@ export interface ChangeAnchor {
   sessionId: string
   eventRange: [number, number]
   sourceMode: string
+  /** 当轮起点那条消息的宿主来源标记；读不到时缺省。 */
+  initiator?: string
+  /** 锚范围里有没有用户本人的话、有没有算数的工具结果；读不到日志时缺省。 */
+  evidence?: { user: boolean; tool: boolean }
+  /** 锚起点事件的时间；读不到时取写入时刻。 */
+  at?: number
 }
 
 /** 一次内容改动可以带的字段。补证时都不生效。 */
@@ -32,7 +38,24 @@ export interface Change {
 }
 
 function stampAnchor(anchor: ChangeAnchor, change: string, by: string, at: number): SourceAnchor {
-  return { sessionId: anchor.sessionId, eventRange: anchor.eventRange, sourceMode: anchor.sourceMode, at, change, by }
+  return {
+    sessionId: anchor.sessionId, eventRange: anchor.eventRange, sourceMode: anchor.sourceMode, at: anchor.at ?? at,
+    ...(anchor.initiator !== undefined ? { initiator: anchor.initiator } : {}),
+    ...(anchor.evidence !== undefined ? { evidence: anchor.evidence } : {}),
+    change, by,
+  }
+}
+
+/**
+ * 出处清单封顶（新的在前）。截掉的部分里有写下内容的锚（不是补证）、留下的部分里却一个都没有时，
+ * 把截掉的里面最近的那个放回末位、挤掉最旧的补证锚：注入的无人值守标注看的就是最近一次写下内容的锚，补证多了不能把它挤没。
+ */
+function cappedTrail(trail: readonly SourceAnchor[]): SourceAnchor[] {
+  const kept = trail.slice(0, SOURCE_TRAIL_CAP)
+  const isContent = (a: SourceAnchor) => a.change !== 'corroborate'
+  if (kept.some(isContent)) return kept
+  const lastContent = trail.slice(SOURCE_TRAIL_CAP).find(isContent)
+  return lastContent === undefined ? kept : [...kept.slice(0, SOURCE_TRAIL_CAP - 1), lastContent]
 }
 
 /** 记录顶层的 source：旧版本只认它，来源方式只能是旧版本认得的那几种，认不出的按最弱一档写。 */
@@ -57,7 +80,7 @@ export function applyChange(current: MemoryRecord, change: Change): MemoryRecord
   const isFreshTrail = kind === 'state-change' && change.isMergedIntoLastVersion !== true
   const provenance = anchor === undefined
     ? {}
-    : { source: sourceOf(anchor), sourceTrail: isFreshTrail ? [anchor] : [anchor, ...anchorsOf(current)].slice(0, SOURCE_TRAIL_CAP) }
+    : { source: sourceOf(anchor), sourceTrail: isFreshTrail ? [anchor] : cappedTrail([anchor, ...anchorsOf(current)]) }
 
   if (kind === 'corroborate') {
     // 多了一处佐证：把握只升不降

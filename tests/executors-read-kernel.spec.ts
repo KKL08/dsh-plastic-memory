@@ -29,6 +29,7 @@ import { FAKE_SECRET } from './helpers/secrets.ts'
 import { SECRET_MASK } from '../src/secrets.ts'
 import { writesDuring } from './helpers/fs-writes.ts'
 import { noInstructions } from './helpers/instructions.ts'
+import { userTurnLog } from './helpers/session-log.ts'
 
 // 执行器切到按范围读取与两级定位。全部用真实目录（FileTable + .state 侧表），
 // 只 mock 进程边界（sessionQuery.readEvent）；文件直接写盘模拟用户手编、git、其他进程。
@@ -111,7 +112,7 @@ function harness(opts: { readEvent?: ReadEventFn; now?: number } = {}) {
     source: (memoryId: string, ws: string | null = WS) =>
       executeSource({ memoryId }, { workspacePath: ws ?? undefined }, { store, getReadEvent: () => opts.readEvent ?? null }),
     save: (args: Parameters<typeof executeSave>[0], ws: string | null = WS) =>
-      executeSave(args, fakeExec(), { store, registry, host: { saveContextOf: ctx(ws) }, snapshots }),
+      executeSave(args, fakeExec(), { store, registry, host: { saveContextOf: ctx(ws), readSessionLog: userTurnLog }, snapshots }),
     forget: (ids: string[]) => executeForget({ ids, reason: '测试' }, { workspacePath: WS }, { store, snapshots, decisions }),
   }
 }

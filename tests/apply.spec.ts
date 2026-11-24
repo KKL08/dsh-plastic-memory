@@ -39,6 +39,8 @@ import { defaultJiebaLoader } from '../src/search/jieba-segmenter.ts'
 import { createRootLock } from '../src/storage/root-lock.ts'
 import { encodeMemoryCommand } from '../src/gui/contract.ts'
 import { fireUntilSettled, manualTimers } from './helpers/manual-timers.ts'
+import { openUserTurn, readUserTurn, USER_TURN_BOUNDARY } from './helpers/session-log.ts'
+import { MEMORY_TOOL_NAMES } from '../src/contract-codes.ts'
 
 // 进程边界的观察：fsTrace.on 期间记下插件对 node:fs、node:fs/promises 的每次调用（函数名 + 第一个参数）。平时原样透传。
 // fsTrace.hold：给了就先问它一次（参数形如 `readFile(<路径>)`），返回 promise 的那次 node:fs/promises 调用等它落定再执行。
@@ -91,9 +93,11 @@ function mockCtx(opts: {
   timer?: { timeout(callback: () => void, delayMs: number): () => void; interval(callback: () => void, delayMs: number): () => void }
   /** 宿主默认模型选择（ctx.get('agentDefaultModel')）；缺省服务缺席。 */
   agentDefaultModel?: { currentSelection(): { provider: string; model: string } }
-  /** 宿主会话查询（ctx.get('sessionQuery')）；缺省服务缺席。 */
+  /** 宿主会话查询（ctx.get('sessionQuery')）；缺省只有 readSession（每个会话都是用户本人开的一轮，保存照常能填用户明说）。 */
   sessionQuery?: unknown
 } = {}) {
+  // 宿主投影只答 turnBoundary：当轮起点指到 readSession 读回的那个 turn/start
+  const userTurnProjections = { stateOf: (_s: object, key: string) => (key === 'turnBoundary' ? USER_TURN_BOUNDARY : undefined) }
   const registered: string[] = []
   const listeners = new Map<string, (...args: unknown[]) => unknown>()
   // ctx.on 的第三参数（cordis EventOptions，如 prepend）按事件名记下，没传的不记
@@ -146,8 +150,9 @@ function mockCtx(opts: {
     get: (name: string) => (name === 'llm' ? llm
       : name === 'storageDomain' && opts.storageDomain === true ? storageDomain
         : name === 'agentDefaultModel' ? opts.agentDefaultModel
-          : name === 'sessionQuery' ? opts.sessionQuery
-            : undefined),
+          : name === 'sessionQuery' ? opts.sessionQuery ?? { readSession: readUserTurn }
+            : name === 'sessionProjections' ? userTurnProjections
+              : undefined),
     // 按依赖名分发，像 cordis 一样只在依赖的服务都在时才回调
     inject: (deps: string[], callback: (child: Record<string, unknown>) => unknown) => {
       const collect = (dispose: unknown) => { if (typeof dispose === 'function') disposers.push(dispose as () => unknown) }
@@ -211,6 +216,8 @@ describe('apply', () => {
       'memory_confirm', 'memory_forget', 'memory_health', 'memory_promote',
       'memory_save', 'memory_scan', 'memory_search', 'memory_snapshot', 'memory_source',
     ])
+    // 不算工具证据的那份工具名清单要和实际注册的一致，加工具时一起改
+    expect([...MEMORY_TOOL_NAMES].sort()).toEqual(ctx.registered)
   })
 
   it('governance.enabled=false 时只注册 P0 三工具 + memory_snapshot（快照写入/恢复必须成对）', async () => {
@@ -1398,7 +1405,7 @@ describe('注入链接线', () => {
     await b.step(earlier, 1, { messages: [userSaid('你好')] })
     expect(visibleSnapshots(earlier).join('')).not.toContain('kiwi')
 
-    const writer = hostSession('sess-a1', { cwd })
+    const writer = openUserTurn(hostSession('sess-a1', { cwd }))
     const saved = await a.tool('memory_save').execute(
       { action: 'create', scope: 'workspace', type: 'preference', name: '代码评审', content: '代码评审先看测试 kiwi', summary: '评审先看测试', sourceMode: 'user-explicit' },
       fakeExec({ agent: { session: writer, options: {} } } as never)) as { kind: string; record?: { id: string } }
@@ -1684,7 +1691,7 @@ describe('证据锚：读 turnBoundary 投影', () => {
     const ctx = {
       ...base,
       tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } },
-      get: (name: string) => (name === 'sessionProjections' ? projections : undefined),
+      get: (name: string) => (name === 'sessionProjections' ? projections : name === 'sessionQuery' ? { readSession: readUserTurn } : undefined),
       logger: { info() {}, warn: (msg: string) => { warnings.push(msg) }, error() {} },
     }
     const memoryRoot = await makeTmpRoot()
@@ -2363,7 +2370,7 @@ describe('写锁接线', () => {
       await apply(ctx as never, config)
       const save = (name: string) => defs.get('memory_save')!.execute(
         { action: 'create', scope: 'workspace', type: 'preference', name, content: `${name} 的正文`, summary: name, sourceMode: 'user-explicit' },
-        fakeExec({ agent: { session: hostSession(`sess-${name}`, { cwd }), options: {} } } as never)) as Promise<{ kind: string; record?: { id: string } }>
+        fakeExec({ agent: { session: openUserTurn(hostSession(`sess-${name}`, { cwd })), options: {} } } as never)) as Promise<{ kind: string; record?: { id: string } }>
       return { ctx, save }
     }
     // 挂住每一次记忆文件的写入（写临时文件那一步，目录索引不算），按到达顺序排队；另记下拿写锁时建锁库目录的调用（每次尝试拿锁都会建一次）

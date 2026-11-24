@@ -22,6 +22,13 @@ export type RejectCode =
   | 'edit-ambiguous'       // edits 某处的 oldString 命中多处又没带 replaceAll
   | 'change-kind-missing'  // update 没声明改动性质（change）：回引导（当前内容和三个判断问题）、不写入；同一会话对同一条再缺一次就按状态变化写
   | 'subagent-restricted'  // 子 agent 会话（delegationDepth ≥ 1）越过写入约束：依据、类型、替代、force、改写归属、新建配额，原因按条区分
+  | 'not-user-initiated'   // 这一轮不是用户本人开的（定时任务、别的 agent，或宿主给不出发起方），sourceMode 只能填 environment-observed、agent-inferred
+
+/** 本插件注册的工具名：它们的结果来自记忆本身，不算保存时的工具证据。 */
+export const MEMORY_TOOL_NAMES = [
+  'memory_confirm', 'memory_forget', 'memory_health', 'memory_promote',
+  'memory_save', 'memory_scan', 'memory_search', 'memory_snapshot', 'memory_source',
+] as const
 
 /**
  * 模型用 memory_save 改写已有记忆（rewrite）、把同作用域旧记忆标成已取代（supersede）时留的撤销记录种类：

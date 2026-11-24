@@ -51,10 +51,10 @@ describe('PA-28 宿主服务缺席、未注册、调用抛错时各自退化，�
     ['没有开着的轮', { sessionProjections: projections({ turnBoundary: { openTurnStartSeq: null } }) }, 'no open turn'],
     ['投影缺字段', { sessionProjections: projections({ turnBoundary: {} }) }, 'undefined'],
   ]
-  it.each(turnAnchorCases)('证据锚读不到 turnBoundary（%s）：起点为 0，每个会话警告一次', async (_label, services, reason) => {
+  it.each(turnAnchorCases)('证据锚读不到 turnBoundary（%s）：起点为不知道，每个会话警告一次', async (_label, services, reason) => {
     const { host, warnings } = boot(services)
     const a = session('sess-a')
-    expect((await host.contextOf(execOf(a))).session.turnStartSeq).toBe(0)
+    expect((await host.contextOf(execOf(a))).session.turnStartSeq).toBeUndefined()
     await host.contextOf(execOf(a))
     expect(warnings).toHaveLength(1)
     expect(warnings[0]).toContain('sess-a')
@@ -143,10 +143,10 @@ describe('PA-28 宿主服务缺席、未注册、调用抛错时各自退化，�
     expect(requests[1]?.sessionId).not.toBe(requests[2]?.sessionId)
   })
 
-  it('没有会话：会话 id 用哨兵，证据锚全为 0，不带委派、不警告', async () => {
+  it('没有会话：会话 id 用哨兵，证据锚终点为 0、轮起点不知道，不带委派、不警告', async () => {
     const { host, warnings } = boot()
     const context = await host.contextOf(execOf())
-    expect(context).toEqual({ workspacePath: undefined, delegationDepth: 0, session: { id: UNKNOWN_SESSION_ID, lastSeq: 0, turnStartSeq: 0 } })
+    expect(context).toEqual({ workspacePath: undefined, delegationDepth: 0, session: { id: UNKNOWN_SESSION_ID, lastSeq: 0, turnStartSeq: undefined } })
     expect(warnings).toEqual([])
   })
 })

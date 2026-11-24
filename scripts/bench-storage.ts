@@ -240,6 +240,12 @@ try {
   const exec = { signal: new AbortController().signal } as ToolRunContext
   const session = { id: 'bench-session', lastSeq: 10, turnStartSeq: 5 }
   const contextOf = async () => ({ workspacePath: currentWs, session })
+  // 保存时读的会话日志：用户本人开的一轮，用户明说照常能写
+  const userTurn = {
+    header: { isSeeded: false }, inheritedEventCount: 0,
+    events: [{ type: 'turn/start', seq: 5, time: 1 }, { type: 'user/message', seq: 6, data: { role: 'user', content: [{ type: 'text', text: '记一下' }], source: { kind: 'user' } } }],
+  }
+  const readSessionLog = async () => userTurn
   const snapshotCache = new SnapshotCache({ store, registry, budget: 4000, memoryRoot: root, evidenceLookup: 'strict', log: quietLog })
   const healthDeps = {
     store, registry, decisions, cache: sidecar.scanCache,
@@ -283,7 +289,7 @@ try {
       const r = await executeSave({
         action: 'create', name: `bench-save-${round + 1}-${words[0]}`, type: 'knowledge', scope: 'workspace',
         content: words.join(' '), summary: words.slice(0, 2).join(' '), sourceMode: 'user-explicit',
-      }, exec, { store, registry, snapshots, host: { saveContextOf: contextOf } })
+      }, exec, { store, registry, snapshots, host: { saveContextOf: contextOf, readSessionLog } })
       if (r.kind !== 'saved') throw new Error(`memory_save 未落盘：${r.kind}`)
     }),
     await bench('memory_save（update）', async round => {
@@ -291,7 +297,7 @@ try {
       const r = await executeSave({
         action: 'update', id: target.id, change: 'refine', name: target.name, type: target.type, scope: 'workspace',
         content: `${target.content}（第 ${round + 2} 次更新）`, summary: target.summary, sourceMode: 'user-explicit',
-      }, exec, { store, registry, snapshots, host: { saveContextOf: contextOf } })
+      }, exec, { store, registry, snapshots, host: { saveContextOf: contextOf, readSessionLog } })
       if (r.kind !== 'updated') throw new Error(`update 未落盘：${r.kind}`)
     }),
     await bench('memory_health 单层（当前项目）', async () => {

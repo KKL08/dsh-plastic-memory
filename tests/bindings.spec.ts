@@ -23,6 +23,7 @@ import type { MemoryRecord } from '../src/record-schema.ts'
 import { InMemoryTable } from './helpers/in-memory-table.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 import { noInstructions } from './helpers/instructions.ts'
+import { userTurnLog } from './helpers/session-log.ts'
 
 /**
  * 九个工具绑定层（src/tools/*-tool.ts）的契约测试。绑定层此前从未被测：纯逻辑在
@@ -74,7 +75,7 @@ function expectRenderClean(tool: ToolDefinition, args: unknown, value: unknown):
 describe('memory_save 绑定', () => {
   const makeTool = (store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())) => createSaveTool({
     store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()),
-    host: { saveContextOf: async () => ({ workspacePath: '/proj', session: { id: 's', lastSeq: 1 } }) },
+    host: { saveContextOf: async () => ({ workspacePath: '/proj', session: { id: 's', lastSeq: 1 } }), readSessionLog: userTurnLog },
   })
   const legal = { action: 'create', name: '标题', type: 'preference', scope: 'global', content: '内容', summary: '摘要', sourceMode: 'user-explicit' }
 

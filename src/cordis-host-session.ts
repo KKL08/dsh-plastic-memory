@@ -78,8 +78,11 @@ export function createCordisHostSession(deps: CordisHostSessionDeps): HostSessio
     return hostSemanticLlm(probe<HostLlmService>('llm'), route && { ...route, sessionId: `plastic-memory-checkup-${randomUUID()}` })
   }
 
-  /** 读不到 turnBoundary 投影一律 0（整会话锚）。证据锚终点 = session.seq - 1（seq 是下一条事件的位置）。 */
-  const openTurnStartSeq = (session: Session): number => {
+  /**
+   * 读不到 turnBoundary 投影一律 undefined：锚退回整会话，判发起方时按保存点找当轮，不把 0 当成轮起点。
+   * 证据锚终点 = session.seq - 1（seq 是下一条事件的位置）。
+   */
+  const openTurnStartSeq = (session: Session): number | undefined => {
     let reason: string
     try {
       const projections = deps.lookup('sessionProjections') as ProjectionReader | undefined
@@ -95,7 +98,7 @@ export function createCordisHostSession(deps: CordisHostSessionDeps): HostSessio
       reason = `projection read threw: ${String(error)}`
     }
     warnOnce(session, 'turn-anchor', `[plastic-memory] 会话 "${session.header.id}" 读不到 turnBoundary 投影，出处锚到整个会话：${reason}`)
-    return 0
+    return undefined
   }
 
   /** 子会话的 mode：读不到按一次性。 */
@@ -152,7 +155,7 @@ export function createCordisHostSession(deps: CordisHostSessionDeps): HostSessio
       session: {
         id: session?.header.id ?? UNKNOWN_SESSION_ID,
         lastSeq: session ? Math.max(session.seq - 1, 0) : 0,
-        turnStartSeq: session ? openTurnStartSeq(session) : 0,
+        turnStartSeq: session ? openTurnStartSeq(session) : undefined,
         ...(session ? { handle: session } : {}),
       },
     }

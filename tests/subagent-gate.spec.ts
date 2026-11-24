@@ -13,6 +13,7 @@ import { decodeFile } from '../src/storage/frontmatter.ts'
 import { isPendingDelegated, type MemoryRecord } from '../src/record-schema.ts'
 import { fakeExec } from './helpers/exec.ts'
 import { writesDuring } from './helpers/fs-writes.ts'
+import { readUserTurn, USER_TURN_BOUNDARY } from './helpers/session-log.ts'
 
 // 子 agent 只读门：宿主子 agent 会话的 header 带 delegationDepth（父深度 + 1），主会话缺省。
 // 经 apply() 注册后的真实工具定义走一遍，宿主对象只按最小结构伪造（进程边界）。
@@ -60,7 +61,9 @@ async function boot(opts: { governance?: boolean } = {}) {
       yield { type: 'finish', reason: { kind: 'stop' } }
     },
   }
-  const sessionQuery = { readEvent: async () => ({ events: [], startSeq: 0, endSeq: 0 }) }
+  const sessionQuery = { readEvent: async () => ({ events: [], startSeq: 0, endSeq: 0 }), readSession: readUserTurn }
+  // 当轮起点读宿主 turnBoundary 投影：指到 readSession 读回的那个 turn/start
+  const turnProjection = { stateOf: (_s: object, key: string) => (key === 'turnBoundary' ? USER_TURN_BOUNDARY : undefined) }
   const ctx = {
     // 同名重复注册在宿主里直接抛错：重注册必须先注销
     tools: {
@@ -71,7 +74,7 @@ async function boot(opts: { governance?: boolean } = {}) {
       },
     },
     on: (event: string, fn: (...args: unknown[]) => unknown) => { listeners.set(event, fn); return () => {} },
-    get: (name: string) => (name === 'llm' ? llm : name === 'sessionQuery' ? sessionQuery : undefined),
+    get: (name: string) => (name === 'llm' ? llm : name === 'sessionQuery' ? sessionQuery : name === 'sessionProjections' ? turnProjection : undefined),
     inject: () => () => {},
     effect: () => () => {},
     logger: { info() {}, warn() {}, error() {} },
