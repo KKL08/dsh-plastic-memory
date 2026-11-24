@@ -153,6 +153,11 @@ export class SnapshotStore {
     }
   }
 
+  /** 这份快照对应的那次写入已经原样撤回、不会再有人按它恢复：删掉，不留到保留窗口结束。 */
+  async discard(id: string): Promise<void> {
+    await this.table.delete(id)
+  }
+
   async list(): Promise<MemorySnapshot[]> {
     return (await this.table.list()).map(([, s]) => s).sort((a, b) => b.createdAt - a.createdAt)
   }

@@ -9,7 +9,7 @@ import { roundValidity } from '../validity.ts'
 /**
  * 变更集：一个方案是一组操作，每个操作带字段补丁、读到时的预期值和依据。这里只有契约和纯函数：
  * 锁内拿刚读到的记录核对一个操作做不做（checkOp）、同一批的进度怎么推进、回执够不够撤销（revertBlock）、撤销还原成什么（reverted）。
- * 落盘在执行器（src/changeset.ts）。
+ * 落盘在执行器（src/tools/changeset.ts）。
  */
 
 /** 这一版落地的操作。 */
@@ -22,6 +22,9 @@ export type ChangeOpKind = (typeof CHANGE_OP_KINDS)[number]
 export const CONTENT_PATCH_FIELDS = ['name', 'summary', 'content', 'tags', 'factTime', 'validFrom', 'validTo'] as const
 export const PATCH_FIELDS = [...CONTENT_PATCH_FIELDS, 'recall'] as const
 export type PatchField = (typeof PATCH_FIELDS)[number]
+/** 回执里能出现的字段：补丁的字段，加上界面里用户改稿时顺带写的升档标记。 */
+export const RECEIPT_FIELDS = [...PATCH_FIELDS, 'delegation'] as const
+export type ReceiptField = (typeof RECEIPT_FIELDS)[number]
 
 /** 每种操作的补丁里允许出现的字段。 */
 const FIELDS_BY_KIND: Record<ChangeOpKind, readonly PatchField[]> = {
@@ -55,6 +58,8 @@ export const changeOpSchema = z.object({
   id: z.string(),
   kind: z.enum([...CHANGE_OP_KINDS, ...RESERVED_OP_KINDS]),
   memoryId: z.string(),
+  /** 目标读到时的作用域键：同一个 id 在全局和项目里各有一份时，操作只认这一份。 */
+  scopeKey: z.string(),
   patch: fieldPatchSchema.optional(),
   /** 补丁里每个字段读到时的值；null 是读到时没有。 */
   expect: fieldPatchSchema.optional(),
@@ -79,23 +84,19 @@ function sortKeys(v: unknown): unknown {
 }
 
 /** 一个字段拿来比的值：没有记 null，正文的换行风格归一，有效期按文件里的分钟比。 */
-export function fieldValue(record: MemoryRecord, field: PatchField): unknown {
-  const raw = record[field]
-  if (raw === undefined) return null
-  if (field === 'content') return lf(raw as string)
-  if (field === 'validFrom' || field === 'validTo') return roundValidity(field, raw as number)
-  return field === 'recall' ? sortKeys(raw) : raw
+export function fieldValue(record: MemoryRecord, field: ReceiptField): unknown {
+  return normalized(field, record[field])
 }
 
-function normalized(field: PatchField, value: unknown): unknown {
+function normalized(field: ReceiptField, value: unknown): unknown {
   if (value === undefined || value === null) return null
   if (field === 'content') return lf(value as string)
   if (field === 'validFrom' || field === 'validTo') return roundValidity(field, value as number)
-  return field === 'recall' ? sortKeys(value) : value
+  return field === 'recall' || field === 'delegation' ? sortKeys(value) : value
 }
 
 /** 一个字段的值的摘要：回执里记它，不记值。 */
-export const fieldDigest = (record: MemoryRecord, field: PatchField) => sha1(fieldValue(record, field))
+export const fieldDigest = (record: MemoryRecord, field: ReceiptField) => sha1(fieldValue(record, field))
 
 /**
  * 扫描指纹：交给模型判断的全部字段（名称、摘要、正文、事实时间、有效期、来源方式、最近一次改动的性质、取代关系）。
@@ -119,30 +120,42 @@ export function scopeKeyOf(r: Pick<MemoryRecord, 'scope' | 'workspacePath'>): st
   return r.scope === 'global' ? GLOBAL_SCOPE_KEY : r.workspacePath ?? ''
 }
 
+/** 一份副本的身份：同一个 id 在不同作用域里是不同的副本，依据、进度都按它认。 */
+export function copyKey(at: { scopeKey: string; memoryId: string }): string {
+  return JSON.stringify([at.scopeKey, at.memoryId])
+}
+
 /** 这一条记忆此刻当依据用的版本。 */
 export function basisOf(r: MemoryRecord): OpBasis {
   return { memoryId: r.id, fingerprint: scanFingerprint(r), scopeKey: scopeKeyOf(r) }
 }
 
 /**
- * 同一批的进度，按记忆记：这批对它写过哪些字段和写下的值，写完后的扫描指纹。后面的操作对写过的字段拿刚写下的值当预期，
+ * 同一批的进度，按副本（copyKey）记：这批对它写过哪些字段和写下的值，写完后的扫描指纹。后面的操作对写过的字段拿刚写下的值当预期，
  * 依据指纹拿写完后的比；没写过的字段仍按读到时的值比，不整版换基线。
  */
 export interface BatchProgress {
   written: Map<string, Map<PatchField, unknown>>
   fingerprints: Map<string, string>
+  /** 这一批自己删掉的记忆：后面的操作拿它当依据时不再核对（它不在用是这一批做的）。 */
+  forgotten: Set<string>
 }
 
 export function newProgress(): BatchProgress {
-  return { written: new Map(), fingerprints: new Map() }
+  return { written: new Map(), fingerprints: new Map(), forgotten: new Set() }
 }
 
 /** 一个操作写成之后推进进度：written 是提交的那一版。 */
-export function advance(progress: BatchProgress, op: ChangeOp, written: MemoryRecord): void {
-  const fields = progress.written.get(op.memoryId) ?? new Map<PatchField, unknown>()
+export function advance(progress: BatchProgress, op: ChangeOp, written: MemoryRecord, fingerprint: (r: MemoryRecord) => string = scanFingerprint): void {
+  const key = copyKey(op)
+  if (written.status === 'deleted') {
+    progress.forgotten.add(key)
+    return
+  }
+  const fields = progress.written.get(key) ?? new Map<PatchField, unknown>()
   for (const field of patchedFields(op)) fields.set(field, fieldValue(written, field))
-  progress.written.set(op.memoryId, fields)
-  progress.fingerprints.set(op.memoryId, scanFingerprint(written))
+  progress.written.set(key, fields)
+  progress.fingerprints.set(key, fingerprint(written))
 }
 
 export function patchedFields(op: ChangeOp): PatchField[] {
@@ -170,25 +183,40 @@ export type OpCheck =
 export interface CheckInput {
   /** 写入段里刚读到的目标；定位不到为 undefined。 */
   target: MemoryRecord | undefined
-  /** 写入段里刚读到的依据记忆，按 id；定位不到的没有这一项。目标自己不用放。 */
+  /** 写入段里刚读到的依据记忆，按副本（copyKey）；定位不到的没有这一项。目标自己不用放。 */
   basis: ReadonlyMap<string, MemoryRecord>
   progress: BatchProgress
   /** 后台写入：改写稿里的疑似密钥只放行原记忆（目标和依据）里已有的。界面里用户亲手定的稿不查这一条。 */
   isSecretChecked: boolean
+  /**
+   * 依据按什么指纹比；缺省扫描指纹。调用方进写入段之前自己核对过版本、口径比扫描指纹严的（界面按卡片上那一版核对），
+   * 给同一个口径：不然进段之前算过期的改动，落在进段前后的空档里就会被放过去。依据里的指纹、进度都得用它算。
+   */
+  fingerprint?: (r: MemoryRecord) => string
 }
 
 const surface = (r: Pick<MemoryRecord, 'content' | 'name' | 'summary' | 'tags'>) => `${r.content}\n${r.name}\n${r.summary}\n${r.tags.join(' ')}`
 
 /**
  * 补丁里的密钥是不是带进来的：有高危密钥，或有疑似密钥的值不在原记忆里（模型编的、截短加长的、从别处带来的）。
+ * 给了 target（要写的那条）就连写下去的整条一起查：补丁和没改的字段拼出来的也算带进来的。
  * 按完整的值比，不看标签和分隔符。原记忆里本来就有、用户保存时确认过的疑似值原样保留不算。
  */
-export function hasForeignSecret(patch: FieldPatch, originals: readonly MemoryRecord[]): boolean {
-  const text = [patch.content, patch.name, patch.summary, patch.tags?.join(' ')].filter(part => part !== undefined).join('\n')
-  if (text === '') return false
+export function hasForeignSecret(patch: FieldPatch, originals: readonly MemoryRecord[], target?: MemoryRecord): boolean {
+  const parts = [patch.content, patch.name, patch.summary, patch.tags?.join(' ')].filter(part => part !== undefined)
+  if (parts.length === 0) return false
+  const text = parts.join('\n')
   if (detectSecrets(text).some(hit => hit.severity === 'critical')) return true
   const known = new Set(originals.flatMap(r => secretValues(surface(r), { severity: 'suspected' })))
-  return secretValues(text, { severity: 'suspected' }).some(value => !known.has(value))
+  if (secretValues(text, { severity: 'suspected' }).some(value => !known.has(value))) return true
+  if (target === undefined) return false
+  // 补丁单看没有、和目标没改的字段拼在一起才成形的（把中间一个字段清空也会让两边的字段连上）：按写下去的整条再查一遍
+  const merged = surface({
+    content: patch.content ?? target.content, name: patch.name ?? target.name, summary: patch.summary ?? target.summary, tags: patch.tags ?? target.tags,
+  })
+  const had = new Set(secretValues(surface(target), { severity: 'critical' }))
+  if (secretValues(merged, { severity: 'critical' }).some(value => !had.has(value))) return true
+  return secretValues(merged, { severity: 'suspected' }).some(value => !known.has(value))
 }
 
 /**
@@ -202,20 +230,25 @@ export function checkOp(op: ChangeOp, input: CheckInput): OpCheck {
   const kind = op.kind as ChangeOpKind
   const fields = patchedFields(op)
   if (fields.some(field => !FIELDS_BY_KIND[kind].includes(field))) return skip('unsupported')
-  if (kind === 'link' && op.links === undefined) return skip('unsupported')
+  if (kind === 'link' && (op.links === undefined || isLinkDeltaCrossed(op.links))) return skip('unsupported')
+  // 改动的性质只有改内容、改有效期的操作能声明，补证走它自己的操作
+  if (op.change !== undefined && (op.change === 'corroborate' || (kind !== 'edit' && kind !== 'set-validity'))) return skip('unsupported')
 
   const { target, progress } = input
   if (target === undefined || target.status !== 'active') return skip('gone')
-  const records = new Map(input.basis)
-  records.set(target.id, target)
+  // 目标自己必须在依据里：没有它，目标读到时的版本和作用域无从核对
+  const own = copyKey(op)
+  if (!op.basis.some(b => copyKey(b) === own)) return skip('unsupported')
   for (const basis of op.basis) {
-    const record = records.get(basis.memoryId)
+    const key = copyKey(basis)
+    if (progress.forgotten.has(key) && key !== own) continue
+    const record = key === own ? target : input.basis.get(key)
     if (record === undefined || record.status !== 'active') return skip('basis-changed', basis.memoryId)
     if (scopeKeyOf(record) !== basis.scopeKey) return skip('moved', basis.memoryId)
-    const expected = progress.fingerprints.get(basis.memoryId) ?? basis.fingerprint
-    if (scanFingerprint(record) !== expected) return skip('basis-changed', basis.memoryId)
+    const expected = progress.fingerprints.get(key) ?? basis.fingerprint
+    if ((input.fingerprint ?? scanFingerprint)(record) !== expected) return skip('basis-changed', basis.memoryId)
   }
-  const written = progress.written.get(op.memoryId)
+  const written = progress.written.get(own)
   for (const field of fields) {
     const expected = written?.has(field) === true ? written.get(field) : normalized(field, op.expect?.[field])
     if (!isDeepStrictEqual(fieldValue(target, field), expected)) return skip('field-changed')
@@ -225,11 +258,17 @@ export function checkOp(op: ChangeOp, input: CheckInput): OpCheck {
   if (kind === 'forget') return { kind: 'forget' }
   if (kind === 'corroborate') return { kind: 'corroborate' }
   if (kind === 'link') return { kind: 'link' }
-  if (input.isSecretChecked && kind === 'edit' && hasForeignSecret(op.patch ?? {}, [...records.values()])) return skip('foreign-secret')
+  if (input.isSecretChecked && kind === 'edit' && hasForeignSecret(op.patch ?? {}, [target, ...input.basis.values()], target)) return skip('foreign-secret')
   const changed = fields.filter(field => !isDeepStrictEqual(fieldValue(target, field), normalized(field, op.patch![field])))
   if (changed.length === 0) return skip('no-change')
   // 只写确实要变的字段：回执和撤销都按它们算
   return { kind: 'write', fields: Object.fromEntries(changed.map(field => [field, op.patch![field] ?? undefined])) }
+}
+
+/** 同一个 id 既要加又要去：算不出这次到底加了还是去了，回执会记下没发生的事。 */
+function isLinkDeltaCrossed(links: NonNullable<ChangeOp['links']>): boolean {
+  const crossed = (add: readonly string[] | undefined, remove: readonly string[] | undefined) => (add ?? []).some(id => (remove ?? []).includes(id))
+  return crossed(links.add?.related, links.remove?.related) || crossed(links.add?.premises, links.remove?.premises)
 }
 
 /** 这次内容改动的性质：操作声明的，缺省细化。 */
@@ -251,8 +290,9 @@ export const changeReceiptSchema = z.object({
   id: z.string(),
   op: z.string(),
   memoryId: z.string(),
-  kind: z.enum(CHANGE_OP_KINDS),
-  fields: z.array(z.enum(PATCH_FIELDS)),
+  // 种类和字段名开放取值：更新的版本记的回执这一版照样读得进、写得回，只是撤不了（见 revertBlock 的 unsupported）
+  kind: z.string(),
+  fields: z.array(z.string()),
   after: z.record(z.string(), z.string()),
   status: z.enum(['active', 'deleted']),
   scopeKey: z.string(),
@@ -261,12 +301,14 @@ export const changeReceiptSchema = z.object({
   isContent: z.boolean(),
   trail: z.string(),
   confirmedAt: z.number(),
+  /** 删除的回执：写下的删除时刻。撤销时对不上，说明期间被恢复过、又被别处删了一次。 */
+  deletedAt: z.number().optional(),
 })
 export type ChangeReceipt = z.infer<typeof changeReceiptSchema>
 
 /** 写成之后算回执：written 是提交的那一版。 */
 export function receiptOf(
-  input: { id: string; op: string; kind: ChangeOpKind; fields: readonly PatchField[]; snapshotId?: string; links?: { added: LinkIds; removed: LinkIds } },
+  input: { id: string; op: string; kind: ChangeOpKind; fields: readonly ReceiptField[]; snapshotId?: string; links?: { added: LinkIds; removed: LinkIds } },
   written: MemoryRecord,
 ): ChangeReceipt {
   return {
@@ -275,6 +317,7 @@ export function receiptOf(
     after: Object.fromEntries(input.fields.map(field => [field, fieldDigest(written, field)])),
     status: written.status === 'deleted' ? 'deleted' : 'active',
     scopeKey: scopeKeyOf(written),
+    ...(written.status === 'deleted' && written.deletedAt !== undefined ? { deletedAt: written.deletedAt } : {}),
     ...(input.snapshotId !== undefined ? { snapshotId: input.snapshotId } : {}),
     ...(input.links !== undefined ? { links: input.links } : {}),
     isContent: input.fields.some(field => (CONTENT_PATCH_FIELDS as readonly string[]).includes(field)),
@@ -286,24 +329,29 @@ export function receiptOf(
 /**
  * 撤不了的原因。gone：记忆不在了；status：状态已不是这次操作后的样子（期间被软删、被恢复、被取代）；moved：换了作用域；
  * field-changed：补丁里的字段已不是这次写下的值；overwritten：内容之后又被别的操作改过；corroborated：期间出处清单变了（被补证过）；
- * expired：改前的值已不在快照里。
+ * expired：改前的值已不在快照里；unsupported：更新的版本记的回执，种类或字段这一版不认识。
  */
-export type RevertBlock = 'gone' | 'status' | 'moved' | 'field-changed' | 'overwritten' | 'corroborated' | 'expired'
+export type RevertBlock = 'gone' | 'status' | 'moved' | 'field-changed' | 'overwritten' | 'corroborated' | 'expired' | 'unsupported'
 
 /**
  * 这条回执此刻撤不撤得了：返回 undefined 是能撤。current 是写入段里刚读到的那一版，before 是改前快照里的。
  * 确认时间不参与；关联和前提按增量撤，期间别人加的不挡它。删除的回执只看状态。
  */
 export function revertBlock(receipt: ChangeReceipt, current: MemoryRecord | undefined, before: MemoryRecord | undefined): RevertBlock | undefined {
+  if (!(CHANGE_OP_KINDS as readonly string[]).includes(receipt.kind) || receipt.fields.some(field => !(RECEIPT_FIELDS as readonly string[]).includes(field))) return 'unsupported'
   if (current === undefined) return 'gone'
   if (current.status !== receipt.status) return 'status'
   if (scopeKeyOf(current) !== receipt.scopeKey) return 'moved'
-  if (receipt.kind === 'forget') return undefined
-  if (receipt.fields.some(field => fieldDigest(current, field) !== receipt.after[field])) return 'field-changed'
+  if (receipt.kind === 'forget') {
+    if (receipt.deletedAt !== undefined && current.deletedAt !== receipt.deletedAt) return 'status'
+    return receipt.snapshotId !== undefined && before === undefined ? 'expired' : undefined
+  }
+  if (receipt.fields.some(field => fieldDigest(current, field as ReceiptField) !== receipt.after[field])) return 'field-changed'
   if (receipt.isContent && current.lastChange?.op !== receipt.op) return 'overwritten'
   const touchesTrail = receipt.isContent || receipt.kind === 'corroborate'
   if (touchesTrail && trailDigest(current) !== receipt.trail) return 'corroborated'
-  if ((receipt.fields.length > 0 || receipt.kind === 'corroborate') && before === undefined) return 'expired'
+  // 拍过改前快照的回执都要它：改前的值、删之前的修改时间、去掉的前提当时的摘要都从那里取
+  if (receipt.snapshotId !== undefined && before === undefined) return 'expired'
   return undefined
 }
 
@@ -324,7 +372,7 @@ export function reverted(receipt: ChangeReceipt, current: MemoryRecord, before: 
     if (before?.[key] === undefined) delete next[key]
     else next[key] = before[key]
   }
-  for (const field of receipt.fields) restore(field)
+  for (const field of receipt.fields) restore(field as ReceiptField)
   const touchesTrail = receipt.isContent || receipt.kind === 'corroborate'
   if (receipt.isContent) for (const key of ['lastChange', 'updatedAt', 'stateSince'] as const) restore(key)
   if (touchesTrail) for (const key of ['source', 'sourceTrail'] as const) restore(key)
@@ -353,9 +401,8 @@ export function firstRevertBlock(
   before: (receipt: ChangeReceipt) => MemoryRecord | undefined,
 ): { receipt: ChangeReceipt; block: RevertBlock } | undefined {
   const state = new Map<string, MemoryRecord | undefined>()
-  const keyOf = (r: ChangeReceipt) => JSON.stringify([r.scopeKey, r.memoryId])
   for (const receipt of [...receipts].reverse()) {
-    const key = keyOf(receipt)
+    const key = copyKey(receipt)
     const now = state.has(key) ? state.get(key) : current(receipt)
     const prior = before(receipt)
     const block = revertBlock(receipt, now, prior)

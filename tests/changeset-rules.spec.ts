@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { applyChange } from '../src/change.ts'
 import {
-  advance, basisOf, changeOpSchema, checkOp, hasForeignSecret, newProgress, receiptOf, revertBlock, reverted, scanFingerprint,
+  advance, basisOf, changeOpSchema, changeReceiptSchema, checkOp, copyKey, hasForeignSecret, newProgress, receiptOf, revertBlock, reverted, scanFingerprint, scopeKeyOf,
   type ChangeOp, type CheckInput,
 } from '../src/governance/changeset.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
@@ -16,7 +16,7 @@ function base(extra: Partial<MemoryRecord> = {}): MemoryRecord {
 }
 
 function op(extra: Partial<ChangeOp> & Pick<ChangeOp, 'kind'>, target = base()): ChangeOp {
-  return { id: 'o1', memoryId: target.id, basis: [basisOf(target)], ...extra }
+  return { id: 'o1', memoryId: target.id, scopeKey: scopeKeyOf(target), basis: [basisOf(target)], ...extra }
 }
 
 function input(target: MemoryRecord | undefined, extra: Partial<CheckInput> = {}): CheckInput {
@@ -24,6 +24,14 @@ function input(target: MemoryRecord | undefined, extra: Partial<CheckInput> = {}
 }
 
 const edit = (target: MemoryRecord, patch: ChangeOp['patch'], expect: ChangeOp['expect']) => op({ kind: 'edit', patch, expect }, target)
+
+describe('依据', () => {
+  it('操作的依据里没有目标自己：不做（目标读到时的版本和作用域无从核对）', () => {
+    const r = base()
+    const o: ChangeOp = { ...edit(r, { content: '新正文' }, { content: '旧正文' }), basis: [] }
+    expect(checkOp(o, input(r))).toMatchObject({ kind: 'skip', reason: 'unsupported' })
+  })
+})
 
 describe('扫描指纹', () => {
   it('名称、摘要、正文、事实时间、有效期、来源方式、最近一次改动的性质、取代关系任一项变了就变', () => {
@@ -78,12 +86,20 @@ describe('锁内核对', () => {
     const read = base()
     const other = base({ id: 'mem_b', content: '另一条' })
     const o: ChangeOp = { ...op({ kind: 'forget' }, read), basis: [basisOf(read), basisOf(other)] }
-    const withOther = (b: MemoryRecord | undefined) => input(read, { basis: new Map(b === undefined ? [] : [[b.id, b]]) })
+    const withOther = (b: MemoryRecord | undefined) => input(read, { basis: new Map(b === undefined ? [] : [[copyKey(basisOf(other)), b]]) })
     expect(checkOp(o, withOther(other))).toEqual({ kind: 'forget' })
     expect(checkOp(o, withOther({ ...other, content: '改过' }))).toEqual({ kind: 'skip', reason: 'basis-changed', memoryId: 'mem_b' })
     expect(checkOp(o, withOther({ ...other, status: 'deleted' }))).toEqual({ kind: 'skip', reason: 'basis-changed', memoryId: 'mem_b' })
     expect(checkOp(o, withOther(undefined))).toEqual({ kind: 'skip', reason: 'basis-changed', memoryId: 'mem_b' })
     expect(checkOp(o, withOther({ ...other, scope: 'workspace', workspacePath: '/p' }))).toEqual({ kind: 'skip', reason: 'moved', memoryId: 'mem_b' })
+  })
+
+  it('调用方给了更严的指纹口径：依据按它比，扫描指纹看不出的改动（确认时间）也算变了', () => {
+    const read = base()
+    const strict = (r: MemoryRecord) => `${scanFingerprint(r)}:${r.lastConfirmedAt}`
+    const o: ChangeOp = { ...edit(read, { content: '新' }, { content: '旧正文' }), basis: [{ ...basisOf(read), fingerprint: strict(read) }] }
+    expect(checkOp(o, input(read, { fingerprint: strict }))).toMatchObject({ kind: 'write' })
+    expect(checkOp(o, input({ ...read, lastConfirmedAt: T0 + 9 }, { fingerprint: strict }))).toMatchObject({ kind: 'skip', reason: 'basis-changed' })
   })
 
   it('期间别处只改了不在依据里的东西（注入档位、关联、确认时间）：照做', () => {
@@ -108,9 +124,23 @@ describe('锁内核对', () => {
     expect(checkOp(op({ kind: 'set-validity', patch: { validTo: T0 + 60_000 }, expect: { validTo: null } }, bare), input(bare))).toMatchObject({ kind: 'write' })
   })
 
+  it('关联的增删里同一个 id 既加又去：不做', () => {
+    const r = base()
+    expect(checkOp(op({ kind: 'link', links: { add: { related: ['mem_b'] }, remove: { related: ['mem_b'] } } }, r), input(r))).toMatchObject({ kind: 'skip', reason: 'unsupported' })
+    expect(checkOp(op({ kind: 'link', links: { add: { premises: ['mem_b'] }, remove: { premises: ['mem_b'] } } }, r), input(r))).toMatchObject({ kind: 'skip', reason: 'unsupported' })
+    expect(checkOp(op({ kind: 'link', links: { add: { related: ['mem_b'] }, remove: { related: ['mem_c'] } } }, r), input(r))).toEqual({ kind: 'link' })
+  })
+
+  it('改动的性质只有改内容、改有效期的操作能声明，且不能声明成补证：对不上的不做', () => {
+    const r = base()
+    expect(checkOp({ ...edit(r, { content: '新' }, { content: '旧正文' }), change: 'corroborate' }, input(r))).toMatchObject({ kind: 'skip', reason: 'unsupported' })
+    expect(checkOp(op({ kind: 'set-recall', patch: { recall: 'never' }, expect: { recall: null }, change: 'correct' }, r), input(r))).toMatchObject({ kind: 'skip', reason: 'unsupported' })
+    expect(checkOp({ ...edit(r, { content: '新' }, { content: '旧正文' }), change: 'correct' }, input(r))).toMatchObject({ kind: 'write' })
+  })
+
   it('操作的形状：多余的补丁字段过不了 schema', () => {
     expect(changeOpSchema.safeParse({ id: 'o', kind: 'edit', memoryId: 'm', basis: [], patch: { status: 'deleted' } }).success).toBe(false)
-    expect(changeOpSchema.safeParse({ id: 'o', kind: 'set-topic', memoryId: 'm', basis: [] }).success).toBe(true)
+    expect(changeOpSchema.safeParse({ id: 'o', kind: 'set-topic', memoryId: 'm', scopeKey: 'global', basis: [] }).success).toBe(true)
   })
 })
 
@@ -146,6 +176,28 @@ describe('同一批的进度', () => {
   })
 })
 
+describe('同一个 id 在全局和项目里各有一份', () => {
+  it('这一批改过全局那份，不算改过项目那份：项目那份被别处改成一样的内容，照样跳过', () => {
+    const global = base({ lastChange: { kind: 'refine', at: T0, op: 'op_0' } })
+    const project = base({ scope: 'workspace', workspacePath: '/p', content: '项目里的正文', lastChange: { kind: 'refine', at: T0, op: 'op_0' } })
+    const progress = newProgress()
+    const written = applyChange(global, { kind: 'refine', fields: { content: '第二版' }, by: 'gui', op: 'op_1', at: T0 + 1 })
+    advance(progress, edit(global, { content: '第二版' }, { content: '旧正文' }), written)
+    const later = edit(project, { content: '第三版' }, { content: '项目里的正文' })
+    expect(checkOp(later, input({ ...project, content: '第二版' }, { progress }))).toMatchObject({ kind: 'skip', reason: 'basis-changed' })
+    expect(checkOp(later, input(project, { progress }))).toEqual({ kind: 'write', fields: { content: '第三版' } })
+  })
+
+  it('依据里列着两份：各按各的核对', () => {
+    const global = base()
+    const project = base({ scope: 'workspace', workspacePath: '/p', content: '项目里的正文' })
+    const o: ChangeOp = { ...op({ kind: 'forget' }, project), basis: [basisOf(global), basisOf(project)] }
+    const withGlobal = (g: MemoryRecord) => input(project, { basis: new Map([[copyKey(basisOf(global)), g]]) })
+    expect(checkOp(o, withGlobal(global))).toEqual({ kind: 'forget' })
+    expect(checkOp(o, withGlobal({ ...global, content: '改过' }))).toMatchObject({ kind: 'skip', reason: 'basis-changed' })
+  })
+})
+
 describe('改写稿里的密钥', () => {
   const SECRET = 'password=Abc12345xyz'
   it('原记忆里已有的疑似值原样带着：放行；新带进来的：拦', () => {
@@ -153,6 +205,19 @@ describe('改写稿里的密钥', () => {
     expect(hasForeignSecret({ content: `测试库连接串 ${SECRET}` }, [r])).toBe(false)
     expect(hasForeignSecret({ content: '连接串 password=Zzz98765qwe' }, [r])).toBe(true)
     expect(hasForeignSecret({ summary: '没有密钥' }, [r])).toBe(false)
+  })
+
+  it('补丁单看没有、和没改的字段拼在一起才成形的高危密钥：拦', () => {
+    const r = base({ content: 'Bearer', name: '旧名称' })
+    const o = edit(r, { name: 'ABCDEFGHIJKLMNOPQRSTUVWX' }, { name: '旧名称' })
+    expect(hasForeignSecret(o.patch!, [r])).toBe(false)
+    expect(checkOp(o, input(r, { isSecretChecked: true }))).toMatchObject({ kind: 'skip', reason: 'foreign-secret' })
+  })
+
+  it('把一个字段清空，让它两边的字段连成高危密钥：拦', () => {
+    const r = base({ name: 'Bearer', summary: '隔开', tags: ['ABCDEFGHIJKLMNOPQRSTUVWX'] })
+    const o = edit(r, { summary: '' }, { summary: '隔开' })
+    expect(checkOp(o, input(r, { isSecretChecked: true }))).toMatchObject({ kind: 'skip', reason: 'foreign-secret' })
   })
 
   it('后台写入才查；界面里用户亲手定的稿不查这一条', () => {
@@ -215,6 +280,29 @@ describe('回执与撤销', () => {
     const back = reverted(r, now, undefined)
     expect(back.related).toEqual(['mem_other'])
     expect(back.premises).toBeUndefined()
+  })
+
+  it('关联按增量撤：它去掉的前提还没回来就按改前的摘要放回，别人已经重新挂上的不重复加', () => {
+    const had = { ...before, related: ['mem_b'], premises: [{ id: 'mem_c', digest: 'd-old' }, { id: 'mem_d', digest: 'd2' }] }
+    const cut = { ...had, related: undefined, premises: undefined }
+    const r = receiptOf({ id: 'o2', op: 'op_2', kind: 'link', fields: [], snapshotId: 'snap_1', links: { added: { related: [], premises: [] }, removed: { related: ['mem_b'], premises: ['mem_c', 'mem_d'] } } }, cut)
+    const now = { ...cut, premises: [{ id: 'mem_d', digest: 'd-new' }] }
+    expect(revertBlock(r, now, had)).toBeUndefined()
+    const back = reverted(r, now, had)
+    expect(back.related).toEqual(['mem_b'])
+    expect(back.premises).toEqual([{ id: 'mem_d', digest: 'd-new' }, { id: 'mem_c', digest: 'd-old' }])
+  })
+
+  it('删除之后被恢复、又被别处删了一次：不是这次删的，不撤', () => {
+    const deleted = { ...before, status: 'deleted' as const, deletedAt: T0 + 3 }
+    const r = receiptOf({ id: 'o3', op: 'op_3', kind: 'forget', fields: [] }, deleted)
+    expect(revertBlock(r, { ...deleted, deletedAt: T0 + 500 }, before)).toBe('status')
+  })
+
+  it('更新的版本记的回执（种类或字段不认识）：读得进，撤不了', () => {
+    const future = changeReceiptSchema.parse({ ...receipt, kind: 'merge' })
+    expect(revertBlock(future, written, before)).toBe('unsupported')
+    expect(revertBlock(changeReceiptSchema.parse({ ...receipt, fields: [...receipt.fields, 'topic'] }), written, before)).toBe('unsupported')
   })
 
   it('删除的撤销：还在最近删除里就放回在用', () => {

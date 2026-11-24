@@ -3,7 +3,7 @@ import type { PendingDecisionsStore } from '../governance/decisions.ts'
 import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import { editFingerprint, isConflicting, type SnapshotStore } from '../governance/snapshots.ts'
 import { asUndoable, expectedFingerprints, isStillOwnWrite, undoRuleOf, undoStateOf, undoStateOfAll, type TargetCopies, type UndoableEntry, type UndoRule } from '../governance/undo-rules.ts'
-import { verdictLoser, type MemorySnapshot, type SnapshotRecord } from '../governance/schema.ts'
+import { snapshotIdFor, verdictLoser, type MemorySnapshot, type SnapshotRecord } from '../governance/schema.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { RecordNotFoundError } from '../errors.ts'
 import { scopeAt, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
@@ -12,7 +12,6 @@ import { newWriteOp } from '../storage/table.ts'
 import { hasDropped, linksOutside, restoreLinks, withoutLinks, type DroppedLinks } from '../links.ts'
 import { revertChange, withdrawVersion } from './changeset.ts'
 import { firstRevertBlock, type ChangeReceipt } from '../governance/changeset.ts'
-import { GLOBAL_SCOPE_KEY } from '../scope.ts'
 import { crossWorkspaceNote, gateRecords, isCopyOf, isVisible, locateCopy, type CrossWorkspaceRejection, type GovernanceContext } from './workspace-gate.ts'
 
 export interface UndoDeps {
@@ -136,7 +135,7 @@ async function revertChanges(entry: UndoableEntry, rule: UndoRule, allow: boolea
   const befores = new Map<string, MemoryRecord | undefined>()
   for (const receipt of receipts) {
     if (!currents.has(keyOf(receipt))) {
-      currents.set(keyOf(receipt), await locateCopy(deps.store, receipt.memoryId, scopeAt(receipt.scopeKey === GLOBAL_SCOPE_KEY ? undefined : receipt.scopeKey)))
+      currents.set(keyOf(receipt), await locateCopy(deps.store, receipt.memoryId, scopeOfLedger(receipt.scopeKey)))
     }
     const snapshot = receipt.snapshotId === undefined ? undefined : await deps.snapshots.get(receipt.snapshotId)
     befores.set(receipt.op, snapshot?.data.find(r => r.id === receipt.memoryId && r.redacted !== true))
@@ -151,6 +150,8 @@ async function revertChanges(entry: UndoableEntry, rule: UndoRule, allow: boolea
   for (const receipt of [...receipts].reverse()) {
     const r = await revertChange(entry.id, receipt, {}, deps)
     if (r.kind !== 'reverted') return changed(receipt.memoryId, restored.length > 0 ? 'kept-third-party' : 'changed')
+    // 这一条已经还原、回执也拿掉了，只是收尾出了错：照实报出去，剩下的回执留着，修好后再撤
+    if (r.error !== undefined) throw r.error
     if (!restored.includes(receipt.memoryId)) restored.push(receipt.memoryId)
   }
   return settleUndo(entry, rule, deps, restored)
@@ -489,11 +490,11 @@ export async function restoreDeleted(
   const isCovered = (r: SnapshotRecord) => r.id === memoryId && (scope === undefined || isCopyOf(r, scope))
   const covers = (s: MemorySnapshot | undefined) => s?.data.some(r => isCovered(r) && r.redacted !== true) === true
   const entry = (await deps.decisions.listSettled())
-    .filter(d => verdictLoser(d, d.settled!.verdict) === memoryId && covers(snapshots.find(s => s.id === d.settled!.snapshotId))).at(-1)
+    .filter(d => verdictLoser(d, d.settled!.verdict) === memoryId && covers(snapshots.find(s => s.id === snapshotIdFor(d, memoryId)))).at(-1)
   if (entry !== undefined) {
     const at = entry.settled!.at
     if (entry.settled!.verdict === 'plan-applied') {
-      return restoreMergedLoser({ decisionId: entry.id, at, memoryId }, snapshots.find(s => s.id === entry.settled!.snapshotId)!, args.allowCrossWorkspace, context, deps)
+      return restoreMergedLoser({ decisionId: entry.id, at, memoryId }, snapshots.find(s => s.id === snapshotIdFor(entry, memoryId))!, args.allowCrossWorkspace, context, deps)
     }
     const r = await claimAndUndo({ decisionId: entry.id, allowCrossWorkspace: args.allowCrossWorkspace }, context, deps,
       current => current.settled.at === at && verdictLoser(current, current.settled.verdict) === memoryId)

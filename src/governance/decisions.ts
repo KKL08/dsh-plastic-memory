@@ -4,7 +4,7 @@ import type { RootLock } from '../root-lock.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { OverflowLevel } from '../contract-codes.ts'
 import {
-  genId, kindOf, verdictLoser, type BatchReceipt, type IndexReceipt, type IndexRun, type LinkIds, type PendingDecision, type PendingKind, type SettledProposal, type SettledVerdict, type StoredSuggestion,
+  genId, kindOf, snapshotIdFor, verdictLoser, type BatchReceipt, type IndexReceipt, type IndexRun, type LinkIds, type PendingDecision, type PendingKind, type SettledProposal, type SettledVerdict, type StoredSuggestion,
   type SuggestionBasis, type SuggestionFailure,
 } from './schema.ts'
 import { isUndoExpired } from './undo-rules.ts'
@@ -230,6 +230,14 @@ export class PendingDecisionsStore {
     }
   }
 
+  /**
+   * 只认领、不拿写锁：一段要分好几次写入段做的流程（逐项应用一个变更集）期间占着这条条目，撤销、裁决这类 withClaim 的操作碰到它
+   * 就按「正在处理」不动。返回释放函数；已被别人认领返回 undefined。持有进程退出后认领按残留清掉。
+   */
+  hold(id: string): Promise<(() => Promise<void>) | undefined> {
+    return this.table.claim(id)
+  }
+
   /** 认领一对冲突的身份后执行 fn（同 withClaim，不等待）：挂账和要删一方的裁决都先认领它，同一对同时只有一处在动。 */
   withPairClaim<R>(entry: KindKeyed, fn: () => Promise<R>): Promise<{ isClaimed: true; value: R } | { isClaimed: false }> {
     return this.withClaim(pairClaimKey(entry), fn)
@@ -384,12 +392,14 @@ export class PendingDecisionsStore {
    * 以后同一对（垂直的同一条）再被扫到时不再挂账。条目不存在或已结清返回 false。调用方持有条目认领。顺手清扫超出保留窗口的条目。
    */
   async settlePlan(
-    id: string, input: { writes: readonly PlanWrite[]; proposal: SettledProposal; snapshotId: string; fingerprint: string }, now: number,
+    id: string, input: { writes: readonly PlanWrite[]; proposal: SettledProposal; snapshotId: string; fingerprint: string; changes?: ChangeReceipt[] }, now: number,
   ): Promise<boolean> {
     const entry = await this.table.get(id)
     if (entry === undefined || entry.settled !== undefined) return false
     await this.table.put(id, {
       ...entry, fingerprint: input.fingerprint,
+      // 按变更集落盘的：逐操作回执记在条目上，撤销按它们逐个还原
+      ...(input.changes !== undefined ? { changes: input.changes } : {}),
       settled: {
         verdict: 'plan-applied', at: now, snapshotId: input.snapshotId, proposal: input.proposal, receipts: receiptsOf(input.writes),
         ...(entry.fingerprint !== undefined ? { priorFingerprint: entry.fingerprint } : {}),
@@ -573,14 +583,6 @@ export class PendingDecisionsStore {
     return this.addSettled({ kind: 'edit', ...input, fingerprint: editFingerprint(written) }, verdict, now, { snapshotId })
   }
 
-  /**
-   * 整理所选的应用：writes 是这次提交的每一项（按计划顺序），written 是那一项实际提交的那份（改写是 update 的返回值，
-   * 删除是软删时锁内那份），回执的指纹按它算；改写写完应是在用，删除写完应在最近删除里。
-   */
-  addBatchEdit(writes: readonly PlanWrite[], input: { summary: string; workspaces: string[] }, snapshotId: string, now: number) {
-    return this.addSettled({ kind: 'edit', memoryIds: writes.map(w => w.memoryId), ...input, receipts: receiptsOf(writes) }, 'batch-edited', now, { snapshotId })
-  }
-
   /** 全局记忆移到项目：written 是移过去的那一份。 */
   /** droppedLinks：移过去时越界去掉的关联和前提，撤销时从改前快照放回去。 */
   addMove(written: MemoryRecord, input: { summary: string; workspace: string; droppedLinks?: LinkIds }, snapshotId: string, now: number) {
@@ -683,7 +685,7 @@ export class PendingDecisionsStore {
    * 一次变更集收尾：一个操作都没做成（或都撤掉了）的整条移出账本；做成了的补上给视图和旧版本读的整条指纹回执（receipts）、
    * 涉及的记忆和改前快照（取第一条回执的）。返回留下的条目。只用在 addChangeRun 记的条目上。
    */
-  async finishChangeRun(id: string, input: { receipts: BatchReceipt[] }): Promise<PendingDecision | undefined> {
+  async finishChangeRun(id: string, input: { writes: readonly PlanWrite[]; summary?: string; workspaces?: string[] }): Promise<PendingDecision | undefined> {
     const entry = await this.table.get(id)
     if (entry?.changes === undefined || entry.settled === undefined) return undefined
     if (entry.changes.length === 0) {
@@ -692,7 +694,8 @@ export class PendingDecisionsStore {
     }
     const snapshotId = entry.changes.find(r => r.snapshotId !== undefined)?.snapshotId
     const done: PendingDecision = {
-      ...entry, memoryIds: [...new Set(entry.changes.map(r => r.memoryId))], receipts: input.receipts,
+      ...entry, memoryIds: [...new Set(entry.changes.map(r => r.memoryId))], receipts: receiptsOf(input.writes),
+      ...(input.summary !== undefined ? { summary: input.summary } : {}), ...(input.workspaces !== undefined ? { workspaces: input.workspaces } : {}),
       settled: { ...entry.settled, ...(snapshotId !== undefined ? { snapshotId } : {}) },
     }
     await this.table.put(id, done)
@@ -735,14 +738,15 @@ export class PendingDecisionsStore {
    */
   async dropDependingOn(snapshotIds: ReadonlySet<string>, memoryId: string): Promise<void> {
     for (const [key, e] of await this.table.list()) {
-      const snapshotId = e.settled?.snapshotId
+      const snapshotId = snapshotIdFor(e, memoryId)
       if (snapshotId !== undefined && snapshotIds.has(snapshotId) && e.memoryIds.includes(memoryId)) await this.table.delete(key)
     }
   }
 
-  /** 悬空引用清理：任一被删记忆出现在条目里，整条移除（含已裁决条目，keepId 那条除外）。返回移除的未决条目数。 */
-  async removeByMemoryIds(memoryIds: string[], keepId?: string): Promise<number> {
-    const hit = (await this.table.list()).filter(([key, e]) => key !== keepId && e.memoryIds.some(id => memoryIds.includes(id)))
+  /** 悬空引用清理：任一被删记忆出现在条目里，整条移除（含已裁决条目，keep 里的除外）。返回移除的未决条目数。 */
+  async removeByMemoryIds(memoryIds: string[], keep?: string | readonly string[]): Promise<number> {
+    const kept = keep === undefined ? [] : typeof keep === 'string' ? [keep] : keep
+    const hit = (await this.table.list()).filter(([key, e]) => !kept.includes(key) && e.memoryIds.some(id => memoryIds.includes(id)))
     for (const [key] of hit) await this.table.delete(key)
     return hit.filter(([, e]) => !e.settled).length
   }

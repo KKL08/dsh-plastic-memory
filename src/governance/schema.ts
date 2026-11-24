@@ -44,6 +44,15 @@ export const SETTLED_VERDICTS = ['keep-both', 'dismiss', 'keep-left', 'keep-righ
 export type SettledVerdict = (typeof SETTLED_VERDICTS)[number]
 
 /**
+ * 条目里这条记忆的改前快照：按变更集应用的条目每个操作各拍各的，取它那条回执上的；其余条目整条只有一份。
+ */
+export function snapshotIdFor(
+  entry: { settled?: { snapshotId?: string }; changes?: ReadonlyArray<{ memoryId: string; snapshotId?: string }> }, memoryId: string,
+): string | undefined {
+  return entry.changes?.find(r => r.memoryId === memoryId && r.snapshotId !== undefined)?.snapshotId ?? entry.settled?.snapshotId
+}
+
+/**
  * 裁决要删掉的一方（败方）；两边都留、或不是冲突条目时为 undefined。
  * 横向：left=memoryIds[0]、right=memoryIds[1]；垂直（有 baselineRef）：left=记忆、right=基线，基线不可删，keep-right 意为记忆删除。
  * plan-applied 的败方是结清信息回执里删除的那一条（融合时并入的那条；垂直改写没有败方）。

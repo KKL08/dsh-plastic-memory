@@ -3,7 +3,7 @@ import type { OpStep, OpStepHandler } from '../storage/table.ts'
 import { ledgerLabel, scopeOfMemory } from '../scope.ts'
 import { genId, type LinkIds, type PendingDecision } from './schema.ts'
 import type { PendingDecisionsStore } from './decisions.ts'
-import { receiptOf, type ChangeOpKind, type PatchField } from './changeset.ts'
+import { receiptOf, type ChangeOpKind, type ReceiptField } from './changeset.ts'
 
 /**
  * 记忆文件写成之后要补的账：正常写完和中断后补做走同一个处理器（见 MemoryTable.registerStep）。
@@ -71,13 +71,13 @@ interface ChangeReceiptStep extends OpStep {
   entryId: string
   opId: string
   opKind: ChangeOpKind
-  fields: PatchField[]
+  fields: ReceiptField[]
   snapshotId?: string
   links?: { added: LinkIds; removed: LinkIds }
 }
 interface ChangeUndoneStep extends OpStep { kind: typeof CHANGE_UNDONE_STEP; entryId: string; receiptOp: string }
 
-export function changeReceiptStep(input: { entryId: string; opId: string; opKind: ChangeOpKind; fields: PatchField[]; snapshotId?: string; links?: { added: LinkIds; removed: LinkIds } }): ChangeReceiptStep {
+export function changeReceiptStep(input: { entryId: string; opId: string; opKind: ChangeOpKind; fields: ReceiptField[]; snapshotId?: string; links?: { added: LinkIds; removed: LinkIds } }): ChangeReceiptStep {
   return { kind: CHANGE_RECEIPT_STEP, ...input }
 }
 

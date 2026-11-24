@@ -5,7 +5,7 @@ import type { MemoryLogger, MemoryStore } from './store.ts'
 import type { SnapshotStore } from './governance/snapshots.ts'
 import { layerOf, newVersionId, STATE_CHANGE_VERSION, type HistoryVersion } from './storage/history.ts'
 import { newWriteOp, type OpStep, type OpStepHandler } from './storage/table.ts'
-import { scopeOfMemory } from './scope.ts'
+import { scopeOfMemory, type Scope } from './scope.ts'
 import { toToolOutput } from './output.ts'
 import { isCurrentPremise } from './links.ts'
 
@@ -85,6 +85,11 @@ export interface CommitChangeDeps {
 }
 
 export interface CommitChangeInput<Stop = never> {
+  /**
+   * 只动这个作用域里的那一份：按它定位、按它写回，别的作用域里同 id 的副本不碰。不给时按会话视角（当前项目优先），
+   * 写回时顺带清掉另一层的同 id 副本（会话里它们是同一条的重复）。
+   */
+  scope?: Scope
   /** 调用方读到的那一版，用来找到要改的那一份：锁内看到它不在了、状态变了或换了作用域就不写。别的字段不比，按锁内读到的最新版拼。 */
   target: MemoryRecord
   /** meta：只改元数据（注入档位、关联和前提），不动修改时间、出处清单和最近一次内容改动，照常拍改前快照。 */
@@ -109,6 +114,10 @@ export interface CommitChangeInput<Stop = never> {
   alsoSnapshot?: readonly MemoryRecord[]
   /** 调用方在这次写入提交之后要补的账，拿到改前快照的 id 再定；处理器由调用方登记。 */
   steps?: (snapshotId: string) => OpStep[]
+  /** 这次写入的操作 id 和要写下的那一版定下来就告诉调用方（落盘之前）：写方法抛错时调用方凭它查落没落盘、认写下的是什么。 */
+  onOp?: (opId: string, planned: MemoryRecord) => void
+  /** 用户在界面里亲手定下的内容：确认时间记为这一刻（不靠出处判断）。只改元数据的操作不生效。 */
+  isUserConfirmed?: boolean
   /** 补证平时不拍改前快照（没有可撤的）；要给它留撤销入口时设为 true，照样拍。 */
   isSnapshotForced?: boolean
   /** 调用方另外的不写条件：对锁内看到的当前内容求值。 */
@@ -147,7 +156,8 @@ export async function commitChange<Stop = never>(input: CommitChangeInput<Stop>,
   const { kind } = input
   return store.writeSection(async () => {
     // 定位和落盘同一个口径（会话视角，当前项目优先）：本项目那份没了、读到的是全局的同 id 副本时，作用域对不上，不写
-    const current = await store.get(input.target.id, { workspacePath: input.target.workspacePath })
+    const from = input.scope ?? { workspacePath: input.target.workspacePath }
+    const current = await store.get(input.target.id, from)
     const isSamePlace = current !== undefined && current.status !== 'deleted' && current.status === input.target.status
       && current.scope === input.target.scope && current.workspacePath === input.target.workspacePath
     if (!isSamePlace || input.isBlocked?.(current) === true) return { kind: 'changed', current }
@@ -202,7 +212,8 @@ export async function commitChange<Stop = never>(input: CommitChangeInput<Stop>,
       ...(reason !== undefined && reason !== '' ? { reason } : {}),
       isMergedIntoLastVersion: history?.mode === 'append',
     }
-    const parsed = memoryRecordSchema.safeParse(kind === 'meta' ? applyMeta(target, prepared.fields) : applyChange(target, change))
+    const applied = kind === 'meta' ? applyMeta(target, prepared.fields) : applyChange(target, change)
+    const parsed = memoryRecordSchema.safeParse(kind !== 'meta' && input.isUserConfirmed === true ? { ...applied, lastConfirmedAt: at } : applied)
     if (!parsed.success) return { kind: 'invalid', reason: parsed.error.issues.map(i => i.message).join('；') }
     // 值是 undefined 的键去掉：记录要能无损序列化
     const next = toToolOutput(parsed.data) as unknown as MemoryRecord
@@ -213,9 +224,10 @@ export async function commitChange<Stop = never>(input: CommitChangeInput<Stop>,
       seen.current = latest
       return latest === undefined || !isSameRecord(latest, target)
     }
+    input.onOp?.(op.id, next)
     if (before !== undefined) pendingBefore.set(op.id, before)
     try {
-      const written = await store.put(next, undefined, isChangedSinceRead, op)
+      const written = await store.put(next, from, isChangedSinceRead, op)
       if (written === undefined) return { kind: 'changed', current: seen.current }
       await store.finishOp(op, written)
       return {

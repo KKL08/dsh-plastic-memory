@@ -1,8 +1,7 @@
 import { mkdir } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { markDeleted, type MemoryLogger, type MemoryStore } from '../store.ts'
-import { byPosition, newWriteOp, type WriteOp } from '../storage/table.ts'
+import type { MemoryLogger, MemoryStore } from '../store.ts'
 import type { CasKvTable } from '../kv-table.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { AgentsMdWriter } from '../storage/agents-md.ts'
@@ -14,7 +13,7 @@ import {
 } from '../governance/decisions.ts'
 import { isModelChange } from '../governance/undo-rules.ts'
 import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
-import { genId, kindOf, type LinkIds, type MemorySnapshot, type PendingDecision, type ProposalOp, type ScanCacheEntry, type SnapshotRecord, type SuggestionBasis } from '../governance/schema.ts'
+import { genId, kindOf, type LinkIds, type PendingDecision, type ProposalOp, type ScanCacheEntry, type SnapshotRecord, type SuggestionBasis } from '../governance/schema.ts'
 import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import { baselineFor, type ReadInstructions } from '../governance/instructions.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
@@ -25,6 +24,8 @@ import { executeForget } from '../tools/forget.ts'
 import { executePromote, type PromoteResult } from '../tools/promote.ts'
 import { hasDropped, linksOutside, withoutLinks } from '../links.ts'
 import { executeUndo, restoreDeleted, type UndoResult } from '../tools/undo.ts'
+import { applyChangeset, receiptsOfEntry, rollBackEntry } from '../tools/changeset.ts'
+import { basisOf, scopeKeyOf, type ChangeOp } from '../governance/changeset.ts'
 import {
   copyHistory, crossWorkspaceNote, gateRecords, locateCopy, workspaceLabel, type CrossWorkspaceRejection, type GovernanceContext,
 } from '../tools/workspace-gate.ts'
@@ -308,127 +309,108 @@ function withUserEdits(cur: MemoryRecord, fields: { content: string; name: strin
   return { ...cur, content, name, summary, tags, updatedAt: now, lastConfirmedAt: now, ...delegation }
 }
 
-/** 整理所选逐项写的写入记录：written 是这一项实际提交的那份（没写成为 undefined），之后的回执、回退都按它。 */
-interface BatchWrite { memoryId: string; op: ApplyEditOp['kind']; written?: MemoryRecord }
+/** 一批里写成的一项：written 是这一项实际提交的那份，之后的回执、结账都按它。 */
+interface BatchWrite { memoryId: string; op: ApplyEditOp['kind']; written: MemoryRecord }
 
 /**
- * 逐项写的一项：改写成这四个面，或软删。isChanged 是写入那一刻锁内的核对：磁盘上的现状过了它就原样不写、整批停下。
- * isSecret 是软删时哪些算含密钥、软删不了（缺省两级都算，同软删的口径）。
+ * 一批里的一项：改写成这四个面，或软删。record 是刚定位到、已核对过等于卡片（或方案依据）版本的那一份：
+ * 落盘时在写入段里再按它核对（依据的扫描指纹、要改的字段还是读到时的值）。isSecret 是软删时哪些算含密钥、软删不了（缺省两级都算）。
  */
 interface BatchItem {
   record: MemoryRecord
   op: { kind: 'edit'; content: string; name: string; summary: string; tags: string[] } | { kind: 'forget' }
-  isChanged: (current: MemoryRecord) => boolean
-  isSecret?: (current: MemoryRecord) => boolean
 }
 
-/** 第一项失败的原因：锁内发现被改过、已不在，软删时刚被写进密钥，或写入抛错。 */
+/** 第一项没做成的原因：锁内发现被改过、已不在，软删时刚被写进密钥，或写入抛错。 */
 type BatchFailure = { kind: 'stale' | 'not-found' | 'has-secret'; memoryId: string } | { kind: 'thrown'; error: unknown }
 
 /**
- * 整理所选的逐项执行（应用处理方案同用）：按顺序逐项写，每项在提交那一刻记写入记录；第一项失败就停下，之后的不再写，
- * 已写的由调用方按写入记录回退。回调里算出的只是候选（文件表复核失败会重来），调用正常返回才以返回值为准。
+ * 一批的结果：全做成了；或没做成，已做的按回执撤回（kept 是撤回出错、仍是这次写下的；unrecorded 是已被别处接着改过的）。
+ * release：这次运行占着整理记录，调用方结完账调它放开。
  */
-async function writeBatch(items: readonly BatchItem[], store: MemoryStore, now: number): Promise<{ writes: BatchWrite[]; failure?: BatchFailure }> {
-  const writes: BatchWrite[] = []
-  for (const { record, op, isChanged, isSecret } of items) {
-    const at = scopeAt(record.workspacePath)
-    const write: BatchWrite = { memoryId: record.id, op: op.kind }
-    writes.push(write)
-    let candidate: MemoryRecord | undefined
-    let outcome: 'deleted' | 'has-secret' | 'changed' | 'missing' = 'changed'
-    // 这一项的写入带着自己的操作 id：抛错之后凭文件上的提交标记判它落没落盘
-    const writeOp = newWriteOp()
-    try {
-      if (op.kind === 'edit') {
-        const committed = await store.update(record, (cur) => {
-          candidate = undefined
-          // 锁内按磁盘上的现状再核对一次：读过之后被改过就原样不写
-          if (isChanged(cur)) return cur
-          return (candidate = withUserEdits(cur, op, now))
-        }, at, writeOp)
-        if (candidate !== undefined) write.written = committed
-      } else {
-        outcome = await store.softDeleteUnlessSecret(record, {
-          at, now, op: writeOp, isChanged: (cur) => { candidate = cur; return isChanged(cur) }, ...(isSecret !== undefined ? { isSecret } : {}),
-        })
-        // 软删只改状态和时间，内容就是锁内最后看到的那份
-        if (outcome === 'deleted') write.written = markDeleted(candidate!, now)
-      }
-    } catch (error) {
-      if (!(error instanceof RecordNotFoundError)) {
-        // 抛错时不知道落没落盘：按 id 重读，文件上的提交标记是这次的操作才算已写（已写的一样要退回）
-        write.written = await committedAfterThrow(store, record, writeOp)
-        return { writes, failure: { kind: 'thrown', error } }
-      }
-      outcome = 'missing'
-    }
-    if (write.written !== undefined) await store.finishOp(writeOp, write.written)
-    if (write.written === undefined) {
-      return { writes, failure: { kind: outcome === 'has-secret' ? 'has-secret' : outcome === 'missing' ? 'not-found' : 'stale', memoryId: record.id } }
-    }
+type BatchResult =
+  | { kind: 'done'; runId: string; writes: BatchWrite[] }
+  | { kind: 'failed'; runId: string; failure: BatchFailure; kept: BatchWrite[]; unrecorded: string[] }
+type BatchOutcome = BatchResult & { release: () => Promise<void> }
+
+/**
+ * 整理所选、按方案处理冲突的逐项执行：组成一个变更集交给执行器，每项各占一次写入段、各记一条回执（先记在一条临时的整理记录 runId 上）。
+ * 一项对不上整批退：已做的按回执逆序撤回。also 是只核对、不写的记忆（整理所选的「不动」项）：和这一批的每一条一起当依据，
+ * 期间任何一条内容变了，后面的都不做。
+ */
+async function runBatch(
+  items: readonly BatchItem[], also: readonly MemoryRecord[], input: { summary: string; isSecret?: (current: MemoryRecord) => boolean },
+  deps: Pick<MemoryCommandDeps, 'store' | 'snapshots' | 'decisions'>, now: number,
+): Promise<BatchOutcome> {
+  const runId = genId('pd')
+  // 依据按卡片上的版本指纹比，和进来时的版本核对同一个口径：两处之间落进来的改动（别的会话补证）同样算被改过
+  const basis = [...items.map(item => item.record), ...also].map(r => ({ ...basisOf(r), fingerprint: editFingerprint(r) }))
+  const ops: ChangeOp[] = items.map(({ record, op }, i) => ({
+    id: `o${i + 1}`, memoryId: record.id, scopeKey: scopeKeyOf(record), basis,
+    ...(op.kind === 'forget'
+      ? { kind: 'forget' as const }
+      : {
+          kind: 'edit' as const,
+          patch: { content: op.content, name: op.name, summary: op.summary, tags: op.tags },
+          expect: { content: record.content, name: record.name, summary: record.summary, tags: record.tags },
+        }),
+  }))
+  // 逐项写的这段时间占着整理记录：它已经在账本里，另一个标签页这时撤销它会撤掉前几项、拿走条目，后几项就没有撤销入口了
+  const held = await deps.decisions.hold(runId)
+  const release = async () => { await held?.().catch(() => {}) }
+  try {
+    return { ...(await runHeld()), release }
+  } catch (error) {
+    await release()
+    throw error
   }
-  return { writes }
-}
 
-/**
- * 写入调用抛错后这一项落没落盘（文件表写盘后还可能在维护目录、写统计时抛错）：在它自己的作用域里找
- * 提交标记等于这次操作 id 的那一份（软删写完归档那份、还没删掉原来那份时也认得出），找到才算已写，返回那份。只改元数据、不动 updatedAt 的写入同样判得出。
- */
-async function committedAfterThrow(store: MemoryStore, record: MemoryRecord, op: WriteOp): Promise<MemoryRecord | undefined> {
-  const scope = scopeOfMemory(record)
-  if (scope === undefined) return undefined
-  const written = await store.locateWrittenBy(record.id, scope, op).catch(() => undefined)
-  return written === undefined ? undefined : byPosition(written)
-}
-
-/**
- * 整理所选的回退：已写的项按写入记录逐条退回快照里的改前版本。只退仍是这次写下那版的（写回那一刻锁内核对），之间被别处接着改过的
- * 停在别处的版本、不覆盖；一项回退抛错也接着退其余的。回退写盘同样不拿调用当证明：正常返回以恢复结果为准，抛错的按 id 重读，
- * 已是改前版本算退回，仍是这次写下的留着（kept，照常结账、可撤销），都不是算被别处改过（unrecorded，不可撤销）。
- */
-async function rollBackBatch(
-  writes: readonly BatchWrite[], snapshot: MemorySnapshot, deps: Pick<MemoryCommandDeps, 'store' | 'snapshots' | 'now'>,
-): Promise<{ kept: BatchWrite[]; unrecorded: string[] }> {
-  const kept: BatchWrite[] = []
-  const unrecorded: string[] = []
-  for (const write of writes) {
-    const { written } = write
-    const before = snapshot.data.find(r => r.id === write.memoryId)
-    if (written === undefined || before === undefined) continue
-    const isOwn = (cur: MemoryRecord | undefined) => cur !== undefined && cur.status === written.status && editFingerprint(cur) === editFingerprint(written)
-    try {
-      const r = await deps.snapshots.restore(snapshot, [write.memoryId], deps.store, { target: 'exact', overwrite: isOwn, now: () => deps.now?.() ?? Date.now() })
-      if (r.restored.length === 0) unrecorded.push(write.memoryId)
-    } catch {
-      const current = await locateCopy(deps.store, write.memoryId, scopeAt(before.workspacePath)).catch(() => undefined)
-      if (current?.status === before.status && editFingerprint(current) === editFingerprint(before)) continue
-      if (isOwn(current)) kept.push(write)
-      else unrecorded.push(write.memoryId)
-    }
+  async function runHeld(): Promise<BatchResult> {
+  const recorded = async () => (await deps.decisions.listSettled()).find(d => d.id === runId)
+  try {
+    await deps.decisions.addChangeRun(runId, {
+      kind: 'edit', summary: input.summary, memoryIds: items.map(item => item.record.id), workspaces: items.map(item => workspaceLabel(item.record)),
+    }, 'batch-edited', now)
+  } catch (error) {
+    // 写进去之后才抛错（清扫过期条目出错）：整理记录已在就接着做
+    if ((await recorded().catch(() => undefined)) === undefined) throw error
   }
-  return { kept, unrecorded }
+  const r = await applyChangeset(ops, {
+    entryId: runId, by: 'gui', at: now, isSecretChecked: false, isAllOrNothing: true, isUserConfirmed: true, fingerprint: editFingerprint, ...(input.isSecret !== undefined ? { isSecret: input.isSecret } : {}),
+  }, deps)
+  // 稿和现在的内容一模一样的那一项没有可写的：照做成了算（写下的就是现在这份），不让它从结果里消失
+  const unchanged = (memoryId: string) => items.find(item => item.record.id === memoryId)?.record
+  const applied = r.outcomes.flatMap((o): BatchWrite[] => {
+    if (o.kind === 'applied') return [{ memoryId: o.memoryId, op: o.opKind === 'forget' ? 'forget' : 'edit', written: o.written }]
+    const same = o.kind === 'skipped' && o.reason === 'no-change' ? unchanged(o.memoryId) : undefined
+    return same === undefined ? [] : [{ memoryId: o.memoryId, op: 'edit', written: same }]
+  })
+  if (r.isRolledBack !== true) return { kind: 'done', runId, writes: applied }
+  const skipped = r.outcomes.find(o => o.kind === 'skipped' && o.reason !== 'no-change')
+  // 拼出的记录过不了格式校验不是「被改过」：当出错报，带上原因
+  const invalid = skipped?.kind === 'skipped' && (skipped.reason === 'invalid' || skipped.reason === 'link-invalid') ? new Error(skipped.detail ?? '改后的记忆不合格式') : undefined
+  const failure: BatchFailure = r.thrown !== undefined || invalid !== undefined || skipped?.kind !== 'skipped'
+    ? { kind: 'thrown', error: r.thrown ?? invalid }
+    : { kind: skipped.reason === 'gone' ? 'not-found' : skipped.reason === 'has-secret' ? 'has-secret' : 'stale', memoryId: skipped.memoryId }
+  return { kind: 'failed', runId, failure, kept: applied.filter(w => r.kept?.includes(w.memoryId) === true), unrecorded: r.unrecorded ?? [] }
+  }
 }
 
 /**
- * 整理所选的结账：删除项按 id 清掉指向它们的账本条目（同 forget，keepId 那条留着），再记一条带逐项回执的 batch-edited。任一步抛错时按快照 id
- * 重读账本：新条目已在（写进去之后的清理抛错）就算记上了；不在就把这几项也按快照退回，再把错误抛出去。
- * 回退和记账都失败时，整批前拍的快照仍在保留期内，是最后的恢复依据。
+ * 一批的结账：删除项按 id 清掉指向它们的账本条目（同 forget，keepId 那条留着），再把那条整理记录收尾（补上给旧版本读的整条回执）。
+ * 一项都没留下的，整理记录移出账本，返回 undefined。
  */
 async function settleBatch(
-  writes: readonly BatchWrite[], workspaces: string[], snapshot: MemorySnapshot, deps: Pick<MemoryCommandDeps, 'store' | 'snapshots' | 'decisions' | 'now'>, now: number,
-  keepId?: string,
-): Promise<PendingDecision> {
+  runId: string, writes: readonly BatchWrite[], deps: Pick<MemoryCommandDeps, 'decisions'>, keepId?: string,
+): Promise<PendingDecision | undefined> {
   try {
     const forgotten = writes.filter(w => w.op === 'forget').map(w => w.memoryId)
-    if (forgotten.length > 0) await deps.decisions.removeByMemoryIds(forgotten, keepId)
-    return await deps.decisions.addBatchEdit(
-      writes.map(w => ({ memoryId: w.memoryId, op: w.op, written: w.written! })), { summary: `整理所选 ${writes.length} 条`, workspaces }, snapshot.id, now,
-    )
+    if (forgotten.length > 0) await deps.decisions.removeByMemoryIds(forgotten, keepId === undefined ? runId : [runId, keepId])
+    return await deps.decisions.finishChangeRun(runId, { writes, summary: `整理所选 ${writes.length} 条`, workspaces: writes.map(w => workspaceLabel(w.written)) })
   } catch (error) {
-    const recorded = (await deps.decisions.listSettled().catch(() => [])).find(d => d.settled?.verdict === 'batch-edited' && d.settled.snapshotId === snapshot.id)
-    if (recorded !== undefined) return recorded
-    await rollBackBatch(writes, snapshot, deps)
+    // 收尾抛错时重读账本：整理记录在、回执也在，就算记上了（撤销按回执做，不靠收尾补的那几项）
+    const recorded = (await deps.decisions.listSettled().catch(() => [])).find(d => d.id === runId)
+    if (recorded?.changes !== undefined && recorded.changes.length > 0) return recorded
     throw error
   }
 }
@@ -672,75 +654,94 @@ async function dispatch(
     if (secretProblem !== undefined) return secretProblem
 
     const what = isRewrite ? (plan.source === 'request' ? '按要求改写' : '采纳改写建议') : (plan.source === 'request' ? '按要求融合' : '采纳融合建议')
-    const snapshot = await deps.snapshots.capture({ operation: 'pre-update', description: `${what}（${entry.id}）前`, records }, now)
-    // 锁内比的是依据里的完整内容指纹：只改了摘要、标签的也挡下
-    const basisOf = (id: string) => plan.basis.memories.find(m => m.memoryId === id)?.fingerprint
-    const isChanged = (cur: MemoryRecord) => cur.status !== 'active' || editFingerprint(cur) !== basisOf(cur.id)
-    const { writes, failure } = await writeBatch([
-      { record: keeper, op: edit, isChanged },
-      // 疑似密钥是用户存下时确认过的，照常软删、可恢复；只有高危软删不了（依据比对已先挡下，这里是锁内兜底）
-      ...(loser !== undefined && !isRewrite ? [{ record: loser, op: { kind: 'forget' as const }, isChanged, isSecret: hasCriticalSecret }] : []),
-    ], deps.store, now)
+    // 两条都当依据：哪一条的内容在这之后变了，都不往里写、也不按它删另一条
+    const ran = await runBatch([
+      { record: keeper, op: edit },
+      ...(loser !== undefined && !isRewrite ? [{ record: loser, op: { kind: 'forget' as const } }] : []),
+    // 疑似密钥是用户存下时确认过的，照常软删、可恢复；只有高危软删不了（依据比对已先挡下，这里是锁内兜底）
+    ], isRewrite ? [] : records.filter(r => r !== keeper && r !== loser), { summary: `${what}（${entry.id}）`, isSecret: hasCriticalSecret }, deps, now)
+    try {
     let left: { kept: BatchWrite[]; unrecorded: string[] }
-    if (failure === undefined) {
-      const unsettled = await settlePlanned(entry, plan, writes, snapshot, isRewrite ? baseline ?? undefined : undefined)
-      if (unsettled === undefined) return { ok: true, cmd, decisionId: entry.id, memoryIds: writes.map(w => w.memoryId), snapshotId: snapshot.id }
+    if (ran.kind === 'done') {
+      const unsettled = await settlePlanned(entry, plan, ran.runId, ran.writes, isRewrite ? baseline ?? undefined : undefined)
+      if (unsettled === undefined) {
+        const snapshotId = (await deps.decisions.listSettled().catch(() => [])).find(d => d.id === entry.id)?.settled?.snapshotId
+        return { ok: true, cmd, decisionId: entry.id, memoryIds: ran.writes.map(w => w.memoryId), ...(snapshotId !== undefined ? { snapshotId } : {}) }
+      }
       left = unsettled
     } else {
-      left = await rollBackBatch(writes, snapshot, deps)
+      left = ran
       if (left.kept.length === 0 && left.unrecorded.length === 0) {
+        await deps.decisions.finishChangeRun(ran.runId, { writes: [] }).catch(() => {})
+        const { failure } = ran
         if (failure.kind === 'thrown') throw failure.error
         if (failure.kind === 'has-secret') return fail(cmd, 'has-secret', `记忆 ${failure.memoryId} 刚被写进密钥，没有删除；${draftName}已退回`)
         return behind(failure.kind, [failure.memoryId], `${subject}刚被改过，界面已换成最新内容；${draftName}已退回`)
       }
     }
-    // 没退干净的记一笔可撤销的账（冲突条目留着，不结清）；账也记不上的列进没记上账的，整批前的快照仍可恢复
+    // 没退干净的记一笔可撤销的账（冲突条目留着，不结清）；账也记不上的列进没记上账的，改前的内容仍在各自的撤销快照里
     const { kept } = left
-    const batch = kept.length === 0 ? undefined
-      : await settleBatch(kept, kept.map(w => workspaceLabel(records.find(r => r.id === w.memoryId)!)), snapshot, deps, now, entry.id).catch(() => undefined)
+    const batch = await settleBatch(ran.runId, kept, deps, entry.id).catch(() => undefined)
     return {
-      ok: true, cmd, ...(batch !== undefined ? { decisionId: batch.id } : {}), memoryIds: batch !== undefined ? kept.map(w => w.memoryId) : [], snapshotId: snapshot.id,
+      ok: true, cmd, ...(batch !== undefined ? { decisionId: batch.id } : {}), memoryIds: batch !== undefined ? kept.map(w => w.memoryId) : [],
+      ...(batch?.settled?.snapshotId !== undefined ? { snapshotId: batch.settled.snapshotId } : {}),
       isPartial: true, unrecordedIds: batch !== undefined || kept.length === 0 ? left.unrecorded : [...left.unrecorded, ...kept.map(w => w.memoryId)],
+    }
+    } finally {
+      await ran.release()
     }
   }
 
   /**
-   * 按方案改写的结账：冲突条目结清为 plan-applied，回执按实际提交的那几份算，改后指纹按写下的那几份算（垂直改写再加这条记忆对应的指令文件，同体检）；
-   * 结清之后才清掉引用被删那条的其他条目（冲突条目自己留着；垂直改写没有被删的），结清不成时那些条目原样留着。结清之后重读被删的那条：
-   * 已被别处彻底删除就把这条结清也撤掉（彻底删除的连带清理可能正好落在结清的读写之间）；改写的那条被别处删掉同理。任一步抛错时按快照 id 重读账本：已结清就算记上了；
-   * 没有就按快照退回，退干净了把错误抛出去，没退干净的交回调用方如实报「部分完成」。结清了返回 undefined。
+   * 按方案改写的结账：冲突条目结清为 plan-applied，这次的逐操作回执从整理记录挪到它上面（撤销按它们逐个还原），改后指纹按写下的那几份算
+   * （垂直改写再加这条记忆对应的指令文件，同体检）；结清之后才清掉引用被删那条的其他条目（冲突条目自己留着；垂直改写没有被删的），
+   * 结清不成时那些条目原样留着。结清之后重读被删的那条：已被别处彻底删除就把这条结清也撤掉（彻底删除的连带清理可能正好落在结清的读写之间）；
+   * 改写的那条被别处删掉同理。任一步抛错时重读账本：已结清就算记上了；没有就按回执撤回，撤干净了把错误抛出去，没撤干净的交回调用方如实报「部分完成」。
+   * 结清了返回 undefined。
    */
   const settlePlanned = async (
-    entry: PendingDecision, plan: RewritePlan, writes: readonly BatchWrite[], snapshot: MemorySnapshot, baseline: readonly string[] | undefined,
+    entry: PendingDecision, plan: RewritePlan, runId: string, writes: readonly BatchWrite[], baseline: readonly string[] | undefined,
   ): Promise<{ kept: BatchWrite[]; unrecorded: string[] } | undefined> => {
+    const changes = await receiptsOfEntry(deps.decisions, runId)
+    const snapshotId = changes.find(c => c.snapshotId !== undefined)?.snapshotId ?? ''
     try {
-      const written = new Map(writes.map(w => [w.memoryId, w.written!]))
+      const written = new Map(writes.map(w => [w.memoryId, w.written]))
       const isSettled = await deps.decisions.settlePlan(entry.id, {
-        writes: writes.map(w => ({ memoryId: w.memoryId, op: w.op, written: w.written! })),
-        proposal: { source: plan.source, action: plan.action }, snapshotId: snapshot.id,
+        writes, changes,
+        proposal: { source: plan.source, action: plan.action }, snapshotId,
         fingerprint: conflictFingerprint(entry.memoryIds.map(id => written.get(id)!), baseline),
       }, now)
       if (!isSettled) throw new Error(`待决项 ${entry.id} 已不在待处理，这次${plan.action === 'rewrite' ? '改写' : '融合'}没有记上`)
+      // 回执已经在冲突条目上：临时的整理记录不再留
+      await deps.decisions.remove(runId).catch(() => {})
       for (const w of writes.filter(w => w.op === 'forget')) {
-        const scope = scopeOfMemory(w.written!)
-        if (scope !== undefined && (await locateCopy(deps.store, w.memoryId, scope)) === undefined) await deps.decisions.dropDependingOn(new Set([snapshot.id]), w.memoryId)
+        const scope = scopeOfMemory(w.written)
+        if (scope !== undefined && (await locateCopy(deps.store, w.memoryId, scope)) === undefined) {
+          await deps.decisions.dropDependingOn(new Set(changes.flatMap(c => (c.snapshotId !== undefined ? [c.snapshotId] : []))), w.memoryId)
+        }
       }
       await deps.decisions.removeByMemoryIds(writes.filter(w => w.op === 'forget').map(w => w.memoryId), entry.id)
       // 改写的那条同理：结清的读写之间被别处删掉，删除的连带清理已经跑过，这条结清（连同建议稿）是被写回来的，照删除的规矩清掉
       const dropped: string[] = []
       for (const w of writes.filter(w => w.op === 'edit')) {
-        const scope = scopeOfMemory(w.written!)
+        const scope = scopeOfMemory(w.written)
         if (scope !== undefined && (await locateCopy(deps.store, w.memoryId, scope))?.status !== 'active') dropped.push(w.memoryId)
       }
       if (dropped.length > 0) await deps.decisions.removeByMemoryIds(dropped)
       return undefined
     } catch (error) {
       const recorded = (await deps.decisions.listSettled().catch(() => []))
-        .some(d => d.id === entry.id && d.settled?.verdict === 'plan-applied' && d.settled.snapshotId === snapshot.id)
-      if (recorded) return undefined
-      const left = await rollBackBatch(writes, snapshot, deps)
-      if (left.kept.length === 0 && left.unrecorded.length === 0) throw error
-      return left
+        .some(d => d.id === entry.id && d.settled?.verdict === 'plan-applied' && d.settled.snapshotId === snapshotId)
+      if (recorded) {
+        await deps.decisions.remove(runId).catch(() => {})
+        return undefined
+      }
+      const left = await rollBackEntry(runId, { by: 'gui' }, deps)
+      if (left.kept === undefined && left.unrecorded === undefined) {
+        await deps.decisions.finishChangeRun(runId, { writes: [] }).catch(() => {})
+        throw error
+      }
+      return { kept: writes.filter(w => left.kept?.includes(w.memoryId) === true), unrecorded: left.unrecorded ?? [] }
     }
   }
 
@@ -1042,28 +1043,34 @@ async function dispatch(
       const secretProblem = editSecretsProblem(ops.flatMap(op => (op.kind === 'edit' ? [op] : [])), command.allowSecret)
       if (secretProblem !== undefined) return secretProblem
 
-      // 整批一份快照，撤销全部和中途失败的回退都按它恢复
-      const snapshot = await deps.snapshots.capture({ operation: 'pre-update', description: `整理所选 ${ops.length} 条前`, records: targets.map(t => t.record) }, now)
-      // 按计划顺序逐项写；锁内按卡片版本再核对一次
-      const { writes, failure } = await writeBatch(targets.map(({ op, record }) => ({ record, op, isChanged: cur => cur.status !== 'active' || isStale(cur, op.base) })), deps.store, now)
-      const labelsOf = (done: readonly BatchWrite[]) => done.map(w => workspaceLabel(targets.find(t => t.record.id === w.memoryId)!.record))
-      if (failure === undefined) {
-        const entry = await settleBatch(writes, labelsOf(writes), snapshot, deps, now)
-        return { ok: true, cmd, decisionId: entry.id, memoryIds: writes.map(w => w.memoryId), snapshotId: snapshot.id }
+      // 逐项各占一次写入段、各拍各的改前快照；「不动」项和这一批的每一条都当依据，写入段里按刚读到的再核对一次
+      const ran = await runBatch(targets.map(({ op, record }) => ({ record, op })), records.slice(ops.length), { summary: `整理所选 ${ops.length} 条` }, deps, now)
+      try {
+      if (ran.kind === 'done') {
+        const entry = await settleBatch(ran.runId, ran.writes, deps)
+        return {
+          ok: true, cmd, ...(entry !== undefined ? { decisionId: entry.id } : {}), memoryIds: ran.writes.map(w => w.memoryId),
+          ...(entry?.settled?.snapshotId !== undefined ? { snapshotId: entry.settled.snapshotId } : {}),
+        }
       }
-      // 中途失败：已写的退回快照里的改前版本
-      const { kept, unrecorded } = await rollBackBatch(writes, snapshot, deps)
+      // 中途没做成：已写的按回执撤回了
+      const { failure, kept, unrecorded } = ran
       if (kept.length === 0 && unrecorded.length === 0) {
+        await deps.decisions.finishChangeRun(ran.runId, { writes: [] }).catch(() => {})
         if (failure.kind === 'thrown') throw failure.error
-        // 锁内写进密钥必然先判成被改过（卡片指纹含全部内容字段），这一支只留作密钥的防线
+        // 锁内写进密钥必然先判成被改过，这一支只留作密钥的防线
         if (failure.kind === 'has-secret') return fail(cmd, 'has-secret', `记忆 ${failure.memoryId} 刚被写进密钥，没有删除；已写的都已退回`)
         return behind(failure.kind, [failure.memoryId], '有记忆刚被改过，界面已换成最新内容；已写的都已退回')
       }
       // 没退干净：仍是本批写下的照常结账、可撤销；被别处接着改过的停在别处的版本，列出来、不可撤销
-      const entry = kept.length > 0 ? await settleBatch(kept, labelsOf(kept), snapshot, deps, now) : undefined
+      const entry = await settleBatch(ran.runId, kept, deps)
       return {
-        ok: true, cmd, ...(entry !== undefined ? { decisionId: entry.id } : {}), memoryIds: kept.map(w => w.memoryId), snapshotId: snapshot.id,
+        ok: true, cmd, ...(entry !== undefined ? { decisionId: entry.id } : {}), memoryIds: kept.map(w => w.memoryId),
+        ...(entry?.settled?.snapshotId !== undefined ? { snapshotId: entry.settled.snapshotId } : {}),
         isPartial: true, unrecordedIds: unrecorded,
+      }
+      } finally {
+        await ran.release()
       }
     }
 

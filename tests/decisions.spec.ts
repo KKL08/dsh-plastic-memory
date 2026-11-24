@@ -770,27 +770,6 @@ describe('整理所选的应用（batch-edited）', () => {
     expect(pendingDecisionSchema.parse(entry)).toEqual(entry)
     expect(() => pendingDecisionSchema.parse({ ...entry, receipts: [{ ...entry.receipts[0], expectedStatus: 'superseded' }] })).toThrow()
   })
-
-  it('addBatchEdit：一条已结清的条目，memoryIds 按写入顺序，回执指纹取实际提交的那份，删除项期望在最近删除', async () => {
-    const s = ledger()
-    const edited = record({ id: 'mem_e', content: '改写后' })
-    const deleted = record({ id: 'mem_d', content: '删掉的', status: 'deleted' })
-    const entry = await s.addBatchEdit(
-      [{ memoryId: 'mem_d', op: 'forget', written: deleted }, { memoryId: 'mem_e', op: 'edit', written: edited }],
-      { summary: '整理所选 2 条', workspaces: ['global', 'global'] }, 'snap_b', 5,
-    )
-    expect(await s.list()).toEqual([])
-    expect(await s.listSettled()).toEqual([entry])
-    expect(entry).toMatchObject({
-      kind: 'edit', memoryIds: ['mem_d', 'mem_e'], summary: '整理所选 2 条', workspaces: ['global', 'global'],
-      receipts: [
-        { memoryId: 'mem_d', op: 'forget', fingerprint: editFingerprint(deleted), expectedStatus: 'deleted' },
-        { memoryId: 'mem_e', op: 'edit', fingerprint: editFingerprint(edited), expectedStatus: 'active' },
-      ],
-      settled: { verdict: 'batch-edited', at: 5, snapshotId: 'snap_b' },
-    })
-    expect(entry.fingerprint).toBeUndefined()
-  })
 })
 
 describe('PendingDecisionsStore 的已裁决条目', () => {

@@ -3,7 +3,7 @@ import { MemoryStore } from '../src/store.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import type { MemorySnapshot, PendingDecision } from '../src/governance/schema.ts'
-import { basisOf, type ChangeOp } from '../src/governance/changeset.ts'
+import { basisOf, scopeKeyOf, type ChangeOp } from '../src/governance/changeset.ts'
 import { applyChangeset, receiptsOfEntry, revertChange, type ChangesetDeps } from '../src/tools/changeset.ts'
 import { executeUndo } from '../src/tools/undo.ts'
 import { layerOf } from '../src/storage/history.ts'
@@ -44,7 +44,7 @@ async function undoAll(w: World) {
   return results
 }
 
-const op = (read: MemoryRecord, id: string, extra: Partial<ChangeOp> & Pick<ChangeOp, 'kind'>): ChangeOp => ({ id, memoryId: read.id, basis: [basisOf(read)], ...extra })
+const op = (read: MemoryRecord, id: string, extra: Partial<ChangeOp> & Pick<ChangeOp, 'kind'>): ChangeOp => ({ id, memoryId: read.id, scopeKey: scopeKeyOf(read), basis: [basisOf(read)], ...extra })
 /** 召回统计、提交标记之外的内容。 */
 const stable = ({ lastWriteOp: _op, recallCount: _c, lastRecalledAt: _a, ...rest }: MemoryRecord) => rest
 
@@ -156,9 +156,23 @@ describe('应用', () => {
       op(b, 'o2', { kind: 'edit', patch: { content: '新' }, expect: { content: b.content } }),
     ], { isAllOrNothing: true })
     expect(r).toMatchObject({ isRolledBack: true, outcomes: [{ kind: 'applied' }, { kind: 'skipped', reason: 'basis-changed' }] })
-    expect(r.unreverted).toBeUndefined()
+    expect(r.kept ?? r.unrecorded).toBeUndefined()
     expect(stable(await now(w))).toEqual(stable(a))
     expect(await receiptsOfEntry(w.decisions, ENTRY)).toEqual([])
+  })
+})
+
+describe('同一个 id 在全局和项目里各有一份', () => {
+  it('只改项目里那份：全局那份原样留着', async () => {
+    const w = world()
+    const project = await seed(w, { scope: 'workspace', workspacePath: '/p', content: '项目里的正文' })
+    await w.store.create(record({ ...project, scope: 'global', workspacePath: undefined, content: '全局的正文' }))
+    const global = (await w.store.get('mem_a', { kind: 'global' }))!
+    expect(global.content).toBe('全局的正文')
+    const r = await run(w, [op(project, 'o1', { kind: 'edit', patch: { content: '项目里的新正文' }, expect: { content: '项目里的正文' } })])
+    expect(r.outcomes.map(o => o.kind)).toEqual(['applied'])
+    expect((await w.store.get('mem_a', { kind: 'workspace', workspacePath: '/p' }))?.content).toBe('项目里的新正文')
+    expect(stable((await w.store.get('mem_a', { kind: 'global' }))!)).toEqual(stable(global))
   })
 })
 
@@ -208,7 +222,7 @@ describe('撤销的资格', () => {
 describe('整条撤销（统一的撤销入口）', () => {
   const undo = (w: World, workspacePath?: string) =>
     executeUndo({ decisionId: ENTRY }, { workspacePath }, { ...w.deps, ignores: { unignoreIfSame: async () => false }, now: () => T0 + 5000 })
-  const finish = (w: World) => w.decisions.finishChangeRun(ENTRY, { receipts: [] })
+  const finish = (w: World) => w.decisions.finishChangeRun(ENTRY, { writes: [] })
 
   it('连做的几个操作逆序整批撤：记忆回到原样，条目移出账本', async () => {
     const w = world()
@@ -265,7 +279,7 @@ describe('快照过了保留窗口', () => {
     const w = world()
     const read = await seed(w)
     await run(w, [op(read, 'o1', { kind: 'edit', patch: { content: '新正文' }, expect: { content: '旧正文' } })])
-    await w.decisions.finishChangeRun(ENTRY, { receipts: [] })
+    await w.decisions.finishChangeRun(ENTRY, { writes: [] })
     const late = await executeUndo({ decisionId: ENTRY }, { workspacePath: undefined }, { ...w.deps, ignores: { unignoreIfSame: async () => false }, now: () => T0 + 400 * 86_400_000 })
     expect(late).toMatchObject({ kind: 'error', code: 'not-found', reason: 'expired' })
     expect((await now(w)).content).toBe('新正文')
