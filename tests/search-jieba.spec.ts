@@ -67,6 +67,7 @@ const FakeJieba: JiebaClass = {
         for (const line of Buffer.from(more).toString('utf8').split('\n')) if (line.trim() !== '') words.add(parseDict(Buffer.from(line))[0]!)
       },
       cutForSearch: text => maxMatch(text, words),
+      cut: text => maxMatch(text, words),
     }
     return instance
   },
