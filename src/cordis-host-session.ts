@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { SaveDelegation } from './pipeline.ts'
-import { UNKNOWN_SESSION_ID, type HostContext, type HostSession } from './tools/host-session.ts'
+import { UNKNOWN_SESSION_ID, type HostContext, type HostSession, type HostSessionEntry } from './tools/host-session.ts'
 import { delegationDepthOf, resolveRootSessionId, subagentModeOf, type DelegationHeader, type ProjectionReader } from './tools/subagent-gate.ts'
 import type { SemanticLlm } from './governance/semantic-scan.ts'
 import type { RawEvent, SessionHeaderLike, SessionLog } from './session-log.ts'
@@ -17,7 +17,7 @@ export interface CordisHostSessionDeps {
   resolveCwd: (cwd: string | undefined) => Promise<string | undefined>
 }
 
-type SessionHeader = { id?: string; cwd?: string; delegationDepth?: number; parentSession?: string }
+type SessionHeader = { id?: string; cwd?: string; delegationDepth?: number; parentSession?: string; origin?: string }
 
 /** dsh-agent turnBoundary 投影里插件读的两个字段（宿主形状的子集）。 */
 type TurnBoundaryState = { lastTurn?: number; openTurnStartSeq?: number | null }
@@ -230,5 +230,20 @@ export function createCordisHostSession(deps: CordisHostSessionDeps): HostSessio
     }
   }
 
-  return { sessionTitleOf, contextOf, saveContextOf, llmOf, defaultLlm, llmForRoute, modelCatalog, modeOf, hasEarlierTurns, remember, ownSessionIdOf, workspaceOf, readSessionLog }
+  const listSessions = async (): Promise<HostSessionEntry[] | null> => {
+    try {
+      const records = await probe<{ listSessions?(): Promise<Array<{ header?: Partial<SessionHeader>; live?: boolean }>> }>('sessionQuery')?.listSessions?.()
+      if (!Array.isArray(records)) return null
+      return records.flatMap((r): HostSessionEntry[] => (typeof r.header?.id !== 'string' ? [] : [{
+        id: r.header.id,
+        cwd: typeof r.header.cwd === 'string' ? r.header.cwd : undefined,
+        isSubagent: (r.header.delegationDepth ?? 0) >= 1 || r.header.origin === 'subagent',
+        isLive: r.live === true,
+      }]))
+    } catch {
+      return null
+    }
+  }
+
+  return { listSessions, sessionTitleOf, contextOf, saveContextOf, llmOf, defaultLlm, llmForRoute, modelCatalog, modeOf, hasEarlierTurns, remember, ownSessionIdOf, workspaceOf, readSessionLog }
 }

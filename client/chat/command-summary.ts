@@ -39,6 +39,7 @@ function actionOf(command: MemoryCommand): Summary {
     case 'forget': return { key: 'chat.command.forget' }
     case 'restore': return { key: 'chat.command.restore' }
     case 'hard-delete': return { key: 'chat.command.hardDelete' }
+    case 'delete-dialogue-records': return { key: 'chat.command.deleteDialogueRecords' }
     case 'confirm': return { key: 'chat.command.confirm' }
     case 'edit-memory': return { key: 'chat.command.edit' }
     case 'merge-memories': return { key: 'chat.command.merge' }

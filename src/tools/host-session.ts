@@ -33,6 +33,14 @@ export interface HostContext {
   }
 }
 
+/** 宿主登记的一个会话：工作目录（没有为 undefined）、是不是子 agent 会话、此刻是不是开着。 */
+export interface HostSessionEntry {
+  id: string
+  cwd: string | undefined
+  isSubagent: boolean
+  isLive: boolean
+}
+
 /**
  * 插件读宿主会话的唯一入口。宿主服务缺席、键未注册、读取抛错时各方法自己退化（null、0、按一次性），
  * 同一会话同一类退化只警告一次；调用方不处理宿主异常。
@@ -62,4 +70,6 @@ export interface HostSession {
   sessionTitleOf(sessionId: string): Promise<string | undefined>
   /** 一个会话的整份日志（活会话取当下的样子，没打开的读落盘的）；读不到为 null。 */
   readSessionLog(sessionId: string): Promise<SessionLog | null>
+  /** 宿主登记的全部会话（含已存档的）；服务缺席或读取抛错为 null，调用方按「这一次列不出来」处理，不当成一个会话都没有。 */
+  listSessions(): Promise<HostSessionEntry[] | null>
 }

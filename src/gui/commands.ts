@@ -62,6 +62,8 @@ export interface MemoryCommandDeps {
   autoCheckups: AutoCheckupSettingStore
   /** 后台模型的选择表（set-model-selection 写它）。 */
   selections: Pick<ModelSelectionStore, 'set'>
+  /** delete-dialogue-records 调它删对话记录库，删不掉要抛；缺省什么都不做（没接对话记录库）。 */
+  deleteDialogueRecords?: () => void
   /** set-auto-checkup 写完设置表、重写体检视图后调用：本进程的自动体检调度立刻重算。缺省不通知（没有调度器）。 */
   onAutoCheckupChanged?: () => void
   /** scan 持有范围认领期间的心跳计时；缺省用进程自己的 setInterval。 */
@@ -1317,6 +1319,14 @@ async function dispatch(
     case 'refresh-views':
       await deps.decisions.sweep(now)
       await deps.views.rewriteAll()
+      return { ok: true, cmd }
+
+    case 'delete-dialogue-records':
+      try {
+        deps.deleteDialogueRecords?.()
+      } catch (err) {
+        return fail(cmd, 'failed', `对话记录没能删掉：${err instanceof Error ? err.message : String(err)}`)
+      }
       return { ok: true, cmd }
   }
 }

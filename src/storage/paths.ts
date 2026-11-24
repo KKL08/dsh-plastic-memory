@@ -31,6 +31,9 @@ export const OP_JOURNAL_FILE = 'op-journal.sqlite'
 /** 派生索引库的文件名（在 localStateDir 下）。 */
 export const DERIVED_INDEX_FILE = 'derived-index.sqlite'
 
+/** 对话记录库的文件名（在 localStateDir 下）。 */
+export const DIALOGUE_RECORDS_FILE = 'dialogue-records.sqlite'
+
 /** APFS 等大小写不敏感文件系统上，memory.md 会与索引 MEMORY.md 相互覆盖——文件命名处必须避让。 */
 export function isReservedFileName(fileName: string): boolean {
   return fileName.toLowerCase() === INDEX_FILE.toLowerCase()

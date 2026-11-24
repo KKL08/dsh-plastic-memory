@@ -1,7 +1,7 @@
 import { mkdirSync, rmSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
-import { isSqliteBusy, loadSqliteQuietly, type SqliteModule } from './root-lock.ts'
+import { inTransaction, isSqliteBusy, isSqliteCorrupt, loadSqliteQuietly, type SqliteModule } from './root-lock.ts'
 import { describeError } from './state-files.ts'
 import type { MemoryLogger } from './table.ts'
 
@@ -197,7 +197,7 @@ export class DerivedIndex {
       return fn(db)
     } catch (err) {
       this.close()
-      if (isCorrupt(err)) this.removeFiles()
+      if (isSqliteCorrupt(err)) this.removeFiles()
       this.warnOnce(err)
       return undefined
     }
@@ -220,7 +220,7 @@ export class DerivedIndex {
         // 别的连接正占着：这一次不用，不删库，下次再开
         if (isSqliteBusy(err)) return undefined
         // 结构版本不同、库文件损坏：库里的东西都能重算，换新库。别的原因（权限、磁盘）不删
-        if (!(err instanceof SchemaMismatchError) && !isCorrupt(err)) throw err
+        if (!(err instanceof SchemaMismatchError) && !isSqliteCorrupt(err)) throw err
         this.removeFiles()
         this.db = openIndex(sqlite, this.path)
       }
@@ -259,14 +259,6 @@ class SchemaMismatchError extends Error {
   }
 }
 
-/** SQLite 报库文件损坏或不是数据库：主错误码 SQLITE_CORRUPT 是 11、SQLITE_NOTADB 是 26，扩展码取低 8 位。 */
-function isCorrupt(err: unknown): boolean {
-  const e = err as { code?: unknown; errcode?: unknown } | null | undefined
-  if (e?.code !== 'ERR_SQLITE_ERROR' || typeof e.errcode !== 'number') return false
-  const primary = e.errcode & 0xff
-  return primary === 11 || primary === 26
-}
-
 function openIndex(sqlite: SqliteModule, path: string): DatabaseSync {
   const db = new sqlite.DatabaseSync(path)
   try {
@@ -297,24 +289,12 @@ function openIndex(sqlite: SqliteModule, path: string): DatabaseSync {
       db.prepare('SELECT level, page, id, ord FROM topic_members LIMIT 1').get()
     } catch (err) {
       // 版本号对、表的样子不对（开发中的旧库）：同样换新库
-      if (isSqliteBusy(err) || isCorrupt(err)) throw err
+      if (isSqliteBusy(err) || isSqliteCorrupt(err)) throw err
       throw new SchemaMismatchError(version)
     }
     return db
   } catch (err) {
     closeQuietly(db)
-    throw err
-  }
-}
-
-function inTransaction<T>(db: DatabaseSync, fn: () => T): T {
-  db.exec('BEGIN IMMEDIATE')
-  try {
-    const result = fn()
-    db.exec('COMMIT')
-    return result
-  } catch (err) {
-    try { db.exec('ROLLBACK') } catch { /* 事务已不在 */ }
     throw err
   }
 }

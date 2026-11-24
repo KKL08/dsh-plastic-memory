@@ -19,8 +19,8 @@ describe('出处读取策略', () => {
   it('读取事实每次现查并把原日志带回', async () => {
     const log = sessionLog([user(1, '正文')])
     const host = sourceHost({ s: log })
-    expect(await sessionFacts('s', host)).toEqual({ exists: true, log })
-    expect(await sessionFacts('missing', host)).toEqual({ exists: false, log: null })
+    expect(await sessionFacts('s', host)).toEqual({ exists: true, log, isMarkedNoReview: false })
+    expect(await sessionFacts('missing', host)).toEqual({ exists: false, log: null, isMarkedNoReview: false })
     await sessionFacts('s', host)
     expect(host.readSessionLog).toHaveBeenCalledTimes(3)
   })
