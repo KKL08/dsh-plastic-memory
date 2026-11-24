@@ -160,7 +160,7 @@ describe('待处理：两态与空状态', () => {
   it('项目记忆删光了（健康视图不列它）：上次体检取体检视图，不写成「还没体检过」', () => {
     const old = { kind: 'workspace' as const, workspacePath: '/w/old' }
     const checkups: CheckupView = {
-      version: GUI_VIEW_VERSION, governanceEnabled: true, defaultFrequency: 'manual', allResult: null,
+      version: GUI_VIEW_VERSION, governanceEnabled: true, defaultFrequency: 'manual', allResult: null, model: null,
       scopes: [{
         scope: old, isCheckable: false, frequency: 7, isOwn: true, lastCheckupAt: new Date(2026, 9, 5, 9).getTime(), nextCheckupAt: null, isDue: false,
         isInProgress: false, failure: null, modelUnavailable: null, lastResult: null,
@@ -174,7 +174,7 @@ describe('待处理：两态与空状态', () => {
   it('体检视图还在读：先不写上次体检，读到了再写（不闪「还没体检过」）', () => {
     const old = { kind: 'workspace' as const, workspacePath: '/w/old' }
     const checkups: CheckupView = {
-      version: GUI_VIEW_VERSION, governanceEnabled: true, defaultFrequency: 'manual', allResult: null,
+      version: GUI_VIEW_VERSION, governanceEnabled: true, defaultFrequency: 'manual', allResult: null, model: null,
       scopes: [{
         scope: old, isCheckable: false, frequency: 7, isOwn: true, lastCheckupAt: new Date(2026, 9, 5, 9).getTime(), nextCheckupAt: null, isDue: false,
         isInProgress: false, failure: null, modelUnavailable: null, lastResult: null,

@@ -17,6 +17,7 @@ import { MEMORY_COMMAND_NAME, encodeMemoryCommand, type MemoryCommand } from '..
 import { createMemoryCommand } from '../src/gui/commands.ts'
 import { FileTable } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
+import { ModelSelectionStore } from '../src/governance/background-llm.ts'
 import { createAgentsMdWriter } from '../src/storage/agents-md.ts'
 import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
@@ -213,6 +214,7 @@ describe('子 agent 记忆的生命周期', () => {
     // 记忆页的「直接改」：同一记忆根目录上另一个宿主进程里的 /memory 命令（磁盘是唯一真相，多进程共用一份），借主会话、视图不写
     const sidecar = new SidecarStore({ root: memoryRoot, schemas: sidecarSchemas })
     const command = createMemoryCommand({
+      selections: new ModelSelectionStore(sidecar.modelSelections),
       memoryRoot, store: new MemoryStore(new FileTable({ root: memoryRoot, stats: sidecar.recallStats }), undefined, sidecar.recallStats),
       decisions: new PendingDecisionsStore(sidecar.pending, sidecar.lock), snapshots: new SnapshotStore(sidecar.snapshots), cache: sidecar.scanCache,
       checkups: new CheckupRecordStore(sidecar.checkups), autoCheckups: new AutoCheckupSettingStore(sidecar.autoCheckups), ignores: new AdviceIgnoreStore(sidecar.adviceIgnores),

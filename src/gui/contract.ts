@@ -603,6 +603,13 @@ export const checkupCauseSchema = z.object({
 })
 export type CheckupCause = z.infer<typeof checkupCauseSchema>
 
+/**
+ * 「模型用不了」的原因（体检记录表与体检视图共用）：同 checkupCauseSchema，用不了的是自动体检选的模型时 isSelectedModel 为 true，缺省 = 默认模型。
+ * 只加可选字段：上一个发布版读到不认识的键直接丢掉，整条记录照常解析。
+ */
+export const modelUnavailableCauseSchema = checkupCauseSchema.extend({ isSelectedModel: z.boolean().optional() })
+export type ModelUnavailableCause = z.infer<typeof modelUnavailableCauseSchema>
+
 /** 体检新增的一组：条目身份（pendingItemKey，按待处理视图里的先后）和条数，pending = 先处理 + 等你决定，advice = 可以整理。 */
 export const checkupAddedSchema = z.object({
   keys: z.array(z.string()),
@@ -639,8 +646,51 @@ export const checkupResultSchema = z.object({
     notes => (Array.isArray(notes) ? notes.filter(n => !(RETIRED_SCAN_NOTE_CODES as readonly unknown[]).includes((n as { code?: unknown } | null)?.code)) : notes),
     z.array(z.object({ code: z.enum(SCAN_NOTE_CODES), cause: checkupCauseSchema.optional() })),
   ),
+  /**
+   * 自动体检选的模型这次用不了、改用了默认模型（reason 是第一处失效的原因，见 governance/background-llm.ts SelectionProblem）；没退回时缺省。
+   * 不进说明码：说明码是严格枚举，上一个发布版读到不认识的码会跳过整条体检记录，丢掉完成记录；对象里不认识的键旧版直接丢掉。
+   * reason 读时不限取值，以后加了原因，这一版照样读得出整条记录。
+   */
+  modelFallback: z.object({ reason: z.string() }).optional(),
 })
 export type CheckupResult = z.infer<typeof checkupResultSchema>
+
+// —— 后台模型的选择 ——
+
+/**
+ * 选择键：不经会话、在后台调模型的功能各一个（自动体检、记忆梦境）。一个键存一份选择，几个宿主进程共用；
+ * 没有这个键的选择 = 跟随（自动体检跟随默认模型，梦境跟随自动体检，见 governance/background-llm.ts）。
+ */
+export const MODEL_SELECTION_KEYS = ['checkup', 'dreams'] as const
+export type ModelSelectionKey = (typeof MODEL_SELECTION_KEYS)[number]
+
+/**
+ * 一份模型选择：提供方（宿主的路由名）、模型 id、推理强度（宿主适配器给的取值，可选；缺省 = 用模型自己的默认强度）。
+ * 存进共享的选择表（storage/schema.ts modelSelectionRowSchema），已存过的要一直认得。
+ */
+export const modelSelectionSchema = z.object({
+  provider: z.string().min(1),
+  model: z.string().min(1),
+  reasoningEffort: z.string().min(1).optional(),
+})
+export type ModelSelection = z.infer<typeof modelSelectionSchema>
+
+/**
+ * 可选的模型（list-models 的结果）：按提供方分组，顺序同宿主；每个模型带可选的推理强度（从低到高）和它的默认强度。
+ * 列出来是空的提供方（没登录、没配 key）、已删的提供方不出现；列模型出错的提供方带 listFailed、模型为空（这次没读到，不等于没有）。
+ */
+export const modelChoicesSchema = z.array(z.object({
+  id: z.string(),
+  name: z.string(),
+  models: z.array(z.object({
+    id: z.string(),
+    name: z.string(),
+    efforts: z.array(z.object({ id: z.string(), name: z.string() })),
+    defaultEffort: z.string().optional(),
+  })),
+  listFailed: z.literal(true).optional(),
+}))
+export type ModelChoices = z.infer<typeof modelChoicesSchema>
 
 /** 体检视图的文件名（在视图目录里，与全局视图并列）。 */
 export const GUI_CHECKUP_VIEW_FILE = 'checkups.json'
@@ -658,6 +708,12 @@ export const checkupViewSchema = z.object({
   defaultFrequency: autoCheckupFrequencySchema,
   /** 「全部」手动体检的最近一次结果（体检记录表键 all 的那条）；没做过为 null。 */
   allResult: checkupResultSchema.nullable(),
+  /**
+   * 自动体检选的模型（选择键 checkup）；没选（用默认模型）为 null。
+   * 可缺省：上一个发布版的进程和这一版共用视图文件、版本号相同，它写的视图没有这个字段，读的一方按没选处理。
+   * 只加可选字段不换版本号，换了两边会互相把对方写的视图判成过期。
+   */
+  model: modelSelectionSchema.nullable().optional(),
   /** 全局在前，项目按路径排序：目录里的全部项目，含没有活跃记忆的（它们的设置和上次体检照样给界面看）。 */
   scopes: z.array(z.object({
     scope: scopeSchema,
@@ -689,8 +745,8 @@ export const checkupViewSchema = z.object({
       isRetryLimitReached: z.boolean(),
       cause: checkupCauseSchema,
     }).nullable(),
-    /** 最近一次自动体检的尝试是「模型用不了」（宿主没有默认模型、未登录、缺凭据）：原因；不是为 null。不算失败，下一次调度检查再试。 */
-    modelUnavailable: checkupCauseSchema.nullable(),
+    /** 最近一次自动体检的尝试是「模型用不了」（宿主没有默认模型、未登录、缺凭据）：原因，注明是不是选的模型；不是为 null。不算失败，下一次调度检查再试。 */
+    modelUnavailable: modelUnavailableCauseSchema.nullable(),
     /** 这个范围最近一次界面手动或自动体检的结果（「全部」体检也给每个被查的范围写一条）；没有为 null。 */
     lastResult: checkupResultSchema.nullable(),
   })),
@@ -968,6 +1024,13 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
     scope: scopeOrAllSchema,
     frequency: z.union([autoCheckupFrequencySchema, z.literal(AUTO_CHECKUP_FOLLOW)]),
   }).refine(c => c.scope.kind !== 'all' || c.frequency !== AUTO_CHECKUP_FOLLOW, { message: '「全部」没有可跟随的范围' }),
+  /** 列出宿主里能选的模型（按提供方分组，带推理强度），给选择器用。只读，不受体检开关影响。 */
+  z.object({ cmd: z.literal('list-models') }),
+  /**
+   * 改一个选择键的模型：selection 写进共享的选择表，null 删掉它、改回跟随。只存不校验：选的模型在不在，每次开跑前现查。
+   * 不受体检开关影响。
+   */
+  z.object({ cmd: z.literal('set-model-selection'), key: z.enum(MODEL_SELECTION_KEYS), selection: modelSelectionSchema.nullable() }),
   z.object({ cmd: z.literal('refresh-views') }),
   /**
    * 设置页改名或删除自建类型时处理已有记忆（全库：全局和所有项目，等同 allowCrossWorkspace）。retype 把这一类的记忆
@@ -1110,6 +1173,8 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
     semanticBatches: z.number().int().positive().optional(),
     /** scan：宿主流 usage 块报的实际用量合计（所有批次、重试、跨项目重复检查）；宿主一次都没报时缺省，不拿估算顶替。 */
     usageTokens: z.number().int().nonnegative().optional(),
+    /** list-models：能选的模型，按提供方分组。 */
+    providers: modelChoicesSchema.optional(),
     /** migrate-type：这次改了类型或移到最近删除的条数。 */
     migrated: z.number().int().nonnegative().optional(),
     /** migrate-type forget：含密钥、没有移动的条数。 */

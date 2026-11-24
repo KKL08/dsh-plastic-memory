@@ -20,7 +20,7 @@ import {
   ADVICE_TYPES, GUI_VIEW_VERSION, PENDING_ITEM_KINDS, PENDING_LEVEL_OF_KIND, PENDING_LEVELS, SCOPE_KEYS, checkupKey, isAwaitingDecision, resolveAutoCheckup,
   pendingItemKey, pendingItemScopes,
   type AdviceType, type AutoCheckupFrequency, type CheckupAdded, type CheckupCause, type CheckupResult, type CheckupView, type DeletedView, type MemoryPromotion, type GlobalViewName, type HealthView, type LibraryView, type MemoryCard,
-  type MemoryCommandResult, type ModelChange, type PendingItem, type PendingView, type SessionView,
+  type MemoryCommandResult, type ModelChange, type ModelSelection, type PendingItem, type PendingView, type SessionView,
 } from './contract.ts'
 import { isInScope, scopeCacheKey, scopeKey, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
 import { isCopyOf, workspaceLabel } from '../tools/workspace-gate.ts'
@@ -281,10 +281,15 @@ export function checkupResults(before: PendingView, after: PendingView, run: {
   notes: ReadonlyArray<{ code: ScanNoteCode; cause?: CheckupCause }>
   /** 「全部」体检时各范围自己的说明（键同体检记录表）；没给的范围用整次的 notes。 */
   scopeNotes?: ReadonlyMap<string, ReadonlyArray<{ code: ScanNoteCode; cause?: CheckupCause }>>
+  /** 选的模型用不了、改用了默认模型（自动体检）：各条结果同记。 */
+  modelFallback?: CheckupResult['modelFallback']
 }): Array<{ key: string; result: CheckupResult }> {
   const { target } = run
   const toNotes = (notes: typeof run.notes) => notes.map(n => ({ code: n.code, ...(n.cause !== undefined ? { cause: n.cause } : {}) }))
-  const base = { checkupId: run.checkupId, by: run.by, completedAt: run.completedAt, notes: toNotes(run.notes) }
+  const base = {
+    checkupId: run.checkupId, by: run.by, completedAt: run.completedAt, notes: toNotes(run.notes),
+    ...(run.modelFallback !== undefined ? { modelFallback: run.modelFallback } : {}),
+  }
   const usage = run.usageTokens !== undefined ? { usageTokens: run.usageTokens } : {}
   const belongsTo = (scope: Scope) => (i: PendingItem) => pendingItemScopes(i).some(s => scopeKey(s) === scopeKey(scope))
   if (target.kind === 'global') {
@@ -382,6 +387,8 @@ export function buildCheckupView(input: {
   isInProgress: (scope: Scope) => boolean
   record: (scope: Scope) => CheckupRecord | undefined
   allRecord: CheckupRecord | undefined
+  /** 自动体检选的模型；没选为 null。 */
+  model: ModelSelection | null
 }): CheckupView {
   return {
     version: GUI_VIEW_VERSION,
@@ -389,6 +396,7 @@ export function buildCheckupView(input: {
     governanceEnabled: input.governanceEnabled,
     defaultFrequency: resolveAutoCheckup(input.settings, { kind: 'all' }).frequency,
     allResult: input.allRecord?.lastResult ?? null,
+    model: input.model,
     scopes: input.scopes.map(scope => {
       const { frequency, isOwn } = resolveAutoCheckup(input.settings, scope)
       const lastCheckupAt = input.lastCheckupAt(scope)

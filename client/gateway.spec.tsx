@@ -68,10 +68,15 @@ describe('parseView', () => {
   })
 
   it('体检视图按契约校验：合法 → ready；缺字段 → error；版本不认识 → outdated', () => {
-    const checkups: CheckupView = { version: GUI_VIEW_VERSION, governanceEnabled: true, defaultFrequency: 7, allResult: null, scopes: [] }
+    const checkups: CheckupView = { version: GUI_VIEW_VERSION, governanceEnabled: true, defaultFrequency: 7, allResult: null, model: null, scopes: [] }
     expect(parseView('checkups', JSON.stringify(checkups))).toEqual({ status: 'ready', data: checkups })
     expect(parseView('checkups', JSON.stringify({ version: GUI_VIEW_VERSION, governanceEnabled: true })).status).toBe('error')
     expect(parseView('checkups', JSON.stringify({ ...checkups, version: GUI_VIEW_VERSION - 1 }))).toEqual({ status: 'outdated' })
+  })
+
+  it('同版本号、没有自动体检所选模型的体检视图（上一个发布版的进程写的）→ ready，不判成过期或结构错误', () => {
+    const { model: _model, ...older } = { version: GUI_VIEW_VERSION, governanceEnabled: true, defaultFrequency: 7, allResult: null, model: null, scopes: [] } satisfies CheckupView
+    expect(parseView('checkups', JSON.stringify(older))).toEqual({ status: 'ready', data: older })
   })
 
   it('视图路径与文件资源地址', () => {
@@ -417,7 +422,7 @@ describe('createHostGateway', () => {
   it('体检视图：读 checkups.json；版本不认识时同样请服务端重写一次再读', async () => {
     localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
     const checkupsPath = '/h/memories/.state/gui/checkups.json'
-    const checkups: CheckupView = { version: GUI_VIEW_VERSION, governanceEnabled: true, defaultFrequency: 'manual', allResult: null, scopes: [] }
+    const checkups: CheckupView = { version: GUI_VIEW_VERSION, governanceEnabled: true, defaultFrequency: 'manual', allResult: null, model: null, scopes: [] }
     resources[fileAddress('s1', checkupsPath)] = { status: 'live', value: { absolutePath: checkupsPath, version: 'v1' }, failure: undefined }
     files[checkupsPath] = JSON.stringify({ ...checkups, version: GUI_VIEW_VERSION - 1 })
     const ctx = fakeCtx()

@@ -131,6 +131,26 @@ describe('PA-28 宿主服务缺席、未注册、调用抛错时各自退化，�
     expect(boot({ llm, agentDefaultModel: { currentSelection: throwing } }).host.defaultLlm()).toBeNull()
   })
 
+  it('选中的模型：按给的提供方、模型、推理强度无会话调用，每次另起一个派生的会话 id；llm 服务缺席为 null', async () => {
+    const requests: Array<Record<string, unknown>> = []
+    const llm = { stream: async function* (req: Record<string, unknown>) { requests.push(req); yield* [] } }
+    const { host } = boot({ llm })
+    await host.llmForRoute({ provider: 'provider-x', model: 'model-a', reasoningEffort: 'high' })!.complete({ system: 's', user: 'u' })
+    await host.llmForRoute({ provider: 'provider-x', model: 'model-a' })!.complete({ system: 's', user: 'u' })
+    expect(requests[0]).toMatchObject({ provider: 'provider-x', model: 'model-a', reasoningEffort: 'high', sessionId: expect.any(String) })
+    expect(requests[1]).not.toHaveProperty('reasoningEffort')
+    expect(requests[1]?.sessionId).not.toBe(requests[0]?.sessionId)
+    expect(boot().host.llmForRoute({ provider: 'provider-x', model: 'model-a' })).toBeNull()
+  })
+
+  it('模型目录：宿主 llm 服务有列模型的方法时给出它；缺席、缺方法或查找抛错为 undefined', () => {
+    const llm = { stream: async function* () {}, listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}) }
+    expect(boot({ llm }).host.modelCatalog()).toBe(llm)
+    expect(boot({ llm: { stream: llm.stream } }).host.modelCatalog()).toBeUndefined()
+    expect(boot().host.modelCatalog()).toBeUndefined()
+    expect(boot({ llm: throwing }).host.modelCatalog()).toBeUndefined()
+  })
+
   it('模型请求带会话 id：借用会话时由该会话的 id 派生（不用原 id，宿主查不到它，不会把这次请求算进那个对话），无会话的默认模型每次另起一个；路由靠它的提供方（如 OpenCode Go）缺了会拒绝请求', async () => {
     const requests: Array<{ sessionId?: unknown }> = []
     const llm = { stream: async function* (req: { sessionId?: unknown }) { requests.push(req); yield* [] } }

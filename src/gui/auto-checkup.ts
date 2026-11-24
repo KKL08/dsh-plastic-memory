@@ -1,9 +1,9 @@
 import type { MemoryLogger } from '../store.ts'
 import type { SemanticLlm } from '../governance/semantic-scan.ts'
-import type { HostSession } from '../tools/host-session.ts'
+import type { ResolvedLlm } from '../governance/background-llm.ts'
 import { scopeKey, type Scope } from '../scope.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
-import type { CheckupCause, CheckupView } from './contract.ts'
+import type { CheckupCause, CheckupResult, CheckupView, ModelUnavailableCause } from './contract.ts'
 import { runCheckup, type CheckupRunDeps, type IntervalTimer } from './checkup-run.ts'
 import type { CheckupSuggestions } from './checkup-suggestions.ts'
 
@@ -27,8 +27,11 @@ export interface AutoCheckupSchedulerDeps {
   views: CheckupRunDeps['views']
   /** 每个范围此刻的情况（体检视图的内容：有效频率、是否到期，全局在前、项目按路径排序）。每次检查现读，别的进程改的设置也能读到。 */
   status: () => Promise<CheckupView>
-  /** 宿主当前的默认模型；拿不到为 null（这次不跑）。每次开跑现读，不缓存。 */
-  host: Pick<HostSession, 'defaultLlm'>
+  /**
+   * 这次体检用哪个模型（governance/background-llm.ts 的解析器，选择键 checkup）：用户选了且还在就用选的，没选或失效用宿主默认模型；
+   * 拿不到为 null（这次不跑）。每次开跑现读，不缓存。
+   */
+  resolveLlm: () => Promise<ResolvedLlm>
   /** 体检开关（用时读配置）：关着时不跑。 */
   isGovernanceEnabled: () => boolean
   timer: AutoCheckupTimer
@@ -44,7 +47,7 @@ export interface AutoCheckupSchedulerDeps {
 
 /**
  * 自动体检调度：dsh 开着时，按共享的设置表和完成记录，在后台对到期的范围做体检。不借会话、不打断对话：
- * 每个范围经一次体检（checkup-run.ts，与界面手动体检同一套规则）：用宿主的默认模型无会话调用，结果照常写缓存、挂账、写完成记录（发起方 auto），
+ * 每个范围经一次体检（checkup-run.ts，与界面手动体检同一套规则）：用自动体检选的模型（没选或选的用不了时用宿主的默认模型，后者在结果里说明）无会话调用，结果照常写缓存、挂账、写完成记录（发起方 auto），
  * 做完立刻重写视图、记下最近一次结果（新增、用量、说明），再给新的冲突逐条生成处理建议（后续段，见 checkup-suggestions.ts）。
  * 后台调用不经过会话，宿主的用量统计看不到，用量取宿主流 usage 块报的数，由插件记在结果里（含生成建议的那几次）。
  * 到期的范围依次查、一次只跑一个（全局先，项目按路径）；一次检查每个范围只补一次。
@@ -53,7 +56,7 @@ export interface AutoCheckupSchedulerDeps {
  * 卸载时取消正在跑的体检：执行器在写入检查点前停下，不写完成记录，下次照常到期。
  *
  * 没做成的两类，都记进体检记录（各进程共有的事实），不写完成记录、不重新计时：
- * - 模型用不了（拿不到默认模型，或宿主报未登录、缺凭据）：不算失败，由调度器给这次检查里到期的范围都记上原因、不再往下试，下一次检查再试；
+ * - 模型用不了（选的模型失效后也拿不到默认模型，或宿主报未登录、缺凭据、提供方已删）：不算失败，由调度器给这次检查里到期的范围都记上原因、不再往下试，下一次检查再试；
  * - 失败（模型调用出错、输出解析不了、体检出错）：一次体检在放掉认领之前记，连续失败次数加一，1 小时后再试，连续 3 次后等到下一个周期；做完一次体检就清零。
  * 取消（插件卸载、认领被别的进程接手）两样都不记。
  */
@@ -133,20 +136,23 @@ export class AutoCheckupScheduler {
     const due = status.scopes.filter(s => s.isDue && (s.failure === null || s.failure.retryAt <= now))
     for (const [i, { scope }] of due.entries()) {
       if (this.isDisposed || !this.deps.isGovernanceEnabled()) return
-      // 每次开跑现读默认模型：用户在两次之间换了模型就用新的
-      const llm = this.deps.host.defaultLlm()
+      // 每次开跑现读选择和默认模型：用户在两次之间换了模型（别的进程里换的也算）就用新的
+      const { llm, isSelected, fellBack, reason } = await this.deps.resolveLlm()
+      if (fellBack) this.log.warn('[plastic-memory] 自动体检选的模型现在用不了，这次改用默认模型', reason)
       const outcome = llm === null
         ? { modelUnavailable: { kind: 'no-default-model' as const } }
-        : await this.run(scope, llm)
+        : await this.run(scope, llm, fellBack ? { reason: reason ?? 'provider-gone' } : undefined)
       if (outcome === undefined) continue
-      // 模型用不了：别的到期范围不再白试，都记上同一个原因（别的进程正在查的不碰），下一次检查再试
-      this.log.warn('[plastic-memory] 默认模型现在用不了，自动体检这次不跑，下次检查再试', outcome.modelUnavailable)
-      await this.recordModelUnavailable(due.slice(i).filter(s => !s.isInProgress).map(s => s.scope), outcome.modelUnavailable, startedAt)
+      // 模型用不了：别的到期范围不再白试，都记上同一个原因（别的进程正在查的不碰），下一次检查再试。
+      // 用不了的是选的模型时注明，界面和日志不把它说成默认模型
+      const cause: ModelUnavailableCause = isSelected ? { ...outcome.modelUnavailable, isSelectedModel: true } : outcome.modelUnavailable
+      this.log.warn(`[plastic-memory] ${isSelected ? '自动体检选的模型' : '默认模型'}现在用不了，自动体检这次不跑，下次检查再试`, cause)
+      await this.recordModelUnavailable(due.slice(i).filter(s => !s.isInProgress).map(s => s.scope), cause, startedAt)
       return
     }
   }
 
-  private async recordModelUnavailable(scopes: readonly Scope[], cause: CheckupCause, since: number): Promise<void> {
+  private async recordModelUnavailable(scopes: readonly Scope[], cause: ModelUnavailableCause, since: number): Promise<void> {
     try {
       for (const scope of scopes) await this.deps.checkups.recordModelUnavailable(scope, cause, since)
     } catch (err) {
@@ -159,12 +165,14 @@ export class AutoCheckupScheduler {
    * 体检一个范围，和手动体检那个范围同口径：项目读全局加本项目、写本项目的缓存；全局只查全局。指令文件按范围现读，垂直冲突照查。
    * 没做完的由一次体检记失败；碰上模型用不了不记，返回原因交给调用方。取消（插件卸载、认领被接手、已不到期）什么都不记。
    */
-  private async run(scope: Scope, llm: SemanticLlm): Promise<{ modelUnavailable: CheckupCause } | undefined> {
+  private async run(scope: Scope, llm: SemanticLlm, modelFallback: CheckupResult['modelFallback']): Promise<{ modelUnavailable: CheckupCause } | undefined> {
     const controller = new AbortController()
     this.controller = controller
     try {
       const outcome = await runCheckup({
         target: scope, by: 'auto', llm, signal: controller.signal,
+        // 选的模型用不了、改用了默认模型：结果里说明
+        ...(modelFallback !== undefined ? { modelFallback } : {}),
         confirmHeld: () => this.isStillDue(scope),
       }, {
         scan: this.deps.scan, checkups: this.deps.checkups, views: this.deps.views,

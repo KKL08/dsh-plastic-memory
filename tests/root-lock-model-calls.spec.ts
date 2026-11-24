@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SidecarStore } from '../src/storage/sidecar.ts'
+import { ModelSelectionStore } from '../src/governance/background-llm.ts'
 import { createAgentsMdWriter } from '../src/storage/agents-md.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { RETENTION_MS } from '../src/retention.ts'
@@ -48,6 +49,7 @@ function env(answer?: (input: { system: string; user: string }) => string) {
     collectCheckups: () => collectCheckupView({ store, checkups, autoCheckups, cache, now }),
   })
   const command = createMemoryCommand({
+    selections: new ModelSelectionStore(sidecar.modelSelections),
     memoryRoot: root, store, decisions, snapshots, cache, checkups, autoCheckups, ignores, registry, views,
     agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')), instructions: noInstructions, log: quietLog,
     host: { contextOf: async () => ({ workspacePath: SESSION_WS, delegationDepth: 0, session: { id: 'sess-1' } }), llmOf: () => model.llm },
@@ -63,7 +65,7 @@ function env(answer?: (input: { system: string; user: string }) => string) {
     const s = new AutoCheckupScheduler({
       scan: { store, registry, decisions, cache, ignores, instructions: noInstructions },
       checkups, views, status: () => collectCheckupView({ store, checkups, autoCheckups, cache, now }),
-      host: { defaultLlm: () => model.llm }, isGovernanceEnabled: () => true,
+      resolveLlm: async () => ({ llm: model.llm, isSelected: false, fellBack: false }), isGovernanceEnabled: () => true,
       timer: { timeout: () => () => {}, interval: () => () => {} },
       now, log: quietLog,
     })

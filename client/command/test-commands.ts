@@ -41,6 +41,8 @@ export const SAMPLE_COMMANDS: { [K in MemoryCommand['cmd']]: Extract<MemoryComma
   'unignore-advice': { cmd: 'unignore-advice', type: 'bloat', memoryIds: ['m1'] },
   'scan': { cmd: 'scan', workspacePath: '/w/app' },
   'set-auto-checkup': { cmd: 'set-auto-checkup', scope: { kind: 'all' }, frequency: 'manual' },
+  'list-models': { cmd: 'list-models' },
+  'set-model-selection': { cmd: 'set-model-selection', key: 'checkup', selection: { provider: 'p1', model: 'm1', reasoningEffort: 'high' } },
   'refresh-views': { cmd: 'refresh-views' },
   'migrate-type': { cmd: 'migrate-type', from: 'old', action: 'forget' },
 }

@@ -3,7 +3,7 @@ import type { CasKvTable, RefreshableClaim, RefreshableClaimKvTable } from '../k
 import type { CheckupCompletion, CheckupRecord } from '../storage/schema.ts'
 import type { ScanCacheEntry } from './schema.ts'
 import type { Scope } from '../scope.ts'
-import { checkupKey, type CheckupCause, type CheckupResult } from '../gui/contract.ts'
+import { checkupKey, type CheckupCause, type CheckupResult, type ModelUnavailableCause } from '../gui/contract.ts'
 
 /**
  * 体检记录表：每个范围一条，记这个范围最近一次做完的体检（完成记录），即「上次体检」。
@@ -83,7 +83,7 @@ export class CheckupRecordStore {
    * 自动体检这次碰上模型用不了（没有默认模型、未登录、缺凭据）：记下原因。不算失败：失败次数和重试时间不动，下一次调度检查再试。
    * since 是这轮检查的开始时间：要记的范围是那时读出来的，之后已经有体检做完（完成时间不早于它）的不记，免得给刚查完的范围记上。
    */
-  async recordModelUnavailable(scope: Scope, cause: CheckupCause, since: number): Promise<void> {
+  async recordModelUnavailable(scope: Scope, cause: ModelUnavailableCause, since: number): Promise<void> {
     const key = checkupKey(scope)
     await this.table.update(key, cur => (cur?.completed !== undefined && cur.completed.completedAt >= since ? undefined : { ...cur, id: key, modelUnavailable: cause }))
   }

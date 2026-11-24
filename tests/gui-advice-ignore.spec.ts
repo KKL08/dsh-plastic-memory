@@ -8,6 +8,7 @@ import { once } from 'node:events'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import { SidecarStore } from '../src/storage/sidecar.ts'
+import { ModelSelectionStore } from '../src/governance/background-llm.ts'
 import { STATE_DIR } from '../src/storage/paths.ts'
 import { createAgentsMdWriter } from '../src/storage/agents-md.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
@@ -52,6 +53,7 @@ function env(opts: { llm?: SemanticLlm } = {}) {
     llmOf: () => opts.llm ?? null,
   }
   const command = createMemoryCommand({
+    selections: new ModelSelectionStore(sidecar.modelSelections),
     memoryRoot: root, store, decisions, snapshots, cache, checkups: new CheckupRecordStore(sidecar.checkups), autoCheckups: new AutoCheckupSettingStore(sidecar.autoCheckups), ignores, registry, views,
     agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')),
     host, instructions: noInstructions, now: () => NOW,

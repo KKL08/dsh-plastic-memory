@@ -12,6 +12,7 @@ import { buildTypeRegistry } from '../../src/type-registry.ts'
 import { type PendingTable } from '../../src/governance/decisions.ts'
 import { AdviceIgnoreStore } from '../../src/governance/advice-ignores.ts'
 import type { SemanticLlm } from '../../src/governance/semantic-scan.ts'
+import { ModelSelectionStore, type HostModelCatalog } from '../../src/governance/background-llm.ts'
 import { RETENTION_MS } from '../../src/retention.ts'
 import { ViewWriter, collectCheckupView, collectGlobalViews } from '../../src/gui/view-writer.ts'
 import { createMemoryCommand } from '../../src/gui/commands.ts'
@@ -58,6 +59,8 @@ interface EnvOpts {
   readEvent?: ReadEventFn
   /** Enable suggestion generation after scanning. */
   withSuggestions?: boolean
+  /** 宿主 llm 服务的列模型部分；缺省当宿主没有。 */
+  catalog?: HostModelCatalog
 }
 
 function env(opts: EnvOpts = {}) {
@@ -70,6 +73,7 @@ function env(opts: EnvOpts = {}) {
   // 表和命令用同一个时钟：软删记的时刻和最近删除的保留期清扫才对得上
   const { store, decisions, snapshots, checkups, autoCheckups } = createPluginEnv(sidecar, { root, stats: sidecar.recallStats, now: () => clock.now }, { table: opts.table, pending: opts.wrapPending?.(sidecar.pending) })
   const cache = sidecar.scanCache
+  const selections = new ModelSelectionStore(sidecar.modelSelections)
   let suggestions: CheckupSuggestions | undefined
   const views = new ViewWriter({
     memoryRoot: root,
@@ -77,7 +81,7 @@ function env(opts: EnvOpts = {}) {
       store, decisions, snapshots, cache, checkups, autoCheckups, registry, memoryRoot: root, now: () => clock.now,
       ...(suggestions !== undefined ? { generatingSuggestions: () => suggestions!.generatingIds() } : {}),
     }),
-    collectCheckups: () => collectCheckupView({ store, checkups, autoCheckups, cache, now: () => clock.now, ...(opts.governanceEnabled !== undefined ? { isGovernanceEnabled: () => opts.governanceEnabled! } : {}) }),
+    collectCheckups: () => collectCheckupView({ store, checkups, autoCheckups, selections, cache, now: () => clock.now, ...(opts.governanceEnabled !== undefined ? { isGovernanceEnabled: () => opts.governanceEnabled! } : {}) }),
     // 替换间隔按测试时钟算、不真等：节流本身由视图测试单独覆盖
     now: () => clock.now, sleep: async () => {}, lock: sidecar.lock,
   })
@@ -86,12 +90,12 @@ function env(opts: EnvOpts = {}) {
   const instructions = instructionsOf(opts.instructions)
   if (opts.withSuggestions === true) suggestions = new CheckupSuggestions({ store, decisions, checkups, views, instructions, now: () => clock.now, log: { info() {}, warn() {}, error() {} } })
   const command = createMemoryCommand({
-    memoryRoot: root, store, decisions, snapshots, cache, checkups, autoCheckups, ignores: new AdviceIgnoreStore(sidecar.adviceIgnores), registry, views: opts.wrapViews?.(views) ?? views,
+    memoryRoot: root, store, decisions, snapshots, cache, checkups, autoCheckups, selections, ignores: new AdviceIgnoreStore(sidecar.adviceIgnores), registry, views: opts.wrapViews?.(views) ?? views,
     onAutoCheckupChanged: () => { autoCheckupChanges.count++ },
     ...(opts.log !== undefined ? { log: opts.log } : {}),
     ...(opts.heartbeat !== undefined ? { heartbeat: opts.heartbeat } : {}),
     agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')),
-    host: { contextOf: async () => ({ workspacePath: 'workspacePath' in opts ? opts.workspacePath : SESSION_WS, delegationDepth: opts.delegationDepth ?? 0, session: { id: 'sess-1' } }), llmOf: () => (opts.llm === undefined ? null : opts.llm) },
+    host: { contextOf: async () => ({ workspacePath: 'workspacePath' in opts ? opts.workspacePath : SESSION_WS, delegationDepth: opts.delegationDepth ?? 0, session: { id: 'sess-1' } }), llmOf: () => (opts.llm === undefined ? null : opts.llm), modelCatalog: () => opts.catalog },
     instructions,
     ...(opts.governanceEnabled !== undefined ? { isGovernanceEnabled: () => opts.governanceEnabled! } : {}),
     ...(opts.readEvent !== undefined ? { getReadEvent: () => opts.readEvent! } : {}),
@@ -110,7 +114,7 @@ function env(opts: EnvOpts = {}) {
   const run = (c: MemoryCommand) => runRaw(encodeMemoryCommand(c).slice(`/${MEMORY_COMMAND_NAME}`.length))
   const readView = async (name: keyof typeof GUI_VIEW_FILES) => JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_VIEW_FILES[name]), 'utf8')) as unknown
   const readCheckupView = async () => checkupViewSchema.parse(JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_CHECKUP_VIEW_FILE), 'utf8')))
-  return { store, decisions, snapshots, cache, checkups, autoCheckups, autoCheckupChanges, stats: sidecar.recallStats, command, run, runRaw, readView, readCheckupView, clock, suggestions }
+  return { store, decisions, snapshots, cache, checkups, autoCheckups, selections, autoCheckupChanges, stats: sidecar.recallStats, command, run, runRaw, readView, readCheckupView, clock, suggestions }
 }
 
 type Ok = Extract<MemoryCommandResult, { ok: true }>

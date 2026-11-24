@@ -43,6 +43,8 @@ function setup(opts: {
   return { form, ...view }
 }
 
+/** 迁移相关的命令：设置页打开时为自动体检的模型选择列模型（list-models），和迁移无关，不算。 */
+const migrationsOf = (gateway: ReturnType<typeof createFakeGateway>) => gateway.executed.filter(e => e.command.cmd !== 'list-models')
 const radio = (name: string) => screen.getByRole('radio', { name })
 const button = (name: string, scope: HTMLElement = document.body) => within(scope).getByRole('button', { name })
 const dialog = (name: string) => screen.getByRole('dialog', { name })
@@ -605,7 +607,7 @@ describe('改名与删除：已有记忆怎么办', () => {
       { op: 'unset', path: ['customTypes', 'domain-term'] },
       { op: 'set', path: ['scenes', 'coding'], value: { label: '编码', types: [...GENERAL, 'glossary'] } },
     ])
-    expect(gateway.executed).toEqual([])
+    expect(migrationsOf(gateway)).toEqual([])
   })
 
   it('存过记忆的改名先二选一；跟着改名在保存时先写配置、再迁移', async () => {
@@ -620,9 +622,9 @@ describe('改名与删除：已有记忆怎么办', () => {
     fireEvent.click(button('保存'))
     expect(confirmLines()).toEqual(['场景：修改「编码」', '「术语」改名为 glossary，2 条记忆跟着改'])
     await act(async () => { fireEvent.click(button('保存', dialog('保存这些改动？'))) })
-    await waitFor(() => { expect(gateway.executed).toHaveLength(1) })
+    await waitFor(() => { expect(migrationsOf(gateway)).toHaveLength(1) })
     expect(form.calls).toHaveLength(1)
-    expect(gateway.executed[0]!.command).toEqual({ cmd: 'migrate-type', from: 'domain-term', action: 'retype', to: 'glossary' })
+    expect(migrationsOf(gateway)[0]!.command).toEqual({ cmd: 'migrate-type', from: 'domain-term', action: 'retype', to: 'glossary' })
   })
 
   it('改名时问旧记忆怎么办：焦点在「取消」；Esc 只收起这一问，表单和改了的英文名都还在', () => {
@@ -668,8 +670,8 @@ describe('改名与删除：已有记忆怎么办', () => {
     fireEvent.click(button('保存'))
     expect(confirmLines()).toEqual(['场景：修改「办公」', '我加的类型：删除「客户名」', '「客户名」在用的记忆移到最近删除'])
     await act(async () => { fireEvent.click(button('保存', dialog('保存这些改动？'))) })
-    await waitFor(() => { expect(gateway.executed).toHaveLength(1) })
-    expect(gateway.executed[0]!.command).toEqual({ cmd: 'migrate-type', from: 'client', action: 'forget' })
+    await waitFor(() => { expect(migrationsOf(gateway)).toHaveLength(1) })
+    expect(migrationsOf(gateway)[0]!.command).toEqual({ cmd: 'migrate-type', from: 'client', action: 'forget' })
     expect(form.value.scenes).toMatchObject({ office: { types: GENERAL } })
     expect(await screen.findByText('1 条含密钥的记忆没有移到最近删除，去记忆页处理。')).toBeInTheDocument()
   })
@@ -696,7 +698,7 @@ describe('改名与删除：已有记忆怎么办', () => {
     fails = false
     await act(async () => { fireEvent.click(button('重试')) })
     await waitFor(() => { expect(screen.queryByText('配置已保存，有记忆没迁过去。')).toBeNull() })
-    expect(gateway.executed.map(e => e.command)).toEqual([
+    expect(migrationsOf(gateway).map(e => e.command)).toEqual([
       { cmd: 'migrate-type', from: 'domain-term', action: 'retype', to: 'glossary' },
       { cmd: 'migrate-type', from: 'domain-term', action: 'retype', to: 'glossary' },
     ])
@@ -713,9 +715,9 @@ describe('改名与删除：已有记忆怎么办', () => {
     fireEvent.click(button('保存'))
     expect(confirmLines()).toEqual(['场景：修改「编码」', '「术语」改名为 glossary，已有记忆跟着改'])
     await act(async () => { fireEvent.click(button('保存', dialog('保存这些改动？'))) })
-    await waitFor(() => { expect(gateway.executed).toHaveLength(1) })
+    await waitFor(() => { expect(migrationsOf(gateway)).toHaveLength(1) })
     expect(form.calls).toHaveLength(1)
-    expect(gateway.executed[0]!.command).toEqual({ cmd: 'migrate-type', from: 'domain-term', action: 'retype', to: 'glossary' })
+    expect(migrationsOf(gateway)[0]!.command).toEqual({ cmd: 'migrate-type', from: 'domain-term', action: 'retype', to: 'glossary' })
   })
 
   it('改名跟着改之后又删掉、选保留记忆：记忆留在原名下，不迁移；确认框写删除', async () => {
@@ -731,7 +733,7 @@ describe('改名与删除：已有记忆怎么办', () => {
     expect(confirmLines()).toEqual(['场景：修改「编码」', '我加的类型：删除「术语」'])
     await act(async () => { fireEvent.click(button('保存', dialog('保存这些改动？'))) })
     await waitFor(() => { expect(form.calls).toHaveLength(1) })
-    expect(gateway.executed).toEqual([])
+    expect(migrationsOf(gateway)).toEqual([])
   })
 
   it('迁移失败后没点重试、又改了别的设置保存：没做完的迁移随这次保存再执行', async () => {
@@ -751,9 +753,9 @@ describe('改名与删除：已有记忆怎么办', () => {
     fireEvent.click(button('保存'))
     expect(confirmLines()).toContain('「术语」改名为 glossary，1 条记忆跟着改')
     await act(async () => { fireEvent.click(button('保存', dialog('保存这些改动？'))) })
-    await waitFor(() => { expect(gateway.executed).toHaveLength(2) })
+    await waitFor(() => { expect(migrationsOf(gateway)).toHaveLength(2) })
     await waitFor(() => { expect(screen.queryByText('配置已保存，有记忆没迁过去。')).toBeNull() })
-    expect(gateway.executed[1]!.command).toEqual({ cmd: 'migrate-type', from: 'domain-term', action: 'retype', to: 'glossary' })
+    expect(migrationsOf(gateway)[1]!.command).toEqual({ cmd: 'migrate-type', from: 'domain-term', action: 'retype', to: 'glossary' })
   })
 
   it('没有会话时：迁移选项置灰并说明，条数读不到按存过记忆处理；保留记忆照常能删', () => {

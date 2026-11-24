@@ -6,10 +6,12 @@ export interface HostLlmService {
   stream?: (req: GenerateOptions) => AsyncIterable<StreamChunk>
 }
 
-/** 一次调用用哪个模型：宿主路由名与模型 id，两者都要有才能调；sessionId 随请求交给宿主，部分提供方（如 OpenCode Go）靠它路由，缺了拒绝请求。 */
+/** 一次调用用哪个模型：宿主路由名与模型 id，两者都要有才能调；sessionId 随请求交给宿主，部分提供方（如 OpenCode Go）靠它路由，缺了拒绝请求。
+ *  reasoningEffort 是适配器给的推理强度取值，给了才随请求带上；缺省时用模型自己的默认强度。 */
 export interface HostModelRoute {
   provider?: string
   model?: string
+  reasoningEffort?: string
   sessionId?: string
 }
 
@@ -17,10 +19,10 @@ export interface HostModelRoute {
  * 宿主报「模型用不了」的错误码（宿主 0.2.1-rc.2 的模型适配层）：账号路由没登录（ACCOUNT_SIGN_IN_REQUIRED）、
  * 账号的 token 被服务端拒掉（ACCOUNT_TOKEN_INVALID，宿主随即删掉它，之后就是没登录）；API key 路由没有 key（MISSING_CREDENTIAL）、
  * key 格式不对（INVALID_CREDENTIAL）、key 被服务端拒掉（AUTH，401/403，填错或已吊销）。这几类要用户去登录或补凭据，
- * 重试没用，体检记「模型用不了」、不算失败。
+ * 重试没用，体检记「模型用不了」、不算失败。提供方已从宿主里删掉（NO_ADAPTER：没有适配器认这个路由名）同样算模型用不了。
  * 其余错误码（限流、超时、额度、上下文超限、网络……）照旧算失败。
  */
-export const MODEL_UNAVAILABLE_HOST_CODES = ['ACCOUNT_SIGN_IN_REQUIRED', 'ACCOUNT_TOKEN_INVALID', 'MISSING_CREDENTIAL', 'INVALID_CREDENTIAL', 'AUTH'] as const
+export const MODEL_UNAVAILABLE_HOST_CODES = ['ACCOUNT_SIGN_IN_REQUIRED', 'ACCOUNT_TOKEN_INVALID', 'MISSING_CREDENTIAL', 'INVALID_CREDENTIAL', 'AUTH', 'NO_ADAPTER'] as const
 
 export function isModelUnavailableCode(hostCode: string | undefined): boolean {
   return hostCode !== undefined && (MODEL_UNAVAILABLE_HOST_CODES as readonly string[]).includes(hostCode)
@@ -44,6 +46,7 @@ export function hostSemanticLlm(llm: HostLlmService | undefined, route: HostMode
   const provider = route?.provider
   const model = route?.model
   const sessionId = route?.sessionId as GenerateOptions['sessionId']
+  const reasoningEffort = route?.reasoningEffort as GenerateOptions['reasoningEffort']
   if (!provider || !model) return null
   const stream = llm?.stream
   if (stream === undefined) return null
@@ -65,6 +68,7 @@ export function hostSemanticLlm(llm: HostLlmService | undefined, route: HostMode
         system,
         signal,
         ...(sessionId === undefined ? {} : { sessionId }),
+        ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
         messages: [{ role: 'user', content: [{ type: 'text', text: user }] }],
       }
       try {

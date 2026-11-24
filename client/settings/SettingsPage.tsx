@@ -5,7 +5,7 @@
  * 体检开关 `governance.enabled` 只在配置文件里改，界面上不放；配置文件关掉体检时依赖它的两项置灰保留、说明换成原因，不隐藏。
  */
 import { useEffect, useId, useRef, useState } from 'react'
-import type { MemoryCommand } from '../../src/gui/contract.ts'
+import type { MemoryCommand, ModelChoices, ModelSelection } from '../../src/gui/contract.ts'
 import { useGateway } from '../gateway.ts'
 import { useT, type Translate } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
@@ -19,6 +19,7 @@ import {
   decayDaysOf, droppedTypes, governanceEnabled, parsePositiveInt, sceneChanges, type ConfigForm, type Migrations, type SettingsFields,
 } from './config.ts'
 import { Dialog, TextField } from './controls.tsx'
+import { ModelPicker } from './ModelPicker.tsx'
 import { SceneSection, sceneLabel, typeNames } from './Scenes.tsx'
 import { typeLabel } from '../type-label.ts'
 import { StatusCard } from './StatusCard.tsx'
@@ -161,6 +162,7 @@ export function SettingsPage({ form, onOpenMemoryPage, now }: {
               onChange={(promoteTarget) => { edit({ promoteTarget }) }}
             />
           </SettingsItem>
+          <CheckupModel id={`${id}-checkup-model`} governanceOn={governanceOn} />
           <SettingsItem label={t('settings.deleted.label')} hint={t('settings.deleted.hint')}>
             <button type="button" className="pm-link pm-settings-link" onClick={() => { onOpenMemoryPage({ view: 'deleted', scope: ALL_SCOPE }) }}>{t('settings.deleted.open')}</button>
           </SettingsItem>
@@ -327,6 +329,87 @@ function MigrationNote({ draft }: { draft: ReturnType<typeof useSettingsDraft> }
     return <p className="pm-form-note pm-settings-note" role="status">{t('settings.migration.secrets', { n: migration.skippedSecrets })}</p>
   }
   return null
+}
+
+/**
+ * 自动体检用的模型。改了立即存，不进保存行：存在插件的共享设置里（set-model-selection），几个 DeepSeek Harness 进程读同一份。
+ * 当前值取体检视图；能选的模型在打开设置页时问一次（list-models）。没有会话、配置文件关掉体检时置灰，说明换成原因；体检视图还没读到时也置灰。
+ *
+ * 连续选时保存一个接一个发：同一时刻只有一个在途，在途时再选的只记最后一次，等在途的回来再发，服务端收到的顺序就是选的顺序。
+ * 刚选的值先显示出来，直到以视图为准：最后一次保存没存上时退回视图里的值并提示；存好之后视图再变一次
+ * （这里存好后重写、或别的窗口改了）就以视图为准。在途或排着的保存回来之前，视图怎么变都先显示刚选的。
+ */
+function CheckupModel({ id, governanceOn }: { id: string; governanceOn: boolean }) {
+  const t = useT()
+  const gateway = useGateway()
+  const session = gateway.useSession(undefined)
+  const view = gateway.useView(session, 'checkups')
+  const sessionId = session.kind === 'ready' ? session.sessionId : undefined
+  const [choices, setChoices] = useState<ModelChoices | 'failed' | undefined>()
+  // 刚选、还没以视图为准时显示的值；isSaved = 最后一次保存已经存好
+  const [chosen, setChosen] = useState<{ value: ModelSelection | null; isSaved: boolean } | undefined>()
+  const [isFailed, setFailed] = useState(false)
+  // 有保存在途时不为 undefined；next 是在途时又选的最后一次，等在途的回来再发
+  const saving = useRef<{ next?: { sessionId: string; value: ModelSelection | null } } | undefined>(undefined)
+  const data = view.status === 'ready' ? view.data : undefined
+  // 上一个发布版的进程写的视图没有这一项，按没选处理
+  const saved = data?.model ?? null
+  // 存好之后视图再变一次，就以视图为准
+  useEffect(() => { setChosen(c => (c?.isSaved === true ? undefined : c)) }, [data])
+  useEffect(() => {
+    // 会话没了：读过的模型不再算数
+    if (sessionId === undefined) { setChoices(undefined); return }
+    if (!governanceOn) return
+    let isLive = true
+    void gateway.execute(sessionId, { cmd: 'list-models' }).then((result) => {
+      if (isLive) setChoices(result.ok ? result.providers ?? [] : 'failed')
+    })
+    return () => { isLive = false }
+  }, [gateway, sessionId, governanceOn])
+
+  const save = (target: string, value: ModelSelection | null) => {
+    saving.current = {}
+    void gateway.execute(target, { cmd: 'set-model-selection', key: 'checkup', selection: value }).then(result => result.ok, () => false).then((isOk) => {
+      // 在途时又选了：接着发最后选的那个，这次的结果不再算数（成败都不改显示、不提示）
+      const next = saving.current?.next
+      if (next !== undefined) { save(next.sessionId, next.value); return }
+      saving.current = undefined
+      if (isOk) setChosen(c => (c === undefined ? c : { ...c, isSaved: true }))
+      else { setChosen(undefined); setFailed(true) }
+    })
+  }
+  const onChange = (next: ModelSelection | null) => {
+    if (sessionId === undefined) return
+    setFailed(false)
+    setChosen({ value: next, isSaved: false })
+    if (saving.current !== undefined) saving.current.next = { sessionId, value: next }
+    else save(sessionId, next)
+  }
+  const hint = !governanceOn ? t('settings.governanceOff') : sessionId === undefined ? t('settings.checkupModel.noSession') : t('settings.checkupModel.hint')
+  // 列表、保存的提示只在能选的时候写：会话没了、体检关了时说明已经换成原因
+  const isNoted = governanceOn && sessionId !== undefined
+  // 有提供方这次没读到：一个模型都没读到时整体说没读到，读到了一部分时点名没读到的提供方
+  const unread = choices === undefined || choices === 'failed' ? [] : choices.filter(p => p.listFailed === true)
+  const isListFailed = choices === 'failed' || (unread.length > 0 && unread.length === choices?.length)
+  return (
+    <SettingsItem label={t('settings.checkupModel.label')} htmlFor={id} hint={hint} disabled={!governanceOn}>
+      <ModelPicker
+        id={id}
+        label={t('settings.checkupModel.label')}
+        followLabel={t('settings.checkupModel.follow')}
+        value={chosen !== undefined ? chosen.value : saved}
+        choices={choices === 'failed' ? undefined : choices}
+        // 体检视图没读到时不知道存的是什么，不当成跟随默认模型让人选
+        disabled={sessionId === undefined || !governanceOn || data === undefined}
+        onChange={onChange}
+      />
+      {isListFailed && isNoted ? <p className="pm-setting-hint" role="status">{t('settings.checkupModel.listFailed')}</p> : null}
+      {!isListFailed && unread.length > 0 && isNoted
+        ? <p className="pm-setting-hint" role="status">{t('settings.checkupModel.listPartial', { providers: unread.map(p => p.name).join(t('settings.scene.listSep')) })}</p>
+        : null}
+      {isFailed && isNoted ? <p className="pm-input-invalid" role="status">{t('settings.checkupModel.failed')}</p> : null}
+    </SettingsItem>
+  )
 }
 
 /**
