@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
-import { globalConfirmCode, runSavePipeline, type SaveRejectSubcode } from '../src/pipeline.ts'
+import { globalConfirmCode, runSavePipeline, type SaveInput, type SaveRejectSubcode } from '../src/pipeline.ts'
 import { confirmCodeOf } from './helpers/global-confirm.ts'
 import { renderSaveResult } from '../src/tools/save.ts'
 import { extractEntities } from '../src/text.ts'
@@ -12,6 +12,7 @@ import { buildTypeRegistry } from '../src/type-registry.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import type { MemorySnapshot, PendingDecision } from '../src/governance/schema.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
+import type { MemoryRecord } from '../src/record-schema.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { editFingerprint } from '../src/governance/snapshots.ts'
 import { candidate, record } from './helpers/record.ts'
@@ -929,6 +930,42 @@ describe('runSavePipeline：子 agent 写入约束', () => {
     expect((await store.get('mem_g'))!.content).toBe('「mem_g」的旧内容')
   })
 
+  it('update 已被取代的待确认记录：整条更新、精确修改、补证都回原来的 subagent-restricted，不指路', async () => {
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
+    await store.put({ ...owned('mem_self', 'self'), status: 'superseded' })
+    await store.put({ ...owned('mem_new', 'main'), supersedes: ['mem_self'] })
+    const inputs = [
+      childCandidate({ action: 'update', change: 'correct', id: 'mem_self', content: '子 agent 想改成这样' }),
+      childCandidate({ action: 'update', change: 'refine', id: 'mem_self', content: undefined, edits: [{ oldString: '旧内容', newString: '新内容' }] }),
+      { action: 'update', change: 'corroborate', id: 'mem_self', sourceMode: 'environment-observed' },
+    ]
+    for (const input of inputs) {
+      const reason = await restricted(runSavePipeline(input as SaveInput, childDeps(store)), 'subagent-not-own')
+      expect(reason).toContain('mem_self 已经被取代了')
+      expect(reason).not.toContain('mem_new')
+    }
+    expect((await store.get('mem_self'))!.content).toBe('「mem_self」的旧内容')
+  })
+
+  it('整条更新：归属检查之后、取目标之前记录被主会话取代，回 subagent-restricted，不叫它去改取代者', async () => {
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
+    await store.put(owned('mem_self', 'self'))
+    await store.put({ ...owned('mem_new', 'main'), supersedes: ['mem_self'] })
+    // 第一次读（归属检查）之后真实改成已取代，后面的读取都读到新状态
+    const realGet = store.get.bind(store)
+    let reads = 0
+    vi.spyOn(store, 'get').mockImplementation(async (id, opts) => {
+      const r = await realGet(id, opts)
+      if (id === 'mem_self' && ++reads === 1) await store.put({ ...r!, status: 'superseded' })
+      return r
+    })
+    const input = childCandidate({ action: 'update', change: 'correct', id: 'mem_self', content: '子 agent 想改成这样' })
+    const r = await runSavePipeline(input as SaveInput, childDeps(store))
+    expect(r).toMatchObject({ kind: 'rejected', code: 'subagent-restricted' })
+    expect(r.kind === 'rejected' && r.reason).not.toContain('mem_new')
+    expect((await realGet('mem_self'))!.content).toBe('「mem_self」的旧内容')
+  })
+
   it('检查时读到已删除、之后被恢复成主会话的记录：照样拒，子级内容不会变成主档', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const main = owned('mem_main', 'main')
@@ -1217,5 +1254,120 @@ describe('runSavePipeline：改写全局记忆要确认', () => {
     const id = await seedGlobal(store)
     const result = await runSavePipeline(candidate({ action: 'update', change: 'correct', id, scope: 'global', content: '提交信息用英文祈使句，标题不超过 50 字' }), { ...deps(store), workspacePath: undefined })
     expect(result.kind).toBe('updated')
+  })
+})
+
+// 更新已被取代的记忆：取代后旧的那条不再带入，改它等于白改，也撤不了。退回、不写，指出取代它的那条，让模型改去更新那条
+describe('runSavePipeline：更新已被取代的记忆', () => {
+  function guarded(store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())) {
+    const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
+    const decisions = new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>())
+    return { store, snapshots, decisions, deps: { ...deps(store), snapshots, decisions, callId: 'call-s' } }
+  }
+  const inProj = (partial: Partial<MemoryRecord>) => record({ type: 'knowledge', scope: 'workspace', workspacePath: '/proj', ...partial })
+  const old = (partial: Partial<MemoryRecord> = {}) => inProj({ id: 'mem_old', name: '旧说法', content: '旧内容', status: 'superseded', ...partial })
+  /** 三种写法：整条更新、精确修改、补证。 */
+  const writes = (id: string) => ({
+    whole: candidate({ action: 'update', change: 'correct', id, type: 'knowledge', scope: 'workspace', content: '改后的内容' }),
+    edits: { action: 'update' as const, change: 'refine' as const, id, sourceMode: 'user-explicit' as const, edits: [{ oldString: '旧内容', newString: '旧内容，补一句' }] },
+    corroborate: { action: 'update' as const, change: 'corroborate' as const, id, sourceMode: 'user-explicit' as const },
+  })
+  async function rejectedAll(e: ReturnType<typeof guarded>, id: string): Promise<string[]> {
+    const before = await e.store.get(id)
+    const reasons: string[] = []
+    for (const [how, input] of Object.entries(writes(id))) {
+      const r = await runSavePipeline(input, e.deps)
+      expect(r, how).toMatchObject({ kind: 'rejected', code: 'target-missing', subcode: 'target-superseded' })
+      if (r.kind === 'rejected') reasons.push(r.reason)
+    }
+    // 记忆文件、快照、撤销记录都不动
+    expect(await e.store.get(id)).toEqual(before)
+    expect(await e.snapshots.list()).toEqual([])
+    expect(await e.decisions.listSettled()).toEqual([])
+    return reasons
+  }
+
+  it('能找到取代者：整条更新、精确修改、补证都退回，原因给取代者的 id 和名称，什么都不写', async () => {
+    const e = guarded()
+    await e.store.put(old())
+    await e.store.put(inProj({ id: 'mem_new', name: '新说法', content: '新内容', supersedes: ['mem_old'] }))
+    for (const reason of await rejectedAll(e, 'mem_old')) {
+      expect(reason).toContain('mem_old 已被取代')
+      expect(reason).toContain('「新说法」（mem_new）')
+    }
+  })
+
+  it('全局记忆被取代：先回已被取代，不先要确认码', async () => {
+    const e = guarded()
+    await e.store.put(old({ scope: 'global', workspacePath: undefined }))
+    await e.store.put(record({ id: 'mem_new', name: '新说法', type: 'knowledge', scope: 'global', supersedes: ['mem_old'] }))
+    for (const reason of await rejectedAll(e, 'mem_old')) expect(reason).toContain('「新说法」（mem_new）')
+  })
+
+  it('有几条取代者都列出，最多三条', async () => {
+    const e = guarded()
+    await e.store.put(old())
+    for (const n of [1, 2, 3, 4]) await e.store.put(inProj({ id: `mem_new${n}`, name: `新说法${n}`, supersedes: ['mem_old'] }))
+    const [reason] = await rejectedAll(e, 'mem_old')
+    expect(reason!.match(/（mem_new\d）/g)).toHaveLength(3)
+  })
+
+  it('找不到取代者（取代者已删除、在别的作用域、自己也已被取代）：照样退回，原因不指路', async () => {
+    const e = guarded()
+    await e.store.put(old({ scope: 'global', workspacePath: undefined }))
+    await e.store.put(record({ id: 'mem_gone', type: 'knowledge', scope: 'global', supersedes: ['mem_old'], status: 'deleted', deletedAt: 2 }))
+    await e.store.put(record({ id: 'mem_stale', type: 'knowledge', scope: 'global', supersedes: ['mem_old'], status: 'superseded' }))
+    await e.store.put(inProj({ id: 'mem_local', supersedes: ['mem_old'] }))
+    for (const reason of await rejectedAll(e, 'mem_old')) {
+      expect(reason).toContain('mem_old 已被取代')
+      expect(reason).not.toMatch(/mem_gone|mem_stale|mem_local/)
+    }
+  })
+
+  it('项目记忆被取代：取代者在全局或别的项目里的不算，原因不指路', async () => {
+    const e = guarded()
+    await e.store.put(old())
+    await e.store.put(record({ id: 'mem_global', type: 'knowledge', scope: 'global', supersedes: ['mem_old'] }))
+    await e.store.put(inProj({ id: 'mem_elsewhere', workspacePath: '/other', supersedes: ['mem_old'] }))
+    for (const reason of await rejectedAll(e, 'mem_old')) {
+      expect(reason).toContain('mem_old 已被取代')
+      expect(reason).not.toMatch(/mem_global|mem_elsewhere/)
+    }
+  })
+
+  it('别的项目里被取代的记忆：仍回跨项目', async () => {
+    const e = guarded()
+    await e.store.put(old({ workspacePath: '/other' }))
+    const r = await runSavePipeline(writes('mem_old').whole, e.deps)
+    expect(r).toMatchObject({ kind: 'rejected', code: 'cross-workspace' })
+  })
+
+  it('取代者名称里带密钥：原因里是遮过的', async () => {
+    const e = guarded()
+    await e.store.put(old())
+    await e.store.put(inProj({ id: 'mem_new', name: `接口密钥 ${FAKE_SECRET.sk}`, supersedes: ['mem_old'] }))
+    for (const reason of await rejectedAll(e, 'mem_old')) {
+      expect(reason).not.toContain(FAKE_SECRET.sk)
+      expect(reason).toContain(SECRET_MASK)
+      expect(reason).toContain('（mem_new）')
+    }
+  })
+
+  it('目标在用时不多读存储：三种写法读取次数不变', async () => {
+    const READS = ['get', 'query', 'queryScope', 'locate'] as const
+    const counts: Record<string, Record<string, number>> = {}
+    for (const [how, input] of Object.entries(writes('mem_live'))) {
+      const e = guarded()
+      await e.store.put(inProj({ id: 'mem_live', content: '旧内容' }))
+      const spies = READS.map(name => [name, vi.spyOn(e.store, name)] as const)
+      const r = await runSavePipeline(input, e.deps)
+      expect(r.kind, how).toBe('updated')
+      counts[how] = Object.fromEntries(spies.map(([name, spy]) => [name, spy.mock.calls.length]))
+    }
+    expect(counts).toEqual({
+      whole: { get: 2, query: 0, queryScope: 0, locate: 0 },
+      edits: { get: 2, query: 0, queryScope: 0, locate: 0 },
+      corroborate: { get: 2, query: 0, queryScope: 0, locate: 0 },
+    })
   })
 })
