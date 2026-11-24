@@ -9,6 +9,7 @@ import {
   type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark,
 } from './workspace-gate.ts'
 import type { Scope } from '../scope.ts'
+import { droppedLinksNote, hasDropped, linksOutside, withoutLinks, type DroppedLinks } from '../links.ts'
 
 export type PromoteTarget = 'global' | 'agents-md'
 
@@ -39,6 +40,8 @@ export interface PromoteResult {
   otherWorkspaces: OtherWorkspaceMark[]
   /** 提升前的自动快照；dismiss 或没有目标时为 null。 */
   snapshotId: string | null
+  /** 提升为全局时越界去掉的关联和前提（指向项目记忆的），一条记忆一项，没去掉的不列；撤销提升时随作用域一起还原。 */
+  droppedLinks: Array<{ id: string } & DroppedLinks>
   message: string
 }
 
@@ -95,7 +98,7 @@ export async function executePromote(
     }
     const skipNote = skipped.length > 0 ? `（${skipped.length} 条不存在或已删除，见 skipped）` : ''
     return {
-      promoted: [], dismissed, skipped, taken: [], rejected, otherWorkspaces, snapshotId: null,
+      promoted: [], dismissed, skipped, taken: [], rejected, otherWorkspaces, snapshotId: null, droppedLinks: [],
       message: `已清除 ${dismissed.length} 条提升候选标记，这些记忆保留在项目内，之后不再提示提升。${skipNote}${wsNote}`,
     }
   }
@@ -128,16 +131,27 @@ export async function executePromote(
     ? { ...r, delegation: { ...r.delegation!, reviewed: { by: options.reviewedBy ?? 'main', at: now } } }
     : r
   // 一条一段：软删、写 AGENTS.md、失败时回滚在同一个写入段里，拿锁超时就整条没做，不会软删了却没写进去
+  const droppedLinks: PromoteResult['droppedLinks'] = []
+  const batch = new Set(targets.map(r => r.id))
   const promoteOne = (r: MemoryRecord) => deps.store.writeSection(async (): Promise<boolean> => {
     // 快照和搬家（写 AGENTS.md 的正文）都按预读的这一版：读到之后被别处改过、或已被搬到别的作用域（比如另一次提升先搬走了）就不动，
     // 计入 skipped，快照里才总是被提升的那一版
     const isChanged = (current: MemoryRecord) =>
       current.scope !== r.scope || current.workspacePath !== r.workspacePath || editFingerprint(current) !== editFingerprint(r)
     if (args.target === 'global') {
+      // 在写入段里按全局重验关联和前提：指向项目记忆的去掉（全局记忆各项目共用，留着到别的项目就悬空）。
+      // 按预读的这一版算：锁内内容和它不一样就不写（isChanged），算出来的就是锁内那一版的。
+      // 同一批一起提升的按已经在全局算：结果不取决于先处理哪一条
+      const dropped = await linksOutside(deps.store, r, { kind: 'global' }, { movingAlong: batch })
       // 无损 JSON 不变式：不能把 workspacePath/globalCandidate 置为 undefined 键，解构剔键。
       // 按原记录的 workspace 定位：同 id 多副本时搬走的才是门放行的这份，不是 global 或别的项目的副本
-      const promote = ({ workspacePath, globalCandidate, ...rest }: MemoryRecord): MemoryRecord => review({ ...rest, scope: 'global' })
-      return (await deps.store.updateIfLive(r, promote, from, { isChanged })) !== undefined   // 没写：读到之后被别处删掉或改过
+      const promote = (cur: MemoryRecord): MemoryRecord => {
+        const { workspacePath, globalCandidate, ...rest } = withoutLinks(cur, dropped)
+        return review({ ...rest, scope: 'global' })
+      }
+      const isWritten = (await deps.store.updateIfLive(r, promote, from, { isChanged })) !== undefined   // 没写：读到之后被别处删掉或改过
+      if (isWritten && hasDropped(dropped)) droppedLinks.push({ id: r.id, ...dropped })
+      return isWritten
     }
     // 两步无法原子：先软删再写 AGENTS.md，append 失败回滚软删——失败方向宁可"没提升"
     // 也不能"两处并存"（原顺序 append 成功+softDelete 失败会双份注入且结果谎报 promoted）。
@@ -156,6 +170,11 @@ export async function executePromote(
     if (await promoteOne(r)) promoted.push({ id: r.id, target: args.target })
     else skipped.push(r.id)
   }
+  // 同一批里有成员被跳过、还留在项目里：前面按「一起搬」留下的、指向它的关联和前提，在已搬到全局的成员上照越界去掉
+  const left = targets.filter(r => !promoted.some(p => p.id === r.id)).map(r => r.id)
+  if (args.target === 'global' && left.length > 0) {
+    for (const { id } of promoted) await dropLinksToLeft(deps.store, id, left, droppedLinks)
+  }
 
   const snapNote = snapshot ? ` 已自动快照（${snapshot.id}），14 天内可用 memory_snapshot 恢复。` : ''
   const message = promoted.length === 0
@@ -163,5 +182,31 @@ export async function executePromote(
     : args.target === 'global'
       ? `已提升 ${promoted.length} 条记忆到全局（插件 global 记忆）。${snapNote}`
       : `已写入 ${promoted.length} 条记忆到 ~/.dsh/AGENTS.md，原项目记忆已归档软删。${snapNote}`
-  return { promoted, dismissed: [], skipped, taken, rejected, otherWorkspaces, snapshotId: snapshot?.id ?? null, message: `${message}${secretNote}${takenNote}${wsNote}` }
+  const linkNote = droppedLinksNote(droppedLinks)
+  return {
+    promoted, dismissed: [], skipped, taken, rejected, otherWorkspaces, snapshotId: snapshot?.id ?? null, droppedLinks,
+    message: `${message}${linkNote}${secretNote}${takenNote}${wsNote}`,
+  }
+}
+
+/**
+ * 已提升到全局的 id 上，指向 left（同批被跳过的成员）且此刻在全局够不着的关联和前提去掉，并进结果的 droppedLinks。
+ * 按锁内读到的这一版算、写；期间被改过就不动。
+ */
+async function dropLinksToLeft(store: MemoryStore, id: string, left: readonly string[], droppedLinks: PromoteResult['droppedLinks']): Promise<void> {
+  await store.writeSection(async () => {
+    const cur = await store.get(id, { kind: 'global' })
+    if (cur === undefined) return
+    const outside = await linksOutside(store, cur, { kind: 'global' })
+    const extra = { related: outside.related.filter(t => left.includes(t)), premises: outside.premises.filter(t => left.includes(t)) }
+    if (!hasDropped(extra)) return
+    const isWritten = (await store.updateIfLive(cur, r => withoutLinks(r, extra), { kind: 'global' }, { isChanged: r => editFingerprint(r) !== editFingerprint(cur) })) !== undefined
+    if (!isWritten) return
+    const known = droppedLinks.find(d => d.id === id)
+    if (known === undefined) droppedLinks.push({ id, ...extra })
+    else {
+      known.related = [...known.related, ...extra.related]
+      known.premises = [...known.premises, ...extra.premises]
+    }
+  })
 }

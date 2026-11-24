@@ -6,9 +6,11 @@ import { asUndoable, expectedFingerprints, isStillOwnWrite, undoRuleOf, undoStat
 import { verdictLoser, type MemorySnapshot, type SnapshotRecord } from '../governance/schema.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { RecordNotFoundError } from '../errors.ts'
-import { scopeAt, scopeOfLedger, type Scope } from '../scope.ts'
-import { indexReceiptUndoneStep } from '../governance/op-steps.ts'
+import { scopeAt, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
+import { LINK_UNDONE_STEP, indexReceiptUndoneStep, ledgerSteps, linkUndoneStep } from '../governance/op-steps.ts'
+import { newWriteOp } from '../storage/table.ts'
 import { layerOf } from '../storage/history.ts'
+import { hasDropped, linksOutside, restoreLinks, withoutLinks, type DroppedLinks } from '../links.ts'
 import { crossWorkspaceNote, gateRecords, isCopyOf, isVisible, locateCopy, type CrossWorkspaceRejection, type GovernanceContext } from './workspace-gate.ts'
 
 export interface UndoDeps {
@@ -33,7 +35,8 @@ export type UndoReason = 'no-entry' | 'undone' | 'resettled' | 'expired' | 'chan
 
 export type UndoError = { kind: 'error'; code: UndoErrorCode; reason?: UndoReason; rejected?: CrossWorkspaceRejection[]; message: string }
 /** skipped：整理索引的撤销里，之后又被改过、没撤的操作数；它们的回执留在条目上。 */
-export type UndoResult = { kind: 'undone'; decisionId: string; restored: string[]; snapshotId?: string; skipped?: number } | UndoError
+/** droppedLinks：撤销换作用域时，放回原作用域后仍越界、去掉的关联和前提（撤销提升、撤销移到项目时才有，没去掉的不列）。 */
+export type UndoResult = { kind: 'undone'; decisionId: string; restored: string[]; snapshotId?: string; skipped?: number; droppedLinks?: Array<{ id: string } & DroppedLinks> } | UndoError
 
 /** 最近删除的普通恢复（没有裁决条目覆盖）多一种 failed：快照后被修改过而跳过。 */
 export type RestoreDeletedResult =
@@ -77,6 +80,7 @@ async function claimAndUndo(
     const rule = undoRuleOf(entry)
     if (rule.mechanism === 'undo-index') return await undoIndexRun(entry, deps)
     const allow = args.allowCrossWorkspace
+    if (rule.mechanism === 'unlink') return await unlink(entry, allow, context, deps)
     if (rule.mechanism === 'relocate') return await relocate(entry, rule, allow, context, deps)
     if (rule.mechanism === 'reflag') return await reflag(entry, rule, allow, context, deps)
     return rule.expectedStatus !== undefined || rule.receipts !== undefined
@@ -292,24 +296,81 @@ async function restoreVerdict(entry: UndoableEntry, rule: UndoRule, allow: boole
   if (rejected.length > 0) return crossWorkspace(rejected)
   // 撤销提升只搬全局那一份，且它得仍在用、内容同快照：之后又搬走、删掉、改过的不动。按提示定位恢复时比的可能是
   // 原项目里同 id 的另一份，顺带清掉的却是全局这份，所以全局这份在这里先比
+  // 提升时越界去掉的关联和前提：全局那份按「快照去掉这些」比，快照恢复时它们随作用域一起回来
+  const dropped = entry.settled.droppedLinks
+  const asPromoted = (r: SnapshotRecord): SnapshotRecord => (isPromote && dropped !== undefined ? withoutLinks(r, dropped) : r)
   if (isPromote) {
     for (const id of targets) {
       const promoted = await locateCopy(deps.store, id, GLOBAL)
       const before = records.find(r => r.id === id)
-      if (promoted?.status !== 'active' || before === undefined || isConflicting(promoted, before)) return changed(id)
+      if (promoted?.status !== 'active' || before === undefined || isConflicting(promoted, asPromoted(before))) return changed(id)
     }
   }
   let restored: string[] = []
+  const stillOutside: Array<{ id: string } & DroppedLinks> = []
   if (snapshot !== undefined) {
     // 撤销提升：上面的核对在锁外，写回那一刻再按锁内现状核一次，核对之后才被删掉、改过的不复活
     const overwrite = isPromote
-      ? (cur: MemoryRecord | undefined) => cur?.status === 'active' && records.some(r => r.id === cur.id && !isConflicting(cur, r))
+      ? (cur: MemoryRecord | undefined) => cur?.status === 'active' && records.some(r => r.id === cur.id && !isConflicting(cur, asPromoted(r)))
       : false
-    const r = await deps.snapshots.restore(snapshot, targets, deps.store, { target, overwrite, now: deps.now ?? Date.now })
+    const r = await deps.store.writeSection(async () => {
+      // 撤销提升：快照里的关联和前提随作用域回到原项目，按原项目重验一次。期间被指向的记忆搬去了别的项目，这条就够不着了，去掉并列出
+      const back = isPromote ? { ...snapshot, data: await Promise.all(snapshot.data.map(async (rec) => {
+        const home = targets.includes(rec.id) ? scopeOfMemory(rec) : undefined
+        if (home === undefined) return rec
+        const outside = await linksOutside(deps.store, rec, home)
+        if (!hasDropped(outside)) return rec
+        stillOutside.push({ id: rec.id, ...outside })
+        return withoutLinks(rec, outside)
+      })) } : snapshot
+      return deps.snapshots.restore(back, targets, deps.store, { target, overwrite, now: deps.now ?? Date.now })
+    })
     if (r.skipped.length > 0) return changed(r.skipped[0]!, r.redacted.length > 0 ? 'redacted' : 'changed')
     restored = r.restored
   }
-  return settleUndo(entry, rule, deps, restored)
+  const result = await settleUndo(entry, rule, deps, restored)
+  return result.kind === 'undone' && stillOutside.length > 0 ? { ...result, droppedLinks: stillOutside } : result
+}
+
+/**
+ * 撤销一次只挂关联、前提的保存：按增量撤，它加的 id 现在还在的去掉，期间别处追加的、改的别的字段都留着，修改时间不动。
+ * 记忆不在用了（期间被软删、取代）或换了作用域的不撤；它加的一个都不在了（已被别处去掉）回 stale。都什么都不动。
+ * 去掉链接的写入带一步「回执标成已撤销」：写完断掉的，下次进写入段补上；进段后回执已结清（上一次其实撤成了）就不再动文件。
+ */
+async function unlink(entry: UndoableEntry, allow: boolean | undefined, context: GovernanceContext, deps: UndoDeps): Promise<UndoResult> {
+  const memoryId = entry.memoryIds[0] ?? ''
+  const label = entry.workspaces?.[0]
+  const added = entry.links
+  if (label === undefined || added === undefined) return notFound(entry.id, 'no-entry')
+  const scope = scopeOfLedger(label)
+  const current = await locateCopy(deps.store, memoryId, scope)
+  const { rejected } = gateRecords(current === undefined ? [] : [current], context, allow)
+  if (rejected.length > 0) return crossWorkspace(rejected)
+  const stillThere = (r: MemoryRecord) => (r.related ?? []).some(id => added.related.includes(id)) || (r.premises ?? []).some(p => added.premises.includes(p.id))
+  if (!deps.store.hasStep(LINK_UNDONE_STEP)) deps.store.registerSteps(ledgerSteps(deps.decisions))
+  const outcome = await deps.store.writeSection(async (): Promise<'removed' | 'changed' | 'already-undone'> => {
+    // 进写入段时补做过被打断的撤销：回执已经结清，说明上一次去掉链接那步其实做成了
+    const fresh = (await deps.decisions.listSettled()).find(d => d.id === entry.id)
+    if (fresh?.settled?.isUndone === true) return 'already-undone'
+    const op = newWriteOp({ steps: [linkUndoneStep(entry.id)] })
+    try {
+      const written = await deps.store.update({ id: memoryId }, (cur) => {
+        // 锁内按磁盘上的现状再判一次；不撤就抛出、不写（同 updateIfLive）
+        if (cur.status !== 'active' || !stillThere(cur)) throw new RecordNotFoundError(cur.id)
+        return withoutLinks(cur, added)
+      }, scope, op)
+      await deps.store.finishOp(op, written)
+      return 'removed'
+    } catch (err) {
+      if (!(err instanceof RecordNotFoundError)) throw err
+      return 'changed'
+    }
+  })
+  if (outcome === 'already-undone') return notFound(`${entry.id}（已撤销）`, 'undone')
+  if (outcome === 'changed') return changed(memoryId)
+  // 回执已由写入提交后的那一步结清，这里不再结第二次
+  const { snapshotId } = entry.settled
+  return { kind: 'undone', decisionId: entry.id, restored: [memoryId], ...(snapshotId !== undefined ? { snapshotId } : {}) }
 }
 
 /**
@@ -327,19 +388,29 @@ async function relocate(entry: UndoableEntry, rule: UndoRule, allow: boolean | u
     return error('target-taken', `全局已有记忆 ${memoryId}，搬回去会盖掉它，未做任何改动`)
   }
   let isMoved = false
+  let dropped: DroppedLinks = { related: [], premises: [] }
+  // 移过去时去掉的关联和前提从改前快照放回去（快照过期了就放不回，照原样搬回）
+  const droppedAtMove = entry.settled.droppedLinks
+  const before = droppedAtMove === undefined ? undefined : (await snapshotOf(entry, deps))?.data.find(r => r.id === memoryId)
+  const withBack = (r: MemoryRecord): MemoryRecord => (before !== undefined && droppedAtMove !== undefined ? restoreLinks(r, before, droppedAtMove) : r)
   try {
-    await deps.store.update(current!, (cur) => {
-      // 锁内按磁盘上的现状再核对一次
-      isMoved = isStillOwnWrite(entry, cur)
-      if (!isMoved) return cur
-      const { workspacePath: _workspacePath, ...rest } = cur
-      return { ...rest, scope: 'global' }
-    }, scopeAt(workspacePath))
+    // 搬回全局前在写入段里按全局重验关联和前提（含放回来的）：越界的（指向项目记忆的）去掉
+    await deps.store.writeSection(async () => {
+      dropped = await linksOutside(deps.store, withBack(current!), GLOBAL)
+      await deps.store.update(current!, (cur) => {
+        // 锁内按磁盘上的现状再核对一次
+        isMoved = isStillOwnWrite(entry, cur)
+        if (!isMoved) return cur
+        const { workspacePath: _workspacePath, ...rest } = withoutLinks(withBack(cur), dropped)
+        return { ...rest, scope: 'global' }
+      }, scopeAt(workspacePath))
+    })
   } catch (err) {
     if (!(err instanceof RecordNotFoundError)) throw err
   }
   if (!isMoved) return changed(memoryId)
-  return settleUndo(entry, rule, deps, [memoryId])
+  const result = await settleUndo(entry, rule, deps, [memoryId])
+  return result.kind === 'undone' && hasDropped(dropped) ? { ...result, droppedLinks: [{ id: memoryId, ...dropped }] } : result
 }
 
 /**

@@ -25,6 +25,7 @@ import { InMemoryTable } from './helpers/in-memory-table.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 import { noInstructions } from './helpers/instructions.ts'
 import { userTurnLog } from './helpers/session-log.ts'
+import { LINKS_PER_KIND_MAX } from '../src/links.ts'
 
 /**
  * 九个工具绑定层（src/tools/*-tool.ts）的契约测试。绑定层此前从未被测：纯逻辑在
@@ -88,6 +89,17 @@ describe('memory_save 绑定', () => {
 
   it('supersedes 的参数说明：填被取代的旧记忆 id，和 update 分工', () => {
     expect(describedParam('supersedes')).toBe('被这条新记忆取代的旧记忆 id（action=create 时用）。旧的随即失效、不再带入；旧说法要留档时用它，只是补充或改正同一条用 action=update。')
+  })
+
+  it('related 与 premises 的参数说明：追加不删已有、每条的上限、作用域规则，补挂时只传 id 不用填 change', () => {
+    const related = describedParam('related')!
+    expect(related).toContain('追加在已有的后面')
+    expect(related).toContain(`每条最多 ${LINKS_PER_KIND_MAX} 个`)
+    expect(related).toContain('全局记忆只能指向全局记忆')
+    expect(related).toContain('不用填 change')
+    const premises = describedParam('premises')!
+    expect(premises).toContain('type=decision')
+    expect(premises).toContain(`每条最多 ${LINKS_PER_KIND_MAX} 个`)
   })
 
   it('summary 与 tags 分工：summary 一句话说清讲什么，tags 只写文本里没有的检索词', () => {

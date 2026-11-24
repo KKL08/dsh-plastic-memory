@@ -41,6 +41,22 @@ All notable changes to this project are documented here. The format follows
   old name finds it. One pass can be undone as a whole, and lines added
   to a topic afterwards stay. A folder holds at most 30 topics by default
   (`index.maxTopics` in the config file).
+- `memory_save` can link memories. `related` points a memory at others about
+  connected matters, for example a decision and the project status it
+  changes; `premises` records which memories a decision is based on, along
+  with what they said at the time, so a later change to a premise can be
+  noticed. Links are appended and never removed by a later save, with up to
+  10 of each per memory. A memory in a project can point at memories in the
+  same project and global memories; a global memory only at global ones. To
+  add links to an existing memory, an update can carry just the id and the
+  links: its text and modification time stay as they are. When a memory is
+  promoted to global or moved from global into a project, links it can no
+  longer reach are dropped and listed in the result; undoing the promotion
+  or the move brings them back, except those that are still out of reach.
+- A memory that a decision cites as a premise always keeps its old version
+  when its state changes, even within the window where quick successive
+  edits are otherwise combined into one version, so the version the decision
+  was based on stays available.
 - Each memory type's confirmation period can now be changed, the five
   general types included: every type card on the settings page shows its
   period, and Edit opens the form where you change it. A memory left

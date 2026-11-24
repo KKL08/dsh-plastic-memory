@@ -18,7 +18,7 @@ export interface ChangeAnchor {
 
 /** 一次内容改动可以带的字段。补证时都不生效。 */
 export type ChangeFields = Partial<Pick<MemoryRecord,
-  'name' | 'type' | 'tags' | 'content' | 'summary' | 'confidence' | 'validFrom' | 'validTo' | 'supersedes' | 'globalCandidate' | 'delegation'>>
+  'name' | 'type' | 'tags' | 'content' | 'summary' | 'confidence' | 'validFrom' | 'validTo' | 'supersedes' | 'globalCandidate' | 'delegation' | 'related' | 'premises'>>
 
 export interface Change {
   kind: ChangeKind

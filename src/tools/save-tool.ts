@@ -5,6 +5,7 @@ import { executeSave, renderSaveResult, type SaveToolDeps } from './save.ts'
 import { toToolOutput } from './output.ts'
 import { VALIDITY_DATE_FORMAT, VALIDITY_FORMAT } from '../validity.ts'
 import { CHANGE_KINDS } from '../record-schema.ts'
+import { LINKS_PER_KIND_MAX } from '../links.ts'
 
 /** 整条写入才必填的字段共用的说明：参数表里都是可选，必填项由管线按 action 校验。 */
 const WHOLE_WRITE = 'create 和整条 update 必填；用 edits 时不传就保留原值。'
@@ -30,7 +31,7 @@ export function createSaveTool(deps: SaveToolDeps, options: { allowSubagent?: bo
       // dsh 参数 DSL：漏写 required: true 即为可选。name、type、scope、content、summary 只在整条写入时必填（edits 时可省），由管线按 action 校验
       action: { type: 'string', enum: ['create', 'update'], required: true },
       id: { type: 'string', description: 'action=update 时必填，目标记忆 id' },
-      change: { type: 'string', enum: [...CHANGE_KINDS], description: 'action=update 时必填：这次改动的性质，决定旧内容怎么处置。corroborate（补证）：同一件事又被提到，内容不用改；只刷新确认时间、记下这次的出处，正文等内容参数不生效，只传 id 和 sourceMode。refine（细化）：旧内容仍全部成立，补上条件、原因、步骤、例外；只增不删。correct（纠错）：旧内容当时就不对，直接改掉，不留历史。state-change（状态变化）：旧内容当时成立、现在变了；旧内容整条留成历史版本，这条记忆换成现在的状态。拿不准旧内容当时成不成立，填 state-change。' },
+      change: { type: 'string', enum: [...CHANGE_KINDS], description: 'action=update 时必填（只补挂 related、premises 的除外）：这次改动的性质，决定旧内容怎么处置。corroborate（补证）：同一件事又被提到，内容不用改；只刷新确认时间、记下这次的出处，正文等内容参数不生效，只传 id 和 sourceMode。refine（细化）：旧内容仍全部成立，补上条件、原因、步骤、例外；只增不删。correct（纠错）：旧内容当时就不对，直接改掉，不留历史。state-change（状态变化）：旧内容当时成立、现在变了；旧内容整条留成历史版本，这条记忆换成现在的状态。拿不准旧内容当时成不成立，填 state-change。' },
       changeReason: { type: 'string', description: 'change=state-change 时填：一句话说明为什么变了，随历史版本留着。' },
       name: { type: 'string', description: `简短标题（2-16 字）。${WHOLE_WRITE}` },
       type: { type: 'string', enum: typeNames, description: WHOLE_WRITE },
@@ -58,6 +59,8 @@ export function createSaveTool(deps: SaveToolDeps, options: { allowSubagent?: bo
       validTo: { type: 'string', description: `失效截止，本机时间。只有用户明确给了截止时间，或信息本身有确定的到期日（一次活动、临时方案）才填，其余不填。用户说了具体时刻写 "${VALIDITY_FORMAT}"（如「今天下午三点前」写 "2026-10-29 15:00"），没说就只写日期 "${VALIDITY_DATE_FORMAT}"，插件补上现在的时分；截止在今天的必须写时刻。必须晚于现在和 validFrom。到点后这条记忆不再带入新对话，也搜不到；已带入当前对话的，到下个会话或上下文压缩后才去掉。` },
       allowSecret: { type: 'boolean', description: '内容里有疑似密钥会被拦下；向用户确认不是密钥后，带 true 重发。明确的密钥一律不存。' },
       force: { type: 'boolean', description: '新建时内容和某条已有记忆几乎一样会被拦下；确认这是另一件事后，带 true 重发这次 create。' },
+      related: { type: 'array', items: { type: 'string' }, description: `相关记忆的 id：这条记忆和它们说的是相关的事（比如一条决定改变了某个项目的现状），以后查到其中一条能顺着找到另一条。追加在已有的后面，已有的保留；每条最多 ${LINKS_PER_KIND_MAX} 个。项目记忆能指向本项目和全局的在用记忆，全局记忆只能指向全局记忆。新建、整条 update 时可一起传；给已有记忆补挂时，action=update 只传 id、sourceMode 和 related，不用填 change，内容保持原样。` },
+      premises: { type: 'array', items: { type: 'string' }, description: `这条决定依据的记忆 id（type=decision 时用）：插件记下每条依据当时的内容，依据以后变了能看出来。追加规则、作用域和补挂方式同 related，每条最多 ${LINKS_PER_KIND_MAX} 个。` },
       confirmGlobal: { type: 'string', description: '确认改写全局记忆时用：原样填这条记忆最近一次未保存提示里给的确认码；第一次调用不填。' },
     },
     output: {

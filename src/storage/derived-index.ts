@@ -3,7 +3,7 @@ import { dirname } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { inTransaction, isSqliteBusy, isSqliteCorrupt, loadSqliteQuietly, type SqliteModule } from './root-lock.ts'
 import { describeError } from './state-files.ts'
-import type { MemoryLogger } from './table.ts'
+import { LINK_KINDS, type LinkKind, type MemoryLogger, type OutgoingLink } from './table.ts'
 
 /**
  * 派生索引库：只存能从记忆文件重新算出来的东西，丢了只多花时间。一个 SQLite 库，放在记忆根之外、每台机器一份。
@@ -17,9 +17,15 @@ import type { MemoryLogger } from './table.ts'
  * - 库的结构版本和本插件的不一样（更旧或更新）、库文件损坏：删库重建，不迁移。
  * - 库正被别的连接占着：这一次不用它，不删。node:sqlite 加载不到：什么都不记。调用方都按没有提示处理。
  * - 文件名由记忆名生成，可能带用户写进去的东西：删掉的行当场抹掉（secure_delete），不用 WAL，免得删掉的名字留在日志文件里。
+ *
+ * 第三张表是链接反向索引：每个记忆文件指出去的前提、相关、取代（含 .archive/ 里的），按层、文件名记，带记下时文件的 stat 签名。
+ * 写入时按这次动到的文件增量记，整份核对时整层重记并在 link_levels 里记下这一层核对过。两种用法：
+ *  - 完整查询拿签名和文件现在的比，对不上的以文件为准重读（见 FileTable.linksTo）。
+ *  - 按目标查只看 links_by_target，不碰文件；没在 link_levels 里的层算查不全（见 FileTable.indexedLinksTo）。
+ * 只存 id 和前提的内容摘要，不存正文。
  */
 
-const SCHEMA_VERSION = 2
+const SCHEMA_VERSION = 3
 
 /** 库忙时最多等这么久：查找记忆在锁外的读路径上也会用到这个库，不能让它卡住。 */
 const BUSY_TIMEOUT_MS = 50
@@ -42,6 +48,14 @@ export interface LevelScan extends LevelStamp {
 
 /** 一个文件的提示：文件名、文件里的 id（读不出记 null）、stat 签名（不知道记空串）。 */
 export type HintRow = readonly [name: string, id: string | null, sig: string]
+
+/** 一个记忆文件记下的链接：文件名、读它时的 stat 签名、文件里的记忆 id（读不出、不是记忆为 null）、指出去的链接。 */
+export interface LinkFileRow {
+  name: string
+  sig: string
+  sourceId: string | null
+  links: readonly OutgoingLink[]
+}
 
 /** 主题索引的一页：文件名、主题名、曾用名、列在这页的记忆 id，以及记下时这页文件的 stat 签名。 */
 export interface TopicPageRow {
@@ -70,6 +84,11 @@ export class DerivedIndex {
   private isBroken = false
   /** 读写失败提醒过了：同一个实例只提醒一次，免得每次查找都刷一行。 */
   private hasWarned = false
+  /**
+   * 这个进程里不再信「核对过」标记的层：增量记链接没记上（库忙、出错），或核对时这一层没读全。
+   * 库里的标记可能删不掉（库正忙），所以在进程里也记一份；之后这一层整份核对成功才重新算数。
+   */
+  private readonly doubtedLinkLevels = new Set<string>()
 
   constructor(opts: DerivedIndexOptions) {
     // 懒打开：构造不做 I/O
@@ -136,6 +155,7 @@ export class DerivedIndex {
     this.exec(db => inTransaction(db, () => {
       const remove = db.prepare('DELETE FROM id_hints WHERE level = ? AND name = ?')
       for (const name of names) remove.run(level, name)
+      for (const name of names) deleteLinkFile(db, level, name)
       upsertScan(db, level, UNVERIFIED_STAMP)
     }))
   }
@@ -146,6 +166,8 @@ export class DerivedIndex {
       db.prepare('DELETE FROM id_hints WHERE level = ?').run(level)
       db.prepare('DELETE FROM level_scans WHERE level = ?').run(level)
       deleteTopicPages(db, level)
+      // 链接也信不过了：这一层回到没核对过，按目标查时算查不全
+      deleteLinkLevel(db, level)
     }))
   }
 
@@ -181,6 +203,85 @@ export class DerivedIndex {
         for (const [ord, id] of p.memberIds.entries()) member.run(level, p.page, id, ord)
       }
     }))
+  }
+
+  /** 这一层记着的链接，按文件名排；每个文件里的链接按记下的先后。没记过或库不可用为空。 */
+  linkRows(level: string): LinkFileRow[] {
+    return this.exec(db => {
+      const files = db.prepare('SELECT name, sig, source FROM link_files WHERE level = ? ORDER BY name').all(level) as Array<{ name: string; sig: string; source: string | null }>
+      const links = db.prepare('SELECT name, kind, target, digest FROM links WHERE level = ? ORDER BY name, ord').all(level) as Array<{ name: string; kind: string; target: string; digest: string | null }>
+      const byName = new Map(files.map(f => [f.name, { name: f.name, sig: f.sig, sourceId: f.source, links: [] as OutgoingLink[] }]))
+      for (const l of links) {
+        // 不认识的种类（更新的版本记的）不交出去
+        if (!(LINK_KINDS as readonly string[]).includes(l.kind)) continue
+        byName.get(l.name)?.links.push({ kind: l.kind as LinkKind, targetId: l.target, ...(l.digest !== null ? { digest: l.digest } : {}) })
+      }
+      return [...byName.values()]
+    }) ?? []
+  }
+
+  /**
+   * 补记链接：去掉不在了的文件，换上（或新加）给的这些文件的行。isWholeLevel：调用方刚把这一层每个文件都按签名核对过，
+   * 补完之后库里就是整层的样子，记下这一层核对过（同整份核对）。
+   */
+  patchLinks(level: string, removed: readonly string[], rows: readonly LinkFileRow[], isWholeLevel = false): void {
+    const isDone = this.exec((db) => {
+      inTransaction(db, () => {
+        for (const name of [...removed, ...rows.map(r => r.name)]) deleteLinkFile(db, level, name)
+        insertLinkRows(db, level, rows)
+        if (isWholeLevel) db.prepare('INSERT OR REPLACE INTO link_levels(level) VALUES (?)').run(level)
+      })
+      return true
+    }) === true
+    this.noteLinkWrite(level, isDone, isWholeLevel)
+  }
+
+  /** 这一层的链接整份核对过没有；库不可用返回 undefined。 */
+  isLinkLevelReconciled(level: string): boolean | undefined {
+    const isMarked = this.exec(db => db.prepare('SELECT 1 FROM link_levels WHERE level = ?').get(level) !== undefined)
+    return isMarked === undefined ? undefined : isMarked && !this.doubtedLinkLevels.has(level)
+  }
+
+  /** 整份核对后整层重记链接：原来的行全部换成给的这些，并记下这一层核对过。 */
+  replaceLinks(level: string, rows: readonly LinkFileRow[]): void {
+    const isDone = this.exec((db) => {
+      inTransaction(db, () => {
+        deleteLinkLevel(db, level)
+        insertLinkRows(db, level, rows)
+        db.prepare('INSERT OR REPLACE INTO link_levels(level) VALUES (?)').run(level)
+      })
+      return true
+    }) === true
+    this.noteLinkWrite(level, isDone, true)
+  }
+
+  /** 这一层没读全：「核对过」标记作废（库里删掉；删不掉也在这个进程里不再信它），下次按目标查时整层按文件核对。 */
+  doubtLinkLevel(level: string): void {
+    this.doubtedLinkLevels.add(level)
+    this.exec(db => db.prepare('DELETE FROM link_levels WHERE level = ?').run(level))
+  }
+
+  /** 记链接写没写成：没写成，这一层的库已经和文件对不上，不再信它的标记；整层核对写成了，重新信。 */
+  private noteLinkWrite(level: string, isDone: boolean, isWholeLevel: boolean): void {
+    if (!isDone) this.doubtedLinkLevels.add(level)
+    else if (isWholeLevel) this.doubtedLinkLevels.delete(level)
+  }
+
+  /**
+   * 按目标查：这几层里指向 target 的链接（来源 id、种类、摘要），只走目标索引。unreconciled 是还没整份核对过的层（这几层的答案不全）。
+   * 库不可用返回 undefined。
+   */
+  linksToTarget(target: string, levels: readonly string[]): { refs: Array<{ level: string; sourceId: string; kind: LinkKind; digest?: string }>; unreconciled: string[] } | undefined {
+    return this.exec(db => {
+      const wanted = new Set(levels)
+      const rows = db.prepare('SELECT l.level AS level, l.kind AS kind, l.digest AS digest, f.source AS source FROM links l JOIN link_files f ON f.level = l.level AND f.name = l.name WHERE l.target = ?')
+        .all(target) as Array<{ level: string; kind: string; digest: string | null; source: string | null }>
+      const reconciled = new Set((db.prepare('SELECT level FROM link_levels').all() as Array<{ level: string }>).map(r => r.level))
+      const refs = rows
+        .filter(r => wanted.has(r.level) && r.source !== null && (LINK_KINDS as readonly string[]).includes(r.kind))
+        .map(r => ({ level: r.level, sourceId: r.source!, kind: r.kind as LinkKind, ...(r.digest !== null ? { digest: r.digest } : {}) }))
+      return { refs, unreconciled: levels.filter(level => !reconciled.has(level) || this.doubtedLinkLevels.has(level)) }
+    })
   }
 
   close(): void {
@@ -278,6 +379,10 @@ function openIndex(sqlite: SqliteModule, path: string): DatabaseSync {
         db.exec('CREATE TABLE IF NOT EXISTS topic_aliases(level TEXT NOT NULL, page TEXT NOT NULL, alias TEXT NOT NULL, ord INTEGER NOT NULL, PRIMARY KEY(level, page, alias))')
         db.exec('CREATE TABLE IF NOT EXISTS topic_members(level TEXT NOT NULL, page TEXT NOT NULL, id TEXT NOT NULL, ord INTEGER NOT NULL, PRIMARY KEY(level, page, id))')
         db.exec('CREATE INDEX IF NOT EXISTS topic_members_by_id ON topic_members(level, id)')
+        db.exec('CREATE TABLE IF NOT EXISTS link_files(level TEXT NOT NULL, name TEXT NOT NULL, sig TEXT NOT NULL, source TEXT, PRIMARY KEY(level, name))')
+        db.exec('CREATE TABLE IF NOT EXISTS links(level TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL, digest TEXT, ord INTEGER NOT NULL, PRIMARY KEY(level, name, kind, target))')
+        db.exec('CREATE INDEX IF NOT EXISTS links_by_target ON links(target)')
+        db.exec('CREATE TABLE IF NOT EXISTS link_levels(level TEXT PRIMARY KEY)')
         db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
       })
     }
@@ -287,6 +392,9 @@ function openIndex(sqlite: SqliteModule, path: string): DatabaseSync {
       db.prepare('SELECT level, page, title, sig FROM topic_pages LIMIT 1').get()
       db.prepare('SELECT level, page, alias, ord FROM topic_aliases LIMIT 1').get()
       db.prepare('SELECT level, page, id, ord FROM topic_members LIMIT 1').get()
+      db.prepare('SELECT level, name, sig, source FROM link_files LIMIT 1').get()
+      db.prepare('SELECT level, name, kind, target, digest, ord FROM links LIMIT 1').get()
+      db.prepare('SELECT level FROM link_levels LIMIT 1').get()
     } catch (err) {
       // 版本号对、表的样子不对（开发中的旧库）：同样换新库
       if (isSqliteBusy(err) || isSqliteCorrupt(err)) throw err
@@ -305,6 +413,27 @@ function currentRev(db: DatabaseSync, level: string): number | undefined {
 
 function deleteTopicPages(db: DatabaseSync, level: string): void {
   for (const table of ['topic_pages', 'topic_aliases', 'topic_members']) db.prepare(`DELETE FROM ${table} WHERE level = ?`).run(level)
+}
+
+function deleteLinkFile(db: DatabaseSync, level: string, name: string): void {
+  db.prepare('DELETE FROM link_files WHERE level = ? AND name = ?').run(level, name)
+  db.prepare('DELETE FROM links WHERE level = ? AND name = ?').run(level, name)
+}
+
+/** 这一层的链接全部去掉，回到没核对过。 */
+function deleteLinkLevel(db: DatabaseSync, level: string): void {
+  db.prepare('DELETE FROM link_files WHERE level = ?').run(level)
+  db.prepare('DELETE FROM links WHERE level = ?').run(level)
+  db.prepare('DELETE FROM link_levels WHERE level = ?').run(level)
+}
+
+function insertLinkRows(db: DatabaseSync, level: string, rows: readonly LinkFileRow[]): void {
+  const file = db.prepare('INSERT OR REPLACE INTO link_files(level, name, sig, source) VALUES (?, ?, ?, ?)')
+  const link = db.prepare('INSERT OR IGNORE INTO links(level, name, kind, target, digest, ord) VALUES (?, ?, ?, ?, ?, ?)')
+  for (const row of rows) {
+    file.run(level, row.name, row.sig, row.sourceId)
+    for (const [ord, l] of row.links.entries()) link.run(level, row.name, l.kind, l.targetId, l.digest ?? null, ord)
+  }
 }
 
 function insertRows(db: DatabaseSync, level: string, rows: readonly HintRow[]): void {

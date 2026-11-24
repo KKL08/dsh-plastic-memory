@@ -56,6 +56,21 @@ function actionOf(command: MemoryCommand): Summary {
   }
 }
 
+/** 换了作用域、去掉了够不着的关联和前提时那一句的写法：提升为全局、移到项目、撤销这三种会去掉。 */
+const DROPPED_KEYS = {
+  'chat.command.promote.global': 'chat.command.promote.global.droppedLinks',
+  'chat.command.move': 'chat.command.move.droppedLinks',
+  'chat.command.undo': 'chat.command.undo.droppedLinks',
+} as const satisfies Partial<Record<Summary['key'], Summary['key']>>
+
+/** 结果里带了去掉的关联和前提：那一句后面接上去掉了几个。 */
+function withDroppedLinks(action: Summary | undefined, dropped: ReadonlyArray<{ related: readonly string[]; premises: readonly string[] }> | undefined): Summary | undefined {
+  const n = (dropped ?? []).reduce((sum, d) => sum + d.related.length + d.premises.length, 0)
+  const key = action === undefined ? undefined : (DROPPED_KEYS as Partial<Record<Summary['key'], Summary['key']>>)[action.key]
+  if (n === 0 || action === undefined || key === undefined) return action
+  return { key, params: { ...action.params, n } }
+}
+
 const firstLine = (text: string) => text.split('\n', 1)[0]!
 
 /** 页面自己发、不是用户动作的命令：查记忆根、刷新视图、查模型、列能选的模型。请求被中断时服务端照常做完，下次打开会再发。 */
@@ -87,7 +102,7 @@ export function commandLine(args: string | null, outcome: CommandOutcome): Comma
     if (outcome.kind === 'error' && command !== undefined && MAINTENANCE.has(command.cmd) && isAbortedText(outcome.text)) return { state: 'ok', action }
     return outcome.kind === 'success' ? { state: 'ok', action } : { state: 'error', action, reason: firstLine(outcome.text ?? '') }
   }
-  if (result.ok) return { state: 'ok', action }
+  if (result.ok) return { state: 'ok', action: withDroppedLinks(action, result.droppedLinks) }
   // 和体检面板一致：已有体检在跑不算失败；体检关闭、体检拿不到模型用面板的文案
   if (result.code === 'busy') return { state: 'ok', action, note: 'busy' }
   if (result.code === 'governance-disabled') return { state: 'error', action, reason: { key: 'settings.governanceOff' } }

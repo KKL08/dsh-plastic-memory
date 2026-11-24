@@ -76,6 +76,52 @@ export function byPosition(found: LocatedFile): MemoryRecord {
   return found.record.status === 'active' && dirname(found.filePath) !== found.dir ? { ...found.record, status: 'deleted' } : found.record
 }
 
+/** 记忆之间的三种显式链接：决定依据的前提（premises）、相关（related）、取代（supersedes）。派生库和反向查询共用这一份取值。 */
+export const LINK_KINDS = ['premise', 'related', 'supersedes'] as const
+export type LinkKind = (typeof LINK_KINDS)[number]
+
+/** 一条记忆指出去的一条链接；前提带当时的内容摘要。 */
+export interface OutgoingLink { kind: LinkKind; targetId: string; digest?: string }
+
+/** 指向某条记忆的一条链接：谁指过来、哪一种；前提带当时的内容摘要。 */
+export interface LinkRef { sourceId: string; kind: LinkKind; digest?: string }
+
+/** 一条记忆指出去的全部链接，按前提、相关、取代的顺序，各自保持文件里的先后、去重。 */
+export function outgoingLinks(record: Pick<MemoryRecord, 'premises' | 'related' | 'supersedes'>): OutgoingLink[] {
+  const out: OutgoingLink[] = []
+  const seen = new Set<string>()
+  const add = (link: OutgoingLink) => {
+    const key = `${link.kind}\u0000${link.targetId}`
+    if (seen.has(key)) return
+    seen.add(key)
+    out.push(link)
+  }
+  for (const p of record.premises ?? []) add({ kind: 'premise', targetId: p.id, digest: p.digest })
+  for (const id of record.related ?? []) add({ kind: 'related', targetId: id })
+  for (const id of record.supersedes ?? []) add({ kind: 'supersedes', targetId: id })
+  return out
+}
+
+/**
+ * 反向查询的结果：查到的链接，以及查得全不全。目录读不了、文件读不出、派生库没核对过某一层时 isComplete 为假，
+ * refs 只是读到的那部分：据此做「没被引用」这类判断的调用方要按被引用处理。
+ */
+export interface LinkQuery { refs: LinkRef[]; isComplete: boolean }
+
+/**
+ * 反向查询的结果排好序、同一来源同一种同一摘要只留一条（同 id 的几份副本都指过来、记的又是同一版时）。
+ * 摘要不同的都留着：同 id 的两份决定各引了这条记忆的不同版本，两版都算被引用。
+ */
+export function sortLinkRefs(refs: readonly LinkRef[]): LinkRef[] {
+  const byKey = new Map<string, LinkRef>()
+  for (const ref of refs) {
+    const key = `${ref.sourceId}\u0000${ref.kind}\u0000${ref.digest ?? ''}`
+    if (!byKey.has(key)) byKey.set(key, ref)
+  }
+  const byText = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
+  return [...byKey.values()].sort((a, b) => byText(a.sourceId, b.sourceId) || LINK_KINDS.indexOf(a.kind) - LINK_KINDS.indexOf(b.kind) || byText(a.digest ?? '', b.digest ?? ''))
+}
+
 /** 多词关键词的匹配模式：all = 全部词项命中，any = 任一词项命中。 */
 export type KeywordMatch = 'all' | 'any'
 
@@ -206,6 +252,16 @@ export interface MemoryTable {
   undoIndexPlan?(dir: string, plan: IndexPlan, opts?: { steps?: (op: string) => readonly OpStep[] }): Promise<IndexUndoOutcome>
   /** 这个操作是不是提交了、还有步骤等着补做。 */
   isOpPending?(op: string): boolean
+  /**
+   * 这几个记忆目录（各含 .archive/）里指向 id 的链接，按 sortLinkRefs 排好。有派生库的实现先按文件签名核对、以文件为准，
+   * 手改了还没整份核对的也查得到；代价是逐层列目录、逐个文件取签名。不提供时由调用方逐个读目录算（结果相同）。
+   */
+  linksTo?(id: string, dirs: readonly string[]): Promise<LinkQuery>
+  /**
+   * 只按派生库的目标索引查：不列目录、不取文件签名，写锁内要快的判断用它。库里有的是插件自己写入时记下的和上次整份核对读到的，
+   * 之后手改文件加的要到下次整份核对才算进来。哪一层没核对过、库这一次用不了时，退回 linksTo 或报不完整。不提供时调用方用 linksTo。
+   */
+  indexedLinksTo?(id: string, dirs: readonly string[]): Promise<LinkQuery>
 }
 
 export type IndexOpOutcome =
