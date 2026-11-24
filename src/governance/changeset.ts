@@ -145,12 +145,6 @@ export function advance(progress: BatchProgress, op: ChangeOp, written: MemoryRe
   progress.fingerprints.set(op.memoryId, scanFingerprint(written))
 }
 
-/** 一个操作撤掉之后退回进度：这条记忆在这一批里不再有写过的记录（整批退时逆序全撤，不会只退一半）。 */
-export function retreat(progress: BatchProgress, memoryId: string): void {
-  progress.written.delete(memoryId)
-  progress.fingerprints.delete(memoryId)
-}
-
 export function patchedFields(op: ChangeOp): PatchField[] {
   return PATCH_FIELDS.filter(field => op.patch !== undefined && field in op.patch)
 }
@@ -318,12 +312,12 @@ const without = (ids: readonly string[] | undefined, drop: readonly string[]) =>
 /**
  * 撤销还原成什么：刚读到的那一版，只把这次改的字段改回改前的值。改了内容的把最近一次内容改动、修改时间、状态起点、出处清单
  * 一起还原成快照里那份；确认时间还是这次写下的值才改回。关联和前提按增量：它加的还在就去掉，它去掉的还没回来就加回。
- * 期间别处改的注入档位、锁、关联原样留着。删除的撤销只把状态放回在用。
+ * 期间别处改的注入档位、锁、关联原样留着。删除的撤销把状态放回在用、修改时间改回删之前的。
  */
 export function reverted(receipt: ChangeReceipt, current: MemoryRecord, before: MemoryRecord | undefined): MemoryRecord {
   if (receipt.kind === 'forget') {
     const { deletedAt: _deletedAt, ...rest } = current
-    return { ...rest, status: 'active' }
+    return { ...rest, status: 'active', updatedAt: before?.updatedAt ?? current.updatedAt }
   }
   const next: Record<string, unknown> = { ...current }
   const restore = (key: keyof MemoryRecord) => {

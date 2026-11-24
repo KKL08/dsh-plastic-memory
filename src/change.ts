@@ -18,7 +18,7 @@ export interface ChangeAnchor {
 
 /** 一次内容改动可以带的字段。补证时都不生效。 */
 export type ChangeFields = Partial<Pick<MemoryRecord,
-  'name' | 'type' | 'tags' | 'content' | 'summary' | 'confidence' | 'validFrom' | 'validTo' | 'supersedes' | 'globalCandidate' | 'delegation' | 'related' | 'premises'>>
+  'name' | 'type' | 'tags' | 'content' | 'summary' | 'confidence' | 'validFrom' | 'validTo' | 'supersedes' | 'globalCandidate' | 'delegation' | 'related' | 'premises' | 'factTime' | 'recall'>>
 
 export interface Change {
   kind: ChangeKind
@@ -98,6 +98,14 @@ export function applyChange(current: MemoryRecord, change: Change): MemoryRecord
     lastChange: { kind, at, op: change.op, by: change.by, ...(change.reason !== undefined ? { reason: change.reason } : {}) },
     ...(kind === 'state-change' ? { stateSince: at } : {}),
   }
+}
+
+/**
+ * 只改元数据的落盘（注入档位、关联和前提）：按 fields 改，别的都不动。修改时间、确认时间、出处清单、最近一次内容改动原样；
+ * 提交标记照常由写入补上。
+ */
+export function applyMeta(current: MemoryRecord, fields: ChangeFields): MemoryRecord {
+  return { ...current, ...fields }
 }
 
 /** 新建时的出处：一个锚，状态起点等于创建时刻。新建不算内容改动，不写最近一次内容改动。 */

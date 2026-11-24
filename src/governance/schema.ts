@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { linkIdsSchema, memoryRecordSchema } from '../record-schema.ts'
 import type { IndexPlan } from '../topic-ops.ts'
 import { MODEL_CHANGE_KINDS, PROPOSAL_ACTIONS, PROPOSAL_SOURCES, SUGGESTION_FAILURE_KINDS, SUGGESTION_PARSE_STAGES } from '../contract-codes.ts'
+import { changeReceiptSchema } from './changeset.ts'
 
 /** 与 mem_ id 同模式（pipeline.ts），不引入 nanoid。 */
 export function genId(prefix: string): string {
@@ -179,6 +180,8 @@ export const pendingDecisionSchema = z.object({
   receipts: z.array(batchReceiptSchema).optional(),
   /** 整理索引（index-organize）：这一次做过的索引操作。其余条目没有此字段。 */
   indexRun: indexRunSchema.optional(),
+  /** 按变更集应用的条目：逐个操作的回执，按做的先后，一个操作提交后记一条、撤掉后拿掉（见 changeset.ts）。有它的条目撤销按它逐个还原字段。 */
+  changes: z.array(changeReceiptSchema).optional(),
   /** 只挂关联、前提的保存（link）：这一次新加的 id（已有的不算）。撤销只去掉这些。其余条目没有此字段。 */
   links: linkIdsSchema.optional(),
   /** 模型改写、替代：哪个会话里哪次 memory_save 调用改的（对话卡按 callId、右侧栏按 sessionId 认领）；替代时 by 是替代它的那条。 */

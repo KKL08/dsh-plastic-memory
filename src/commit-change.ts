@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'node:util'
-import { applyChange, stateStartOf, type Change, type ChangeAnchor, type ChangeFields } from './change.ts'
+import { applyChange, applyMeta, stateStartOf, type Change, type ChangeAnchor, type ChangeFields } from './change.ts'
 import { memoryRecordSchema, type ChangeKind, type MemoryRecord } from './record-schema.ts'
 import type { MemoryLogger, MemoryStore } from './store.ts'
 import type { SnapshotStore } from './governance/snapshots.ts'
@@ -87,14 +87,15 @@ export interface CommitChangeDeps {
 export interface CommitChangeInput<Stop = never> {
   /** 调用方读到的那一版，用来找到要改的那一份：锁内看到它不在了、状态变了或换了作用域就不写。别的字段不比，按锁内读到的最新版拼。 */
   target: MemoryRecord
-  kind: ChangeKind
+  /** meta：只改元数据（注入档位、关联和前提），不动修改时间、出处清单和最近一次内容改动，照常拍改前快照。 */
+  kind: ChangeKind | 'meta'
   /** 要改的字段（见 Change.fields）；补证时不生效。只放这次要改的：没列的字段保留锁内读到的值。 */
   fields?: ChangeFields
   /**
    * 要改的字段得看最新内容才定得下来时用它（和 fields 二选一，都给时用它）：锁内拿刚读到的那一版算，在拍快照之前。
-   * 返回 stop 即不写，原样交回调用方。
+   * 返回 stop 即不写，原样交回调用方。可以是异步的（要在写入段里再读别的记忆时）。
    */
-  prepare?: (current: MemoryRecord) => { fields: ChangeFields } | { stop: Stop }
+  prepare?: (current: MemoryRecord) => Prepared<Stop> | Promise<Prepared<Stop>>
   /** 这次写入的出处；没有会话可指的后台写入不给。 */
   anchor?: ChangeAnchor
   /** 谁写的：记进锚、最近一次内容改动和操作日志。 */
@@ -108,13 +109,17 @@ export interface CommitChangeInput<Stop = never> {
   alsoSnapshot?: readonly MemoryRecord[]
   /** 调用方在这次写入提交之后要补的账，拿到改前快照的 id 再定；处理器由调用方登记。 */
   steps?: (snapshotId: string) => OpStep[]
+  /** 补证平时不拍改前快照（没有可撤的）；要给它留撤销入口时设为 true，照样拍。 */
+  isSnapshotForced?: boolean
   /** 调用方另外的不写条件：对锁内看到的当前内容求值。 */
   isBlocked?: (current: MemoryRecord) => boolean
 }
 
+type Prepared<Stop> = { fields: ChangeFields } | { stop: Stop }
+
 export type CommitChangeResult<Stop = never> =
   /** snapshotId：改前快照，补证不拍。version：这次状态变化留下或并进去的历史版本。 */
-  | { kind: 'written'; record: MemoryRecord; /** 写入段里读到、这次改动拼在它上面的那一版；整条替换时被盖掉的内容以它为准。 */ before: MemoryRecord; snapshotId?: string; version?: { id: string; isMerged: boolean } }
+  | { kind: 'written'; /** 这次写入的操作 id。 */ op: string; record: MemoryRecord; /** 写入段里读到、这次改动拼在它上面的那一版；整条替换时被盖掉的内容以它为准。 */ before: MemoryRecord; snapshotId?: string; version?: { id: string; isMerged: boolean } }
   /** 调用方读到之后目标不在了、状态变了、换了作用域，或过不了调用方另给的条件，没写。 */
   | { kind: 'changed'; current: MemoryRecord | undefined }
   /** prepare 看了最新内容之后叫停，没写。 */
@@ -149,12 +154,12 @@ export async function commitChange<Stop = never>(input: CommitChangeInput<Stop>,
     const target = current
     // 调用方的时刻是它开始时取的：别处在那之后写过这条，这次落盘排在它后面，时间不往回写
     const at = Math.max(input.at, current.updatedAt, current.lastConfirmedAt)
-    const prepared = input.prepare?.(current) ?? { fields: input.fields ?? {} }
+    const prepared = (await input.prepare?.(current)) ?? { fields: input.fields ?? {} }
     if ('stop' in prepared) return { kind: 'stopped', stop: prepared.stop }
 
     const isContentChange = kind !== 'corroborate'
     const alsoSnapshot = input.alsoSnapshot ?? []
-    const snapshot = isContentChange || alsoSnapshot.length > 0
+    const snapshot = isContentChange || alsoSnapshot.length > 0 || input.isSnapshotForced === true
       ? await deps.snapshots.capture({ operation: 'pre-update', description: `更新记忆 ${target.id} 前`, records: [target, ...alsoSnapshot] }, at)
       : undefined
 
@@ -193,11 +198,11 @@ export async function commitChange<Stop = never>(input: CommitChangeInput<Stop>,
     const op = newWriteOp({ initiator: input.by, steps })
     const reason = kind === 'state-change' ? input.reason?.trim().slice(0, CHANGE_REASON_LIMIT) : undefined
     const change: Change = {
-      kind, fields: prepared.fields, anchor: input.anchor, by: input.by, op: op.id, at,
+      kind: kind === 'meta' ? 'refine' : kind, fields: prepared.fields, anchor: input.anchor, by: input.by, op: op.id, at,
       ...(reason !== undefined && reason !== '' ? { reason } : {}),
       isMergedIntoLastVersion: history?.mode === 'append',
     }
-    const parsed = memoryRecordSchema.safeParse(applyChange(target, change))
+    const parsed = memoryRecordSchema.safeParse(kind === 'meta' ? applyMeta(target, prepared.fields) : applyChange(target, change))
     if (!parsed.success) return { kind: 'invalid', reason: parsed.error.issues.map(i => i.message).join('；') }
     // 值是 undefined 的键去掉：记录要能无损序列化
     const next = toToolOutput(parsed.data) as unknown as MemoryRecord
@@ -215,6 +220,7 @@ export async function commitChange<Stop = never>(input: CommitChangeInput<Stop>,
       await store.finishOp(op, written)
       return {
         kind: 'written',
+        op: op.id,
         record: next,
         before: target,
         ...(snapshot !== undefined ? { snapshotId: snapshot.id } : {}),

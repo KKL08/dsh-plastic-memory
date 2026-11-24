@@ -3,6 +3,7 @@ import type { OpStep, OpStepHandler } from '../storage/table.ts'
 import { ledgerLabel, scopeOfMemory } from '../scope.ts'
 import { genId, type LinkIds, type PendingDecision } from './schema.ts'
 import type { PendingDecisionsStore } from './decisions.ts'
+import { receiptOf, type ChangeOpKind, type PatchField } from './changeset.ts'
 
 /**
  * 记忆文件写成之后要补的账：正常写完和中断后补做走同一个处理器（见 MemoryTable.registerStep）。
@@ -57,6 +58,33 @@ export function linkUndoneStep(entryId: string): LinkUndoneStep {
   return { kind: LINK_UNDONE_STEP, entryId }
 }
 
+/**
+ * 变更集的一个操作提交之后记回执。步骤里只有 id、字段名和关联 id，写下的值的摘要到做的时候按写下的那条算。
+ * 文件已不是这次写下的原样（提交之后、补做之前又被改过）就不记：按它算摘要会让撤销把别人的改动当成自己的。
+ */
+export const CHANGE_RECEIPT_STEP = 'ledger-change-receipt'
+/** 变更集一个操作的撤销：还原写成之后，把它的回执从条目里拿掉。 */
+export const CHANGE_UNDONE_STEP = 'ledger-change-undone'
+
+interface ChangeReceiptStep extends OpStep {
+  kind: typeof CHANGE_RECEIPT_STEP
+  entryId: string
+  opId: string
+  opKind: ChangeOpKind
+  fields: PatchField[]
+  snapshotId?: string
+  links?: { added: LinkIds; removed: LinkIds }
+}
+interface ChangeUndoneStep extends OpStep { kind: typeof CHANGE_UNDONE_STEP; entryId: string; receiptOp: string }
+
+export function changeReceiptStep(input: { entryId: string; opId: string; opKind: ChangeOpKind; fields: PatchField[]; snapshotId?: string; links?: { added: LinkIds; removed: LinkIds } }): ChangeReceiptStep {
+  return { kind: CHANGE_RECEIPT_STEP, ...input }
+}
+
+export function changeUndoneStep(entryId: string, receiptOp: string): ChangeUndoneStep {
+  return { kind: CHANGE_UNDONE_STEP, entryId, receiptOp }
+}
+
 interface ModelChangeStep extends OpStep {
   kind: typeof MODEL_CHANGE_STEP
   change: 'rewrite' | 'supersede'
@@ -94,6 +122,25 @@ export function ledgerSteps(decisions: PendingDecisionsStore, log: MemoryLogger 
     },
     [LINK_UNDONE_STEP]: async (raw) => {
       await decisions.markUndone((raw as LinkUndoneStep).entryId)
+    },
+    [CHANGE_RECEIPT_STEP]: async (raw, { op, record, isIntact }) => {
+      const step = raw as ChangeReceiptStep
+      if (record === undefined) return
+      if (!isIntact) {
+        log.warn(`[plastic-memory] 操作 ${op} 写成之后记忆 ${record.id} 又被改过，没有补记撤销入口${step.snapshotId === undefined ? '' : `；改前的内容还在撤销快照 ${step.snapshotId} 里`}`)
+        return
+      }
+      const receipt = receiptOf({
+        id: step.opId, op, kind: step.opKind, fields: step.fields,
+        ...(step.snapshotId !== undefined ? { snapshotId: step.snapshotId } : {}), ...(step.links !== undefined ? { links: step.links } : {}),
+      }, record)
+      if (!(await decisions.appendChange(step.entryId, receipt))) {
+        log.warn(`[plastic-memory] 操作 ${op} 做成了，但它那次处理的记录已经不在，没有撤销入口`)
+      }
+    },
+    [CHANGE_UNDONE_STEP]: async (raw) => {
+      const step = raw as ChangeUndoneStep
+      await decisions.dropChange(step.entryId, step.receiptOp)
     },
     [INDEX_RECEIPT_STEP]: async (raw, { op }) => {
       const step = raw as IndexReceiptStep

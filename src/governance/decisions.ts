@@ -8,6 +8,7 @@ import {
   type SuggestionBasis, type SuggestionFailure,
 } from './schema.ts'
 import { isUndoExpired } from './undo-rules.ts'
+import type { ChangeReceipt } from './changeset.ts'
 import { editFingerprint } from './snapshots.ts'
 import { scopeAt, scopeKey } from '../scope.ts'
 
@@ -545,7 +546,7 @@ export class PendingDecisionsStore {
    * 撤销记录走下面按种类的方法；就地处理时才记的提升、留下也直接用它（isBornSettled 见 schema）。超出保留窗口由 sweep 清掉。
    */
   async addSettled(
-    input: { kind: PendingKind; memoryIds: string[]; summary: string; workspaces: string[]; fingerprint?: string; receipts?: BatchReceipt[]; origin?: PendingDecision['origin']; indexRun?: IndexRun; links?: LinkIds },
+    input: { kind: PendingKind; memoryIds: string[]; summary: string; workspaces: string[]; fingerprint?: string; receipts?: BatchReceipt[]; origin?: PendingDecision['origin']; indexRun?: IndexRun; links?: LinkIds; changes?: ChangeReceipt[] },
     verdict: SettledVerdict, now: number,
     opts: { snapshotId?: string; isBornSettled?: true; misplacedIgnore?: MisplacedIgnore; id?: string; droppedLinks?: LinkIds } = {},
   ): Promise<PendingDecision> {
@@ -648,6 +649,51 @@ export class PendingDecisionsStore {
       return undefined
     }
     const done = { ...entry, indexRun: { receipts } }
+    await this.table.put(id, done)
+    return done
+  }
+
+  /**
+   * 一次变更集开始应用之前记一条已结清的条目（id 由调用方定好，重复调用不多记）：每个操作提交后记回执（appendChange），
+   * 做完调 finishChangeRun。给已有的未决条目（冲突按方案处理）记回执不用它，直接 appendChange。
+   */
+  addChangeRun(id: string, input: { kind: PendingKind; summary: string; workspaces: string[]; memoryIds: string[] }, verdict: SettledVerdict, now: number) {
+    return this.addSettled({ ...input, changes: [] }, verdict, now, { id })
+  }
+
+  /** 一个操作提交了：把它的回执记到条目上（同一次写入只记一次）。条目已不在返回 false。在写入段里调用。 */
+  async appendChange(id: string, receipt: ChangeReceipt): Promise<boolean> {
+    const entry = await this.table.get(id)
+    if (entry === undefined) return false
+    const changes = entry.changes ?? []
+    if (changes.some(r => r.op === receipt.op)) return true
+    await this.table.put(id, { ...entry, changes: [...changes, receipt] })
+    return true
+  }
+
+  /** 一条回执对应的操作撤掉了：拿掉这条回执。在写入段里调用。 */
+  async dropChange(id: string, op: string): Promise<void> {
+    const entry = await this.table.get(id)
+    if (entry?.changes === undefined || !entry.changes.some(r => r.op === op)) return
+    await this.table.put(id, { ...entry, changes: entry.changes.filter(r => r.op !== op) })
+  }
+
+  /**
+   * 一次变更集收尾：一个操作都没做成（或都撤掉了）的整条移出账本；做成了的补上给视图和旧版本读的整条指纹回执（receipts）、
+   * 涉及的记忆和改前快照（取第一条回执的）。返回留下的条目。只用在 addChangeRun 记的条目上。
+   */
+  async finishChangeRun(id: string, input: { receipts: BatchReceipt[] }): Promise<PendingDecision | undefined> {
+    const entry = await this.table.get(id)
+    if (entry?.changes === undefined || entry.settled === undefined) return undefined
+    if (entry.changes.length === 0) {
+      await this.table.delete(id)
+      return undefined
+    }
+    const snapshotId = entry.changes.find(r => r.snapshotId !== undefined)?.snapshotId
+    const done: PendingDecision = {
+      ...entry, memoryIds: [...new Set(entry.changes.map(r => r.memoryId))], receipts: input.receipts,
+      settled: { ...entry.settled, ...(snapshotId !== undefined ? { snapshotId } : {}) },
+    }
     await this.table.put(id, done)
     return done
   }

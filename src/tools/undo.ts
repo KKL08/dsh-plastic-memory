@@ -9,8 +9,8 @@ import { RecordNotFoundError } from '../errors.ts'
 import { scopeAt, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
 import { LINK_UNDONE_STEP, indexReceiptUndoneStep, ledgerSteps, linkUndoneStep } from '../governance/op-steps.ts'
 import { newWriteOp } from '../storage/table.ts'
-import { layerOf } from '../storage/history.ts'
 import { hasDropped, linksOutside, restoreLinks, withoutLinks, type DroppedLinks } from '../links.ts'
+import { withdrawVersion } from './changeset.ts'
 import { crossWorkspaceNote, gateRecords, isCopyOf, isVisible, locateCopy, type CrossWorkspaceRejection, type GovernanceContext } from './workspace-gate.ts'
 
 export interface UndoDeps {
@@ -146,25 +146,6 @@ async function gateRestore(records: readonly SnapshotRecord[], target: 'exact' |
     return current !== undefined && !isVisible(current, context) ? current : r
   }))
   return gateRecords(seen, context, allow).rejected
-}
-
-/**
- * 撤销一次状态变化前，先把它在历史版本里留下的撤掉：这一版是它留的档就删掉，是并进别人留的那版就拿掉它那一笔（连同它给的原因）。
- * 按改前快照的 id 认是哪一次写入。先撤版本、再恢复记忆：中途断掉只是少一个历史版本，不会留下和当前页内容相同的版本。
- * 返回放回去的函数：恢复没成时照原样放回。
- */
-export async function withdrawVersion(store: MemoryStore, before: SnapshotRecord, snapshotId: string): Promise<() => Promise<void>> {
-  const found = await store.locate(before.id, scopeAt(before.workspacePath))
-  if (found === undefined) return async () => {}
-  const layer = layerOf(found)
-  for (const version of await store.history.list(layer, before.id)) {
-    const index = version.writes.findIndex(w => w.snapshot === snapshotId)
-    if (index < 0) continue
-    if (index === 0) await store.history.remove(layer, before.id, version.versionId)
-    else await store.history.write(layer, { ...version, writes: version.writes.filter((_, i) => i !== index) })
-    return () => store.history.write(layer, version)
-  }
-  return async () => {}
 }
 
 /**
@@ -503,3 +484,5 @@ export async function restoreDeleted(
   }
   return { kind: 'restored', restored: r.restored, snapshotId: snapshot.id }
 }
+
+export { withdrawVersion }
