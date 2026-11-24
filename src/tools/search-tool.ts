@@ -3,6 +3,7 @@ import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { executeSearch, renderSearchResult, type SearchHit, type SearchToolDeps } from './search.ts'
 import { toToolOutput } from './output.ts'
 import type { TypeRegistry } from '../type-registry.ts'
+import { SEARCH_SOURCES } from '../contract-codes.ts'
 
 /**
  * types 的参数说明：固定用法 + 当前场景的类型列表。类型可配置，名字全从类型表读；
@@ -17,6 +18,16 @@ function describeTypes(registry: TypeRegistry): string {
     `当前场景的类型：${list.join('；')}`,
   ].join('')
 }
+
+/**
+ * memory_search 的 source 参数：这次查哪里，缺省跟随设置。工具形状不随设置变：设置是只查记忆时参数仍在，
+ * 传了 dialogue 或 both 就照常查记忆并附一句说明。原话检索接上之前先不注册。
+ */
+export const SEARCH_SOURCE_PARAMETER = {
+  type: 'string',
+  enum: [...SEARCH_SOURCES],
+  description: '查哪里，缺省跟随用户的设置。memory：只查长期记忆；dialogue：只查本项目过往对话的原话，能找到没记成记忆的内容；both：两者都查。用户设置成只查记忆时，这里填 dialogue 或 both 仍只查记忆，结果开头会说明',
+} as const
 
 /**
  * 把 memory_search 工具接到 dsh 框架上。纯逻辑在 search.ts，不依赖框架包，测试直接测它；
