@@ -893,7 +893,7 @@ describe('draft-proposal 与按要求应用（补充要求）', () => {
       expect(await e.snapshots.list()).toEqual([])
     })
 
-    it('融合稿含高危密钥：secret-critical；含疑似密钥：secret-suspected，带 force 后照常写入', async () => {
+    it('融合稿含高危密钥：secret-critical；含疑似密钥：secret-suspected，带 allowSecret 后照常写入', async () => {
       const { e, entry, proposal } = await drafted(MERGED)
       const withContent = (content: string) => ({ ...proposal, ops: proposal.ops.map(op => (op.kind === 'edit' ? { ...op, content } : op)) })
       expect(err(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, proposal: withContent(`用 pnpm，token ${FAKE_SECRET.github}`) })).code).toBe('secret-critical')
@@ -901,7 +901,7 @@ describe('draft-proposal 与按要求应用（补充要求）', () => {
       expect(err(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, proposal: suspected })).code).toBe('secret-suspected')
       expect(await statuses(e)).toEqual(['active', 'active'])
       expect(await e.snapshots.list()).toEqual([])
-      ok(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, proposal: suspected, force: true }))
+      ok(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, proposal: suspected, allowSecret: true }))
       expect((await e.store.get('mem_a'))!.content).toBe('用 pnpm，password: abc12345x')
     })
 

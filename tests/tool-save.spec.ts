@@ -56,12 +56,12 @@ describe('executeSave', () => {
     expect(result.record.tags).toEqual([])
   })
 
-  it('同实体的同类记忆触发 duplicate-suspected', async () => {
+  it('同实体但不同说法的记忆照常保存', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const deps = makeDeps(store)
     await executeSave({ ...base, name: '认证位置', content: '认证逻辑在 `src/auth.ts`', summary: 'auth 位置' }, fakeExec(), deps)
     const dup = await executeSave({ ...base, name: '认证位置改', content: '`src/auth.ts` 负责认证', summary: 'auth 位置改' }, fakeExec(), deps)
-    expect(dup.kind).toBe('duplicate-suspected')
+    expect(dup.kind).toBe('saved')
   })
 
   it('保存上下文无 workspacePath（无 cwd 会话）时 create 拒存', async () => {
@@ -327,7 +327,7 @@ describe('renderSaveResult', () => {
   })
 
   it('duplicate-suspected 提示改用 update 且含命中 id', () => {
-    const text = renderSaveResult({ kind: 'duplicate-suspected', existing: [{ id: 'mem_1', summary: '已有' }] })
+    const text = renderSaveResult({ kind: 'duplicate-suspected', existing: { id: 'mem_1', name: '已有', summary: '已有', scope: 'workspace' } })
     expect(text).toContain('mem_1')
     expect(text).toContain('update')
   })
@@ -341,7 +341,7 @@ describe('renderSaveResult', () => {
   it('saved 含 warnings 时渲染显示警告行', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const result = await executeSave(
-      { ...base, name: '密钥记录', content: '内部约定 api_key: 1234567890abcdefghij', summary: 'key', force: true },
+      { ...base, name: '密钥记录', content: '内部约定 api_key: 1234567890abcdefghij', summary: 'key', allowSecret: true },
       fakeExec(),
       makeDeps(store),
     )
@@ -362,7 +362,7 @@ describe('renderSaveResult', () => {
     )
     if (created.kind !== 'saved') throw new Error(created.kind)
     const updated = await executeSave(
-      { ...base, action: 'update', change: 'correct', id: created.record.id, name: 'title', content: '密码:TESTONLYpassw0rd', summary: 'summary', force: true },
+      { ...base, action: 'update', change: 'correct', id: created.record.id, name: 'title', content: '密码:TESTONLYpassw0rd', summary: 'summary', allowSecret: true },
       fakeExec(),
       deps,
     )
@@ -379,7 +379,7 @@ describe('renderSaveResult', () => {
     expect(renderSaveResult({ kind: 'saved', record: saved })).toContain(quiet)
     expect(renderSaveResult({ kind: 'updated', record: saved })).toContain(quiet)
     expect(renderSaveResult({ kind: 'rejected', code: 'unknown-type', reason: '未知类型' })).not.toContain(quiet)
-    expect(renderSaveResult({ kind: 'duplicate-suspected', existing: [{ id: 'mem_1', summary: '已有' }] })).not.toContain(quiet)
+    expect(renderSaveResult({ kind: 'duplicate-suspected', existing: { id: 'mem_1', name: '已有', summary: '已有', scope: 'workspace' } })).not.toContain(quiet)
   })
 
   it('saved/updated 无 warnings 时渲染文案不改变', async () => {

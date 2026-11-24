@@ -3,7 +3,7 @@
  * 通用工具行（ui-tool `GenericToolCard` → `ToolRow` → ui-primitives `DisclosureRow`，0.2.1-rc.2），图标、标题、
  * 输入 / 输出与运行状态的文案也用宿主的（`conversation` 命名空间），只把摘要换成一句话。
  * 不对齐的部分：运行中的 TextShimmer 扫光动画（只保留读屏用的状态文字）。
- * 摘要、输入、输出都先遮掉密钥片段再显示：参数是 agent 发的原文，没经过视图的遮盖。疑似密钥也遮（带 force 存下的
+ * 摘要、输入、输出都先遮掉密钥片段再显示：参数是 agent 发的原文，没经过视图的遮盖。疑似密钥也遮（带 allowSecret 存下的
  * password= / api_key= 赋值），密钥一律不出现在对话卡里。
  */
 import { useMemo, type KeyboardEvent } from 'react'

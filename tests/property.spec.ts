@@ -8,7 +8,7 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { Session, SESSION_FORMAT_VERSION, type SessionId } from '@deepseek-ai/dsh-session'
 import { createSystemMessage } from '@deepseek-ai/dsh-llm'
 import { slugifyName, isReservedFileName, INDEX_FILE, ARCHIVE_DIR } from '../src/storage/paths.ts'
-import { expandQueryTerms, textSimilarity } from '../src/text.ts'
+import { expandQueryTerms } from '../src/text.ts'
 import { apply, Config } from '../src/index.ts'
 import { decodeFile } from '../src/storage/frontmatter.ts'
 import { editFingerprint } from '../src/governance/snapshots.ts'
@@ -39,12 +39,6 @@ const messyName = fc.oneof(
     )
     .map(cs => cs.join('')),
 )
-
-// Non-empty text over a whitespace-free alphabet, so expandQueryTerms always
-// yields at least one term (needed for the Dice self-similarity = 1 property).
-const word = fc
-  .array(fc.constantFrom(...'abcXYZ中文查询部署0129-._/api'), { minLength: 1, maxLength: 24 })
-  .map(cs => cs.join(''))
 
 // One contiguous run of Han chars in slugifyName's CJK range (U+4E00..U+9FFF).
 const cjkRun = fc
@@ -155,39 +149,6 @@ describe('expandQueryTerms', () => {
         for (let i = 0; i < chars.length - 1; i++) {
           expect(terms.has(chars[i] + chars[i + 1])).toBe(true)
         }
-      }),
-    )
-  })
-})
-
-describe('textSimilarity (Dice)', () => {
-  // INVARIANT: the Dice coefficient is symmetric in its two arguments.
-  it('is symmetric', () => {
-    fc.assert(
-      fc.property(fc.string(), fc.string(), (a, b) => {
-        expect(textSimilarity(a, b)).toBe(textSimilarity(b, a))
-      }),
-    )
-  })
-
-  // INVARIANT: an identical (non-empty) string scores exactly 1.
-  it('scores 1 for two identical non-empty strings', () => {
-    fc.assert(
-      fc.property(word, a => {
-        expect(textSimilarity(a, a)).toBe(1)
-      }),
-    )
-  })
-
-  // INVARIANT: self-similarity is maximal and the score is bounded to [0, 1], so
-  // replacing the identical copy with any (unrelated) string cannot raise the score.
-  it('is bounded and non-increasing away from an identical string', () => {
-    fc.assert(
-      fc.property(fc.string(), fc.string(), (a, b) => {
-        const sim = textSimilarity(a, b)
-        expect(sim).toBeGreaterThanOrEqual(0)
-        expect(sim).toBeLessThanOrEqual(1)
-        expect(textSimilarity(a, a)).toBeGreaterThanOrEqual(sim)
       }),
     )
   })

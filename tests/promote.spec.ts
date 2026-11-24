@@ -101,7 +101,7 @@ describe('executePromote', () => {
     expect(await snapshots.list()).toHaveLength(0) // 没有实际提升目标，不拍快照
   })
 
-  it('target=agents-md：只含 suspected 密钥（用户 force 放行保存）的记录同样拒绝', async () => {
+  it('target=agents-md：只含 suspected 密钥（用户放行保存）的记录同样拒绝', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_sus', name: '测试库', content: '数据库密码: hunter2024x' }))
     const { writer, lines } = fakeAgentsMd()

@@ -64,7 +64,7 @@ export type MemOp =
   | { kind: 'preciseEdit' | 'corroborate'; id: Key }
   | { kind: 'guiBatch' }
   | { kind: 'hardDelete'; id: Key; layer?: 'workspace' | 'global' }
-  | { kind: 'modelRewrite'; id: Key; isForced: boolean }
+  | { kind: 'modelRewrite'; id: Key; allowsSecret: boolean }
   | { kind: 'external'; id: Key; isTwoStep: boolean }
   | { kind: 'recall'; ids: Key[] }
   | { kind: 'redact' | 'purge'; id: Key }
@@ -272,7 +272,7 @@ async function runMemOp(w: MemoryWorld, op: MemOp, index: number, hooks: OpHooks
     case 'corroborate':
     case 'modelRewrite': {
       // 像模型一样：改的是全局记忆就先收到引导，抄引导里的确认码重发；其间被别处改过、码变了，就照新引导再发一次
-      const args = candidate({ action: 'update', change: 'correct', id: IDS[op.id], name: NAMES[op.id], type: 'knowledge', scope: 'workspace', content: `模型改写 ${index}`, summary: `模型改写 ${index}`, ...(op.kind === 'modelRewrite' && op.isForced ? { force: true } : {}) })
+      const args = candidate({ action: 'update', change: 'correct', id: IDS[op.id], name: NAMES[op.id], type: 'knowledge', scope: 'workspace', content: `模型改写 ${index}`, summary: `模型改写 ${index}`, ...(op.kind === 'modelRewrite' && op.allowsSecret ? { allowSecret: true } : {}) })
       // 补证：同一件事又被提到，只带 id 和依据，正文不动
       const input = op.kind === 'preciseEdit'
         ? { action: 'update' as const, change: 'correct' as const, id: IDS[op.id], sourceMode: 'user-explicit' as const, edits: [{ oldString: w.bases.get(op.id)?.content ?? '不存在的正文', newString: `精确修改 ${index}` }] }
@@ -323,7 +323,7 @@ async function runMemOp(w: MemoryWorld, op: MemOp, index: number, hooks: OpHooks
 export const labelOf = (op: MemOp) => {
   switch (op.kind) {
     case 'create': return `create(${op.name},${op.scope})`
-    case 'modelRewrite': return `modelRewrite(${op.id}${op.isForced ? ',force' : ''})`
+    case 'modelRewrite': return `modelRewrite(${op.id}${op.allowsSecret ? ',allowSecret' : ''})`
     case 'external': return `external(${op.id}${op.isTwoStep ? ',两步' : ''})`
     case 'hardDelete': return `hardDelete(${op.id}${op.layer === undefined ? '' : `,${op.layer}`})`
     case 'recall': return `recall(${op.ids.join('+')})`
@@ -421,6 +421,6 @@ export const snapshotIdsArb = fc.constantFrom<Key[]>([], ['a'], ['a', 'b'])
 export const writeOpArb: fc.Arbitrary<MemOp> = fc.oneof(
   fc.record({ kind: fc.constant('create' as const), name: fc.constantFrom<Key | 'fresh'>('a', 'b', 'fresh'), scope: fc.constantFrom('global' as const, 'workspace' as const) }),
   fc.record({ kind: fc.constantFrom('update' as const, 'softDelete' as const, 'restore' as const, 'hardDelete' as const, 'promote' as const, 'guiEdit' as const), id: keyArb }),
-  fc.record({ kind: fc.constant('modelRewrite' as const), id: keyArb, isForced: fc.boolean() }),
+  fc.record({ kind: fc.constant('modelRewrite' as const), id: keyArb, allowsSecret: fc.boolean() }),
 )
 export const externalOpArb: fc.Arbitrary<MemOp> = fc.record({ kind: fc.constant('external' as const), id: keyArb, isTwoStep: fc.boolean() })

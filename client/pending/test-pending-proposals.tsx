@@ -251,16 +251,16 @@ describe('横向冲突卡：补充要求（票 07）', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('要求里有高危密钥，没有发送。去掉密钥再生成。')
   })
 
-  it('融合稿像密钥：卡片里再确认一次，「仍然保存」带 force 重发', async () => {
+  it('融合稿像密钥：卡片里再确认一次，「仍然保存」带 allowSecret 重发', async () => {
     const { commands } = setup([card({ suggestion: keepA })], {
-      respond: command => (command.cmd === 'apply-proposal' && command.force !== true ? { ok: false, cmd: command.cmd, code: 'secret-suspected' } : drafted(mergeProposal)(command)),
+      respond: command => (command.cmd === 'apply-proposal' && command.allowSecret !== true ? { ok: false, cmd: command.cmd, code: 'secret-suspected' } : drafted(mergeProposal)(command)),
     })
     open()
     write('两者融合')
     await generate()
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '应用' })) })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '仍然保存' })) })
-    expect(commands().at(-1)).toEqual({ cmd: 'apply-proposal', decisionId: 'd-h', proposal: mergeProposal, force: true })
+    expect(commands().at(-1)).toEqual({ cmd: 'apply-proposal', decisionId: 'd-h', proposal: mergeProposal, allowSecret: true })
     expect(await screen.findByText('已融合成一条')).toBeInTheDocument()
   })
 

@@ -111,7 +111,7 @@ describe('补证', () => {
 
   it('原来存下时带疑似密钥的记忆照样能补证', async () => {
     const e = env()
-    const made = await create(e, { content: `连接串 password=${'x'.repeat(4)}Zq9${'k'.repeat(12)}` })
+    const made = await create(e, { allowSecret: true, content: `连接串 password=${'x'.repeat(4)}Zq9${'k'.repeat(12)}` })
     expect((await update(e, made.id, { change: 'corroborate', force: undefined })).kind).toBe('updated')
   })
 })

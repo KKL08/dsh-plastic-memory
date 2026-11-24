@@ -47,7 +47,7 @@ describe('改写全局记忆的确认码：活性', () => {
       })
       const ids: string[] = []
       for (let i = 0; i < N; i++) {
-        const created = await runSavePipeline(candidate({ scope: 'workspace', name: `全局规范${i}`, content: `全局规范 ${i} 的初始正文` }), deps())
+        const created = await runSavePipeline(candidate({ scope: 'workspace', name: `全局规范${i}`, force: true, content: `全局规范 ${i} 的初始正文` }), deps())
         if (created.kind !== 'saved') throw new Error(created.kind)
         await store.put({ ...created.record, scope: 'global', workspacePath: undefined })
         ids.push(created.record.id)

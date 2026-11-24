@@ -1125,7 +1125,7 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
     await attempt('H20-SUGGESTION-SOURCES', async () => {
       const gate = semanticGate(); if (gate) return gate
       const ws = mkWs('d')
-      // 两条故意说法相近（要构成冲突），结构去重会拦第二条：带 force 存
+      // 两条说法相近，带 force 存，不让新建闸挡住
       const saveAfterSaying = async (said: string, name: string, content: string): Promise<string | undefined> => {
         const exec = mkExec(ws, sel)
         const session = exec.agent.session as SessionLike

@@ -30,7 +30,7 @@ const generators: Record<Kind, (w: MemoryWorld, op: Write, before: MemoryRecord)
   },
   整条更新: async (w, op, before) => {
     const content = `整条替换${op.index}`
-    const result = await runSavePipeline(candidate({ action: 'update', change: 'correct', id: before.id, name: before.name, content, force: true }), { store: w.store, registry, workspacePath: W, snapshots: w.snapshots, session: { id: `会话${op.writer}`, lastSeq: op.index + 1 }, now: () => STORE_NOW })
+    const result = await runSavePipeline(candidate({ action: 'update', change: 'correct', id: before.id, name: before.name, content, allowSecret: true }), { store: w.store, registry, workspacePath: W, snapshots: w.snapshots, session: { id: `会话${op.writer}`, lastSeq: op.index + 1 }, now: () => STORE_NOW })
     expect(result.kind).toBe('updated')
     expect(await w.store.get(before.id, { workspacePath: W })).toMatchObject({ content })
   },
@@ -129,7 +129,7 @@ const undoNames: Record<UndoKind, string> = {
 const prefixKinds = ['modelRewrite', 'preciseEdit', 'guiEdit', 'guiBatch', 'corroborate'] as const
 type PrefixKind = typeof prefixKinds[number]
 const undoGenerators: Record<UndoKind, (id: 'a' | 'b') => MemOp> = {
-  modelRewrite: id => ({ kind: 'modelRewrite', id, isForced: true }),
+  modelRewrite: id => ({ kind: 'modelRewrite', id, allowsSecret: true }),
   preciseEdit: id => ({ kind: 'preciseEdit', id }),
   guiEdit: id => ({ kind: 'guiEdit', id }),
   guiBatch: () => ({ kind: 'guiBatch' }),
@@ -156,7 +156,7 @@ for (const [kindIndex, kind] of undoKinds.entries()) {
     const selected = prefix.length
     const later = isChanged ? id : id === 'a' ? 'b' : 'a'
     const suffix: MemOp[] = isChanged || kind !== 'guiBatch'
-      ? [{ kind: 'modelRewrite', id: later, isForced: true }] : []
+      ? [{ kind: 'modelRewrite', id: later, allowsSecret: true }] : []
     const ops = [...prefix.map(k => prefixGenerators[k](id)), undoGenerators[kind](id), ...suffix]
     await checkSequence(seed, ops, turns, async (sequence, scheduler) => {
       // 缩减仍按原对象辨认所选操作；删掉它不构成撤销性质的反例。
@@ -219,7 +219,7 @@ for (const [kindIndex, kind] of undoKinds.entries()) {
 for (const kind of ['preciseEdit', 'guiBatch'] as const) it(`共享记忆：${undoNames[kind]} 与整条改写、界面编辑交错仍与串行一致`, async () => {
   const seed = seeds[0]!
   const [ops, turns] = sequenceCase(seed, fc.shuffledSubarray<MemOp>([
-    undoGenerators[kind]('a'), { kind: 'modelRewrite', id: 'a', isForced: true }, { kind: 'guiEdit', id: 'a' },
+    undoGenerators[kind]('a'), { kind: 'modelRewrite', id: 'a', allowsSecret: true }, { kind: 'guiEdit', id: 'a' },
   ], { minLength: 3, maxLength: 3 }), 3)
   await checkSequence(seed, ops, turns, async (xs, scheduler) => {
     await assertSerialEquivalent(base, scheduler, xs)

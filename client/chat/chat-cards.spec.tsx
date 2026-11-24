@@ -1378,9 +1378,9 @@ describe('密钥永远不出现在对话卡里', () => {
     expect(container.querySelector('.pm-tr-summary')).toHaveTextContent('[已隐藏]')
   })
 
-  it('带 force 存下的疑似密钥（password: …）同样不出现在交付卡和折叠行里', () => {
+  it('带 allowSecret 存下的疑似密钥（password: …）同样不出现在交付卡和折叠行里', () => {
     const PASS = 'password: Hunter2-2026'
-    const args = { ...saveArgs, name: `登录 ${PASS}`, content: `测试环境 ${PASS}，周五前改。`, force: true }
+    const args = { ...saveArgs, name: `登录 ${PASS}`, content: `测试环境 ${PASS}，周五前改。`, allowSecret: true }
     const data = turnData([turnStart, call(2, 'c1', 'memory_save', args), res(3, 'c1', SAVED_TEXT)])
     const card = renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={data!.saved} now={NOW} openDetail={() => {}} />, createFakeGateway())
     expect(card.container.textContent).not.toContain('Hunter2-2026')

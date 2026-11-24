@@ -1,7 +1,7 @@
 /**
  * 密钥模式集。severity 分两级：
  * - critical：有明确厂商前缀/格式，几乎不误报 → 写入时直接拦截（pipeline reject，不落盘）。
- * - suspected：无厂商特征、正则较宽、可能误报 → 写入时拦下待确认，带 force 放行并保留警告。
+ * - suspected：无厂商特征、正则较宽、可能误报 → 写入时拦下待确认，带 allowSecret 放行并保留警告。
  * 库里的 suspected 是用户确认过不是密钥才放行的，注入遮盖与体检判红只看 critical；
  * forget 时两级一视同仁：命中任一级即物理删除（tools/forget.ts）。
  */
@@ -114,7 +114,7 @@ export const SECRET_PATTERNS: SecretPattern[] = [
   { name: 'Slack token', re: /\bxox[baprs]-[A-Za-z0-9-]{8,}\b/, severity: 'critical' },
   { name: 'Google API Key', re: /\bAIza[0-9A-Za-z_-]{35}\b/, severity: 'critical' },
   { name: 'Bearer token', re: /\bBearer\s+[A-Za-z0-9._-]{20,}/, severity: 'critical' },
-  // 以下两条无厂商特征、正则较宽，归 suspected（拦下待确认，force 放行，避免误伤）。
+  // 以下两条无厂商特征、正则较宽，归 suspected（拦下待确认，allowSecret 放行，避免误伤）。
   // \S{6,} 对中文文本会把任意 6 个非空白字符当密码——中文记忆没有空格，普通句子如
   // "密码:公司统一走单点登录" 也会命中。约束取值必须像凭证（同时含数字与字母）且不含中日韩字符，
   // 排除自然语言描述、保留真正贴出来的口令。

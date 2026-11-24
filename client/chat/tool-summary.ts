@@ -76,7 +76,7 @@ const SOURCE_MODES = ['user-explicit', 'user-behavior', 'environment-observed', 
  * 一次成功的新记（kind = saved）或改写（kind = updated）→ 记忆卡：id / 类型 / 作用域取结果，原文、名字、来源取参数。
  * 改写的结果只有 id 和名称：类型取参数，作用域也先取参数（改写不改作用域，参数可能填错），由交付卡按全部记忆视图校正。
  * 只传 edits 的改写参数里没有名称、正文这些：名称取结果，其余留空，由交付卡从全部记忆视图取改后的样子。
- * 参数是 agent 发的原文，没经过视图的遮盖，这里遮掉密钥片段，疑似密钥也遮（带 force 存下的也不例外）。
+ * 参数是 agent 发的原文，没经过视图的遮盖，这里遮掉密钥片段，疑似密钥也遮（带 allowSecret 存下的也不例外）。
  */
 export function savedMemoryCard(args: Args | undefined, resultText: string, time: number): MemoryCard | undefined {
   const result = parseSaveResult(resultText)

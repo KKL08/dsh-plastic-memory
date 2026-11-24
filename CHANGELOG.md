@@ -7,6 +7,11 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- After an update, `memory_save` lists numbers, dates, names and paths that
+  are no longer in the memory, and points out a refinement that removed a
+  large part of the text. It also suggests combining memories when a single
+  turn creates a third one, and splitting a memory whose text is longer than
+  2,000 characters.
 - `memory_source` lists all sources of a memory and lets you select one, page
   backward or forward, search its conversation, include tool calls and results,
   and trace a sub-agent memory to its parent or child conversation. Results
@@ -82,6 +87,15 @@ All notable changes to this project are documented here. The format follows
   test instead of hanging the run.
 
 ### Changed
+- `memory_save` now refuses a new memory only when it is almost word for
+  word the same as an existing one (ignoring spaces and punctuation); the
+  reply names that memory and the three ways forward. Other new memories
+  are saved, and the reply lists up to five similar ones so the model can
+  update one of them instead.
+- `force` on `memory_save` now only skips the near-duplicate check. Saving
+  something that looks like a secret after you confirm it is not one uses
+  a new parameter, `allowSecret`; sub-agents can use neither. The memory
+  page's "Save anyway" sends `allowSecret` as well.
 - `memory_source` omits tool results by default; pass `include: "all"` to read them.
 - `MEMORY.md` is now generated from the topic index: one section per topic
   with its description and the number of memories in it, linking to the

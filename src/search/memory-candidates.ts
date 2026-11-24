@@ -26,6 +26,8 @@ export interface MemoryCandidate {
 
 /** 说明要用的查询侧信息，和候选出自同一次分词、同一次读盘。只描述记忆这一路的切词。 */
 export interface MemorySearchDiagnostics {
+  /** 范围内读盘列出的记录数，与排序使用的全库条数一致。 */
+  listedCount: number
   /** 参与打分的查询 token（去重、去掉单字母和纯数字）。 */
   tokens: readonly string[]
   /** 旧的子串词项：只给第三档用，兜住 id 这类不打分字段的子串命中。 */
@@ -145,6 +147,7 @@ export async function findMemoryCandidates(q: MemoryCandidateQuery, deps: Memory
     isDirectHit: direct >= 0,
     at: now,
     diagnostics: {
+      listedCount: read.listedCount,
       tokens,
       legacyTerms,
       groups,

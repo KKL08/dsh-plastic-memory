@@ -25,6 +25,13 @@ describe('契约的枚举字段', () => {
 })
 
 describe('契约里界面要用的命令集', () => {
+  it('四种改写命令的密钥确认参数随文本往返保留', () => {
+    for (const cmd of ['edit-memory', 'merge-memories', 'apply-edits', 'apply-proposal'] as const) {
+      const command = { ...SAMPLE_COMMANDS[cmd], allowSecret: true }
+      expect(parseMemoryCommand(encodeMemoryCommand(command).slice(`/${MEMORY_COMMAND_NAME} `.length))).toEqual({ ok: true, command })
+    }
+  })
+
   it('可带跨项目确认的命令：恰好是 schema 收下 allowCrossWorkspace 的那些', () => {
     for (const [cmd, sample] of Object.entries(SAMPLE_COMMANDS)) {
       const parsed = memoryCommandSchema.parse({ ...sample, allowCrossWorkspace: true })
@@ -163,9 +170,9 @@ describe('apply-edits（整理所选应用全部）', () => {
     expect(CROSS_WORKSPACE_COMMANDS.has('apply-edits')).toBe(true)
   })
 
-  it('命令与结果随文本往返：改写、删除（带承接）、不动的核对项、force；结果带条目、记忆、快照，部分生效另带 isPartial', () => {
+  it('命令与结果随文本往返：改写、删除（带承接）、不动的核对项、allowSecret；结果带条目、记忆、快照，部分生效另带 isPartial', () => {
     const command = {
-      cmd: 'apply-edits', ops: [forget('m1', 'm3'), edit('m2')], keep: [ref('m3')], force: true, allowCrossWorkspace: true,
+      cmd: 'apply-edits', ops: [forget('m1', 'm3'), edit('m2')], keep: [ref('m3')], allowSecret: true, allowCrossWorkspace: true,
     } as const satisfies MemoryCommand
     expect(parseMemoryCommand(encodeMemoryCommand(command).slice(`/${MEMORY_COMMAND_NAME} `.length))).toEqual({ ok: true, command })
     const result = { ok: true, cmd: 'apply-edits', decisionId: 'pd_1', memoryIds: ['m1', 'm2'], snapshotId: 'snap_1' }
@@ -265,8 +272,8 @@ describe('补充要求：draft-proposal 与按要求应用', () => {
     expect(OPEN_ITEM_COMMANDS.has('draft-proposal')).toBe(true)
   })
 
-  it('apply-proposal 依据二选一：建议 id，或按要求生成的方案（操作、依据版本）；按要求的可带 force', () => {
-    const command: MemoryCommand = { cmd: 'apply-proposal', decisionId: 'pd_1', proposal, force: true }
+  it('apply-proposal 依据二选一：建议 id，或按要求生成的方案（操作、依据版本）；按要求的可带 allowSecret', () => {
+    const command: MemoryCommand = { cmd: 'apply-proposal', decisionId: 'pd_1', proposal, allowSecret: true }
     expect(parseMemoryCommand(encodeMemoryCommand(command).slice(`/${MEMORY_COMMAND_NAME} `.length))).toEqual({ ok: true, command })
     const accepts = (args: object) => memoryCommandSchema.safeParse({ cmd: 'apply-proposal', decisionId: 'pd_1', ...args }).success
     expect([accepts({ suggestionId: 'sg_1', proposal }), accepts({}), accepts({ proposal: { ...proposal, basis: undefined } })]).toEqual([false, false, false])

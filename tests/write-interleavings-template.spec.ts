@@ -18,8 +18,8 @@ describe('强制模板', () => {
     await fc.assert(
       // 模型改写在锁内按最新版落盘，界面先写完它照样写得进去；界面要排到后面，得让它晚开始（模型改写不延后）
       fc.asyncProperty(seedArb.filter(sd => sd.a !== 'deleted'), fc.boolean(), fc.option(writeOpArb, { nil: undefined }), fc.nat(400), interleaveScheduler(),
-        async (seed, isForced, extra, guiDelay, s) => {
-          const ops: MemOp[] = [{ kind: 'guiEdit', id: 'a' }, { kind: 'modelRewrite', id: 'a', isForced }, ...(extra === undefined ? [] : [extra])]
+        async (seed, allowsSecret, extra, guiDelay, s) => {
+          const ops: MemOp[] = [{ kind: 'guiEdit', id: 'a' }, { kind: 'modelRewrite', id: 'a', allowsSecret }, ...(extra === undefined ? [] : [extra])]
           const eq = await assertSerialEquivalent(memorySubject(seed), s, ops, [guiDelay, 0])
           const c = classOf(eq.order)
           tally.set(c, (tally.get(c) ?? 0) + 1)

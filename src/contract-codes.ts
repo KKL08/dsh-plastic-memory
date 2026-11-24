@@ -12,7 +12,7 @@ export type RejectCode =
   | 'global-update-unconfirmed' // 项目会话里 update 全局记忆没带或带错确认码：回引导（含这条的确认码）、不写入；内容对所有项目都成立再带码重发
   | 'schema-invalid'    // 字段校验失败
   | 'secret-critical'   // 明确厂商特征的密钥，拒存不落盘
-  | 'secret-suspected'  // 疑似密钥（无厂商特征），未带 force 时拒存；用户确认后带 force: true 重发
+  | 'secret-suspected'  // 疑似密钥（无厂商特征），未带 allowSecret 时拒存；用户确认后带 allowSecret: true 重发
   | 'validity-format'      // validFrom / validTo 不是 YYYY-MM-DD HH:mm 或 YYYY-MM-DD（validity.ts）
   | 'validity-nonexistent' // validFrom / validTo 的日期或时刻不存在（2 月 30 日、25:00）
   | 'validity-past'        // validTo 不晚于当前时间，存下即过期
@@ -21,7 +21,7 @@ export type RejectCode =
   | 'edit-not-found'       // edits 某处的 oldString 在正文里找不到；原因带当前正文
   | 'edit-ambiguous'       // edits 某处的 oldString 命中多处又没带 replaceAll
   | 'change-kind-missing'  // update 没声明改动性质（change）：回引导（当前内容和三个判断问题）、不写入；同一会话对同一条再缺一次就按状态变化写
-  | 'subagent-restricted'  // 子 agent 会话（delegationDepth ≥ 1）越过写入约束：依据、类型、替代、force、改写归属、新建配额，原因按条区分
+  | 'subagent-restricted'  // 子 agent 会话（delegationDepth ≥ 1）越过写入约束：依据、类型、替代、force、allowSecret、改写归属、新建配额，原因按条区分
   | 'not-user-initiated'   // 这一轮不是用户本人开的（定时任务、别的 agent，或宿主给不出发起方），sourceMode 只能填 environment-observed、agent-inferred
 
 /** 本插件注册的工具名：它们的结果来自记忆本身，不算保存时的工具证据。 */
@@ -53,11 +53,15 @@ export type AcceptRejectCode =
 
 /** memory_save 成功但附带的警告（pipeline.ts）。 */
 export type WarningCode =
+  | 'facts-dropped'          // 更新后正文里消失的数字、日期、专名、路径（遮盖后列出），只提示不拦
+  | 'refine-shrank'          // 声明细化却删掉了一大段原文，附改前快照
+  | 'turn-third-save'        // 同一轮新建到第三条，提示并成一条、先找已有的
+  | 'content-long'           // 正文超过 2000 字符，提示按状态或事件拆开
   | 'update-global-candidate' // update 填 global：scope 不变，标记为提升候选
   | 'update-scope-kept'       // update 填了与目标不同的 scope：保持原 scope
   | 'cross-bucket-supersede'  // supersedes 目标和本次写入的记忆不在同一作用域，跳过
   | 'auto-snapshot'           // 更新 global 记忆前已自动快照
-  | 'secret-suspected'        // 疑似密钥（无厂商特征），带 force: true 放行落盘，仍建议改写
+  | 'secret-suspected'        // 疑似密钥（无厂商特征），带 allowSecret: true 放行落盘，仍建议改写
   | 'subagent-scope-local'    // 子 agent 填 global：落当前项目、不标提升候选
   | 'change-kind-assumed'     // update 两次都没声明改动性质：按状态变化写了，改前的内容留成历史版本
   | 'corroborate-fields-ignored' // 补证带了正文等内容参数：没有生效

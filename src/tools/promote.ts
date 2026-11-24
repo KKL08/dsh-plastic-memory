@@ -49,7 +49,7 @@ export interface PromoteResult {
  * - target=global：scope 改 global（FileTable persist 检测目录变化自动搬家），清除候选标记。
  * - target=agents-md：内容写进 ~/.dsh/AGENTS.md 专属区块，原项目记忆软删（已脱离插件治理，避免重复）。
  * - 两种 target 下，待确认的子 agent 记忆都同时升档（reviewed 记 options.reviewedBy）。
- *   含密钥（critical 或 force 放行的 suspected）的记录拒绝写入，原样留在项目内，计入 skipped。
+ *   含密钥（critical 或 allowSecret 放行的 suspected）的记录拒绝写入，原样留在项目内，计入 skipped。
  * - dismiss=true：用户明确不想提升，只清除候选标记、记忆留在项目内，忽略 target。
  */
 export async function executePromote(

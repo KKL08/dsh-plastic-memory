@@ -441,12 +441,12 @@ async function dispatch(
   const notFound = (what: string) => fail(cmd, 'not-found', `不存在或已处理：${what}`)
   /** 界面落后于磁盘（卡片版本对不上、要动的已经不在）：失败结果带上是哪几条，界面据此等视图换成最新内容。 */
   const behind = (code: 'stale' | 'not-found', memoryIds: readonly string[], detail: string): Err => ({ ...fail(cmd, code, detail), memoryIds: [...memoryIds] })
-  /** 与 memory_save 同口径：要写进去的四个面一起查，高危直接拦，疑似等用户确认后带 force 重发。 */
-  const editSecretsProblem = (edits: readonly { content: string; name: string; summary: string; tags: string[] }[], force: boolean | undefined): Err | undefined => {
+  /** 与 memory_save 同口径：要写进去的四个面一起查，高危直接拦，疑似等用户确认后带 allowSecret 重发。 */
+  const editSecretsProblem = (edits: readonly { content: string; name: string; summary: string; tags: string[] }[], allowSecret: boolean | undefined): Err | undefined => {
     const hits = detectSecrets(edits.map(f => `${f.content}\n${f.name}\n${f.summary}\n${f.tags.join(' ')}`).join('\n'))
     const names = (severity: 'critical' | 'suspected') => [...new Set(hits.filter(h => h.severity === severity).map(h => h.name))].join('、')
     if (names('critical') !== '') return fail(cmd, 'secret-critical', `检测到高危密钥（${names('critical')}），未保存`)
-    if (names('suspected') !== '' && force !== true) return fail(cmd, 'secret-suspected', `检测到疑似密钥（${names('suspected')}），未保存；确认不是密钥后带 force 重发`)
+    if (names('suspected') !== '' && allowSecret !== true) return fail(cmd, 'secret-suspected', `检测到疑似密钥（${names('suspected')}），未保存；确认不是密钥后带 allowSecret 重发`)
     return undefined
   }
   // 撤销与最近删除的恢复：时钟现读，恢复收尾要判快照是不是途中刚过期被清扫，用命令开头的时刻判不出来
@@ -583,10 +583,10 @@ async function dispatch(
   // —— 采纳融合建议（票 06）、按要求融合（票 07）、垂直冲突改写这条记忆（票 10）——
 
   /**
-   * 改写记忆要落盘的方案：结论（融合、垂直改写）、来源、逐条操作、依据版本；按要求的方案带用户对疑似密钥的确认（force）。
+   * 改写记忆要落盘的方案：结论（融合、垂直改写）、来源、逐条操作、依据版本；按要求的方案带用户对疑似密钥的确认（allowSecret）。
    * 采纳建议时由认领后重读的条目给出（建议已换了一份或结论不同为 undefined，按依据失效算）。
    */
-  type RewritePlan = { action: 'merge' | 'rewrite'; source: ProposalSource; ops: readonly ProposalOp[]; basis: SuggestionBasis; force?: boolean | undefined }
+  type RewritePlan = { action: 'merge' | 'rewrite'; source: ProposalSource; ops: readonly ProposalOp[]; basis: SuggestionBasis; allowSecret?: boolean | undefined }
 
   /**
    * 先认领条目、再认领冲突身份（同要删一方的裁决），和裁决、撤销、体检挂账、另一个标签页的采纳互斥；认领后重读条目再动手。
@@ -636,8 +636,8 @@ async function dispatch(
     }
     const { rejected } = gateRecords(records, gov, allowCrossWorkspace)
     if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
-    // 建议存盘时已保证稿里的疑似值都出自原文，采纳不再等确认；按要求的稿等用户确认（force）。高危照拦
-    const secretProblem = editSecretsProblem([edit], plan.source === 'suggestion' ? true : plan.force)
+    // 建议存盘时已保证稿里的疑似值都出自原文，采纳不再等确认；按要求的稿等用户确认（allowSecret）。高危照拦
+    const secretProblem = editSecretsProblem([edit], plan.source === 'suggestion' ? true : plan.allowSecret)
     if (secretProblem !== undefined) return secretProblem
 
     const what = isRewrite ? (plan.source === 'request' ? '按要求改写' : '采纳改写建议') : (plan.source === 'request' ? '按要求融合' : '采纳融合建议')
@@ -731,7 +731,7 @@ async function dispatch(
         const verdict = verdictOfAction(proposal.action)
         if (verdict === undefined) {
           const action = proposal.action === 'rewrite' ? 'rewrite' : 'merge'
-          return await adoptPlan(entry.id, () => ({ action, source: 'request', ops: proposal.ops, basis: proposal.basis, force: command.force }), command.allowCrossWorkspace)
+          return await adoptPlan(entry.id, () => ({ action, source: 'request', ops: proposal.ops, basis: proposal.basis, allowSecret: command.allowSecret }), command.allowCrossWorkspace)
         }
         return await resolveConflict(entry.id, verdict, command.allowCrossWorkspace, { basis: { request: { action: proposal.action, basis: proposal.basis } }, memoryIds: entry.memoryIds })
       }
@@ -915,7 +915,7 @@ async function dispatch(
       if (targets.some(t => hasCriticalSecret(t.record))) return fail(cmd, 'has-secret', '含密钥的记忆不能在这里改：界面上是遮盖后的正文，保存会把占位文字写回去。未做任何改动')
       const stale = () => fail(cmd, 'stale', '这条记忆刚被改过，界面已换成最新内容。未做任何改动')
       if (targets.some(t => isStale(t.record, t.base))) return stale()
-      const secretProblem = editSecretsProblem([command], command.force)
+      const secretProblem = editSecretsProblem([command], command.allowSecret)
       if (secretProblem !== undefined) return secretProblem
 
       const keepAt = targets.length === 2 ? mergeKeeperIndex([targets[0]!.record, targets[1]!.record]) : 0
@@ -987,7 +987,7 @@ async function dispatch(
       // 改写的目标含高危密钥：界面上是遮盖后的正文（同直接改）；删除的目标含密钥（疑似也算）软删不了（同合并要删的那条）
       const secretHeld = targets.find(t => (t.op.kind === 'edit' ? hasCriticalSecret(t.record) : hasSecret(t.record)))
       if (secretHeld !== undefined) return fail(cmd, 'has-secret', `记忆 ${secretHeld.record.id} 含密钥，不能在这里整理：先彻底删除它，或手改文件去掉密钥。未做任何改动`)
-      const secretProblem = editSecretsProblem(ops.flatMap(op => (op.kind === 'edit' ? [op] : [])), command.force)
+      const secretProblem = editSecretsProblem(ops.flatMap(op => (op.kind === 'edit' ? [op] : [])), command.allowSecret)
       if (secretProblem !== undefined) return secretProblem
 
       // 整批一份快照，撤销全部和中途失败的回退都按它恢复

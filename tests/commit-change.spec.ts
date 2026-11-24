@@ -32,7 +32,7 @@ describe('落盘原语', () => {
     const w = world()
     const target = await seeded(w)
     const r = await commitChange({ target, kind: 'correct', fields: { content: '回复用简体中文' }, by: 'dreams', at: T0 + 1000 }, w.deps)
-    expect(r.kind).toBe('written')
+    expect(r).toMatchObject({ kind: 'written', before: target })
     const now = (await w.store.get('mem_a'))!
     expect(now).toMatchObject({ content: '回复用简体中文', updatedAt: T0 + 1000, lastConfirmedAt: T0, source: target.source })
     expect(now.sourceTrail).toBeUndefined()
@@ -77,6 +77,7 @@ describe('落盘原语', () => {
     const target = await seeded(w)
     await w.store.update(target, r => ({ ...r, tags: ['别处加的'], recall: 'pinned', locked: true, validTo: T0 + 86_400_000 }))
     const r = await commitChange({ target, kind: 'correct', fields: { content: '甲' }, by: 'dreams', at: T0 + 1000 }, w.deps)
+    expect(r).toMatchObject({ before: { ...target, tags: ['别处加的'], recall: 'pinned', locked: true, validTo: T0 + 86_400_000 } })
     expect(r.kind).toBe('written')
     expect(await w.store.get('mem_a')).toMatchObject({ content: '甲', tags: ['别处加的'], recall: 'pinned', locked: true, validTo: T0 + 86_400_000 })
     expect((await w.snapshots.list()).map(s => s.data[0]!.tags)).toEqual([['别处加的']])
