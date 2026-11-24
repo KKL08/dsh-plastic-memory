@@ -83,12 +83,17 @@ export interface CommitChangeDeps {
   log?: MemoryLogger
 }
 
-export interface CommitChangeInput {
-  /** 调用方读到的那一版：锁内看到的当前内容和它不一样就不写。 */
+export interface CommitChangeInput<Stop = never> {
+  /** 调用方读到的那一版，用来找到要改的那一份：锁内看到它不在了、状态变了或换了作用域就不写。别的字段不比，按锁内读到的最新版拼。 */
   target: MemoryRecord
   kind: ChangeKind
-  /** 要改的字段（见 Change.fields）；补证时不生效。 */
+  /** 要改的字段（见 Change.fields）；补证时不生效。只放这次要改的：没列的字段保留锁内读到的值。 */
   fields?: ChangeFields
+  /**
+   * 要改的字段得看最新内容才定得下来时用它（和 fields 二选一，都给时用它）：锁内拿刚读到的那一版算，在拍快照之前。
+   * 返回 stop 即不写，原样交回调用方。
+   */
+  prepare?: (current: MemoryRecord) => { fields: ChangeFields } | { stop: Stop }
   /** 这次写入的出处；没有会话可指的后台写入不给。 */
   anchor?: ChangeAnchor
   /** 谁写的：记进锚、最近一次内容改动和操作日志。 */
@@ -106,11 +111,13 @@ export interface CommitChangeInput {
   isBlocked?: (current: MemoryRecord) => boolean
 }
 
-export type CommitChangeResult =
+export type CommitChangeResult<Stop = never> =
   /** snapshotId：改前快照，补证不拍。version：这次状态变化留下或并进去的历史版本。 */
   | { kind: 'written'; record: MemoryRecord; snapshotId?: string; version?: { id: string; isMerged: boolean } }
-  /** 调用方读到之后目标被改过或不在了，没写。 */
+  /** 调用方读到之后目标不在了、状态变了、换了作用域，或过不了调用方另给的条件，没写。 */
   | { kind: 'changed'; current: MemoryRecord | undefined }
+  /** prepare 看了最新内容之后叫停，没写。 */
+  | { kind: 'stopped'; stop: Stop }
   /** 拼出来的记录过不了格式校验，没写。 */
   | { kind: 'invalid'; reason: string }
 
@@ -123,15 +130,27 @@ export function isSameRecord(a: MemoryRecord, b: MemoryRecord): boolean {
 
 /**
  * 把一次声明了性质的改动落到一条已有的记忆上：改前快照、按性质拼出新记录、写文件、状态变化留历史版本，整段在一个写入段里。
+ * 新记录是锁内读到的最新版加上这次要改的字段：调用方读到之后别处改的注入档位、有效期、关联、锁都留着，改前快照拍的也是最新版。
  * 这里只管落盘：调用方是谁、该不该改、内容合不合规由调用方先判。前台保存在外面套确认码和子 agent 的规则，没有会话的后台写入直接调。
  *
  * 顺序：先拍快照，再写记忆文件，历史版本记成提交之后的一步。写文件之前断掉，只多一份没人用的快照；
  * 写完文件断掉，下一次进写入段按操作日志从快照补上历史版本。任何时刻都不会有一个和当前页内容相同的历史版本。
  */
-export async function commitChange(input: CommitChangeInput, deps: CommitChangeDeps): Promise<CommitChangeResult> {
+export async function commitChange<Stop = never>(input: CommitChangeInput<Stop>, deps: CommitChangeDeps): Promise<CommitChangeResult<Stop>> {
   const { store } = deps
-  const { target, kind, at } = input
+  const { kind } = input
   return store.writeSection(async () => {
+    // 定位和落盘同一个口径（会话视角，当前项目优先）：本项目那份没了、读到的是全局的同 id 副本时，作用域对不上，不写
+    const current = await store.get(input.target.id, { workspacePath: input.target.workspacePath })
+    const isSamePlace = current !== undefined && current.status !== 'deleted' && current.status === input.target.status
+      && current.scope === input.target.scope && current.workspacePath === input.target.workspacePath
+    if (!isSamePlace || input.isBlocked?.(current) === true) return { kind: 'changed', current }
+    const target = current
+    // 调用方的时刻是它开始时取的：别处在那之后写过这条，这次落盘排在它后面，时间不往回写
+    const at = Math.max(input.at, current.updatedAt, current.lastConfirmedAt)
+    const prepared = input.prepare?.(current) ?? { fields: input.fields ?? {} }
+    if ('stop' in prepared) return { kind: 'stopped', stop: prepared.stop }
+
     const isContentChange = kind !== 'corroborate'
     const alsoSnapshot = input.alsoSnapshot ?? []
     const snapshot = isContentChange || alsoSnapshot.length > 0
@@ -171,7 +190,7 @@ export async function commitChange(input: CommitChangeInput, deps: CommitChangeD
     const op = newWriteOp({ initiator: input.by, steps })
     const reason = kind === 'state-change' ? input.reason?.trim().slice(0, CHANGE_REASON_LIMIT) : undefined
     const change: Change = {
-      kind, fields: input.fields ?? {}, anchor: input.anchor, by: input.by, op: op.id, at,
+      kind, fields: prepared.fields, anchor: input.anchor, by: input.by, op: op.id, at,
       ...(reason !== undefined && reason !== '' ? { reason } : {}),
       isMergedIntoLastVersion: history?.mode === 'append',
     }
@@ -180,10 +199,11 @@ export async function commitChange(input: CommitChangeInput, deps: CommitChangeD
     // 值是 undefined 的键去掉：记录要能无损序列化
     const next = toToolOutput(parsed.data) as unknown as MemoryRecord
 
+    // 写入段挡不住不拿锁的写（手改文件）：落盘那一刻和刚读到的不是同一版就不写
     const seen: { current?: MemoryRecord } = {}
-    const isChangedSinceRead = (current: MemoryRecord | undefined) => {
-      seen.current = current
-      return current === undefined || !isSameRecord(current, target) || input.isBlocked?.(current) === true
+    const isChangedSinceRead = (latest: MemoryRecord | undefined) => {
+      seen.current = latest
+      return latest === undefined || !isSameRecord(latest, target)
     }
     if (before !== undefined) pendingBefore.set(op.id, before)
     try {

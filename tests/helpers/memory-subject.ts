@@ -336,7 +336,7 @@ export const labelOf = (op: MemOp) => {
 
 /**
  * 允许串行重放拆开的结果，都是竞争类拒绝（读后被改或被删而放弃的写入）：界面编辑回 stale、彻底删除回 failed、
- * 模型改写回 changed-after-read、提升计入 skipped。这些操作在锁内复核之前已经按「快照先行」拍了快照，被拒后这份
+ * 模型改写回 changed-after-read（精确修改在最新正文上重做成功的带 edit-rebased）、提升计入 skipped。这些操作在锁内复核之前已经按「快照先行」拍了快照，被拒后这份
  * 改动前的快照留在盘上（无害，保留期满清扫），整体串行重放复现不出这份快照，所以在提交点拆开比。
  */
 function splitTag(value: unknown, op: MemOp): string | undefined {
@@ -345,6 +345,8 @@ function splitTag(value: unknown, op: MemOp): string | undefined {
   if (op.kind === 'hardDelete') return (value as { code?: string }).code === 'failed' ? 'race' : undefined
   if (op.kind === 'modelRewrite' || op.kind === 'preciseEdit' || op.kind === 'corroborate') {
     const r = value as PipelineResult
+    // 精确修改在别处改过的正文上重做成功：结果里带着期间有人改过的说明，整体串行重放同样复现不出，也在提交点拆开比
+    if (r.kind === 'updated' && r.warnings?.some(w => w.code === 'edit-rebased') === true) return 'race'
     return r.kind === 'rejected' && r.subcode === 'changed-after-read' ? 'race' : undefined
   }
   if (op.kind === 'promote') {

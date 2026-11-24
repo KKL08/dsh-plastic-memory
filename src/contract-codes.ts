@@ -61,6 +61,7 @@ export type WarningCode =
   | 'subagent-scope-local'    // 子 agent 填 global：落当前项目、不标提升候选
   | 'change-kind-assumed'     // update 两次都没声明改动性质：按状态变化写了，改前的内容留成历史版本
   | 'corroborate-fields-ignored' // 补证带了正文等内容参数：没有生效
+  | 'edit-rebased'            // 精确修改保存期间正文被别处改过：改在了最新正文上，附合并后的全文
 
 /** memory_scan 的说明性 note（scan.ts）。 */
 export const SCAN_NOTE_CODES = [
