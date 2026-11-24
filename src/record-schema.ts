@@ -22,7 +22,10 @@ export const sourceAnchorSchema = z.object({
   sourceMode: z.string(),
   /** 锚起点的事件时间 */
   at: z.number(),
-  /** 当轮起点那条用户消息的宿主来源标记；开放取值，宿主给不出时缺省 */
+  /**
+   * 当轮起点那条用户消息的宿主来源标记，原样记下；开放取值，宿主给不出时缺省。
+   * 委派给子 agent 的任务宿主也标成 user：判断是不是用户本人，要连 by 一起看（by 是 subagent 时不是）。
+   */
   initiator: z.string().optional(),
   /** user：锚范围内有用户本人发起的消息；tool：有工具结果（本插件的工具、读记忆根下文件的结果不算）。缺的一项按不知道处理 */
   evidence: z.object({ user: z.boolean().optional(), tool: z.boolean().optional() }).catchall(openValue).optional(),

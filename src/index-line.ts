@@ -1,4 +1,5 @@
-import { isPendingDelegated, type MemoryRecord } from './record-schema.ts'
+import { anchorsOf, isPendingDelegated, type MemoryRecord } from './record-schema.ts'
+import { isUserInitiator } from './session-log.ts'
 
 /** 低置信（模型推断）标注，索引行 / 快照 / search 结果共用同一份文案。 */
 export const INFERENCE_NOTE = '（模型推断，未经确认）'
@@ -13,6 +14,18 @@ export function sourceNote(r: MemoryRecord): string {
   // 判据是 sourceMode 而非 confidence：任何来源都可被下调，user-explicit 存 0.7 会被阈值误标
   // 无 source = 手编/无出处：不带推断标注
   return r.source?.sourceMode === 'agent-inferred' ? INFERENCE_NOTE : ''
+}
+
+/** 无人值守标注：内容是在不是用户本人开的轮里写下的（定时任务、别的 agent）。 */
+export const UNATTENDED_NOTE = '（无人值守时写入）'
+
+/**
+ * 注入侧的无人值守标注：看最近一次写下内容的锚（补证不改内容，不算）。
+ * 没记发起方的锚（旧版本写的、宿主给不出的）不标：说不清的不当成无人值守。
+ */
+export function unattendedNote(r: MemoryRecord): string {
+  const initiator = anchorsOf(r).find(a => a.change !== 'corroborate')?.initiator
+  return initiator !== undefined && !isUserInitiator(initiator) ? UNATTENDED_NOTE : ''
 }
 
 /**
