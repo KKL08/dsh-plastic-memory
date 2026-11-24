@@ -1,0 +1,2743 @@
+### {"query":"数据库"}
+{
+ "hits": [
+  {
+   "id": "mem_db_naming",
+   "type": "knowledge",
+   "summary": "mem_db_naming 摘要",
+   "content": "24 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_db_naming.md"
+  },
+  {
+   "id": "mem_db_mock",
+   "type": "preference",
+   "summary": "mem_db_mock 摘要",
+   "content": "35 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_db_mock.md"
+  },
+  {
+   "id": "mem_old",
+   "type": "knowledge",
+   "summary": "mem_old 摘要",
+   "content": "13 字符",
+   "sourceNote": "",
+   "stalenessNote": "（已 400 天未确认，可能过时）",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_old.md"
+  },
+  {
+   "id": "mem_secret",
+   "type": "knowledge",
+   "summary": "mem_secret 摘要",
+   "content": "23 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_secret.md"
+  },
+  {
+   "id": "mem_long",
+   "type": "knowledge",
+   "summary": "mem_long 摘要",
+   "content": "212 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/proj-d6f74551/mem_long.md",
+   "isExcerpt": true,
+   "contentChars": 3499
+  },
+  {
+   "id": "mem_cache_a",
+   "type": "knowledge",
+   "summary": "mem_cache_a 摘要",
+   "content": "206 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_cache_a.md",
+   "isExcerpt": true,
+   "contentChars": 2407
+  },
+  {
+   "id": "mem_cache_b",
+   "type": "knowledge",
+   "summary": "mem_cache_b 摘要",
+   "content": "207 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_cache_b.md",
+   "isExcerpt": true,
+   "contentChars": 2408
+  },
+  {
+   "id": "mem_pending",
+   "type": "knowledge",
+   "summary": "mem_pending 摘要",
+   "content": "24 字符",
+   "sourceNote": "（子 agent 写入，未确认）",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_pending.md"
+  }
+ ]
+}
+--- 渲染 ---
+下面头行标「节选」的条目只给出正文的一段（有命中词时取它附近）。要全文，用 memory_search 按 id 查，或读头行末尾路径指向的文件。更新记忆会替换整条正文，更新前先确认已读过它的全文。
+
+[mem_db_naming] knowledge｜mem_db_naming 摘要 · /in-memory/global/mem_db_naming.md
+数据库表名用复数，字段用 snake_case。
+
+[mem_db_mock] preference｜mem_db_mock 摘要 · /in-memory/global/mem_db_mock.md
+测试里不要 mock 数据库，集成测试连真实的 PostgreSQL。
+
+[mem_old] knowledge｜mem_old 摘要（已 400 天未确认，可能过时） · /in-memory/global/mem_old.md
+数据库备份每天凌晨三点跑。
+
+[mem_secret] knowledge｜mem_secret 摘要 · /in-memory/global/mem_secret.md
+数据库连接串里的口令是 [已隐藏]，不要外传。
+
+[mem_long] knowledge｜mem_long 摘要 · 节选，正文共 3499 字符 · /in-memory/proj-d6f74551/mem_long.md
+[前文省略]
+这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。数据库连接池上限是二十。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。
+[后文省略]
+
+[mem_cache_a] knowledge｜mem_cache_a 摘要 · 部分命中，没有可列出的完整关键词 · 节选，正文共 2407 字符 · /in-memory/global/mem_cache_a.md
+缓存键的命名。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。
+[后文省略]
+
+[mem_cache_b] knowledge｜mem_cache_b 摘要 · 部分命中，没有可列出的完整关键词 · 节选，正文共 2408 字符 · /in-memory/global/mem_cache_b.md
+缓存预热的做法。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。
+[后文省略]
+
+[mem_pending] knowledge｜mem_pending 摘要（子 agent 写入，未确认） · /in-memory/global/mem_pending.md
+数据库迁移脚本放在 migrations 目录。
+
+### {"query":"数据库 测试"}
+{
+ "hits": [
+  {
+   "id": "mem_db_mock",
+   "type": "preference",
+   "summary": "mem_db_mock 摘要",
+   "content": "35 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_db_mock.md"
+  },
+  {
+   "id": "mem_db_naming",
+   "type": "knowledge",
+   "summary": "mem_db_naming 摘要",
+   "content": "24 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 匹配：数据库",
+   "matchedTerms": [
+    "数据库"
+   ],
+   "path": "/in-memory/global/mem_db_naming.md"
+  },
+  {
+   "id": "mem_old",
+   "type": "knowledge",
+   "summary": "mem_old 摘要",
+   "content": "13 字符",
+   "sourceNote": "",
+   "stalenessNote": "（已 400 天未确认，可能过时）",
+   "matchNote": " · 匹配：数据库",
+   "matchedTerms": [
+    "数据库"
+   ],
+   "path": "/in-memory/global/mem_old.md"
+  },
+  {
+   "id": "mem_secret",
+   "type": "knowledge",
+   "summary": "mem_secret 摘要",
+   "content": "23 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 匹配：数据库",
+   "matchedTerms": [
+    "数据库"
+   ],
+   "path": "/in-memory/global/mem_secret.md"
+  },
+  {
+   "id": "mem_review",
+   "type": "preference",
+   "summary": "mem_review 摘要",
+   "content": "14 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 匹配：测试",
+   "matchedTerms": [
+    "测试"
+   ],
+   "path": "/in-memory/global/mem_review.md"
+  },
+  {
+   "id": "mem_deploy",
+   "type": "knowledge",
+   "summary": "mem_deploy 摘要",
+   "content": "42 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 匹配：测试",
+   "matchedTerms": [
+    "测试"
+   ],
+   "path": "/in-memory/proj-d6f74551/mem_deploy.md"
+  },
+  {
+   "id": "mem_cache_a",
+   "type": "knowledge",
+   "summary": "mem_cache_a 摘要",
+   "content": "206 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_cache_a.md",
+   "isExcerpt": true,
+   "contentChars": 2407
+  },
+  {
+   "id": "mem_cache_b",
+   "type": "knowledge",
+   "summary": "mem_cache_b 摘要",
+   "content": "207 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_cache_b.md",
+   "isExcerpt": true,
+   "contentChars": 2408
+  },
+  {
+   "id": "mem_long",
+   "type": "knowledge",
+   "summary": "mem_long 摘要",
+   "content": "212 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 匹配：数据库",
+   "matchedTerms": [
+    "数据库"
+   ],
+   "path": "/in-memory/proj-d6f74551/mem_long.md",
+   "isExcerpt": true,
+   "contentChars": 3499
+  },
+  {
+   "id": "mem_pending",
+   "type": "knowledge",
+   "summary": "mem_pending 摘要",
+   "content": "24 字符",
+   "sourceNote": "（子 agent 写入，未确认）",
+   "stalenessNote": "",
+   "matchNote": " · 匹配：数据库",
+   "matchedTerms": [
+    "数据库"
+   ],
+   "path": "/in-memory/global/mem_pending.md"
+  }
+ ]
+}
+--- 渲染 ---
+下面头行标「节选」的条目只给出正文的一段（有命中词时取它附近）。要全文，用 memory_search 按 id 查，或读头行末尾路径指向的文件。更新记忆会替换整条正文，更新前先确认已读过它的全文。
+
+[mem_db_mock] preference｜mem_db_mock 摘要 · /in-memory/global/mem_db_mock.md
+测试里不要 mock 数据库，集成测试连真实的 PostgreSQL。
+
+[mem_db_naming] knowledge｜mem_db_naming 摘要 · 匹配：数据库 · /in-memory/global/mem_db_naming.md
+数据库表名用复数，字段用 snake_case。
+
+[mem_old] knowledge｜mem_old 摘要（已 400 天未确认，可能过时） · 匹配：数据库 · /in-memory/global/mem_old.md
+数据库备份每天凌晨三点跑。
+
+[mem_secret] knowledge｜mem_secret 摘要 · 匹配：数据库 · /in-memory/global/mem_secret.md
+数据库连接串里的口令是 [已隐藏]，不要外传。
+
+[mem_review] preference｜mem_review 摘要 · 匹配：测试 · /in-memory/global/mem_review.md
+代码评审先看测试，再看实现。
+
+[mem_deploy] knowledge｜mem_deploy 摘要 · 匹配：测试 · /in-memory/proj-d6f74551/mem_deploy.md
+部署走 GitHub Actions，发布前先跑 pnpm build 和集成测试。
+
+[mem_cache_a] knowledge｜mem_cache_a 摘要 · 部分命中，没有可列出的完整关键词 · 节选，正文共 2407 字符 · /in-memory/global/mem_cache_a.md
+缓存键的命名。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。
+[后文省略]
+
+[mem_cache_b] knowledge｜mem_cache_b 摘要 · 部分命中，没有可列出的完整关键词 · 节选，正文共 2408 字符 · /in-memory/global/mem_cache_b.md
+缓存预热的做法。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。
+[后文省略]
+
+[mem_long] knowledge｜mem_long 摘要 · 匹配：数据库 · 节选，正文共 3499 字符 · /in-memory/proj-d6f74551/mem_long.md
+[前文省略]
+这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。数据库连接池上限是二十。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。
+[后文省略]
+
+[mem_pending] knowledge｜mem_pending 摘要（子 agent 写入，未确认） · 匹配：数据库 · /in-memory/global/mem_pending.md
+数据库迁移脚本放在 migrations 目录。
+
+### {"query":"数据库 测试","match":"all"}
+{
+ "hits": [
+  {
+   "id": "mem_db_mock",
+   "type": "preference",
+   "summary": "mem_db_mock 摘要",
+   "content": "35 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_db_mock.md"
+  }
+ ]
+}
+--- 渲染 ---
+[mem_db_mock] preference｜mem_db_mock 摘要 · /in-memory/global/mem_db_mock.md
+测试里不要 mock 数据库，集成测试连真实的 PostgreSQL。
+
+### {"query":"数据库 火星探测"}
+{
+ "noteCode": "low-coverage",
+ "note": "没有记忆同时含全部关键词，排第一的对上的查询内容不到一半，以下按相关性排序。命中弱，可以换同义词、换成另一种语言的写法、减少词数或换个角度再搜一次。\n各关键词命中的记忆条数：数据库 6、火星探测 0。范围内一条都没命中的：火星探测。",
+ "hits": [
+  {
+   "id": "mem_db_naming",
+   "type": "knowledge",
+   "summary": "mem_db_naming 摘要",
+   "content": "24 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 匹配：数据库",
+   "matchedTerms": [
+    "数据库"
+   ],
+   "path": "/in-memory/global/mem_db_naming.md"
+  },
+  {
+   "id": "mem_db_mock",
+   "type": "preference",
+   "summary": "mem_db_mock 摘要",
+   "content": "35 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 匹配：数据库",
+   "matchedTerms": [
+    "数据库"
+   ],
+   "path": "/in-memory/global/mem_db_mock.md"
+  },
+  {
+   "id": "mem_old",
+   "type": "knowledge",
+   "summary": "mem_old 摘要",
+   "content": "13 字符",
+   "sourceNote": "",
+   "stalenessNote": "（已 400 天未确认，可能过时）",
+   "matchNote": " · 匹配：数据库",
+   "matchedTerms": [
+    "数据库"
+   ],
+   "path": "/in-memory/global/mem_old.md"
+  },
+  {
+   "id": "mem_secret",
+   "type": "knowledge",
+   "summary": "mem_secret 摘要",
+   "content": "23 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 匹配：数据库",
+   "matchedTerms": [
+    "数据库"
+   ],
+   "path": "/in-memory/global/mem_secret.md"
+  },
+  {
+   "id": "mem_cache_a",
+   "type": "knowledge",
+   "summary": "mem_cache_a 摘要",
+   "content": "206 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_cache_a.md",
+   "isExcerpt": true,
+   "contentChars": 2407
+  },
+  {
+   "id": "mem_cache_b",
+   "type": "knowledge",
+   "summary": "mem_cache_b 摘要",
+   "content": "207 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_cache_b.md",
+   "isExcerpt": true,
+   "contentChars": 2408
+  },
+  {
+   "id": "mem_long",
+   "type": "knowledge",
+   "summary": "mem_long 摘要",
+   "content": "212 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 匹配：数据库",
+   "matchedTerms": [
+    "数据库"
+   ],
+   "path": "/in-memory/proj-d6f74551/mem_long.md",
+   "isExcerpt": true,
+   "contentChars": 3499
+  },
+  {
+   "id": "mem_pending",
+   "type": "knowledge",
+   "summary": "mem_pending 摘要",
+   "content": "24 字符",
+   "sourceNote": "（子 agent 写入，未确认）",
+   "stalenessNote": "",
+   "matchNote": " · 匹配：数据库",
+   "matchedTerms": [
+    "数据库"
+   ],
+   "path": "/in-memory/global/mem_pending.md"
+  }
+ ]
+}
+--- 渲染 ---
+没有记忆同时含全部关键词，排第一的对上的查询内容不到一半，以下按相关性排序。命中弱，可以换同义词、换成另一种语言的写法、减少词数或换个角度再搜一次。
+各关键词命中的记忆条数：数据库 6、火星探测 0。范围内一条都没命中的：火星探测。
+下面头行标「节选」的条目只给出正文的一段（有命中词时取它附近）。要全文，用 memory_search 按 id 查，或读头行末尾路径指向的文件。更新记忆会替换整条正文，更新前先确认已读过它的全文。
+
+[mem_db_naming] knowledge｜mem_db_naming 摘要 · 匹配：数据库 · /in-memory/global/mem_db_naming.md
+数据库表名用复数，字段用 snake_case。
+
+[mem_db_mock] preference｜mem_db_mock 摘要 · 匹配：数据库 · /in-memory/global/mem_db_mock.md
+测试里不要 mock 数据库，集成测试连真实的 PostgreSQL。
+
+[mem_old] knowledge｜mem_old 摘要（已 400 天未确认，可能过时） · 匹配：数据库 · /in-memory/global/mem_old.md
+数据库备份每天凌晨三点跑。
+
+[mem_secret] knowledge｜mem_secret 摘要 · 匹配：数据库 · /in-memory/global/mem_secret.md
+数据库连接串里的口令是 [已隐藏]，不要外传。
+
+[mem_cache_a] knowledge｜mem_cache_a 摘要 · 部分命中，没有可列出的完整关键词 · 节选，正文共 2407 字符 · /in-memory/global/mem_cache_a.md
+缓存键的命名。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。
+[后文省略]
+
+[mem_cache_b] knowledge｜mem_cache_b 摘要 · 部分命中，没有可列出的完整关键词 · 节选，正文共 2408 字符 · /in-memory/global/mem_cache_b.md
+缓存预热的做法。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。
+[后文省略]
+
+[mem_long] knowledge｜mem_long 摘要 · 匹配：数据库 · 节选，正文共 3499 字符 · /in-memory/proj-d6f74551/mem_long.md
+[前文省略]
+这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。数据库连接池上限是二十。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。
+[后文省略]
+
+[mem_pending] knowledge｜mem_pending 摘要（子 agent 写入，未确认） · 匹配：数据库 · /in-memory/global/mem_pending.md
+数据库迁移脚本放在 migrations 目录。
+
+### {"query":"数据库 测试 火星探测"}
+{
+ "noteCode": "or-fallback",
+ "note": "没有记忆同时含全部关键词，以下按相关性排序。\n各关键词命中的记忆条数：数据库 6、测试 3、火星探测 0。范围内一条都没命中的：火星探测。",
+ "hits": [
+  {
+   "id": "mem_db_mock",
+   "type": "preference",
+   "summary": "mem_db_mock 摘要",
+   "content": "35 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 匹配：数据库、测试",
+   "matchedTerms": [
+    "数据库",
+    "测试"
+   ],
+   "path": "/in-memory/global/mem_db_mock.md"
+  },
+  {
+   "id": "mem_db_naming",
+   "type": "knowledge",
+   "summary": "mem_db_naming 摘要",
+   "content": "24 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 匹配：数据库",
+   "matchedTerms": [
+    "数据库"
+   ],
+   "path": "/in-memory/global/mem_db_naming.md"
+  },
+  {
+   "id": "mem_old",
+   "type": "knowledge",
+   "summary": "mem_old 摘要",
+   "content": "13 字符",
+   "sourceNote": "",
+   "stalenessNote": "（已 400 天未确认，可能过时）",
+   "matchNote": " · 匹配：数据库",
+   "matchedTerms": [
+    "数据库"
+   ],
+   "path": "/in-memory/global/mem_old.md"
+  },
+  {
+   "id": "mem_secret",
+   "type": "knowledge",
+   "summary": "mem_secret 摘要",
+   "content": "23 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 匹配：数据库",
+   "matchedTerms": [
+    "数据库"
+   ],
+   "path": "/in-memory/global/mem_secret.md"
+  },
+  {
+   "id": "mem_review",
+   "type": "preference",
+   "summary": "mem_review 摘要",
+   "content": "14 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 匹配：测试",
+   "matchedTerms": [
+    "测试"
+   ],
+   "path": "/in-memory/global/mem_review.md"
+  },
+  {
+   "id": "mem_deploy",
+   "type": "knowledge",
+   "summary": "mem_deploy 摘要",
+   "content": "42 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 匹配：测试",
+   "matchedTerms": [
+    "测试"
+   ],
+   "path": "/in-memory/proj-d6f74551/mem_deploy.md"
+  },
+  {
+   "id": "mem_cache_a",
+   "type": "knowledge",
+   "summary": "mem_cache_a 摘要",
+   "content": "206 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_cache_a.md",
+   "isExcerpt": true,
+   "contentChars": 2407
+  },
+  {
+   "id": "mem_cache_b",
+   "type": "knowledge",
+   "summary": "mem_cache_b 摘要",
+   "content": "207 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_cache_b.md",
+   "isExcerpt": true,
+   "contentChars": 2408
+  },
+  {
+   "id": "mem_long",
+   "type": "knowledge",
+   "summary": "mem_long 摘要",
+   "content": "212 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 匹配：数据库",
+   "matchedTerms": [
+    "数据库"
+   ],
+   "path": "/in-memory/proj-d6f74551/mem_long.md",
+   "isExcerpt": true,
+   "contentChars": 3499
+  },
+  {
+   "id": "mem_pending",
+   "type": "knowledge",
+   "summary": "mem_pending 摘要",
+   "content": "24 字符",
+   "sourceNote": "（子 agent 写入，未确认）",
+   "stalenessNote": "",
+   "matchNote": " · 匹配：数据库",
+   "matchedTerms": [
+    "数据库"
+   ],
+   "path": "/in-memory/global/mem_pending.md"
+  }
+ ]
+}
+--- 渲染 ---
+没有记忆同时含全部关键词，以下按相关性排序。
+各关键词命中的记忆条数：数据库 6、测试 3、火星探测 0。范围内一条都没命中的：火星探测。
+下面头行标「节选」的条目只给出正文的一段（有命中词时取它附近）。要全文，用 memory_search 按 id 查，或读头行末尾路径指向的文件。更新记忆会替换整条正文，更新前先确认已读过它的全文。
+
+[mem_db_mock] preference｜mem_db_mock 摘要 · 匹配：数据库、测试 · /in-memory/global/mem_db_mock.md
+测试里不要 mock 数据库，集成测试连真实的 PostgreSQL。
+
+[mem_db_naming] knowledge｜mem_db_naming 摘要 · 匹配：数据库 · /in-memory/global/mem_db_naming.md
+数据库表名用复数，字段用 snake_case。
+
+[mem_old] knowledge｜mem_old 摘要（已 400 天未确认，可能过时） · 匹配：数据库 · /in-memory/global/mem_old.md
+数据库备份每天凌晨三点跑。
+
+[mem_secret] knowledge｜mem_secret 摘要 · 匹配：数据库 · /in-memory/global/mem_secret.md
+数据库连接串里的口令是 [已隐藏]，不要外传。
+
+[mem_review] preference｜mem_review 摘要 · 匹配：测试 · /in-memory/global/mem_review.md
+代码评审先看测试，再看实现。
+
+[mem_deploy] knowledge｜mem_deploy 摘要 · 匹配：测试 · /in-memory/proj-d6f74551/mem_deploy.md
+部署走 GitHub Actions，发布前先跑 pnpm build 和集成测试。
+
+[mem_cache_a] knowledge｜mem_cache_a 摘要 · 部分命中，没有可列出的完整关键词 · 节选，正文共 2407 字符 · /in-memory/global/mem_cache_a.md
+缓存键的命名。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。
+[后文省略]
+
+[mem_cache_b] knowledge｜mem_cache_b 摘要 · 部分命中，没有可列出的完整关键词 · 节选，正文共 2408 字符 · /in-memory/global/mem_cache_b.md
+缓存预热的做法。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。
+[后文省略]
+
+[mem_long] knowledge｜mem_long 摘要 · 匹配：数据库 · 节选，正文共 3499 字符 · /in-memory/proj-d6f74551/mem_long.md
+[前文省略]
+这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。数据库连接池上限是二十。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。
+[后文省略]
+
+[mem_pending] knowledge｜mem_pending 摘要（子 agent 写入，未确认） · 匹配：数据库 · /in-memory/global/mem_pending.md
+数据库迁移脚本放在 migrations 目录。
+
+### {"query":"数据库 集成测试 PostgreSQL 火星"}
+{
+ "noteCode": "or-fallback",
+ "note": "没有记忆同时含全部关键词，以下按相关性排序。\n各关键词命中的记忆条数：数据库 6、集成测试 2、PostgreSQL 1、火星 0。范围内一条都没命中的：火星。",
+ "hits": [
+  {
+   "id": "mem_db_mock",
+   "type": "preference",
+   "summary": "mem_db_mock 摘要",
+   "content": "35 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 匹配：数据库、集成测试、PostgreSQL",
+   "matchedTerms": [
+    "数据库",
+    "集成测试",
+    "PostgreSQL"
+   ],
+   "path": "/in-memory/global/mem_db_mock.md"
+  },
+  {
+   "id": "mem_db_naming",
+   "type": "knowledge",
+   "summary": "mem_db_naming 摘要",
+   "content": "24 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 匹配：数据库",
+   "matchedTerms": [
+    "数据库"
+   ],
+   "path": "/in-memory/global/mem_db_naming.md"
+  },
+  {
+   "id": "mem_old",
+   "type": "knowledge",
+   "summary": "mem_old 摘要",
+   "content": "13 字符",
+   "sourceNote": "",
+   "stalenessNote": "（已 400 天未确认，可能过时）",
+   "matchNote": " · 匹配：数据库",
+   "matchedTerms": [
+    "数据库"
+   ],
+   "path": "/in-memory/global/mem_old.md"
+  },
+  {
+   "id": "mem_deploy",
+   "type": "knowledge",
+   "summary": "mem_deploy 摘要",
+   "content": "42 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 匹配：集成测试",
+   "matchedTerms": [
+    "集成测试"
+   ],
+   "path": "/in-memory/proj-d6f74551/mem_deploy.md"
+  },
+  {
+   "id": "mem_secret",
+   "type": "knowledge",
+   "summary": "mem_secret 摘要",
+   "content": "23 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 匹配：数据库",
+   "matchedTerms": [
+    "数据库"
+   ],
+   "path": "/in-memory/global/mem_secret.md"
+  },
+  {
+   "id": "mem_review",
+   "type": "preference",
+   "summary": "mem_review 摘要",
+   "content": "14 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_review.md"
+  },
+  {
+   "id": "mem_cache_a",
+   "type": "knowledge",
+   "summary": "mem_cache_a 摘要",
+   "content": "206 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_cache_a.md",
+   "isExcerpt": true,
+   "contentChars": 2407
+  },
+  {
+   "id": "mem_cache_b",
+   "type": "knowledge",
+   "summary": "mem_cache_b 摘要",
+   "content": "207 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_cache_b.md",
+   "isExcerpt": true,
+   "contentChars": 2408
+  },
+  {
+   "id": "mem_long",
+   "type": "knowledge",
+   "summary": "mem_long 摘要",
+   "content": "212 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 匹配：数据库",
+   "matchedTerms": [
+    "数据库"
+   ],
+   "path": "/in-memory/proj-d6f74551/mem_long.md",
+   "isExcerpt": true,
+   "contentChars": 3499
+  },
+  {
+   "id": "mem_pending",
+   "type": "knowledge",
+   "summary": "mem_pending 摘要",
+   "content": "24 字符",
+   "sourceNote": "（子 agent 写入，未确认）",
+   "stalenessNote": "",
+   "matchNote": " · 匹配：数据库",
+   "matchedTerms": [
+    "数据库"
+   ],
+   "path": "/in-memory/global/mem_pending.md"
+  }
+ ]
+}
+--- 渲染 ---
+没有记忆同时含全部关键词，以下按相关性排序。
+各关键词命中的记忆条数：数据库 6、集成测试 2、PostgreSQL 1、火星 0。范围内一条都没命中的：火星。
+下面头行标「节选」的条目只给出正文的一段（有命中词时取它附近）。要全文，用 memory_search 按 id 查，或读头行末尾路径指向的文件。更新记忆会替换整条正文，更新前先确认已读过它的全文。
+
+[mem_db_mock] preference｜mem_db_mock 摘要 · 匹配：数据库、集成测试、PostgreSQL · /in-memory/global/mem_db_mock.md
+测试里不要 mock 数据库，集成测试连真实的 PostgreSQL。
+
+[mem_db_naming] knowledge｜mem_db_naming 摘要 · 匹配：数据库 · /in-memory/global/mem_db_naming.md
+数据库表名用复数，字段用 snake_case。
+
+[mem_old] knowledge｜mem_old 摘要（已 400 天未确认，可能过时） · 匹配：数据库 · /in-memory/global/mem_old.md
+数据库备份每天凌晨三点跑。
+
+[mem_deploy] knowledge｜mem_deploy 摘要 · 匹配：集成测试 · /in-memory/proj-d6f74551/mem_deploy.md
+部署走 GitHub Actions，发布前先跑 pnpm build 和集成测试。
+
+[mem_secret] knowledge｜mem_secret 摘要 · 匹配：数据库 · /in-memory/global/mem_secret.md
+数据库连接串里的口令是 [已隐藏]，不要外传。
+
+[mem_review] preference｜mem_review 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/global/mem_review.md
+代码评审先看测试，再看实现。
+
+[mem_cache_a] knowledge｜mem_cache_a 摘要 · 部分命中，没有可列出的完整关键词 · 节选，正文共 2407 字符 · /in-memory/global/mem_cache_a.md
+缓存键的命名。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。
+[后文省略]
+
+[mem_cache_b] knowledge｜mem_cache_b 摘要 · 部分命中，没有可列出的完整关键词 · 节选，正文共 2408 字符 · /in-memory/global/mem_cache_b.md
+缓存预热的做法。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。
+[后文省略]
+
+[mem_long] knowledge｜mem_long 摘要 · 匹配：数据库 · 节选，正文共 3499 字符 · /in-memory/proj-d6f74551/mem_long.md
+[前文省略]
+这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。数据库连接池上限是二十。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。
+[后文省略]
+
+[mem_pending] knowledge｜mem_pending 摘要（子 agent 写入，未确认） · 匹配：数据库 · /in-memory/global/mem_pending.md
+数据库迁移脚本放在 migrations 目录。
+
+### {"query":"部署 火星 木星 土星 天王星"}
+{
+ "noteCode": "low-coverage",
+ "note": "没有记忆同时含全部关键词，排第一的对上的查询内容不到一半，以下按相关性排序。命中弱，可以换同义词、换成另一种语言的写法、减少词数或换个角度再搜一次。\n各关键词命中的记忆条数：部署 1、火星 0、木星 0、土星 0、天王星 0。范围内一条都没命中的：火星、木星、土星、天王星。",
+ "hits": [
+  {
+   "id": "mem_deploy",
+   "type": "knowledge",
+   "summary": "mem_deploy 摘要",
+   "content": "42 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 匹配：部署",
+   "matchedTerms": [
+    "部署"
+   ],
+   "path": "/in-memory/proj-d6f74551/mem_deploy.md"
+  }
+ ]
+}
+--- 渲染 ---
+没有记忆同时含全部关键词，排第一的对上的查询内容不到一半，以下按相关性排序。命中弱，可以换同义词、换成另一种语言的写法、减少词数或换个角度再搜一次。
+各关键词命中的记忆条数：部署 1、火星 0、木星 0、土星 0、天王星 0。范围内一条都没命中的：火星、木星、土星、天王星。
+
+[mem_deploy] knowledge｜mem_deploy 摘要 · 匹配：部署 · /in-memory/proj-d6f74551/mem_deploy.md
+部署走 GitHub Actions，发布前先跑 pnpm build 和集成测试。
+
+### {"query":"火星探测","match":"all"}
+{
+ "hits": []
+}
+--- 渲染 ---
+没有匹配的记忆。
+
+### {"query":"数据库 火星探测","match":"all"}
+{
+ "noteCode": "all-no-hit",
+ "note": "没有记忆同时含全部关键词。\n各关键词命中的记忆条数：数据库 6、火星探测 0。范围内一条都没命中的：火星探测。\n改用 match: \"any\" 可以看部分命中的结果。",
+ "hits": []
+}
+--- 渲染 ---
+没有记忆同时含全部关键词。
+各关键词命中的记忆条数：数据库 6、火星探测 0。范围内一条都没命中的：火星探测。
+改用 match: "any" 可以看部分命中的结果。
+
+### {"query":"mem_db"}
+{
+ "moreNote": "共命中 26 条，只列出前 10 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。用 match: \"all\" 可以只看同时含全部关键词的记忆。",
+ "hits": [
+  {
+   "id": "mem_db_mock",
+   "type": "preference",
+   "summary": "mem_db_mock 摘要",
+   "content": "35 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_db_mock.md"
+  },
+  {
+   "id": "mem_db_naming",
+   "type": "knowledge",
+   "summary": "mem_db_naming 摘要",
+   "content": "24 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_db_naming.md"
+  },
+  {
+   "id": "mem_old",
+   "type": "knowledge",
+   "summary": "mem_old 摘要",
+   "content": "13 字符",
+   "sourceNote": "",
+   "stalenessNote": "（已 400 天未确认，可能过时）",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_old.md"
+  },
+  {
+   "id": "mem_long",
+   "type": "knowledge",
+   "summary": "mem_long 摘要",
+   "content": "201 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/proj-d6f74551/mem_long.md",
+   "isExcerpt": true,
+   "contentChars": 3499
+  },
+  {
+   "id": "mem_both",
+   "type": "knowledge",
+   "summary": "mem_both 摘要",
+   "content": "25 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/proj-d6f74551/mem_both.md"
+  },
+  {
+   "id": "mem_deploy",
+   "type": "knowledge",
+   "summary": "mem_deploy 摘要",
+   "content": "42 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/proj-d6f74551/mem_deploy.md"
+  },
+  {
+   "id": "mem_secret",
+   "type": "knowledge",
+   "summary": "mem_secret 摘要",
+   "content": "23 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_secret.md"
+  },
+  {
+   "id": "mem_review",
+   "type": "preference",
+   "summary": "mem_review 摘要",
+   "content": "14 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_review.md"
+  },
+  {
+   "id": "mem_api_13",
+   "type": "knowledge",
+   "summary": "mem_api_13 摘要",
+   "content": "28 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_api_13.md"
+  },
+  {
+   "id": "mem_api_12",
+   "type": "knowledge",
+   "summary": "mem_api_12 摘要",
+   "content": "28 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_api_12.md"
+  }
+ ]
+}
+--- 渲染 ---
+共命中 26 条，只列出前 10 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。用 match: "all" 可以只看同时含全部关键词的记忆。
+下面头行标「节选」的条目只给出正文的一段（有命中词时取它附近）。要全文，用 memory_search 按 id 查，或读头行末尾路径指向的文件。更新记忆会替换整条正文，更新前先确认已读过它的全文。
+
+[mem_db_mock] preference｜mem_db_mock 摘要 · /in-memory/global/mem_db_mock.md
+测试里不要 mock 数据库，集成测试连真实的 PostgreSQL。
+
+[mem_db_naming] knowledge｜mem_db_naming 摘要 · /in-memory/global/mem_db_naming.md
+数据库表名用复数，字段用 snake_case。
+
+[mem_old] knowledge｜mem_old 摘要（已 400 天未确认，可能过时） · 部分命中，没有可列出的完整关键词 · /in-memory/global/mem_old.md
+数据库备份每天凌晨三点跑。
+
+[mem_long] knowledge｜mem_long 摘要 · 部分命中，没有可列出的完整关键词 · 节选，正文共 3499 字符 · /in-memory/proj-d6f74551/mem_long.md
+缓存策略说明。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。
+[后文省略]
+
+[mem_both] knowledge｜mem_both 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/proj-d6f74551/mem_both.md
+项目这份：日志用 JSON 格式，并带上请求编号。
+
+[mem_deploy] knowledge｜mem_deploy 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/proj-d6f74551/mem_deploy.md
+部署走 GitHub Actions，发布前先跑 pnpm build 和集成测试。
+
+[mem_secret] knowledge｜mem_secret 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/global/mem_secret.md
+数据库连接串里的口令是 [已隐藏]，不要外传。
+
+[mem_review] preference｜mem_review 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/global/mem_review.md
+代码评审先看测试，再看实现。
+
+[mem_api_13] knowledge｜mem_api_13 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/global/mem_api_13.md
+接口约定第 13 条：返回值统一包一层 data 字段。
+
+[mem_api_12] knowledge｜mem_api_12 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/global/mem_api_12.md
+接口约定第 12 条：返回值统一包一层 data 字段。
+
+### {"query":"mem_db_mock"}
+{
+ "moreNote": "共命中 26 条，只列出前 10 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。用 match: \"all\" 可以只看同时含全部关键词的记忆。",
+ "hits": [
+  {
+   "id": "mem_db_mock",
+   "type": "preference",
+   "summary": "mem_db_mock 摘要",
+   "content": "35 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_db_mock.md"
+  },
+  {
+   "id": "mem_db_naming",
+   "type": "knowledge",
+   "summary": "mem_db_naming 摘要",
+   "content": "24 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_db_naming.md"
+  },
+  {
+   "id": "mem_old",
+   "type": "knowledge",
+   "summary": "mem_old 摘要",
+   "content": "13 字符",
+   "sourceNote": "",
+   "stalenessNote": "（已 400 天未确认，可能过时）",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_old.md"
+  },
+  {
+   "id": "mem_long",
+   "type": "knowledge",
+   "summary": "mem_long 摘要",
+   "content": "201 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/proj-d6f74551/mem_long.md",
+   "isExcerpt": true,
+   "contentChars": 3499
+  },
+  {
+   "id": "mem_both",
+   "type": "knowledge",
+   "summary": "mem_both 摘要",
+   "content": "25 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/proj-d6f74551/mem_both.md"
+  },
+  {
+   "id": "mem_deploy",
+   "type": "knowledge",
+   "summary": "mem_deploy 摘要",
+   "content": "42 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/proj-d6f74551/mem_deploy.md"
+  },
+  {
+   "id": "mem_secret",
+   "type": "knowledge",
+   "summary": "mem_secret 摘要",
+   "content": "23 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_secret.md"
+  },
+  {
+   "id": "mem_review",
+   "type": "preference",
+   "summary": "mem_review 摘要",
+   "content": "14 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_review.md"
+  },
+  {
+   "id": "mem_api_13",
+   "type": "knowledge",
+   "summary": "mem_api_13 摘要",
+   "content": "28 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_api_13.md"
+  },
+  {
+   "id": "mem_api_12",
+   "type": "knowledge",
+   "summary": "mem_api_12 摘要",
+   "content": "28 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_api_12.md"
+  }
+ ]
+}
+--- 渲染 ---
+共命中 26 条，只列出前 10 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。用 match: "all" 可以只看同时含全部关键词的记忆。
+下面头行标「节选」的条目只给出正文的一段（有命中词时取它附近）。要全文，用 memory_search 按 id 查，或读头行末尾路径指向的文件。更新记忆会替换整条正文，更新前先确认已读过它的全文。
+
+[mem_db_mock] preference｜mem_db_mock 摘要 · /in-memory/global/mem_db_mock.md
+测试里不要 mock 数据库，集成测试连真实的 PostgreSQL。
+
+[mem_db_naming] knowledge｜mem_db_naming 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/global/mem_db_naming.md
+数据库表名用复数，字段用 snake_case。
+
+[mem_old] knowledge｜mem_old 摘要（已 400 天未确认，可能过时） · 部分命中，没有可列出的完整关键词 · /in-memory/global/mem_old.md
+数据库备份每天凌晨三点跑。
+
+[mem_long] knowledge｜mem_long 摘要 · 部分命中，没有可列出的完整关键词 · 节选，正文共 3499 字符 · /in-memory/proj-d6f74551/mem_long.md
+缓存策略说明。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。
+[后文省略]
+
+[mem_both] knowledge｜mem_both 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/proj-d6f74551/mem_both.md
+项目这份：日志用 JSON 格式，并带上请求编号。
+
+[mem_deploy] knowledge｜mem_deploy 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/proj-d6f74551/mem_deploy.md
+部署走 GitHub Actions，发布前先跑 pnpm build 和集成测试。
+
+[mem_secret] knowledge｜mem_secret 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/global/mem_secret.md
+数据库连接串里的口令是 [已隐藏]，不要外传。
+
+[mem_review] preference｜mem_review 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/global/mem_review.md
+代码评审先看测试，再看实现。
+
+[mem_api_13] knowledge｜mem_api_13 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/global/mem_api_13.md
+接口约定第 13 条：返回值统一包一层 data 字段。
+
+[mem_api_12] knowledge｜mem_api_12 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/global/mem_api_12.md
+接口约定第 12 条：返回值统一包一层 data 字段。
+
+### {"query":"mem_both"}
+{
+ "moreNote": "共命中 26 条，只列出前 10 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。用 match: \"all\" 可以只看同时含全部关键词的记忆。",
+ "hits": [
+  {
+   "id": "mem_both",
+   "type": "knowledge",
+   "summary": "mem_both 摘要",
+   "content": "25 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/proj-d6f74551/mem_both.md"
+  },
+  {
+   "id": "mem_old",
+   "type": "knowledge",
+   "summary": "mem_old 摘要",
+   "content": "13 字符",
+   "sourceNote": "",
+   "stalenessNote": "（已 400 天未确认，可能过时）",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_old.md"
+  },
+  {
+   "id": "mem_long",
+   "type": "knowledge",
+   "summary": "mem_long 摘要",
+   "content": "201 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/proj-d6f74551/mem_long.md",
+   "isExcerpt": true,
+   "contentChars": 3499
+  },
+  {
+   "id": "mem_deploy",
+   "type": "knowledge",
+   "summary": "mem_deploy 摘要",
+   "content": "42 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/proj-d6f74551/mem_deploy.md"
+  },
+  {
+   "id": "mem_secret",
+   "type": "knowledge",
+   "summary": "mem_secret 摘要",
+   "content": "23 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_secret.md"
+  },
+  {
+   "id": "mem_review",
+   "type": "preference",
+   "summary": "mem_review 摘要",
+   "content": "14 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_review.md"
+  },
+  {
+   "id": "mem_api_13",
+   "type": "knowledge",
+   "summary": "mem_api_13 摘要",
+   "content": "28 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_api_13.md"
+  },
+  {
+   "id": "mem_api_12",
+   "type": "knowledge",
+   "summary": "mem_api_12 摘要",
+   "content": "28 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_api_12.md"
+  },
+  {
+   "id": "mem_api_11",
+   "type": "knowledge",
+   "summary": "mem_api_11 摘要",
+   "content": "28 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_api_11.md"
+  },
+  {
+   "id": "mem_api_10",
+   "type": "knowledge",
+   "summary": "mem_api_10 摘要",
+   "content": "28 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_api_10.md"
+  }
+ ]
+}
+--- 渲染 ---
+共命中 26 条，只列出前 10 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。用 match: "all" 可以只看同时含全部关键词的记忆。
+下面头行标「节选」的条目只给出正文的一段（有命中词时取它附近）。要全文，用 memory_search 按 id 查，或读头行末尾路径指向的文件。更新记忆会替换整条正文，更新前先确认已读过它的全文。
+
+[mem_both] knowledge｜mem_both 摘要 · /in-memory/proj-d6f74551/mem_both.md
+项目这份：日志用 JSON 格式，并带上请求编号。
+
+[mem_old] knowledge｜mem_old 摘要（已 400 天未确认，可能过时） · 部分命中，没有可列出的完整关键词 · /in-memory/global/mem_old.md
+数据库备份每天凌晨三点跑。
+
+[mem_long] knowledge｜mem_long 摘要 · 部分命中，没有可列出的完整关键词 · 节选，正文共 3499 字符 · /in-memory/proj-d6f74551/mem_long.md
+缓存策略说明。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。
+[后文省略]
+
+[mem_deploy] knowledge｜mem_deploy 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/proj-d6f74551/mem_deploy.md
+部署走 GitHub Actions，发布前先跑 pnpm build 和集成测试。
+
+[mem_secret] knowledge｜mem_secret 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/global/mem_secret.md
+数据库连接串里的口令是 [已隐藏]，不要外传。
+
+[mem_review] preference｜mem_review 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/global/mem_review.md
+代码评审先看测试，再看实现。
+
+[mem_api_13] knowledge｜mem_api_13 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/global/mem_api_13.md
+接口约定第 13 条：返回值统一包一层 data 字段。
+
+[mem_api_12] knowledge｜mem_api_12 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/global/mem_api_12.md
+接口约定第 12 条：返回值统一包一层 data 字段。
+
+[mem_api_11] knowledge｜mem_api_11 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/global/mem_api_11.md
+接口约定第 11 条：返回值统一包一层 data 字段。
+
+[mem_api_10] knowledge｜mem_api_10 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/global/mem_api_10.md
+接口约定第 10 条：返回值统一包一层 data 字段。
+
+### {"query":""}
+{
+ "moreNote": "共命中 26 条，只列出前 10 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。",
+ "hits": [
+  {
+   "id": "mem_db_mock",
+   "type": "preference",
+   "summary": "mem_db_mock 摘要",
+   "content": "35 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_db_mock.md"
+  },
+  {
+   "id": "mem_db_naming",
+   "type": "knowledge",
+   "summary": "mem_db_naming 摘要",
+   "content": "24 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_db_naming.md"
+  },
+  {
+   "id": "mem_deploy",
+   "type": "knowledge",
+   "summary": "mem_deploy 摘要",
+   "content": "42 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/proj-d6f74551/mem_deploy.md"
+  },
+  {
+   "id": "mem_long",
+   "type": "knowledge",
+   "summary": "mem_long 摘要",
+   "content": "201 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/proj-d6f74551/mem_long.md",
+   "isExcerpt": true,
+   "contentChars": 3499
+  },
+  {
+   "id": "mem_secret",
+   "type": "knowledge",
+   "summary": "mem_secret 摘要",
+   "content": "23 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_secret.md"
+  },
+  {
+   "id": "mem_english",
+   "type": "knowledge",
+   "summary": "mem_english 摘要",
+   "content": "60 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_english.md"
+  },
+  {
+   "id": "mem_cache_a",
+   "type": "knowledge",
+   "summary": "mem_cache_a 摘要",
+   "content": "206 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_cache_a.md",
+   "isExcerpt": true,
+   "contentChars": 2407
+  },
+  {
+   "id": "mem_cache_b",
+   "type": "knowledge",
+   "summary": "mem_cache_b 摘要",
+   "content": "207 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_cache_b.md",
+   "isExcerpt": true,
+   "contentChars": 2408
+  },
+  {
+   "id": "mem_both",
+   "type": "knowledge",
+   "summary": "mem_both 摘要",
+   "content": "25 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/proj-d6f74551/mem_both.md"
+  },
+  {
+   "id": "mem_old",
+   "type": "knowledge",
+   "summary": "mem_old 摘要",
+   "content": "13 字符",
+   "sourceNote": "",
+   "stalenessNote": "（已 400 天未确认，可能过时）",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_old.md"
+  }
+ ]
+}
+--- 渲染 ---
+共命中 26 条，只列出前 10 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。
+下面头行标「节选」的条目只给出正文的一段（有命中词时取它附近）。要全文，用 memory_search 按 id 查，或读头行末尾路径指向的文件。更新记忆会替换整条正文，更新前先确认已读过它的全文。
+
+[mem_db_mock] preference｜mem_db_mock 摘要 · /in-memory/global/mem_db_mock.md
+测试里不要 mock 数据库，集成测试连真实的 PostgreSQL。
+
+[mem_db_naming] knowledge｜mem_db_naming 摘要 · /in-memory/global/mem_db_naming.md
+数据库表名用复数，字段用 snake_case。
+
+[mem_deploy] knowledge｜mem_deploy 摘要 · /in-memory/proj-d6f74551/mem_deploy.md
+部署走 GitHub Actions，发布前先跑 pnpm build 和集成测试。
+
+[mem_long] knowledge｜mem_long 摘要 · 节选，正文共 3499 字符 · /in-memory/proj-d6f74551/mem_long.md
+缓存策略说明。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。
+[后文省略]
+
+[mem_secret] knowledge｜mem_secret 摘要 · /in-memory/global/mem_secret.md
+数据库连接串里的口令是 [已隐藏]，不要外传。
+
+[mem_english] knowledge｜mem_english 摘要 · /in-memory/global/mem_english.md
+Use vitest for unit tests; playwright covers the login flow.
+
+[mem_cache_a] knowledge｜mem_cache_a 摘要 · 节选，正文共 2407 字符 · /in-memory/global/mem_cache_a.md
+缓存键的命名。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。
+[后文省略]
+
+[mem_cache_b] knowledge｜mem_cache_b 摘要 · 节选，正文共 2408 字符 · /in-memory/global/mem_cache_b.md
+缓存预热的做法。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。
+[后文省略]
+
+[mem_both] knowledge｜mem_both 摘要 · /in-memory/proj-d6f74551/mem_both.md
+项目这份：日志用 JSON 格式，并带上请求编号。
+
+[mem_old] knowledge｜mem_old 摘要（已 400 天未确认，可能过时） · /in-memory/global/mem_old.md
+数据库备份每天凌晨三点跑。
+
+### {"query":"接口约定"}
+{
+ "moreNote": "共命中 14 条，只列出前 10 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。",
+ "hits": [
+  {
+   "id": "mem_api_09",
+   "type": "knowledge",
+   "summary": "mem_api_09 摘要",
+   "content": "27 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_api_09.md"
+  },
+  {
+   "id": "mem_api_08",
+   "type": "knowledge",
+   "summary": "mem_api_08 摘要",
+   "content": "27 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_api_08.md"
+  },
+  {
+   "id": "mem_api_07",
+   "type": "knowledge",
+   "summary": "mem_api_07 摘要",
+   "content": "27 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_api_07.md"
+  },
+  {
+   "id": "mem_api_06",
+   "type": "knowledge",
+   "summary": "mem_api_06 摘要",
+   "content": "27 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_api_06.md"
+  },
+  {
+   "id": "mem_api_05",
+   "type": "knowledge",
+   "summary": "mem_api_05 摘要",
+   "content": "27 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_api_05.md"
+  },
+  {
+   "id": "mem_api_04",
+   "type": "knowledge",
+   "summary": "mem_api_04 摘要",
+   "content": "27 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_api_04.md"
+  },
+  {
+   "id": "mem_api_03",
+   "type": "knowledge",
+   "summary": "mem_api_03 摘要",
+   "content": "27 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_api_03.md"
+  },
+  {
+   "id": "mem_api_02",
+   "type": "knowledge",
+   "summary": "mem_api_02 摘要",
+   "content": "27 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_api_02.md"
+  },
+  {
+   "id": "mem_api_01",
+   "type": "knowledge",
+   "summary": "mem_api_01 摘要",
+   "content": "27 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_api_01.md"
+  },
+  {
+   "id": "mem_api_00",
+   "type": "knowledge",
+   "summary": "mem_api_00 摘要",
+   "content": "27 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_api_00.md"
+  }
+ ]
+}
+--- 渲染 ---
+共命中 14 条，只列出前 10 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。
+
+[mem_api_09] knowledge｜mem_api_09 摘要 · /in-memory/global/mem_api_09.md
+接口约定第 9 条：返回值统一包一层 data 字段。
+
+[mem_api_08] knowledge｜mem_api_08 摘要 · /in-memory/global/mem_api_08.md
+接口约定第 8 条：返回值统一包一层 data 字段。
+
+[mem_api_07] knowledge｜mem_api_07 摘要 · /in-memory/global/mem_api_07.md
+接口约定第 7 条：返回值统一包一层 data 字段。
+
+[mem_api_06] knowledge｜mem_api_06 摘要 · /in-memory/global/mem_api_06.md
+接口约定第 6 条：返回值统一包一层 data 字段。
+
+[mem_api_05] knowledge｜mem_api_05 摘要 · /in-memory/global/mem_api_05.md
+接口约定第 5 条：返回值统一包一层 data 字段。
+
+[mem_api_04] knowledge｜mem_api_04 摘要 · /in-memory/global/mem_api_04.md
+接口约定第 4 条：返回值统一包一层 data 字段。
+
+[mem_api_03] knowledge｜mem_api_03 摘要 · /in-memory/global/mem_api_03.md
+接口约定第 3 条：返回值统一包一层 data 字段。
+
+[mem_api_02] knowledge｜mem_api_02 摘要 · /in-memory/global/mem_api_02.md
+接口约定第 2 条：返回值统一包一层 data 字段。
+
+[mem_api_01] knowledge｜mem_api_01 摘要 · /in-memory/global/mem_api_01.md
+接口约定第 1 条：返回值统一包一层 data 字段。
+
+[mem_api_00] knowledge｜mem_api_00 摘要 · /in-memory/global/mem_api_00.md
+接口约定第 0 条：返回值统一包一层 data 字段。
+
+### {"query":"接口约定","limit":3}
+{
+ "moreNote": "共命中 14 条，只列出前 3 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。",
+ "hits": [
+  {
+   "id": "mem_api_09",
+   "type": "knowledge",
+   "summary": "mem_api_09 摘要",
+   "content": "27 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_api_09.md"
+  },
+  {
+   "id": "mem_api_08",
+   "type": "knowledge",
+   "summary": "mem_api_08 摘要",
+   "content": "27 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_api_08.md"
+  },
+  {
+   "id": "mem_api_07",
+   "type": "knowledge",
+   "summary": "mem_api_07 摘要",
+   "content": "27 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_api_07.md"
+  }
+ ]
+}
+--- 渲染 ---
+共命中 14 条，只列出前 3 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。
+
+[mem_api_09] knowledge｜mem_api_09 摘要 · /in-memory/global/mem_api_09.md
+接口约定第 9 条：返回值统一包一层 data 字段。
+
+[mem_api_08] knowledge｜mem_api_08 摘要 · /in-memory/global/mem_api_08.md
+接口约定第 8 条：返回值统一包一层 data 字段。
+
+[mem_api_07] knowledge｜mem_api_07 摘要 · /in-memory/global/mem_api_07.md
+接口约定第 7 条：返回值统一包一层 data 字段。
+
+### {"query":"接口约定","limit":50}
+{
+ "hits": [
+  {
+   "id": "mem_api_09",
+   "type": "knowledge",
+   "summary": "mem_api_09 摘要",
+   "content": "27 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_api_09.md"
+  },
+  {
+   "id": "mem_api_08",
+   "type": "knowledge",
+   "summary": "mem_api_08 摘要",
+   "content": "27 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_api_08.md"
+  },
+  {
+   "id": "mem_api_07",
+   "type": "knowledge",
+   "summary": "mem_api_07 摘要",
+   "content": "27 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_api_07.md"
+  },
+  {
+   "id": "mem_api_06",
+   "type": "knowledge",
+   "summary": "mem_api_06 摘要",
+   "content": "27 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_api_06.md"
+  },
+  {
+   "id": "mem_api_05",
+   "type": "knowledge",
+   "summary": "mem_api_05 摘要",
+   "content": "27 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_api_05.md"
+  },
+  {
+   "id": "mem_api_04",
+   "type": "knowledge",
+   "summary": "mem_api_04 摘要",
+   "content": "27 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_api_04.md"
+  },
+  {
+   "id": "mem_api_03",
+   "type": "knowledge",
+   "summary": "mem_api_03 摘要",
+   "content": "27 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_api_03.md"
+  },
+  {
+   "id": "mem_api_02",
+   "type": "knowledge",
+   "summary": "mem_api_02 摘要",
+   "content": "27 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_api_02.md"
+  },
+  {
+   "id": "mem_api_01",
+   "type": "knowledge",
+   "summary": "mem_api_01 摘要",
+   "content": "27 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_api_01.md"
+  },
+  {
+   "id": "mem_api_00",
+   "type": "knowledge",
+   "summary": "mem_api_00 摘要",
+   "content": "27 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_api_00.md"
+  },
+  {
+   "id": "mem_api_13",
+   "type": "knowledge",
+   "summary": "mem_api_13 摘要",
+   "content": "28 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_api_13.md"
+  },
+  {
+   "id": "mem_api_12",
+   "type": "knowledge",
+   "summary": "mem_api_12 摘要",
+   "content": "28 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_api_12.md"
+  },
+  {
+   "id": "mem_api_11",
+   "type": "knowledge",
+   "summary": "mem_api_11 摘要",
+   "content": "28 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_api_11.md"
+  },
+  {
+   "id": "mem_api_10",
+   "type": "knowledge",
+   "summary": "mem_api_10 摘要",
+   "content": "28 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_api_10.md"
+  }
+ ]
+}
+--- 渲染 ---
+[mem_api_09] knowledge｜mem_api_09 摘要 · /in-memory/global/mem_api_09.md
+接口约定第 9 条：返回值统一包一层 data 字段。
+
+[mem_api_08] knowledge｜mem_api_08 摘要 · /in-memory/global/mem_api_08.md
+接口约定第 8 条：返回值统一包一层 data 字段。
+
+[mem_api_07] knowledge｜mem_api_07 摘要 · /in-memory/global/mem_api_07.md
+接口约定第 7 条：返回值统一包一层 data 字段。
+
+[mem_api_06] knowledge｜mem_api_06 摘要 · /in-memory/global/mem_api_06.md
+接口约定第 6 条：返回值统一包一层 data 字段。
+
+[mem_api_05] knowledge｜mem_api_05 摘要 · /in-memory/global/mem_api_05.md
+接口约定第 5 条：返回值统一包一层 data 字段。
+
+[mem_api_04] knowledge｜mem_api_04 摘要 · /in-memory/global/mem_api_04.md
+接口约定第 4 条：返回值统一包一层 data 字段。
+
+[mem_api_03] knowledge｜mem_api_03 摘要 · /in-memory/global/mem_api_03.md
+接口约定第 3 条：返回值统一包一层 data 字段。
+
+[mem_api_02] knowledge｜mem_api_02 摘要 · /in-memory/global/mem_api_02.md
+接口约定第 2 条：返回值统一包一层 data 字段。
+
+[mem_api_01] knowledge｜mem_api_01 摘要 · /in-memory/global/mem_api_01.md
+接口约定第 1 条：返回值统一包一层 data 字段。
+
+[mem_api_00] knowledge｜mem_api_00 摘要 · /in-memory/global/mem_api_00.md
+接口约定第 0 条：返回值统一包一层 data 字段。
+
+[mem_api_13] knowledge｜mem_api_13 摘要 · /in-memory/global/mem_api_13.md
+接口约定第 13 条：返回值统一包一层 data 字段。
+
+[mem_api_12] knowledge｜mem_api_12 摘要 · /in-memory/global/mem_api_12.md
+接口约定第 12 条：返回值统一包一层 data 字段。
+
+[mem_api_11] knowledge｜mem_api_11 摘要 · /in-memory/global/mem_api_11.md
+接口约定第 11 条：返回值统一包一层 data 字段。
+
+[mem_api_10] knowledge｜mem_api_10 摘要 · /in-memory/global/mem_api_10.md
+接口约定第 10 条：返回值统一包一层 data 字段。
+
+### {"query":"连接池"}
+{
+ "hits": [
+  {
+   "id": "mem_long",
+   "type": "knowledge",
+   "summary": "mem_long 摘要",
+   "content": "212 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/proj-d6f74551/mem_long.md",
+   "isExcerpt": true,
+   "contentChars": 3499
+  },
+  {
+   "id": "mem_secret",
+   "type": "knowledge",
+   "summary": "mem_secret 摘要",
+   "content": "23 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_secret.md"
+  }
+ ]
+}
+--- 渲染 ---
+下面头行标「节选」的条目只给出正文的一段（有命中词时取它附近）。要全文，用 memory_search 按 id 查，或读头行末尾路径指向的文件。更新记忆会替换整条正文，更新前先确认已读过它的全文。
+
+[mem_long] knowledge｜mem_long 摘要 · 节选，正文共 3499 字符 · /in-memory/proj-d6f74551/mem_long.md
+[前文省略]
+这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。数据库连接池上限是二十。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。
+[后文省略]
+
+[mem_secret] knowledge｜mem_secret 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/global/mem_secret.md
+数据库连接串里的口令是 [已隐藏]，不要外传。
+
+### {"query":"缓存"}
+{
+ "hits": [
+  {
+   "id": "mem_long",
+   "type": "knowledge",
+   "summary": "mem_long 摘要",
+   "content": "201 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/proj-d6f74551/mem_long.md",
+   "isExcerpt": true,
+   "contentChars": 3499
+  },
+  {
+   "id": "mem_cache_a",
+   "type": "knowledge",
+   "summary": "mem_cache_a 摘要",
+   "content": "206 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_cache_a.md",
+   "isExcerpt": true,
+   "contentChars": 2407
+  },
+  {
+   "id": "mem_cache_b",
+   "type": "knowledge",
+   "summary": "mem_cache_b 摘要",
+   "content": "207 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_cache_b.md",
+   "isExcerpt": true,
+   "contentChars": 2408
+  }
+ ]
+}
+--- 渲染 ---
+下面头行标「节选」的条目只给出正文的一段（有命中词时取它附近）。要全文，用 memory_search 按 id 查，或读头行末尾路径指向的文件。更新记忆会替换整条正文，更新前先确认已读过它的全文。
+
+[mem_long] knowledge｜mem_long 摘要 · 节选，正文共 3499 字符 · /in-memory/proj-d6f74551/mem_long.md
+缓存策略说明。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。
+[后文省略]
+
+[mem_cache_a] knowledge｜mem_cache_a 摘要 · 节选，正文共 2407 字符 · /in-memory/global/mem_cache_a.md
+缓存键的命名。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。
+[后文省略]
+
+[mem_cache_b] knowledge｜mem_cache_b 摘要 · 节选，正文共 2408 字符 · /in-memory/global/mem_cache_b.md
+缓存预热的做法。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。
+[后文省略]
+
+### {"query":"缓存","limit":2}
+{
+ "moreNote": "共命中 3 条，只列出前 2 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。",
+ "hits": [
+  {
+   "id": "mem_long",
+   "type": "knowledge",
+   "summary": "mem_long 摘要",
+   "content": "201 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/proj-d6f74551/mem_long.md",
+   "isExcerpt": true,
+   "contentChars": 3499
+  },
+  {
+   "id": "mem_cache_a",
+   "type": "knowledge",
+   "summary": "mem_cache_a 摘要",
+   "content": "206 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_cache_a.md",
+   "isExcerpt": true,
+   "contentChars": 2407
+  }
+ ]
+}
+--- 渲染 ---
+共命中 3 条，只列出前 2 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。
+下面头行标「节选」的条目只给出正文的一段（有命中词时取它附近）。要全文，用 memory_search 按 id 查，或读头行末尾路径指向的文件。更新记忆会替换整条正文，更新前先确认已读过它的全文。
+
+[mem_long] knowledge｜mem_long 摘要 · 节选，正文共 3499 字符 · /in-memory/proj-d6f74551/mem_long.md
+缓存策略说明。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。
+[后文省略]
+
+[mem_cache_a] knowledge｜mem_cache_a 摘要 · 节选，正文共 2407 字符 · /in-memory/global/mem_cache_a.md
+缓存键的命名。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。
+[后文省略]
+
+### {"query":"口令"}
+{
+ "hits": [
+  {
+   "id": "mem_secret",
+   "type": "knowledge",
+   "summary": "mem_secret 摘要",
+   "content": "23 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_secret.md"
+  }
+ ]
+}
+--- 渲染 ---
+[mem_secret] knowledge｜mem_secret 摘要 · /in-memory/global/mem_secret.md
+数据库连接串里的口令是 [已隐藏]，不要外传。
+
+### {"query":"vitest playwright"}
+{
+ "hits": [
+  {
+   "id": "mem_english",
+   "type": "knowledge",
+   "summary": "mem_english 摘要",
+   "content": "60 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_english.md"
+  }
+ ]
+}
+--- 渲染 ---
+[mem_english] knowledge｜mem_english 摘要 · /in-memory/global/mem_english.md
+Use vitest for unit tests; playwright covers the login flow.
+
+### {"query":"a 1"}
+{
+ "noteCode": "substring-fallback",
+ "note": "没有命中关键词的记忆，以下只是关键词以子串出现的结果。命中弱，可以换同义词、换成另一种语言的写法、减少词数或换个角度再搜一次。",
+ "moreNote": "共命中 21 条，只列出前 10 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。",
+ "hits": [
+  {
+   "id": "mem_secret",
+   "type": "knowledge",
+   "summary": "mem_secret 摘要",
+   "content": "23 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 仅子串命中",
+   "path": "/in-memory/global/mem_secret.md"
+  },
+  {
+   "id": "mem_api_13",
+   "type": "knowledge",
+   "summary": "mem_api_13 摘要",
+   "content": "28 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 仅子串命中",
+   "path": "/in-memory/global/mem_api_13.md"
+  },
+  {
+   "id": "mem_api_12",
+   "type": "knowledge",
+   "summary": "mem_api_12 摘要",
+   "content": "28 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 仅子串命中",
+   "path": "/in-memory/global/mem_api_12.md"
+  },
+  {
+   "id": "mem_api_11",
+   "type": "knowledge",
+   "summary": "mem_api_11 摘要",
+   "content": "28 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 仅子串命中",
+   "path": "/in-memory/global/mem_api_11.md"
+  },
+  {
+   "id": "mem_api_10",
+   "type": "knowledge",
+   "summary": "mem_api_10 摘要",
+   "content": "28 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 仅子串命中",
+   "path": "/in-memory/global/mem_api_10.md"
+  },
+  {
+   "id": "mem_api_01",
+   "type": "knowledge",
+   "summary": "mem_api_01 摘要",
+   "content": "27 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 仅子串命中",
+   "path": "/in-memory/global/mem_api_01.md"
+  },
+  {
+   "id": "mem_db_naming",
+   "type": "knowledge",
+   "summary": "mem_db_naming 摘要",
+   "content": "24 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 仅子串命中",
+   "path": "/in-memory/global/mem_db_naming.md"
+  },
+  {
+   "id": "mem_deploy",
+   "type": "knowledge",
+   "summary": "mem_deploy 摘要",
+   "content": "42 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 仅子串命中",
+   "path": "/in-memory/proj-d6f74551/mem_deploy.md"
+  },
+  {
+   "id": "mem_english",
+   "type": "knowledge",
+   "summary": "mem_english 摘要",
+   "content": "60 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 仅子串命中",
+   "path": "/in-memory/global/mem_english.md"
+  },
+  {
+   "id": "mem_cache_a",
+   "type": "knowledge",
+   "summary": "mem_cache_a 摘要",
+   "content": "206 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 仅子串命中",
+   "path": "/in-memory/global/mem_cache_a.md",
+   "isExcerpt": true,
+   "contentChars": 2407
+  }
+ ]
+}
+--- 渲染 ---
+没有命中关键词的记忆，以下只是关键词以子串出现的结果。命中弱，可以换同义词、换成另一种语言的写法、减少词数或换个角度再搜一次。
+共命中 21 条，只列出前 10 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。
+下面头行标「节选」的条目只给出正文的一段（有命中词时取它附近）。要全文，用 memory_search 按 id 查，或读头行末尾路径指向的文件。更新记忆会替换整条正文，更新前先确认已读过它的全文。
+
+[mem_secret] knowledge｜mem_secret 摘要 · 仅子串命中 · /in-memory/global/mem_secret.md
+数据库连接串里的口令是 [已隐藏]，不要外传。
+
+[mem_api_13] knowledge｜mem_api_13 摘要 · 仅子串命中 · /in-memory/global/mem_api_13.md
+接口约定第 13 条：返回值统一包一层 data 字段。
+
+[mem_api_12] knowledge｜mem_api_12 摘要 · 仅子串命中 · /in-memory/global/mem_api_12.md
+接口约定第 12 条：返回值统一包一层 data 字段。
+
+[mem_api_11] knowledge｜mem_api_11 摘要 · 仅子串命中 · /in-memory/global/mem_api_11.md
+接口约定第 11 条：返回值统一包一层 data 字段。
+
+[mem_api_10] knowledge｜mem_api_10 摘要 · 仅子串命中 · /in-memory/global/mem_api_10.md
+接口约定第 10 条：返回值统一包一层 data 字段。
+
+[mem_api_01] knowledge｜mem_api_01 摘要 · 仅子串命中 · /in-memory/global/mem_api_01.md
+接口约定第 1 条：返回值统一包一层 data 字段。
+
+[mem_db_naming] knowledge｜mem_db_naming 摘要 · 仅子串命中 · /in-memory/global/mem_db_naming.md
+数据库表名用复数，字段用 snake_case。
+
+[mem_deploy] knowledge｜mem_deploy 摘要 · 仅子串命中 · /in-memory/proj-d6f74551/mem_deploy.md
+部署走 GitHub Actions，发布前先跑 pnpm build 和集成测试。
+
+[mem_english] knowledge｜mem_english 摘要 · 仅子串命中 · /in-memory/global/mem_english.md
+Use vitest for unit tests; playwright covers the login flow.
+
+[mem_cache_a] knowledge｜mem_cache_a 摘要 · 仅子串命中 · 节选，正文共 2407 字符 · /in-memory/global/mem_cache_a.md
+缓存键的命名。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。
+[后文省略]
+
+### {"query":"数据库","types":["preference"]}
+{
+ "hits": [
+  {
+   "id": "mem_db_mock",
+   "type": "preference",
+   "summary": "mem_db_mock 摘要",
+   "content": "35 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_db_mock.md"
+  }
+ ]
+}
+--- 渲染 ---
+[mem_db_mock] preference｜mem_db_mock 摘要 · /in-memory/global/mem_db_mock.md
+测试里不要 mock 数据库，集成测试连真实的 PostgreSQL。
+
+### {"query":"数据库","types":[]}
+{
+ "hits": [
+  {
+   "id": "mem_db_naming",
+   "type": "knowledge",
+   "summary": "mem_db_naming 摘要",
+   "content": "24 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_db_naming.md"
+  },
+  {
+   "id": "mem_db_mock",
+   "type": "preference",
+   "summary": "mem_db_mock 摘要",
+   "content": "35 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_db_mock.md"
+  },
+  {
+   "id": "mem_old",
+   "type": "knowledge",
+   "summary": "mem_old 摘要",
+   "content": "13 字符",
+   "sourceNote": "",
+   "stalenessNote": "（已 400 天未确认，可能过时）",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_old.md"
+  },
+  {
+   "id": "mem_secret",
+   "type": "knowledge",
+   "summary": "mem_secret 摘要",
+   "content": "23 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_secret.md"
+  },
+  {
+   "id": "mem_long",
+   "type": "knowledge",
+   "summary": "mem_long 摘要",
+   "content": "212 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/proj-d6f74551/mem_long.md",
+   "isExcerpt": true,
+   "contentChars": 3499
+  },
+  {
+   "id": "mem_cache_a",
+   "type": "knowledge",
+   "summary": "mem_cache_a 摘要",
+   "content": "206 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_cache_a.md",
+   "isExcerpt": true,
+   "contentChars": 2407
+  },
+  {
+   "id": "mem_cache_b",
+   "type": "knowledge",
+   "summary": "mem_cache_b 摘要",
+   "content": "207 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_cache_b.md",
+   "isExcerpt": true,
+   "contentChars": 2408
+  },
+  {
+   "id": "mem_pending",
+   "type": "knowledge",
+   "summary": "mem_pending 摘要",
+   "content": "24 字符",
+   "sourceNote": "（子 agent 写入，未确认）",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_pending.md"
+  }
+ ]
+}
+--- 渲染 ---
+下面头行标「节选」的条目只给出正文的一段（有命中词时取它附近）。要全文，用 memory_search 按 id 查，或读头行末尾路径指向的文件。更新记忆会替换整条正文，更新前先确认已读过它的全文。
+
+[mem_db_naming] knowledge｜mem_db_naming 摘要 · /in-memory/global/mem_db_naming.md
+数据库表名用复数，字段用 snake_case。
+
+[mem_db_mock] preference｜mem_db_mock 摘要 · /in-memory/global/mem_db_mock.md
+测试里不要 mock 数据库，集成测试连真实的 PostgreSQL。
+
+[mem_old] knowledge｜mem_old 摘要（已 400 天未确认，可能过时） · /in-memory/global/mem_old.md
+数据库备份每天凌晨三点跑。
+
+[mem_secret] knowledge｜mem_secret 摘要 · /in-memory/global/mem_secret.md
+数据库连接串里的口令是 [已隐藏]，不要外传。
+
+[mem_long] knowledge｜mem_long 摘要 · 节选，正文共 3499 字符 · /in-memory/proj-d6f74551/mem_long.md
+[前文省略]
+这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。数据库连接池上限是二十。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。
+[后文省略]
+
+[mem_cache_a] knowledge｜mem_cache_a 摘要 · 部分命中，没有可列出的完整关键词 · 节选，正文共 2407 字符 · /in-memory/global/mem_cache_a.md
+缓存键的命名。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。
+[后文省略]
+
+[mem_cache_b] knowledge｜mem_cache_b 摘要 · 部分命中，没有可列出的完整关键词 · 节选，正文共 2408 字符 · /in-memory/global/mem_cache_b.md
+缓存预热的做法。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。
+[后文省略]
+
+[mem_pending] knowledge｜mem_pending 摘要（子 agent 写入，未确认） · /in-memory/global/mem_pending.md
+数据库迁移脚本放在 migrations 目录。
+
+### {"query":"数据库","types":["decision"]}
+{
+ "noteCode": "types-no-records",
+ "note": "范围内没有 decision 类型的记忆。不限类型时范围内的记忆：knowledge（事实与经验）24 条、preference（行为偏好）2 条。",
+ "hits": []
+}
+--- 渲染 ---
+范围内没有 decision 类型的记忆。不限类型时范围内的记忆：knowledge（事实与经验）24 条、preference（行为偏好）2 条。
+
+### {"query":"火星","types":["preference"]}
+{
+ "hits": []
+}
+--- 渲染 ---
+没有匹配的记忆。
+
+### {"query":"日志","scope":"global"}
+{
+ "hits": [
+  {
+   "id": "mem_both",
+   "type": "knowledge",
+   "summary": "mem_both 摘要",
+   "content": "19 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_both.md"
+  }
+ ]
+}
+--- 渲染 ---
+[mem_both] knowledge｜mem_both 摘要 · /in-memory/global/mem_both.md
+全局这份：日志统一用 JSON 格式。
+
+### {"query":"日志","scope":"workspace"}
+{
+ "hits": [
+  {
+   "id": "mem_both",
+   "type": "knowledge",
+   "summary": "mem_both 摘要",
+   "content": "25 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/proj-d6f74551/mem_both.md"
+  }
+ ]
+}
+--- 渲染 ---
+[mem_both] knowledge｜mem_both 摘要 · /in-memory/proj-d6f74551/mem_both.md
+项目这份：日志用 JSON 格式，并带上请求编号。
+
+### {"query":"日志","scope":"all-visible"}
+{
+ "hits": [
+  {
+   "id": "mem_both",
+   "type": "knowledge",
+   "summary": "mem_both 摘要",
+   "content": "25 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/proj-d6f74551/mem_both.md"
+  }
+ ]
+}
+--- 渲染 ---
+[mem_both] knowledge｜mem_both 摘要 · /in-memory/proj-d6f74551/mem_both.md
+项目这份：日志用 JSON 格式，并带上请求编号。
+
+### {"query":"备份"}
+{
+ "hits": [
+  {
+   "id": "mem_old",
+   "type": "knowledge",
+   "summary": "mem_old 摘要",
+   "content": "13 字符",
+   "sourceNote": "",
+   "stalenessNote": "（已 400 天未确认，可能过时）",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_old.md"
+  }
+ ]
+}
+--- 渲染 ---
+[mem_old] knowledge｜mem_old 摘要（已 400 天未确认，可能过时） · /in-memory/global/mem_old.md
+数据库备份每天凌晨三点跑。
+
+### {"query":"迁移脚本"}
+{
+ "hits": [
+  {
+   "id": "mem_pending",
+   "type": "knowledge",
+   "summary": "mem_pending 摘要",
+   "content": "24 字符",
+   "sourceNote": "（子 agent 写入，未确认）",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_pending.md"
+  }
+ ]
+}
+--- 渲染 ---
+[mem_pending] knowledge｜mem_pending 摘要（子 agent 写入，未确认） · /in-memory/global/mem_pending.md
+数据库迁移脚本放在 migrations 目录。
+
+### {"query":"临时账号"}
+{
+ "hits": []
+}
+--- 渲染 ---
+没有匹配的记忆。
+
+### 冻结快照的会话 {"query":"数据库"}
+{
+ "hits": [
+  {
+   "id": "mem_db_naming",
+   "type": "knowledge",
+   "summary": "mem_db_naming 摘要",
+   "content": "24 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_db_naming.md"
+  },
+  {
+   "id": "mem_db_mock",
+   "type": "preference",
+   "summary": "mem_db_mock 摘要",
+   "content": "16 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_db_mock.md"
+  },
+  {
+   "id": "mem_old",
+   "type": "knowledge",
+   "summary": "mem_old 摘要",
+   "content": "13 字符",
+   "sourceNote": "",
+   "stalenessNote": "（已 400 天未确认，可能过时）",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_old.md"
+  },
+  {
+   "id": "mem_secret",
+   "type": "knowledge",
+   "summary": "mem_secret 摘要",
+   "content": "23 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_secret.md"
+  },
+  {
+   "id": "mem_long",
+   "type": "knowledge",
+   "summary": "mem_long 摘要",
+   "content": "212 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/proj-d6f74551/mem_long.md",
+   "isExcerpt": true,
+   "contentChars": 3499
+  },
+  {
+   "id": "mem_cache_a",
+   "type": "knowledge",
+   "summary": "mem_cache_a 摘要",
+   "content": "206 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_cache_a.md",
+   "isExcerpt": true,
+   "contentChars": 2407
+  },
+  {
+   "id": "mem_cache_b",
+   "type": "knowledge",
+   "summary": "mem_cache_b 摘要",
+   "content": "207 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_cache_b.md",
+   "isExcerpt": true,
+   "contentChars": 2408
+  },
+  {
+   "id": "mem_pending",
+   "type": "knowledge",
+   "summary": "mem_pending 摘要",
+   "content": "24 字符",
+   "sourceNote": "（子 agent 写入，未确认）",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_pending.md"
+  }
+ ]
+}
+--- 渲染 ---
+下面头行标「节选」的条目只给出正文的一段（有命中词时取它附近）。要全文，用 memory_search 按 id 查，或读头行末尾路径指向的文件。更新记忆会替换整条正文，更新前先确认已读过它的全文。
+
+[mem_db_naming] knowledge｜mem_db_naming 摘要 · /in-memory/global/mem_db_naming.md
+数据库表名用复数，字段用 snake_case。
+
+[mem_db_mock] preference｜mem_db_mock 摘要 · /in-memory/global/mem_db_mock.md
+全文已在本会话带入的长期记忆里。
+
+[mem_old] knowledge｜mem_old 摘要（已 400 天未确认，可能过时） · /in-memory/global/mem_old.md
+数据库备份每天凌晨三点跑。
+
+[mem_secret] knowledge｜mem_secret 摘要 · /in-memory/global/mem_secret.md
+数据库连接串里的口令是 [已隐藏]，不要外传。
+
+[mem_long] knowledge｜mem_long 摘要 · 节选，正文共 3499 字符 · /in-memory/proj-d6f74551/mem_long.md
+[前文省略]
+这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。数据库连接池上限是二十。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。后面还有一大段无关内容。
+[后文省略]
+
+[mem_cache_a] knowledge｜mem_cache_a 摘要 · 部分命中，没有可列出的完整关键词 · 节选，正文共 2407 字符 · /in-memory/global/mem_cache_a.md
+缓存键的命名。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。键名带上租户和版本，避免串数据。
+[后文省略]
+
+[mem_cache_b] knowledge｜mem_cache_b 摘要 · 部分命中，没有可列出的完整关键词 · 节选，正文共 2408 字符 · /in-memory/global/mem_cache_b.md
+缓存预热的做法。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。发布后先预热热点数据，再放流量。
+[后文省略]
+
+[mem_pending] knowledge｜mem_pending 摘要（子 agent 写入，未确认） · /in-memory/global/mem_pending.md
+数据库迁移脚本放在 migrations 目录。
+
+### 冻结快照的会话 {"query":"测试"}
+{
+ "hits": [
+  {
+   "id": "mem_db_mock",
+   "type": "preference",
+   "summary": "mem_db_mock 摘要",
+   "content": "16 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_db_mock.md"
+  },
+  {
+   "id": "mem_review",
+   "type": "preference",
+   "summary": "mem_review 摘要",
+   "content": "16 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_review.md"
+  },
+  {
+   "id": "mem_deploy",
+   "type": "knowledge",
+   "summary": "mem_deploy 摘要",
+   "content": "42 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/proj-d6f74551/mem_deploy.md"
+  }
+ ]
+}
+--- 渲染 ---
+[mem_db_mock] preference｜mem_db_mock 摘要 · /in-memory/global/mem_db_mock.md
+全文已在本会话带入的长期记忆里。
+
+[mem_review] preference｜mem_review 摘要 · /in-memory/global/mem_review.md
+全文已在本会话带入的长期记忆里。
+
+[mem_deploy] knowledge｜mem_deploy 摘要 · /in-memory/proj-d6f74551/mem_deploy.md
+部署走 GitHub Actions，发布前先跑 pnpm build 和集成测试。
+
+### 冻结快照的会话 {"query":"mem_db_mock"}
+{
+ "moreNote": "共命中 26 条，只列出前 10 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。用 match: \"all\" 可以只看同时含全部关键词的记忆。",
+ "hits": [
+  {
+   "id": "mem_db_mock",
+   "type": "preference",
+   "summary": "mem_db_mock 摘要",
+   "content": "16 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": "",
+   "path": "/in-memory/global/mem_db_mock.md"
+  },
+  {
+   "id": "mem_db_naming",
+   "type": "knowledge",
+   "summary": "mem_db_naming 摘要",
+   "content": "24 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_db_naming.md"
+  },
+  {
+   "id": "mem_old",
+   "type": "knowledge",
+   "summary": "mem_old 摘要",
+   "content": "13 字符",
+   "sourceNote": "",
+   "stalenessNote": "（已 400 天未确认，可能过时）",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_old.md"
+  },
+  {
+   "id": "mem_long",
+   "type": "knowledge",
+   "summary": "mem_long 摘要",
+   "content": "201 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/proj-d6f74551/mem_long.md",
+   "isExcerpt": true,
+   "contentChars": 3499
+  },
+  {
+   "id": "mem_both",
+   "type": "knowledge",
+   "summary": "mem_both 摘要",
+   "content": "25 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/proj-d6f74551/mem_both.md"
+  },
+  {
+   "id": "mem_deploy",
+   "type": "knowledge",
+   "summary": "mem_deploy 摘要",
+   "content": "42 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/proj-d6f74551/mem_deploy.md"
+  },
+  {
+   "id": "mem_secret",
+   "type": "knowledge",
+   "summary": "mem_secret 摘要",
+   "content": "23 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_secret.md"
+  },
+  {
+   "id": "mem_review",
+   "type": "preference",
+   "summary": "mem_review 摘要",
+   "content": "16 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_review.md"
+  },
+  {
+   "id": "mem_api_13",
+   "type": "knowledge",
+   "summary": "mem_api_13 摘要",
+   "content": "28 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_api_13.md"
+  },
+  {
+   "id": "mem_api_12",
+   "type": "knowledge",
+   "summary": "mem_api_12 摘要",
+   "content": "28 字符",
+   "sourceNote": "",
+   "stalenessNote": "",
+   "matchNote": " · 部分命中，没有可列出的完整关键词",
+   "matchedTerms": [],
+   "path": "/in-memory/global/mem_api_12.md"
+  }
+ ]
+}
+--- 渲染 ---
+共命中 26 条，只列出前 10 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。用 match: "all" 可以只看同时含全部关键词的记忆。
+下面头行标「节选」的条目只给出正文的一段（有命中词时取它附近）。要全文，用 memory_search 按 id 查，或读头行末尾路径指向的文件。更新记忆会替换整条正文，更新前先确认已读过它的全文。
+
+[mem_db_mock] preference｜mem_db_mock 摘要 · /in-memory/global/mem_db_mock.md
+全文已在本会话带入的长期记忆里。
+
+[mem_db_naming] knowledge｜mem_db_naming 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/global/mem_db_naming.md
+数据库表名用复数，字段用 snake_case。
+
+[mem_old] knowledge｜mem_old 摘要（已 400 天未确认，可能过时） · 部分命中，没有可列出的完整关键词 · /in-memory/global/mem_old.md
+数据库备份每天凌晨三点跑。
+
+[mem_long] knowledge｜mem_long 摘要 · 部分命中，没有可列出的完整关键词 · 节选，正文共 3499 字符 · /in-memory/proj-d6f74551/mem_long.md
+缓存策略说明。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。这一段讲缓存失效的细节，写得很长。
+[后文省略]
+
+[mem_both] knowledge｜mem_both 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/proj-d6f74551/mem_both.md
+项目这份：日志用 JSON 格式，并带上请求编号。
+
+[mem_deploy] knowledge｜mem_deploy 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/proj-d6f74551/mem_deploy.md
+部署走 GitHub Actions，发布前先跑 pnpm build 和集成测试。
+
+[mem_secret] knowledge｜mem_secret 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/global/mem_secret.md
+数据库连接串里的口令是 [已隐藏]，不要外传。
+
+[mem_review] preference｜mem_review 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/global/mem_review.md
+全文已在本会话带入的长期记忆里。
+
+[mem_api_13] knowledge｜mem_api_13 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/global/mem_api_13.md
+接口约定第 13 条：返回值统一包一层 data 字段。
+
+[mem_api_12] knowledge｜mem_api_12 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/global/mem_api_12.md
+接口约定第 12 条：返回值统一包一层 data 字段。
