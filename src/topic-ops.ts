@@ -1,6 +1,7 @@
+import { createHash } from 'node:crypto'
 import {
   ALIASES_RE, HEADER_RE, HEADING_RE, LINKED_HEADING_RE, MEMBER_RE, UNSORTED_PAGE, UNSORTED_TITLE,
-  decodePath, encodePath, isTopicName, keyOf, orderedPages, resolveTopic, scan, unescape, withCreatedAt,
+  decodePath, encodePath, isTopicName, keyOf, orderedPages, resolveTopic, scan, unescape, withCreatedAt, withMemberText, withoutMemberText,
   type IndexFiles,
 } from './topic-index.ts'
 
@@ -8,7 +9,7 @@ import {
  * 索引操作的纯函数：把一个操作按当下的索引定成具体的计划、把计划套到索引上、把计划撤回去。不碰磁盘。
  *
  * - 操作（IndexOp）用主题名说话，是模型和调用方交来的样子；计划（IndexPlan）用文件名说话，带上撤销要用的改前数据，
- *   可以原样存进操作日志和回执。
+ *   可以原样存进回执。计划里说到记忆只用 id：改前的整页里成员行换成只带 id 的占位，记忆的名称和摘要不进计划。
  * - 套计划（applyPlan）可以重复做：对已经套了一半的索引再套一次，得到套完的索引。中断后的补做靠这一点。
  * - 撤销（undoPlan）按效果判：这一步写下的效果还在才撤，期间别处进来的行留着；效果已经不在了就说撤不了。
  * - 六种操作：归主题、改名、合并、调主题顺序、调成员顺序、改说明。拆分就是几次归到新主题，不另算一种。
@@ -29,11 +30,14 @@ export interface MovedMember { id: string; from: string; at: number }
 
 export type IndexPlan =
   | { kind: 'assign'; page: string; name: string; isNew: boolean; about?: string; createdAt?: number; moved: MovedMember[] }
-  | { kind: 'rename'; page: string; from: string; to: string; aboutBefore: string }
+  | { kind: 'rename'; page: string; from: string; to: string; aboutBefore: string; aliasesBefore: string[] }
   | {
     kind: 'merge'; page: string; name: string; moved: MovedMember[]
-    /** 并进来的主题：改前的整页、它在入口里的那一节和位置（入口里没有这一节时没有）。 */
-    sources: Array<{ page: string; name: string; aliases: string[]; text: string; section?: { text: string; at: number } }>
+    /**
+     * 并进来的主题：改前的整页（成员行是只带 id 的占位）、页里成员行之外的文字的指纹（body，搬空之后页里别的文字还是这样才删页）、
+     * 它在入口里的那一节和位置（入口里没有这一节时没有）。
+     */
+    sources: Array<{ page: string; name: string; aliases: string[]; text: string; body: string; section?: { text: string; at: number } }>
     about?: string
     aboutBefore: string
     aliasesBefore: string[]
@@ -75,6 +79,11 @@ function splitHeader(text: string): { header: string; rows: Row[] } {
 const joinPage = (header: string, rows: readonly Row[]) => header + rows.map(r => r.line).join('\n')
 
 const memberIds = (text: string) => splitHeader(text).rows.flatMap(r => memberIdOf(r) ?? [])
+
+/** 一页里成员行和空行之外的文字（页头不算）：标题、曾用名、手写的备注。 */
+const bodyLines = (text: string) => splitHeader(text).rows.filter(r => memberIdOf(r) === undefined && bare(r.line).trim() !== '').map(r => bare(r.line))
+/** 那些文字的指纹：删页前拿它确认页里没有多出别人后来写的东西。 */
+const bodyDigest = (text: string) => createHash('sha1').update(bodyLines(text).join('\n')).digest('hex').slice(0, 16)
 
 /** 从一页里取出这些记忆的行（按页里的先后），并给出去掉它们之后的页。 */
 function takeMembers(text: string, ids: ReadonlySet<string>): { lines: Map<string, string>; rest: string } {
@@ -252,9 +261,30 @@ function insertSection(e: Entry, section: Section, at: number): Entry {
 
 const sectionFromText = (text: string): Section | undefined => splitEntry(text).sections[0]
 
-const FORMER_NOTE_RE = /（曾用名：([^（）]*)）$/
-const formerNames = (about: string) => FORMER_NOTE_RE.exec(about)?.[1]!.split('、').map(n => n.trim()).filter(n => n !== '') ?? []
-const withoutFormerNote = (about: string) => about.replace(FORMER_NOTE_RE, '')
+const FORMER_NOTE_OPEN = '（曾用名：'
+/** 括号成对：从左到右右括号不比左括号多，数到头正好抵消。 */
+const isBalanced = (text: string) => {
+  let depth = 0
+  for (const ch of text) {
+    if (ch === '（') depth++
+    else if (ch === '）' && --depth < 0) return false
+  }
+  return depth === 0
+}
+/**
+ * 说明末尾那句「（曾用名：…）」从哪开始；没有这一句为 -1。旧名自己可以带成对的括号；
+ * 开头字样到末尾之间括号不成对的（那几个字只是出现在正文中间）不算。
+ */
+const formerNoteAt = (about: string) => {
+  if (!about.endsWith('）')) return -1
+  const at = about.lastIndexOf(FORMER_NOTE_OPEN)
+  return at !== -1 && isBalanced(about.slice(at + FORMER_NOTE_OPEN.length, -1)) ? at : -1
+}
+const formerNames = (about: string) => {
+  const at = formerNoteAt(about)
+  return at === -1 ? [] : about.slice(at + FORMER_NOTE_OPEN.length, -1).split('、').map(n => n.trim()).filter(n => n !== '')
+}
+const withoutFormerNote = (about: string) => { const at = formerNoteAt(about); return at === -1 ? about : about.slice(0, at) }
 const withFormerNote = (head: string, names: readonly string[]) => (names.length === 0 ? head : `${head}（曾用名：${names.join('、')}）`)
 
 /** 入口里的说明末尾带一句「（曾用名：…）」：把这些旧名记进去，已经记着的不重复。 */
@@ -266,6 +296,9 @@ function aboutWithoutFormerNames(about: string, names: readonly string[]): strin
   const drop = new Set(names.map(keyOf))
   return withFormerNote(withoutFormerNote(about), formerNames(about).filter(name => !drop.has(keyOf(name))))
 }
+
+/** 说明要落成入口里的一行普通文字：以标题记号或代码围栏开头的会改掉入口的结构，不收。 */
+const isAbout = (text: string) => !/^(#{1,6}(\s|$)|```|~~~)/.test(text)
 
 // ── 定计划 ──
 
@@ -280,11 +313,18 @@ function findTopic(files: IndexFiles, name: string) {
 
 /** 这几条记忆现在在 page 页里的、还在用的那些，连同各自的位置。 */
 function movable(files: IndexFiles, page: string, ids: readonly string[], active: ReadonlySet<string>): MovedMember[] {
-  const inPage = memberIds(files.pages[page] ?? '')
+  const position = new Map<string, number>()
+  memberIds(files.pages[page] ?? '').forEach((id, at) => { if (!position.has(id)) position.set(id, at) })
   return [...new Set(ids)].flatMap(id => {
-    const at = inPage.indexOf(id)
-    return at === -1 || !active.has(id) ? [] : [{ id, from: page, at }]
+    const at = position.get(id)
+    return at === undefined || !active.has(id) ? [] : [{ id, from: page, at }]
   })
+}
+
+/** 套完之后搬的记忆确实成了目标页的成员才算数：目标页结尾落在代码块里之类的情况，行放进去也不算成员，这个操作不做。 */
+function landed(files: IndexFiles, plan: Extract<IndexPlan, { kind: 'assign' | 'merge' }>): PlanResult {
+  const members = new Set(memberIds(applyPlan(files, plan).files.pages[plan.page] ?? ''))
+  return plan.moved.every(m => members.has(m.id)) ? { kind: 'planned', plan } : skipped('目标主题页放不进成员（页里有没收尾的代码块）')
 }
 
 /**
@@ -303,10 +343,9 @@ export function planIndexOp(files: IndexFiles, op: IndexOp, ctx: PlanContext): P
       const moved = movable(files, fromPage, op.memoryIds, ctx.activeIds)
       if (moved.length === 0) return skipped(`这些记忆已经不在「${op.from}」里`)
       const isNew = target.kind === 'new'
-      return {
-        kind: 'planned',
-        plan: { kind: 'assign', page: target.fileName, name: target.name, isNew, ...(isNew ? { about: oneLine(op.about ?? ''), createdAt: ctx.now } : {}), moved },
-      }
+      // 新主题的说明不合适就先空着，记忆照样归过去
+      const about = oneLine(op.about ?? '')
+      return landed(files, { kind: 'assign', page: target.fileName, name: target.name, isNew, ...(isNew ? { about: isAbout(about) ? about : '', createdAt: ctx.now } : {}), moved })
     }
     case 'rename': {
       const topic = findTopic(files, op.topic)
@@ -317,7 +356,7 @@ export function planIndexOp(files: IndexFiles, op: IndexOp, ctx: PlanContext): P
       const clash = findTopic(files, name)
       // 只是改大小写、或改回自己的曾用名可以；撞上别的主题的名字或曾用名不改
       if (clash !== undefined && clash.fileName !== topic.fileName) return skipped(`已经有主题叫「${name}」`)
-      return { kind: 'planned', plan: { kind: 'rename', page: topic.fileName, from: topic.name, to: name, aboutBefore: topic.about } }
+      return { kind: 'planned', plan: { kind: 'rename', page: topic.fileName, from: topic.name, to: name, aboutBefore: topic.about, aliasesBefore: topic.aliases } }
     }
     case 'merge': {
       const into = findTopic(files, op.into)
@@ -328,21 +367,21 @@ export function planIndexOp(files: IndexFiles, op: IndexOp, ctx: PlanContext): P
         return t === undefined || t.fileName === into.fileName ? [] : [[t.fileName, t] as const]
       })).values()]
       if (found.length === 0) return skipped('要并进来的主题都不在了')
+      // 被并的页里还有不在用的记忆的行（等维护清掉）时先不并：页搬不空，旧名会留在一张空页上
+      if (found.some(t => t.memberIds.some(id => !ctx.activeIds.has(id)))) return skipped('要并进来的主题里有等着清理的成员行')
       const sources = found.map(t => {
         const at = sectionIndex(entry, t.fileName, t.name)
         return {
-          page: t.fileName, name: t.name, aliases: t.aliases, text: files.pages[t.fileName]!,
+          page: t.fileName, name: t.name, aliases: t.aliases, text: withoutMemberText(files.pages[t.fileName]!), body: bodyDigest(files.pages[t.fileName]!),
           ...(at === -1 ? {} : { section: { text: entry.sections[at]!.rows.map(r => r.line).join('\n'), at } }),
         }
       })
       const moved = found.flatMap(t => movable(files, t.fileName, t.memberIds, ctx.activeIds))
-      return {
-        kind: 'planned',
-        plan: {
-          kind: 'merge', page: into.fileName, name: into.name, moved, sources,
-          ...(op.about === undefined ? {} : { about: oneLine(op.about) }), aboutBefore: into.about, aliasesBefore: into.aliases,
-        },
-      }
+      const about = op.about === undefined ? '' : oneLine(op.about)
+      return landed(files, {
+        kind: 'merge', page: into.fileName, name: into.name, moved, sources,
+        ...(about === '' || !isAbout(about) ? {} : { about }), aboutBefore: into.about, aliasesBefore: into.aliases,
+      })
     }
     case 'order-topics': {
       const topics = orderedPages(files)
@@ -366,7 +405,9 @@ export function planIndexOp(files: IndexFiles, op: IndexOp, ctx: PlanContext): P
     case 'describe': {
       const topic = findTopic(files, op.topic)
       if (topic === undefined) return skipped(`主题「${op.topic}」不在了`)
-      const about = oneLine(op.about)
+      if (!isAbout(oneLine(op.about))) return skipped('说明不能以标题记号或代码围栏开头')
+      // 说明末尾那句曾用名是程序记的，改说明时留着
+      const about = withFormerNote(withoutFormerNote(oneLine(op.about)), formerNames(topic.about))
       if (about === topic.about) return skipped('说明没变')
       return { kind: 'planned', plan: { kind: 'describe', page: topic.fileName, about, before: topic.about } }
     }
@@ -391,10 +432,14 @@ function moveInto(files: IndexFiles, page: string, moved: readonly MovedMember[]
     const taken = takeMembers(pages[fileName]!, wanted)
     for (const [id, line] of taken.lines) if (!lines.has(id)) lines.set(id, line)
   }
-  const arriving = moved.flatMap(m => lines.get(m.id) ?? [])
-  pages[page] = insertMembers(pages[page]!, arriving, position === 'top' ? 0 : Number.MAX_SAFE_INTEGER)
-  // 现在在目标页里的，别的页不再留它的行
-  const settled = new Set([...present, ...lines.keys()].filter(id => moved.some(m => m.id === id)))
+  const arriving = moved.filter(m => lines.has(m.id))
+  const inserted = insertMembers(pages[page]!, arriving.map(m => lines.get(m.id)!), position === 'top' ? 0 : Number.MAX_SAFE_INTEGER)
+  // 放进去的行要确实成了这页的成员才算（页被改成结尾落在代码块里时不算）：不算就不放，那几条留在原处
+  const landing = new Set(memberIds(inserted))
+  if (arriving.every(m => landing.has(m.id))) pages[page] = inserted
+  // 现在确实在目标页里的，别的页不再留它的行
+  const here = new Set(memberIds(pages[page]!))
+  const settled = new Set(moved.map(m => m.id).filter(id => here.has(id)))
   for (const fileName of Object.keys(pages)) if (fileName !== page) pages[fileName] = takeMembers(pages[fileName]!, settled).rest
   return { entry: files.entry, pages }
 }
@@ -457,8 +502,8 @@ export function applyPlan(files: IndexFiles, plan: IndexPlan): AppliedIndex {
       const former = plan.sources.flatMap(s => [s.name, ...s.aliases])
       const target = next.pages[plan.page]!
       next = { ...next, pages: { ...next.pages, [plan.page]: withAliases(target, mergeNames(aliasesOf(target), former).filter(a => keyOf(a) !== keyOf(plan.name))) } }
-      // 并进来的页里一条成员都不剩才删；期间别处又归进去的记忆留在原处，那一页就不删
-      const deleted = plan.sources.map(s => s.page).filter(page => next.pages[page] !== undefined && memberIds(next.pages[page]!).length === 0)
+      // 并进来的页里一条成员都不剩、别的文字也还是定计划时的样子才删；期间别处又归进去的记忆、后来手写的备注留在原处，那一页就不删
+      const deleted = plan.sources.filter(s => next.pages[s.page] !== undefined && memberIds(next.pages[s.page]!).length === 0 && bodyDigest(next.pages[s.page]!) === s.body).map(s => s.page)
       const pages = { ...next.pages }
       for (const page of deleted) delete pages[page]
       const entry = splitEntry(next.entry)
@@ -487,6 +532,14 @@ export function applyPlan(files: IndexFiles, plan: IndexPlan): AppliedIndex {
       return { files: mapSection(files, plan.page, topic.name, s => withAbout(s, plan.about)), deleted: [] }
     }
   }
+}
+
+/**
+ * 只够再套一次的计划：去掉撤销才用得上的改前全文（并进来的页、入口里的那一节）。放进操作日志的是这一份，里面没有成员行。
+ */
+export function planForReplay(plan: IndexPlan): IndexPlan {
+  if (plan.kind !== 'merge') return plan
+  return { ...plan, sources: plan.sources.map(s => ({ ...s, text: '', ...(s.section !== undefined ? { section: { text: '', at: s.section.at } } : {}) })) }
 }
 
 // ── 撤销 ──
@@ -520,21 +573,31 @@ export function undoPlan(files: IndexFiles, plan: IndexPlan): UndoResult {
       if (back.count === 0) return stale('这些记忆已经不在这个主题里')
       let next = back.files
       const deleted: string[] = []
-      // 这次新建的主题，搬空了就连页带入口那一节一起去掉
+      // 这次新建的主题，搬空了就连页带入口那一节一起去掉；页里、那一节里后来多了别的文字（手写的备注、改过的说明）就都留着
       if (plan.isNew && memberIds(next.pages[plan.page]!).length === 0) {
-        const pages = { ...next.pages }
-        delete pages[plan.page]
-        deleted.push(plan.page)
         const entry = splitEntry(next.entry)
         const at = sectionIndex(entry, plan.page, plan.name)
-        next = { entry: at === -1 ? next.entry : joinEntry({ ...entry, sections: entry.sections.filter((_, i) => i !== at) }), pages }
+        const written = (rows: readonly Row[]) => rows.map(r => bare(r.line).trim()).filter(line => line !== '').join('\n')
+        const isSectionAsCreated = at === -1 || written(entry.sections[at]!.rows) === written(newSection(plan.page, plan.name, plan.about ?? '').rows)
+        if (bodyLines(next.pages[plan.page]!).join('\n') === `# ${plan.name}` && isSectionAsCreated) {
+          const pages = { ...next.pages }
+          delete pages[plan.page]
+          deleted.push(plan.page)
+          next = { entry: at === -1 ? next.entry : joinEntry({ ...entry, sections: entry.sections.filter((_, i) => i !== at) }), pages }
+        }
       }
       return { kind: 'undone', files: next, deleted }
     }
     case 'rename': {
       const text = files.pages[plan.page]
       if (text === undefined || titleOf(text) !== plan.to) return stale('这个主题后来又改过名')
-      const aliases = aliasesOf(text).filter(a => keyOf(a) !== keyOf(plan.from))
+      // 曾用名回到改名前的样子：改名时加进去的旧名拿掉，改名时拿掉的（新名原本就是曾用名）放回来，后来别处加的留着
+      const before = new Set(plan.aliasesBefore.map(keyOf))
+      const now = aliasesOf(text)
+      const aliases = [
+        ...plan.aliasesBefore.filter(a => keyOf(a) === keyOf(plan.to) || now.some(n => keyOf(n) === keyOf(a))),
+        ...now.filter(a => !before.has(keyOf(a)) && keyOf(a) !== keyOf(plan.from)),
+      ]
       let next: IndexFiles = { ...files, pages: { ...files.pages, [plan.page]: withAliases(withTitle(text, plan.from), aliases) } }
       next = mapSection(next, plan.page, plan.to, s => {
         const linked = linkedHeading(s, plan.page, plan.from)
@@ -553,11 +616,9 @@ export function undoPlan(files: IndexFiles, plan: IndexPlan): UndoResult {
       for (const source of plan.sources) {
         const mine = plan.moved.filter(m => m.from === source.page)
         if (pages[source.page] === undefined) {
-          // 页已经删了：按改前的整页放回去，只留现在还在合并成的主题里的成员（别的已经去了别处或不在了）
-          const { header, rows } = splitHeader(source.text)
+          // 页已经删了：按改前的整页放回去，只留现在还在合并成的主题里的成员（别的已经去了别处或不在了），行用现在的
           const keep = new Set(mine.map(m => m.id).filter(id => inTarget.has(id)))
-          pages[source.page] = joinPage(header, rows.filter(r => { const id = memberIdOf(r); return id === undefined || keep.has(id) })
-            .map(r => { const id = memberIdOf(r); return id === undefined ? r : { ...r, line: taken.lines.get(id)! + (r.line.endsWith('\r') ? '\r' : '') } }))
+          pages[source.page] = withMemberText(source.text, (key) => { const id = unescape(key); return keep.has(id) ? taken.lines.get(id) : undefined })
           restored++
         } else {
           // 页还在（期间有别的记忆归进去）：只把搬走的成员放回去

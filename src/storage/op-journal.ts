@@ -46,6 +46,13 @@ export type OpTarget =
     scopeDir: string
     isOwnDirOnly: boolean
   }
+  | {
+    /** 改主题索引：提交点是 file（'entry' 或主题页的文件名）页头里的提交标记等于操作 id。其余的页由步骤补。 */
+    kind: 'index'
+    /** 记忆目录。 */
+    dir: string
+    file: string
+  }
 
 
 export interface PendingOp {
@@ -58,6 +65,11 @@ export interface PendingOp {
   batch?: string
   target: OpTarget
   steps: OpStep[]
+  /**
+   * 已经看到这次操作提交了。提交之后要改好几个文件的操作，写下第一个文件就记上这一笔：之后补做不再按文件里的
+   * 提交标记判（那个文件可能已经被后来的操作写上新的标记）。
+   */
+  isCommitted?: boolean
 }
 
 export interface OpJournalOptions {
@@ -92,6 +104,15 @@ export class OpJournal {
   begin(op: PendingOp): void {
     const { op: id, at, ...body } = op
     this.exec(db => { db.prepare('INSERT OR REPLACE INTO ops(op, at, body) VALUES (?, ?, ?)').run(id, at, JSON.stringify(body)) })
+  }
+
+  /** 记下这个操作已经提交（行的先后不变）。行不在就什么都不做。 */
+  markCommitted(opId: string): void {
+    this.exec(db => {
+      const row = db.prepare('SELECT body FROM ops WHERE op = ?').get(opId) as { body: string } | undefined
+      if (row === undefined) return
+      db.prepare('UPDATE ops SET body = ? WHERE op = ?').run(JSON.stringify({ ...(JSON.parse(row.body) as object), isCommitted: true }), opId)
+    })
   }
 
   /** 这个操作做完了（或作废了）：删掉它的行。 */

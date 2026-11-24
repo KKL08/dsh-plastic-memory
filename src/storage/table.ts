@@ -3,6 +3,8 @@ import type { MemoryRecord } from '../record-schema.ts'
 import type { CodedNote, DirectoryNoteCode } from '../contract-codes.ts'
 import { scopeOfMemory, type Scope } from '../scope.ts'
 import type { VersionHistory } from './history.ts'
+import type { IndexFiles } from '../topic-index.ts'
+import type { IndexOp, IndexPlan } from '../topic-ops.ts'
 
 /** 提交之后调用方要补做的一件事：kind 之外的内容由登记这一种的处理器解释，不含字段值和正文。 */
 export type OpStep = { kind: string } & Record<string, unknown>
@@ -196,6 +198,29 @@ export interface MemoryTable {
   locateWrittenBy?(id: string, target: Scope, opId: string): Promise<LocatedFile | undefined>
   /** 登记提交后某一种步骤的处理器：正常写完和中断后补做走同一个。重复登记以后一次为准。 */
   registerStep?(kind: string, handler: OpStepHandler): void
+  /** 一个记忆目录的主题索引文件，原样读出；还没有索引时为空。没有主题索引的实现可以不提供下面三个。 */
+  readIndex?(dir: string): Promise<IndexFiles | undefined>
+  /** 对一个记忆目录的主题索引做一个操作：写入段里按当下的索引和记忆重新核对，对不上的跳过。 */
+  applyIndexOp?(dir: string, op: IndexOp, opts: IndexOpOptions): Promise<IndexOpOutcome>
+  /** 撤销一个做过的索引操作：这一步写下的效果还在才撤，不在了返回 stale、什么都不动。 */
+  undoIndexPlan?(dir: string, plan: IndexPlan, opts?: { steps?: (op: string) => readonly OpStep[] }): Promise<IndexUndoOutcome>
+  /** 这个操作是不是提交了、还有步骤等着补做。 */
+  isOpPending?(op: string): boolean
+}
+
+export type IndexOpOutcome =
+  /** 做了：op 是这次操作的 id，plan 是做下去的计划（带撤销要用的改前数据，手写的文字已经遮过密钥）。 */
+  | { kind: 'applied'; op: string; plan: IndexPlan }
+  | { kind: 'skipped'; reason: string }
+export type IndexUndoOutcome = { kind: 'undone'; op: string } | { kind: 'stale'; reason: string }
+export interface IndexOpOptions {
+  /** 主题数上限。 */
+  maxTopics: number
+  /**
+   * 写第一个文件之前调一次（在写入段里）：op 是这次操作的 id，plan 带着撤销要用的改前数据。调用方在这里把回执先记下，
+   * 返回提交之后要做的步骤（确认回执之类）。步骤进操作日志，里面只放 id，不放 plan。索引文件正被别处改、要重来时会再调一次（换新的 id）。
+   */
+  prepare?: (op: string, plan: IndexPlan) => Promise<readonly OpStep[]>
 }
 
 /**

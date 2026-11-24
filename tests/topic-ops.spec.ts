@@ -111,6 +111,39 @@ describe('归主题', () => {
     const movedAway = { ...applied, pages: { ...applied.pages, '约定.md': page('约定', memberLine(B)), '发版.md': page('发版', memberLine(A), memberLine(D), memberLine(C)) } }
     expect(undoPlan(movedAway, plan)).toMatchObject({ kind: 'stale' })
   })
+
+  it('新主题的说明以标题记号或代码围栏开头：主题照建，说明空着，入口里后面的主题不受影响', () => {
+    for (const about of ['```js 里面', '## [别的](topics/x.md)', '~~~']) {
+      const plan = planned(base(), { kind: 'assign', memoryIds: ['mem_c'], from: UNSORTED_TITLE, to: '锁', about })
+      expect(plan).toMatchObject({ isNew: true, about: '' })
+      const { files } = applyPlan(base(), plan)
+      expect(readIndex(files).topics.map(t => [t.name, t.about])).toEqual([['发版', '怎么发版。'], ['约定', '协作上的约定。'], ['锁', '']])
+      expectSettled(files)
+    }
+  })
+
+  it('目标页里只有一个没收尾的代码块：行放进去不算成员，这个操作不做；代码块之前有成员的页照常做', () => {
+    const files = base()
+    files.pages['约定.md'] = page('约定', memberLine(B), '```', '没收尾的代码块')
+    expect(members(applyPlan(files, planned(files, { kind: 'assign', memoryIds: ['mem_c'], from: UNSORTED_TITLE, to: '约定' })).files)['约定']).toEqual(['mem_c', 'mem_b'])
+    files.pages['约定.md'] = page('约定', '```', '没收尾的代码块')
+    expect(skippedReason(files, { kind: 'assign', memoryIds: ['mem_c'], from: UNSORTED_TITLE, to: '约定' }, ctx({ activeIds: new Set(['mem_a', 'mem_c', 'mem_d']) }))).toContain('代码块')
+    expect(skippedReason(files, { kind: 'merge', from: ['发版'], into: '约定' }, ctx({ activeIds: new Set(['mem_a', 'mem_c', 'mem_d']) }))).toContain('代码块')
+  })
+
+  it('撤销新建的主题时，页里或入口那一节后来多了手写的文字：成员搬回去，页和那一节留着', () => {
+    const plan = planned(base(), { kind: 'assign', memoryIds: ['mem_d'], from: '发版', to: '打 tag', about: '什么时候打 tag。' })
+    const applied = applyPlan(base(), plan).files
+    const noted = { ...applied, pages: { ...applied.pages, '打-tag.md': applied.pages['打-tag.md']!.replace(memberLine(D), `后来手写的笔记。\n${memberLine(D)}`) } }
+    const kept = undone(noted, plan)
+    expect(kept.deleted).toEqual([])
+    expect(kept.files.pages['打-tag.md']).toContain('后来手写的笔记。')
+    expect(members(kept.files)).toMatchObject({ 发版: ['mem_a', 'mem_d'], '打 tag': [] })
+    const described = { ...applied, entry: applied.entry.replace('什么时候打 tag。', '手改过的说明。') }
+    const keptSection = undone(described, plan)
+    expect(keptSection.deleted).toEqual([])
+    expect(readIndex(keptSection.files).topics.at(-1)).toMatchObject({ name: '打 tag', about: '手改过的说明。', memberIds: [] })
+  })
 })
 
 describe('改名', () => {
@@ -145,6 +178,24 @@ describe('改名', () => {
     expect(undoPlan(again, plan)).toMatchObject({ kind: 'stale' })
     const edited = { ...applied, entry: applied.entry.replace('怎么发版。（曾用名：发版）', '手改过的说明。') }
     expect(readIndex(undone(edited, plan).files).topics[0]).toMatchObject({ name: '发版', about: '手改过的说明。' })
+  })
+
+  it('改回自己的曾用名再撤销：那个曾用名回来', () => {
+    const renamed = applyPlan(base(), planned(base(), { kind: 'rename', topic: '发版', name: '发布流程' })).files
+    const plan = planned(renamed, { kind: 'rename', topic: '发布流程', name: '发版' })
+    const back = undone(applyPlan(renamed, plan).files, plan).files
+    expect(readIndex(back).topics[0]).toMatchObject({ name: '发布流程', aliases: ['发版'] })
+    expect(back.pages).toEqual(renamed.pages)
+  })
+
+  it('旧名自己带全角括号：说明末尾那句曾用名照样认得出，再改名接着往里记', () => {
+    const files = base()
+    files.pages['发版.md'] = page('发版（旧）', memberLine(A), memberLine(D))
+    files.entry = files.entry.replace('## 发版', '## [发版（旧）](topics/%E5%8F%91%E7%89%88.md)')
+    const once = applyPlan(files, planned(files, { kind: 'rename', topic: '发版（旧）', name: '发布' })).files
+    expect(readIndex(once).topics[0]!.about).toBe('怎么发版。（曾用名：发版（旧））')
+    const twice = applyPlan(once, planned(once, { kind: 'rename', topic: '发布', name: '上线' })).files
+    expect(readIndex(twice).topics[0]!.about).toBe('怎么发版。（曾用名：发版（旧）、发布）')
   })
 })
 
@@ -201,6 +252,49 @@ describe('合并', () => {
     const back = undone(later, plan).files
     expect(members(back)).toEqual({ 发版: ['mem_c', 'mem_a', 'mem_d'], 约定: [], [UNSORTED_TITLE]: ['mem_b'] })
   })
+
+  it('计划里说到记忆只有 id：被并的页存的是占位，撤销时成员行用现在的', () => {
+    const plan = planned(base(), merge)
+    const stored = JSON.stringify(plan)
+    for (const m of ALL) {
+      expect(stored).not.toContain(m.name)
+      expect(stored).not.toContain(m.summary)
+    }
+    // 合并之后那条记忆改了名：撤回去的页里是新的那一行
+    const applied = applyPlan(base(), plan).files
+    const renamedB = memberLine({ ...B, name: '回复用中文' })
+    const later = { ...applied, pages: { ...applied.pages, '发版.md': applied.pages['发版.md']!.replace(memberLine(B), renamedB) } }
+    expect(undone(later, plan).files.pages['约定.md']).toBe(page('约定', renamedB))
+  })
+
+  it('被并的页在定计划之后多了手写的文字：成员照搬，页留着不删', () => {
+    const plan = planned(base(), merge)
+    const later = base()
+    later.pages['约定.md'] = page('约定', '刚写的备注。', memberLine(B))
+    const { files, deleted } = applyPlan(later, plan)
+    expect(deleted).toEqual([])
+    expect(files.pages['约定.md']).toBe(page('约定', '刚写的备注。'))
+    expect(members(files)).toMatchObject({ 发版: ['mem_a', 'mem_d', 'mem_b'] })
+  })
+
+  it('被并的页里有等着清理的成员行（记忆已经不在用）：先不并', () => {
+    expect(skippedReason(base(), merge, ctx({ activeIds: new Set(['mem_a', 'mem_c', 'mem_d']) }))).toContain('等着清理')
+  })
+
+  it('合并后的说明以标题记号或代码围栏开头：照并，说明用原来的', () => {
+    const plan = planned(base(), { ...merge, about: '``` 开头' })
+    expect(readIndex(applyPlan(base(), plan).files).topics[0]!.about).toBe('怎么发版。（曾用名：约定）')
+  })
+
+  it('补做时目标页已经被改成放不进成员（成员前面多了没收尾的代码块）：要搬的记忆留在原处，被并的页不删', () => {
+    const plan = planned(base(), merge)
+    const later = base()
+    later.pages['发版.md'] = page('发版', '```', memberLine(A), memberLine(D))
+    const { files, deleted } = applyPlan(later, plan)
+    expect(deleted).toEqual([])
+    expect(members(files)['约定']).toEqual(['mem_b'])
+    expect(files.pages['发版.md']).not.toContain('mem_b')
+  })
 })
 
 describe('调顺序和改说明', () => {
@@ -237,6 +331,17 @@ describe('调顺序和改说明', () => {
     expect(readIndex(added).topics[0]!.about).toBe('新写的说明。')
     const later = { ...applied, entry: applied.entry.replace('发版的步骤 和注意事项。', '又改了。') }
     expect(undoPlan(later, plan)).toMatchObject({ kind: 'stale' })
+  })
+
+  it('说明以标题记号或代码围栏开头的不收；改说明时末尾那句曾用名留着', () => {
+    for (const about of ['```js', '# 标题', '## [X](topics/../../x.md)', '~~~ 围栏']) expect(skippedReason(base(), { kind: 'describe', topic: '发版', about })).toContain('开头')
+    const renamed = applyPlan(base(), planned(base(), { kind: 'rename', topic: '发版', name: '发布流程' })).files
+    const plan = planned(renamed, { kind: 'describe', topic: '发布流程', about: '发布的步骤。' })
+    expect(readIndex(applyPlan(renamed, plan).files).topics[0]!.about).toBe('发布的步骤。（曾用名：发版）')
+    expect(skippedReason(renamed, { kind: 'describe', topic: '发布流程', about: '怎么发版。' })).toContain('没变')
+    // 「曾用名」几个字只是出现在说明中间：整句照收
+    const middle = '部署（曾用名：发布）请看附录（第二章）'
+    expect(readIndex(applyPlan(base(), planned(base(), { kind: 'describe', topic: '发版', about: middle })).files).topics[0]!.about).toBe(middle)
   })
 })
 
