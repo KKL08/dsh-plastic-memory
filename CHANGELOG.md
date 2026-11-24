@@ -184,6 +184,9 @@ All notable changes to this project are documented here. The format follows
   JWT many times in one long unbroken string could take seconds to check
   for secrets, and the app stopped responding meanwhile. Such text is now
   checked as quickly as any other text of the same length.
+- Hiding secrets in a memory that held tens of thousands of secret-like
+  values took time that grew with the square of their number. It now grows
+  in step with the length of the text.
 
 ## [0.2.0] - 2026-11-21
 

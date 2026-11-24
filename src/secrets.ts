@@ -258,7 +258,13 @@ function surfaceSpans(r: SecretSurface, opts: MaskOptions): { text: string; segm
     text += segment
   })
   const own = segments.flatMap((segment, i) => secretSpans(segment, opts).map(([a, b]): Span => [starts[i] + a, starts[i] + b]))
-  const cross = rawSpans(text, opts).filter(([a, b]) => !own.some(([start, end]) => a >= start && b <= end))
+  // own 按起点递增、互不相接：拼接文本上的命中按起点排好，顺着 own 往后对，每个区间只比一次
+  let at = 0
+  const cross = rawSpans(text, opts).sort((x, y) => x[0] - y[0]).filter(([a, b]) => {
+    while (at + 1 < own.length && own[at + 1][0] <= a) at++
+    const candidate = own[at]
+    return candidate === undefined || a < candidate[0] || b > candidate[1]
+  })
   return { text, segments, starts, spans: mergeSpans([...own, ...cross]) }
 }
 

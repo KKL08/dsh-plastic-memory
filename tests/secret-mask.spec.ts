@@ -322,6 +322,16 @@ describe('逐标签执行的正则：不带往后扫的断言', () => {
   }
 })
 
+describe('四个面一起遮盖：命中再多也在限时内跑完', () => {
+  it('正文里十万处互不相接的命中：逐处遮住，其余字段不动', () => {
+    const times = 100_000
+    const r = { content: 'pwd=abc123 '.repeat(times), name: '名称', summary: '摘要', tags: ['标签'] }
+    const masked = withinTimeLimit(() => maskSecretSurface(r, { severity: 'suspected' }))
+    expect(masked).toEqual({ ...r, content: `${SECRET_MASK} `.repeat(times) })
+    expect(withinTimeLimit(() => secretFields(r))).toEqual(secretFields({ ...r, content: 'pwd=abc123 ' }))
+  })
+})
+
 describe('硬编码密码：标签再多，取值检查也只把每段字符读一遍', () => {
   const suspected = { severity: 'suspected' } as const
 
