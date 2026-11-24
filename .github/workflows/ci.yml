@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: ['22', '24']
+        node: ['24']
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
@@ -61,7 +61,7 @@ jobs:
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: pnpm
       - run: node scripts/use-host.cjs
       - run: pnpm install --no-frozen-lockfile
@@ -73,7 +73,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: test-results-host-floor-node22
+          name: test-results-host-floor-node24
           path: test-results/junit.xml
           retention-days: 14
       - name: Cache the floor dsh host

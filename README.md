@@ -83,7 +83,7 @@ dsh plugin --profile web add dsh-plastic-memory
 安装细节和升级说明
 
 - 如果用命令行装进桌面版（`--profile desktop`）：先打开一次桌面版，完全退出后再运行命令，装完重新打开。其他 Profile 不存在时会自动创建。`dsh` 命令用 npm 装的或桌面版自带的都可以。
-- 运行环境：Node.js `^22.19.0 || >=24`。
+- 运行环境：Node.js `>=24.9`。
 - 从 0.1.x 版本升级后原有记忆存储会继续沿用，待处理事项自动迁移；共用同一个记忆目录的多个 Profile 请一起升级，旧版本读不了升级后带有效期的记忆。0.2.0 要求 DeepSeek Harness v0.2.2-rc.1 及以上，旧版本 DeepSeek Harness 请先升级再安装本插件。
 - DeepSeek Harness 仍在预发布阶段，之后可能有破坏性更新。升级 DeepSeek Harness 前，请注意本文档和更新日志里有关本插件支持的版本信息。
 
