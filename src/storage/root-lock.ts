@@ -49,6 +49,27 @@ export function isSqliteBusy(err: unknown): boolean {
   return e?.code === 'ERR_SQLITE_ERROR' && typeof e.errcode === 'number' && (e.errcode & 0xff) === 5
 }
 
+/** SQLite 报库文件损坏或不是数据库：主错误码 SQLITE_CORRUPT 是 11、SQLITE_NOTADB 是 26，扩展码取低 8 位。 */
+export function isSqliteCorrupt(err: unknown): boolean {
+  const e = err as { code?: unknown; errcode?: unknown } | null | undefined
+  if (e?.code !== 'ERR_SQLITE_ERROR' || typeof e.errcode !== 'number') return false
+  const primary = e.errcode & 0xff
+  return primary === 11 || primary === 26
+}
+
+/** 在一个立即取写锁的事务里跑 fn：抛错就回滚再抛出。各个库共用，库各自的打开、重建流程不在这里。 */
+export function inTransaction<T>(db: DatabaseSync, fn: () => T): T {
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    const result = fn()
+    db.exec('COMMIT')
+    return result
+  } catch (err) {
+    try { db.exec('ROLLBACK') } catch { /* 事务已不在 */ }
+    throw err
+  }
+}
+
 /** 写入点注入的锁：跨进程锁外面套一层写入段（进程内也互斥、可重入，见 write-section.ts）。 */
 export function createRootLock(opts: RootLockOptions): WriteSection {
   return new WriteSection(createCrossProcessLock(opts))
