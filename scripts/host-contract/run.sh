@@ -68,12 +68,12 @@ fi
 # Second boot of the same isolated home (H12): the record restored in H7 must come
 # back from disk in a fresh host process, and its snapshot must survive the restart.
 RESULTS2="$TMP/results-restart.json"
-STEP=restart
 if [ ! -f "$HANDOFF" ]; then
   echo "$HOST_TAG: first boot exited ($code) without a handoff file; restart check cannot run. boot.log errors:" >&2
   grep -iE "error|fatal" "$LOGS/boot.log" | head -n 10 >&2 || true
   exit 1
 fi
+STEP=restart
 set +e
 env DSH_HOME="$HOMEDIR" DSH_AGENTS_HOME="$AGENTS_HOME" HOST_CONTRACT_OUT="$RESULTS2" HOST_CONTRACT_HANDOFF="$HANDOFF" HOST_CONTRACT_PHASE=restart "$DSH" --profile host --patch "$PATCH" >"$LOGS/restart.log" 2>&1
 code2=$?
@@ -101,17 +101,37 @@ if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
     exit 1
   fi
 fi
+# Each results file comes from one boot; a failed case is reported against the
+# boot that ran it, with that boot's log tail, not against the last boot started.
+STEP=results
+FAILED_STEPS="$TMP/failed-steps"
+set +e
 node -e '
 const fs = require("fs");
-const r = process.argv.slice(1).filter(f => fs.existsSync(f)).flatMap(f => JSON.parse(fs.readFileSync(f, "utf8")));
+const [out, ...pairs] = process.argv.slice(1);
+const runs = pairs.map(p => p.split(/=(.*)/s)).filter(([, f]) => fs.existsSync(f));
+const r = runs.flatMap(([step, f]) => JSON.parse(fs.readFileSync(f, "utf8")).map(o => ({ ...o, step })));
 for (const o of r) console.log(`${o.ok ? (o.skipped ? "SKIP" : "PASS") : "FAIL"}  ${o.id}  ${o.detail}`);
 const fails = r.filter(o => !o.ok).length, skips = r.filter(o => o.skipped).length;
 console.log(`host-contract: ${r.length - fails - skips} passed, ${skips} skipped, ${fails} failed`);
+fs.writeFileSync(out, [...new Set(r.filter(o => !o.ok).map(o => o.step))].map(s => `${s}\n`).join(""));
 process.exit(fails ? 1 : 0);
-' "$RESULTS" "$RESULTS2" "$RESULTS3"
+' "$FAILED_STEPS" "boot=$RESULTS" "restart=$RESULTS2" "bad-key=$RESULTS3"
+summary=$?
+set -e
+if [ "$summary" -ne 0 ]; then
+  [ ! -f "$FAILED_STEPS" ] || while read -r step; do
+    [ -n "$step" ] || continue
+    echo "$HOST_TAG: failed case(s) ran in step: $step" >&2
+    echo "----- $step.log (tail) -----" >&2
+    tail -n 40 "$LOGS/$step.log" >&2
+  done < "$FAILED_STEPS"
+  exit 1
+fi
 # The verify plugin exits the host with 0 only when every case passed; a host that
 # wrote the results and then died on shutdown must not be reported as PASS.
 if [ "$code" -ne 0 ] || [ "$code2" -ne 0 ] || [ "$code3" -ne 0 ]; then
+  STEP=host-exit
   echo "$HOST_TAG: host exited (first=$code restart=$code2 bad-key=$code3) after writing results; log tails:" >&2
   tail -n 20 "$LOGS/boot.log" "$LOGS/restart.log" >&2
   [ ! -f "$LOGS/bad-key.log" ] || tail -n 20 "$LOGS/bad-key.log" >&2
