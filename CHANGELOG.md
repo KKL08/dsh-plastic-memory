@@ -176,6 +176,10 @@ All notable changes to this project are documented here. The format follows
 - A suggestion for a conflict was discarded as unreadable when the model's
   reply had braces in the text around its answer. It is now read as long as
   the reply holds exactly one answer.
+- Text that repeated a password label such as `password:` or the start of a
+  JWT many times in one long unbroken string could take seconds to check
+  for secrets, and the app stopped responding meanwhile. Such text is now
+  checked as quickly as any other text of the same length.
 
 ## [0.2.0] - 2026-11-21
 
