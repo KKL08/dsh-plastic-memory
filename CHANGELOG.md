@@ -64,6 +64,10 @@ All notable changes to this project are documented here. The format follows
   whether a message from you or a tool result backs it.
 - Testing: `pnpm host:contract` also checks how many events a forked session
   inherits and that a save in a turn opened by a schedule is rejected.
+- Testing: every regular expression used to detect secrets is checked by
+  static analysis for backtracking that grows faster than the input, and the
+  private key block cases run under a time limit, so a regression fails the
+  test instead of hanging the run.
 
 ### Changed
 - Node.js 24.9 or later is now required; Node.js 22 is no longer supported.
@@ -176,6 +180,13 @@ All notable changes to this project are documented here. The format follows
 - A suggestion for a conflict was discarded as unreadable when the model's
   reply had braces in the text around its answer. It is now read as long as
   the reply holds exactly one answer.
+- Text that repeated a password label such as `password:` or the start of a
+  JWT many times in one long unbroken string could take seconds to check
+  for secrets, and the app stopped responding meanwhile. Such text is now
+  checked as quickly as any other text of the same length.
+- Hiding secrets in a memory that held tens of thousands of secret-like
+  values took time that grew with the square of their number. It now grows
+  in step with the length of the text.
 
 ## [0.2.0] - 2026-11-21
 
