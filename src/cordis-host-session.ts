@@ -209,5 +209,13 @@ export function createCordisHostSession(deps: CordisHostSessionDeps): HostSessio
     return null
   }
 
-  return { contextOf, saveContextOf, llmOf, defaultLlm, modeOf, hasEarlierTurns, remember, ownSessionIdOf, workspaceOf, readSessionLog }
+  const sessionTitleOf = async (sessionId: string): Promise<string | undefined> => {
+    try {
+      return (await probe<{ readTitle?(id: string): Promise<{ title: string } | undefined> }>('sessionQuery')?.readTitle?.(sessionId))?.title || undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  return { sessionTitleOf, contextOf, saveContextOf, llmOf, defaultLlm, modeOf, hasEarlierTurns, remember, ownSessionIdOf, workspaceOf, readSessionLog }
 }

@@ -7,6 +7,10 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- `memory_source` lists all sources of a memory and lets you select one, page
+  backward or forward, search its conversation, include tool calls and results,
+  and trace a sub-agent memory to its parent or child conversation. Results
+  include the conversation title, start time and event counts.
 - Each memory type's confirmation period can now be changed, the five
   general types included: every type card on the settings page shows its
   period, and Edit opens the form where you change it. A memory left
@@ -70,6 +74,7 @@ All notable changes to this project are documented here. The format follows
   test instead of hanging the run.
 
 ### Changed
+- `memory_source` omits tool results by default; pass `include: "all"` to read them.
 - Node.js 24.9 or later is now required; Node.js 22 is no longer supported.
   Every supported DeepSeek Harness version already requires 24.9, so a
   working install is not affected. CI no longer runs on Node.js 22.
@@ -113,6 +118,9 @@ All notable changes to this project are documented here. The format follows
   `agent-inferred`; other values are rejected with `not-user-initiated`.
 
 ### Fixed
+- `memory_source` showed context that DeepSeek Harness adds to a conversation
+  as if you had typed it, and left out what the assistant replied. It now
+  shows assistant replies and leaves the added context out.
 - A deleted memory whose 14 days in Recently deleted had run out could
   still be restored until the next cleanup removed it. Restoring it is now
   refused.
