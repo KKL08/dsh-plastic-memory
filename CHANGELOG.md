@@ -69,6 +69,13 @@ All notable changes to this project are documented here. The format follows
 - Node.js 24.9 or later is now required; Node.js 22 is no longer supported.
   Every supported DeepSeek Harness version already requires 24.9, so a
   working install is not affected. CI no longer runs on Node.js 22.
+- A save made while another session changes the same memory is applied to
+  the memory as it is at that moment, so a recall setting, validity period,
+  related memory or lock changed elsewhere in the meantime is kept. A
+  precise edit is retried once on the latest text and the result shows the
+  merged text; a full rewrite still goes through, with the version it
+  replaced kept for undo. If the memory was deleted, promoted or moved in
+  the meantime, the save is refused so the model reads it again.
 - The recall options of a memory type are renamed after what each chat
   carries: Always, Search and Passive are now Full text, Summary and Brief
   index (全文, 摘要 and 简单索引 in Chinese). The settings page, the side

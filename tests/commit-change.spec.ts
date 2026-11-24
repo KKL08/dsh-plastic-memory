@@ -72,16 +72,61 @@ describe('落盘原语', () => {
     expect(await w.snapshots.list()).toEqual([])
   })
 
-  it('调用方读到之后目标被改过：不写，交回当前内容；调用方另给的条件同样在锁内判', async () => {
+  it('调用方读到之后别处改了别的字段：这次的改动落在最新版上，别处改的都留着，改前快照拍的是最新版', async () => {
     const w = world()
     const target = await seeded(w)
-    await w.store.update(target, r => ({ ...r, tags: ['别处加的'] }))
-    const changed = await commitChange({ target, kind: 'correct', fields: { content: '甲' }, by: 'dreams', at: T0 + 1000 }, w.deps)
-    expect(changed).toMatchObject({ kind: 'changed', current: { tags: ['别处加的'] } })
-    const fresh = (await w.store.get('mem_a'))!
-    const blocked = await commitChange({ target: fresh, kind: 'correct', fields: { content: '甲' }, by: 'dreams', at: T0 + 1000, isBlocked: () => true }, w.deps)
+    await w.store.update(target, r => ({ ...r, tags: ['别处加的'], recall: 'pinned', locked: true, validTo: T0 + 86_400_000 }))
+    const r = await commitChange({ target, kind: 'correct', fields: { content: '甲' }, by: 'dreams', at: T0 + 1000 }, w.deps)
+    expect(r.kind).toBe('written')
+    expect(await w.store.get('mem_a')).toMatchObject({ content: '甲', tags: ['别处加的'], recall: 'pinned', locked: true, validTo: T0 + 86_400_000 })
+    expect((await w.snapshots.list()).map(s => s.data[0]!.tags)).toEqual([['别处加的']])
+  })
+
+  it('调用方读到之后目标被软删、换了状态或搬了作用域：不写，交回当前内容；调用方另给的条件同样在锁内判', async () => {
+    const moves: Array<[string, (w: ReturnType<typeof world>, target: MemoryRecord) => Promise<unknown>]> = [
+      ['软删', (w, target) => w.store.softDelete(target, { now: T0 + 500 })],
+      ['被取代', (w, target) => w.store.update(target, r => ({ ...r, status: 'superseded' }))],
+      ['提升为全局', (w, target) => w.store.update(target, ({ workspacePath: _, ...r }) => ({ ...r, scope: 'global' }))],
+    ]
+    for (const [label, move] of moves) {
+      const w = world()
+      const target = await seeded(w, { scope: 'workspace', workspacePath: '/proj' })
+      await move(w, target)
+      const r = await commitChange({ target, kind: 'correct', fields: { content: '甲' }, by: 'dreams', at: T0 + 1000 }, w.deps)
+      expect(r.kind, label).toBe('changed')
+      expect((await w.store.get('mem_a', { workspacePath: '/proj' }))!.content, label).toBe('回复用中文')
+      expect(await w.snapshots.list(), label).toEqual([])
+    }
+    const w = world()
+    const target = await seeded(w)
+    const blocked = await commitChange({ target, kind: 'correct', fields: { content: '甲' }, by: 'dreams', at: T0 + 1000, isBlocked: () => true }, w.deps)
     expect(blocked.kind).toBe('changed')
     expect((await w.store.get('mem_a'))!.content).toBe('回复用中文')
+  })
+
+  it('调用方的时刻早于别处刚写下的那一版：落盘时间不往回写，状态变化留的历史版本起止不颠倒', async () => {
+    const w = world()
+    const target = await seeded(w)
+    const other = await commitChange({ target, kind: 'state-change', fields: { content: '第二版' }, by: 'main', sessionId: 's2', at: T0 + 3000 }, w.deps)
+    expect(other.kind).toBe('written')
+    // 这一次开始得早（时刻 T0+1000）、落盘得晚
+    const r = await commitChange({ target, kind: 'state-change', fields: { content: '第三版' }, by: 'main', sessionId: 's1', at: T0 + 1000 }, w.deps)
+    expect(r).toMatchObject({ kind: 'written', record: { content: '第三版', updatedAt: T0 + 3000, stateSince: T0 + 3000 }, version: { isMerged: false } })
+    expect((await versionsOf(w, target)).map(v => [v.record.content, v.startedAt, v.endedAt])).toEqual([
+      ['回复用中文', T0, T0 + 3000],
+      ['第二版', T0 + 3000, T0 + 3000],
+    ])
+  })
+
+  it('要改什么看了最新内容才定：按锁内读到的那一版算；叫停就不写、不拍快照', async () => {
+    const w = world()
+    const target = await seeded(w)
+    await w.store.update(target, r => ({ ...r, content: '回复用中文，代码注释也用中文' }))
+    const r = await commitChange({ target, kind: 'refine', prepare: current => ({ fields: { content: `${current.content}。术语保留英文` } }), by: 'dreams', at: T0 + 1000 }, w.deps)
+    expect(r).toMatchObject({ kind: 'written', record: { content: '回复用中文，代码注释也用中文。术语保留英文' } })
+    const stopped = await commitChange({ target, kind: 'refine', prepare: () => ({ stop: '不改了' }), by: 'dreams', at: T0 + 2000 }, w.deps)
+    expect(stopped).toEqual({ kind: 'stopped', stop: '不改了' })
+    expect(await w.snapshots.list()).toHaveLength(1)
   })
 
   it('拼出来的记录过不了格式校验：不写', async () => {

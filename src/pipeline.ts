@@ -4,7 +4,7 @@ import type { ChangeKind, MemoryRecord, SourceMode } from './record-schema.ts'
 import type { CodedNote, RejectCode, WarningCode } from './contract-codes.ts'
 import { ALREADY_REVIEWED_REASON, CHANGE_KINDS, CONFIDENCE_BY_SOURCE, NOT_DELEGATED_REASON, isPendingDelegated, memoryRecordSchema } from './record-schema.ts'
 import { applyChange, initialProvenance, type ChangeAnchor, type ChangeFields } from './change.ts'
-import { commitChange } from './commit-change.ts'
+import { commitChange, isSameRecord } from './commit-change.ts'
 import { UNKNOWN_SESSION_ID } from './session-id.ts'
 import { anchorRangeOf, type AnchorFacts } from './session-log.ts'
 import type { MemoryStore } from './store.ts'
@@ -212,6 +212,9 @@ function checkUpdateTarget(id: string | undefined, target: MemoryRecord | undefi
 }
 
 const WHOLE_WRITE_REQUIRED = ['name', 'type', 'scope', 'content', 'summary'] as const
+/** 精确修改没传时沿用目标的字段。 */
+const INHERITED_KEYS = ['name', 'type', 'summary', 'tags'] as const
+type InheritedKey = typeof INHERITED_KEYS[number]
 
 /**
  * 在目标正文上应用 edits（见 edits.ts），不成立时换成给模型的拒绝原因。
@@ -233,10 +236,10 @@ function editTarget(target: MemoryRecord, edits: readonly SaveEdit[]): { content
 
 /**
  * 把入参补成完整的候选。整条写入：校验必填项，tags 缺省按空数组。精确修改：只能配 update、不能和 content 同传；
- * 读到目标后在它的正文上应用 edits，没传的字段沿用目标的，返回的 base 就是这份读数——后面写入时的读后被改复核以它为准，
- * 别处在这之后改过就不拿旧读数算出的正文去盖。
+ * 读到目标后在它的正文上应用 edits，没传的字段沿用目标的（inherited 列出是哪几个），返回的 base 就是这份读数。
+ * 写入时锁内读到的正文和 base 不一样，就拿 edits 在最新正文上重做一次，沿用的字段也取最新的。
  */
-async function resolveInput(input: SaveInput, deps: PipelineDeps): Promise<{ candidate: SaveCandidate; base?: MemoryRecord; ignored?: string[] } | Rejection> {
+async function resolveInput(input: SaveInput, deps: PipelineDeps): Promise<{ candidate: SaveCandidate; base?: MemoryRecord; ignored?: string[]; edits?: readonly SaveEdit[]; inherited?: readonly InheritedKey[] } | Rejection> {
   const { edits, ...rest } = input
   if (input.action === 'update' && input.change === 'corroborate') return resolveCorroboration(input, deps)
   if (edits === undefined) {
@@ -273,7 +276,7 @@ async function resolveInput(input: SaveInput, deps: PipelineDeps): Promise<{ can
     tags: rest.tags ?? target.tags,
     content: applied.content,
   }
-  return { candidate, base: target }
+  return { candidate, base: target, edits, inherited: INHERITED_KEYS.filter(k => rest[k] === undefined) }
 }
 
 /** 补证时不生效的参数：正文和别的内容字段都留着原样。 */
@@ -328,8 +331,8 @@ const SUBAGENT_TYPES = ['knowledge', 'project']
 export const SUBAGENT_MAX_SAVES_DEFAULT = 10
 
 /**
- * update 写入那一刻发现目标在读到之后被改过：按目标此刻的样子回拒绝。原因会进模型上下文，当前内容按注入的口径遮明确密钥。
- * 子 agent 照旧回 subagent-restricted、带回主会话；主会话（删掉、被别的会话或用户改过、提升、取代）回 target-missing。
+ * update 写入那一刻发现目标不在读到时的位置了（被删、归档、取代、提升、移走，或落盘前被不拿锁的手改换掉）：按目标此刻的样子回拒绝。原因会进模型上下文，当前内容按注入的口径遮明确密钥。
+ * 子 agent 照旧回 subagent-restricted、带回主会话；主会话回 target-missing。
  */
 function changedAfterRead(id: string, current: MemoryRecord | undefined, isFromSubagent: boolean): PipelineResult {
   if (isFromSubagent) {
@@ -366,6 +369,18 @@ function subagentTargetProblem(id: string, target: MemoryRecord | undefined, ses
   return undefined
 }
 
+/** 子 agent 写不了这个类型的原因；能写返回 undefined。 */
+function subagentTypeProblem(type: string, registry: TypeRegistry): Rejection & { subcode: SaveRejectSubcode } | undefined {
+  const writable = SUBAGENT_TYPES.filter(t => registry.has(t))
+  if (writable.includes(type)) return undefined
+  const shown = writable.length > 0 ? `当前场景里能写：${writable.join('、')}` : '当前场景里两类都没有'
+  return {
+    code: 'subagent-restricted',
+    subcode: 'subagent-type',
+    reason: `子 agent 只能写 knowledge、project 两类，且要在当前场景里（${shown}）；"${type}" 不行，这件事带回主会话。`,
+  }
+}
+
 /**
  * 子 agent 写入约束：主会话不经过这里。一个判断块、一个拒绝码 subagent-restricted，原因按条写明怎么改或带回主会话。
  * 顺序固定：scope 降级（只警告）→ 依据 → 类型 → supersedes / force → update 归属 → create 配额，同时犯多条时报最前的。
@@ -389,15 +404,8 @@ async function checkSubagentWrite(
       reason: `sourceMode=${candidate.sourceMode} 子 agent 用不了：子 agent 收到的指令来自委派方，不算用户明说；按观察（environment-observed）或推断（agent-inferred）重发。`,
     }
   }
-  const writable = SUBAGENT_TYPES.filter(t => deps.registry.has(t))
-  if (!writable.includes(candidate.type)) {
-    const shown = writable.length > 0 ? `当前场景里能写：${writable.join('、')}` : '当前场景里两类都没有'
-    return {
-      code: 'subagent-restricted',
-      subcode: 'subagent-type',
-      reason: `子 agent 只能写 knowledge、project 两类，且要在当前场景里（${shown}）；"${candidate.type}" 不行，这件事带回主会话。`,
-    }
-  }
+  const typeProblem = subagentTypeProblem(candidate.type, deps.registry)
+  if (typeProblem !== undefined) return typeProblem
   if ((candidate.supersedes ?? []).length > 0) {
     return { code: 'subagent-restricted', subcode: 'subagent-supersedes', reason: '子 agent 不能用 supersedes 替代旧记忆；去掉 supersedes 重发，要替代哪条带回主会话。' }
   }
@@ -409,7 +417,7 @@ async function checkSubagentWrite(
       reason: '子 agent 不能带 force：去重、疑似密钥两道检查子 agent 都过不去。撞重复就另存或放弃，疑似密钥一律不存；去掉 force 重发。',
     }
   }
-  // update 只改本会话存下、还没升档的。写入时在存储锁内按最新读数再判一次（见下方 put 的 skipIf），其间被接受、删除、提升的不覆盖
+  // update 只改本会话存下、还没升档的。写入时在写入段里按最新读数再判一次（见下方 commitChange 的 isBlocked），其间被接受、删除、提升的不覆盖
   if (candidate.action === 'update' && candidate.id !== undefined) {
     const problem = subagentTargetProblem(candidate.id, await deps.store.get(candidate.id, { workspacePath: deps.workspacePath }), deps.session.id)
     if (problem !== undefined) return problem
@@ -481,6 +489,10 @@ export async function runSavePipeline(
   }
 
   // 1. 格式校验
+  const typeGate = (type: string): Rejection | undefined => {
+    if (!registry.has(type)) return { code: 'unknown-type', reason: `未知类型 "${type}"，可用类型见工具说明` }
+    return deps.delegation ? subagentTypeProblem(type, registry) : undefined
+  }
   if (!registry.has(candidate.type)) {
     return { kind: 'rejected', code: 'unknown-type', reason: `未知类型 "${candidate.type}"，可用类型见工具说明` }
   }
@@ -492,7 +504,7 @@ export async function runSavePipeline(
   let target: MemoryRecord | undefined
   let change: ChangeKind | undefined
   if (candidate.action === 'update') {
-    // 精确修改用算新正文时的那份读数，不再读一次：之后的改动都要在写入时的复核里拦下
+    // 精确修改用算新正文时的那份读数，不再读一次：之后正文被别处改过，写入时在最新正文上重做
     const checked = resolved.base !== undefined
       ? { target: resolved.base }
       : checkUpdateTarget(candidate.id, candidate.id ? await store.get(candidate.id, { workspacePath: deps.workspacePath }) : undefined, deps.workspacePath)
@@ -502,7 +514,7 @@ export async function runSavePipeline(
     // 静默拉回当前项目（提升闸被写入链绕过）。降级同样没有免确认通道。
     scope = target.scope
     // 全局记忆注入所有项目的会话：项目会话里改它，先要模型判断这次的内容对所有项目都成立（带引导里的确认码重发），
-    // 只对当前项目成立的改存项目记忆。码按改写前的这份目标算，和锁内复核比的是同一份。没有工作目录的会话没有项目记忆可选，
+    // 只对当前项目成立的改存项目记忆。码按预读的这一版算：确认的是这次的内容对所有项目成立，预读之后别处改过这条不让它失效。没有工作目录的会话没有项目记忆可选，
     // 全局是唯一去处，不拦。码对了之后别的检查没过，照常回那条检查的原因
     if (target.scope === 'global' && deps.workspacePath !== undefined) {
       const code = globalConfirmCode(session.id, target)
@@ -528,7 +540,6 @@ export async function runSavePipeline(
     if (candidate.scope === 'global' && target.scope === 'workspace') {
       // 模型对 workspace 记录重申 global 意图：转成提升候选（已是候选则静默幂等）
       if (!target.globalCandidate) {
-        globalCandidate = true
         scopeWarnings.push({ code: 'update-global-candidate', text: 'scope 不随更新变更；已将这条记忆标记为全局提升候选，治理时经用户确认后提升' })
       }
     } else if (candidate.scope !== target.scope) {
@@ -559,7 +570,7 @@ export async function runSavePipeline(
     : { scope, workspacePath: scope === 'workspace' ? deps.workspacePath : undefined }
   const isSameScope = (old: MemoryRecord) => old.scope === writeScope.scope
     && (writeScope.scope !== 'workspace' || old.workspacePath === writeScope.workspacePath)
-  const replaced: MemoryRecord[] = []
+  let replaced: MemoryRecord[] = []
   let hasCrossScopeSupersede = false
   for (const oldId of new Set(candidate.supersedes ?? [])) {
     const old = await store.get(oldId, { workspacePath: deps.workspacePath })
@@ -608,29 +619,33 @@ export async function runSavePipeline(
     ...(turn?.startTime !== undefined ? { at: turn.startTime } : {}),
   }
   const by = deps.delegation ? 'subagent' : 'main'
-  // update 要改的字段：怎么落到记录上由改动性质定（change.ts 的落盘行为表），补证只带把握
-  let fields: ChangeFields = {}
+  // update 要改的字段：怎么落到记录上由改动性质定（change.ts 的落盘行为表），补证只带把握。
+  // 按 on 这一版拼：这次没传的都取它的值，所以落盘时拿锁内读到的最新版再拼一遍，预读之后别处改的不会被盖回去
+  const inherited = new Set<InheritedKey>(resolved.inherited ?? [])
+  const fieldsOn = (on: MemoryRecord, content: string, valid: { validFrom?: number; validTo?: number }): ChangeFields => isCorroboration ? { confidence: corroboratedConfidence } : {
+    name: inherited.has('name') ? on.name : candidate.name,
+    type: inherited.has('type') ? on.type : candidate.type,
+    tags: inherited.has('tags') ? on.tags : candidate.tags,
+    content,
+    summary: inherited.has('summary') ? on.summary : candidate.summary,
+    confidence,
+    // 可选字段统一"不传即保留"：update 是内容编辑，不重传 validTo 就清掉时效窗口
+    // 会让有时效的记忆变成永不过期（有效期的回退在 resolveValidity 里）
+    validFrom: valid.validFrom,
+    validTo: valid.validTo,
+    supersedes: candidate.supersedes ?? on.supersedes,
+    globalCandidate: candidate.scope === 'global' && on.scope === 'workspace' ? true : on.globalCandidate,
+    // 创建者四个字段永不改。子 agent 改写：内容仍是子级写的，reviewed 一律去掉（回到待确认）；
+    // 主会话改写待确认记录即升档：reviewed 缺省时补 main，已有的（用户改过、早先接受过）不动
+    delegation: deps.delegation
+      ? on.delegation && { ...on.delegation, reviewed: undefined }
+      : on.delegation && { ...on.delegation, reviewed: on.delegation.reviewed ?? { by: 'main', at: now } },
+  }
   let record: MemoryRecord
   if (candidate.action === 'update') {
-    // scope/workspacePath 从 target 原样继承（见上方 scope 决议），不吃当前会话上下文
-    fields = isCorroboration ? { confidence: corroboratedConfidence } : {
-      name: candidate.name, type: candidate.type, tags: candidate.tags,
-      content: candidate.content, summary: candidate.summary,
-      confidence,
-      // 可选字段统一"不传即保留"：update 是内容编辑，不重传 validTo 就清掉时效窗口
-      // 会让有时效的记忆变成永不过期（有效期的回退在 resolveValidity 里）
-      validFrom: validity.validFrom,
-      validTo: validity.validTo,
-      supersedes: candidate.supersedes ?? target!.supersedes,
-      globalCandidate: globalCandidate || target!.globalCandidate,
-      // 创建者四个字段永不改。子 agent 改写：内容仍是子级写的，reviewed 一律去掉（回到待确认）；
-      // 主会话改写待确认记录即升档：reviewed 缺省时补 main，已有的（用户改过、早先接受过）不动
-      delegation: deps.delegation
-        ? target!.delegation && { ...target!.delegation, reviewed: undefined }
-        : target!.delegation && { ...target!.delegation, reviewed: target!.delegation.reviewed ?? { by: 'main', at: now } },
-    }
-    // 先按同一张表拼一遍，过格式校验；真正落盘的那条在写入段里带着操作 id 再拼
-    record = applyChange(target!, { kind: change!, fields, anchor, by, op: 'op_preview', at: now })
+    // scope/workspacePath 从 target 原样继承（见上方 scope 决议），不吃当前会话上下文。
+    // 先按预读的那一版拼一遍，过格式校验；真正落盘的那条在写入段里按最新版、带着操作 id 再拼
+    record = applyChange(target!, { kind: change!, fields: fieldsOn(target!, candidate.content, validity), anchor, by, op: 'op_preview', at: now })
   } else {
     record = {
       id: `mem_${now.toString(36)}${Math.random().toString(36).slice(2, 8)}`,
@@ -658,26 +673,33 @@ export async function runSavePipeline(
   // 5. 写盘前 secret 检查：高危（明确厂商特征）直接拦截、不落盘；疑似拦下待确认，force 放行并保留警告。
   // summary 进注入索引、name 进文件名、tags 进索引行——密钥藏在哪个字段都会外泄，四个面一起查；
   // supersedes 落进文件、体检的孤儿说明会把它引出来，变化原因随历史版本落盘，一并查。补证不写内容，不查。
-  const secretHits = isCorroboration ? [] : detectSecrets(
-    `${candidate.content}\n${candidate.name}\n${candidate.summary}\n${candidate.tags.join(' ')}\n${(candidate.supersedes ?? []).join(' ')}\n${candidate.changeReason ?? ''}`)
-  const critical = secretHits.filter(h => h.severity === 'critical')
-  if (critical.length > 0) {
-    return {
-      kind: 'rejected',
-      code: 'secret-critical',
-      reason: `检测到高危密钥（${critical.map(h => h.name).join('、')}），未保存。密钥不该进记忆（将来可能随同步离开本机）——如需记录，请改写成不含密钥的指针（如「AWS 凭证在 1Password 的 X 条目」）再存。`,
+  type SecretFaces = Pick<MemoryRecord, 'content' | 'name' | 'summary' | 'tags' | 'supersedes'>
+  const secretGate = (faces: SecretFaces): { rejected: PipelineResult } | { suspected: ReturnType<typeof detectSecrets> } => {
+    const secretHits = isCorroboration ? [] : detectSecrets(
+      `${faces.content}\n${faces.name}\n${faces.summary}\n${faces.tags.join(' ')}\n${(faces.supersedes ?? []).join(' ')}\n${candidate.changeReason ?? ''}`)
+    const critical = secretHits.filter(h => h.severity === 'critical')
+    if (critical.length > 0) {
+      return { rejected: {
+        kind: 'rejected',
+        code: 'secret-critical',
+        reason: `检测到高危密钥（${critical.map(h => h.name).join('、')}），未保存。密钥不该进记忆（将来可能随同步离开本机）——如需记录，请改写成不含密钥的指针（如「AWS 凭证在 1Password 的 X 条目」）再存。`,
+      } }
     }
-  }
-  const suspected = secretHits.filter(h => h.severity === 'suspected')
-  if (suspected.length > 0 && !candidate.force) {
-    return {
-      kind: 'rejected',
-      code: 'secret-suspected',
-      reason: deps.delegation
-        ? `检测到疑似密钥（${suspected.map(h => h.name).join('、')}），未保存。疑似密钥一律不存：改写成不含密钥的指针再存，不是密钥的带回主会话。`
-        : `检测到疑似密钥（${suspected.map(h => h.name).join('、')}），未保存。是密钥就改写成不含密钥的指针再存；向用户确认不是密钥后，带 force: true 重发。`,
+    const found = secretHits.filter(h => h.severity === 'suspected')
+    if (found.length > 0 && !candidate.force) {
+      return { rejected: {
+        kind: 'rejected',
+        code: 'secret-suspected',
+        reason: deps.delegation
+          ? `检测到疑似密钥（${found.map(h => h.name).join('、')}），未保存。疑似密钥一律不存：改写成不含密钥的指针再存，不是密钥的带回主会话。`
+          : `检测到疑似密钥（${found.map(h => h.name).join('、')}），未保存。是密钥就改写成不含密钥的指针再存；向用户确认不是密钥后，带 force: true 重发。`,
+      } }
     }
+    return { suspected: found }
   }
+  const gate = secretGate(candidate)
+  if ('rejected' in gate) return gate.rejected
+  let suspected = gate.suspected
 
   // 从拍快照到记账本是一条记忆的一次改动，整段在一个写入段里：中途拿锁超时不会写了文件却没留撤销，
   // 同进程别的写入也插不进中间。段内只读写文件，不等模型
@@ -690,6 +712,10 @@ export async function runSavePipeline(
       if (!store.hasStep(MODEL_CHANGE_STEP)) store.registerSteps(ledgerSteps(deps.decisions))
       return [modelChangeStep({ change: kind, snapshotId, at: now, origin: writer === undefined ? origin : { ...origin, by: writer } })]
     }
+    // 要替代的旧记忆按写入段里读到的最新版算：改前快照拍的是这一版，预读之后别处给它加的锁、改的注入档位撤销时还在；
+    // 其间不在用了、搬走了、被改写过（修改时间变了）的不替代
+    const latest = await Promise.all(replaced.map(old => store.get(old.id, { workspacePath: old.workspacePath })))
+    replaced = latest.filter((r, i): r is MemoryRecord => r !== undefined && r.status === 'active' && isSameScope(r) && r.updatedAt === replaced[i]!.updatedAt)
     let clean: MemoryRecord
     // 改写、替代前的快照（快照先行）：改写的目标与要替代的旧记忆同拍一份，对话卡与右侧栏的「撤销修改」按它恢复
     let snapshotId: string | undefined
@@ -701,10 +727,34 @@ export async function runSavePipeline(
       // 新 id 不定位（create 排他占名）
       await store.create(clean)
     } else {
-      // 落盘走不带前台门禁的原语：锁内复核（读到目标之后它又被改过、删除、归档、提升就不写）、改前快照、
-      // 按改动性质拼记录、状态变化留历史版本都在里面。子 agent 的归属按锁内那一份再判：其间被接受、提升的一并拦下
-      const committed = await commitChange({
-        target: target!, kind: change!, fields, anchor, by, at: now,
+      // 落盘走不带前台门禁的原语：锁内重读、复核目标还在原处（期间被删除、归档、提升、移走的不写）、改前快照、
+      // 按改动性质在最新版上拼记录、状态变化留历史版本都在里面。子 agent 的归属按锁内那一份再判：其间被接受、提升的一并拦下。
+      // 预读之后内容被别处改过不拦：整条替换照常落盘，被盖掉的那一版在改前快照里；精确修改在最新正文上重做一次。
+      // 有效期先后和密钥检测按合并后的记录在锁内重做，过不了就不写
+      let isRebased = false
+      const committed = await commitChange<PipelineResult>({
+        target: target!, kind: change!, anchor, by, at: now,
+        prepare: (current) => {
+          let content = candidate.content
+          if (resolved.edits !== undefined && current.content !== target!.content) {
+            const applied = editTarget(current, resolved.edits)
+            if ('code' in applied) return { stop: { kind: 'rejected', ...applied, subcode: 'changed-after-read', reason: `保存期间这条记忆被别处改过。${applied.reason}` } }
+            content = applied.content
+            isRebased = true
+          }
+          // 没传类型的精确修改沿用最新版的类型：别处把它改成这次写不了的类型，照类型那两道检查回拒绝
+          if (inherited.has('type') && current.type !== target!.type) {
+            const typeProblem = typeGate(current.type)
+            if (typeProblem !== undefined) return { stop: { kind: 'rejected', ...typeProblem } }
+          }
+          const valid = resolveValidity(candidate, current, now)
+          if ('code' in valid) return { stop: { kind: 'rejected', ...valid } }
+          const fields = fieldsOn(current, content, valid)
+          const merged = secretGate({ ...current, ...fields })
+          if ('rejected' in merged) return { stop: merged.rejected }
+          suspected = merged.suspected
+          return { fields }
+        },
         reason: candidate.changeReason,
         // 合并窗口按会话开；认不出是哪个会话的不并
         ...(session.id !== UNKNOWN_SESSION_ID ? { sessionId: session.id } : {}),
@@ -716,21 +766,25 @@ export async function runSavePipeline(
           : {}),
       }, { store, snapshots: deps.snapshots, mergeWindowMs: deps.mergeWindowMs })
       if (committed.kind === 'changed') return changedAfterRead(target!.id, committed.current, deps.delegation !== undefined)
+      if (committed.kind === 'stopped') return committed.stop
       if (committed.kind === 'invalid') return { kind: 'rejected', code: 'schema-invalid', reason: `字段校验失败：${committed.reason}` }
       clean = committed.record
       snapshotId = committed.snapshotId
+      if (isRebased) {
+        scopeWarnings.push({ code: 'edit-rebased', text: `保存期间这条记忆被别处改过，这次的修改已经改在最新正文上。合并后的全文：\n${maskSecretSurface(clean).content}` })
+      }
     }
     // 模型自报的警告只对 global 目标给（与以往一致）：项目记忆的快照只供界面撤销，不增加给模型的文字
     const updateSnapshotId = candidate.action === 'update' && target!.scope === 'global' ? snapshotId : undefined
 
     // 6. supersedes 处理：读到时在用的同作用域目标置 superseded（见上方 replaced）；锁内再看一次，其间被删除、被取代、
-    // 被改写或搬到别的作用域的不动
+    // 被改过（和上面拍快照时读到的不是同一版）或搬到别的作用域的不动
     for (const old of replaced) {
       try {
         const op = snapshotId === undefined ? undefined : newWriteOp({ steps: ledgerStep('supersede', snapshotId, clean.id) })
         const written = await store.update(old, (r) => {
           // 抛出即不写（同 updateIfLive）
-          if (r.status !== 'active' || r.updatedAt !== old.updatedAt || !isSameScope(r)) throw new RecordNotFoundError(r.id)
+          if (r.status !== 'active' || !isSameRecord(r, old) || !isSameScope(r)) throw new RecordNotFoundError(r.id)
           return { ...r, status: 'superseded', updatedAt: now }
         }, undefined, op)
         if (op !== undefined) await store.finishOp(op, written)

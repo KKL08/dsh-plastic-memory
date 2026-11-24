@@ -8,6 +8,7 @@ import { encodeRecord, splitFrontmatter } from '../src/storage/frontmatter.ts'
 import { ARCHIVE_DIR, GLOBAL_DIR, INDEX_FILE } from '../src/storage/paths.ts'
 import { MemoryStore } from '../src/store.ts'
 import { scopeAt } from '../src/scope.ts'
+import { layerOf } from '../src/storage/history.ts'
 import { ConcurrentModificationError } from '../src/errors.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
@@ -23,6 +24,7 @@ import type { RejectCode } from '../src/contract-codes.ts'
 import { executeSnapshotTool } from '../src/tools/snapshot.ts'
 import { record as baseRecord, candidate } from './helpers/record.ts'
 import { captureRejection } from './helpers/errors.ts'
+import { FAKE_SECRET } from './helpers/secrets.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 import { noInstructions } from './helpers/instructions.ts'
 
@@ -377,20 +379,28 @@ describe('memory_save supersedes：读到旧记忆之后、置 superseded 之前
   })
 })
 
-describe('memory_save update：读到目标之后、写入之前目标被改过，不写', () => {
+describe('memory_save update：读到目标之后、写入之前目标被别处动过', () => {
   const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
-  const saveDeps = (store: MemoryStore) => ({
-    store, registry, workspacePath: '/proj' as string | undefined, session: { id: 's1', lastSeq: 42 },
-    snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()),
+  const saveDeps = (store: MemoryStore, snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())) => ({
+    store, registry, workspacePath: '/proj' as string | undefined, session: { id: 's1', lastSeq: 42 }, snapshots,
   })
   const later = 1_700_000_005_000
-  // 管线读目标那一次 locate 读完即改：之后的去重、密钥检测、拍快照都在旧读数上做，写入那一刻才看到新内容
+  // 管线读目标那一次 locate 读完即改：之后的去重、密钥检测都在旧读数上做，进了写入段才读到新内容
   const changes: Array<[string, string | undefined, RejectCode]> = [
-    ['界面直接改过', encodeRecord(record({ content: '用户改的', updatedAt: later }), {}), 'target-missing'],
-    ['别的会话改写过', encodeRecord(record({ content: '别的会话改的', updatedAt: later }), {}), 'target-missing'],
     ['软删了', encodeRecord(record({ status: 'deleted', deletedAt: later, updatedAt: later }), {}), 'target-missing'],
     ['硬删了', undefined, 'target-missing'],
   ]
+
+  it.each([['界面直接改过', '用户改的'], ['别的会话改写过', '别的会话改的']])('%s 正文：整条替换照常落盘，被盖掉的那一版在改前快照里', async (_label, content) => {
+    const path = await seed('mem_race.md', record())
+    changeAfterRead(path, encodeRecord(record({ content, updatedAt: later }), {}), AFTER_LOCATE)
+    const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
+    const store = new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())
+    const r = await runSavePipeline(candidate({ action: 'update', change: 'correct', id: 'mem_race', confirmGlobal: globalConfirmCode('s1', record()), name: '竞态', type: 'preference', content: '模型想改成这样' }), saveDeps(store, snapshots))
+    expect(r.kind).toBe('updated')
+    expect((await store.get('mem_race'))!.content).toBe('模型想改成这样')
+    expect((await snapshots.list()).map(s => s.data.map(d => d.content))).toEqual([[content]])
+  })
 
   it.each(changes)('PA-02：%s：回拒绝，记录保持改过之后那一版', async (_label, text, code) => {
     const path = await seed('mem_race.md', record())
@@ -400,36 +410,169 @@ describe('memory_save update：读到目标之后、写入之前目标被改过�
     expect(await readFile(path, 'utf8').catch(() => undefined)).toBe(text)
   })
 
-  it('精确修改：读到目标、算好新正文之后目标被改过，回拒绝，不拿旧读数算出的正文盖掉新内容', async () => {
+  it('精确修改：算好新正文之后正文被别处改过，在最新正文上重做一次，结果说明期间有人改过并附合并后的全文', async () => {
     const path = await seed('mem_race.md', record({ content: '端口 3000，超时 5 秒' }))
-    const text = encodeRecord(record({ content: '端口 3000，超时 30 秒', updatedAt: later }), {})
+    changeAfterRead(path, encodeRecord(record({ content: '端口 3000，超时 30 秒', updatedAt: later }), {}), AFTER_LOCATE)
+    const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
+    const store = new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())
+    const r = await runSavePipeline(
+      { action: 'update', change: 'correct', id: 'mem_race', confirmGlobal: globalConfirmCode('s1', record({ content: '端口 3000，超时 5 秒' })), sourceMode: 'user-explicit', edits: [{ oldString: '端口 3000', newString: '端口 8080' }] },
+      saveDeps(store, snapshots),
+    )
+    if (r.kind !== 'updated') throw new Error(r.kind)
+    expect(r.record.content).toBe('端口 8080，超时 30 秒')
+    expect(r.warnings).toContainEqual(expect.objectContaining({ code: 'edit-rebased', text: expect.stringContaining('端口 8080，超时 30 秒') }))
+    expect((await store.get('mem_race'))!.content).toBe('端口 8080，超时 30 秒')
+    // 撤销只撤这一次：改前快照是别处改过之后的那一版
+    expect((await snapshots.list()).map(s => s.data[0]!.content)).toEqual(['端口 3000，超时 30 秒'])
+  })
+
+  it('精确修改：别处把要替换的那段原文改掉了，重做命不中，回拒绝并附最新正文，别处改的原样留着', async () => {
+    const path = await seed('mem_race.md', record({ content: '端口 3000，超时 5 秒' }))
+    const text = encodeRecord(record({ content: '端口 9000，超时 5 秒', updatedAt: later }), {})
     changeAfterRead(path, text, AFTER_LOCATE)
     const r = await runSavePipeline(
       { action: 'update', change: 'correct', id: 'mem_race', confirmGlobal: globalConfirmCode('s1', record({ content: '端口 3000，超时 5 秒' })), sourceMode: 'user-explicit', edits: [{ oldString: '端口 3000', newString: '端口 8080' }] },
       saveDeps(new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())),
     )
-    expect(r).toMatchObject({ kind: 'rejected', code: 'target-missing', subcode: 'changed-after-read' })
+    expect(r).toMatchObject({ kind: 'rejected', code: 'edit-not-found', reason: expect.stringContaining('端口 9000，超时 5 秒') })
     expect(await readFile(path, 'utf8')).toBe(text)
   })
 
-  it('PA-02：界面改过：拒绝原因带用户那一版的内容', async () => {
-    const path = await seed('mem_race.md', record())
-    changeAfterRead(path, encodeRecord(record({ content: '用户改的', updatedAt: later }), {}), AFTER_LOCATE)
-    const r = await runSavePipeline(candidate({ action: 'update', change: 'correct', id: 'mem_race', confirmGlobal: globalConfirmCode('s1', record()), name: '竞态', type: 'preference', content: '模型想改成这样' }), saveDeps(new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())))
-    if (r.kind !== 'rejected') throw new Error(r.kind)
-    expect(r.reason).toContain('用户改的')
+  it('精确修改没传名称和摘要：别处改过的名称、摘要、标签都留着，不被预读的旧值盖回', async () => {
+    const store = new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())
+    await store.put(record({ scope: 'workspace', workspacePath: '/proj', content: '端口 3000' }))
+    afterGet(store, 'mem_race', async loc => { await store.update(loc.record, r => ({ ...r, name: '新名称', summary: '新摘要', tags: ['新标签'] })) })
+    const r = await runSavePipeline({ action: 'update', change: 'correct', id: 'mem_race', sourceMode: 'user-explicit', edits: [{ oldString: '3000', newString: '8080' }] }, saveDeps(store))
+    expect(r.kind).toBe('updated')
+    vi.restoreAllMocks()
+    expect(await store.get('mem_race', { workspacePath: '/proj' })).toMatchObject({ content: '端口 8080', name: '新名称', summary: '新摘要', tags: ['新标签'] })
   })
 
   const update = () => candidate({ action: 'update', change: 'correct', id: 'mem_race', confirmGlobal: globalConfirmCode('s1', record()), name: '竞态', type: 'preference', content: '模型想改成这样' })
 
-  it('PA-02：候选标记被清掉、updatedAt 没变：回拒绝，标记不被盖回', async () => {
+  it('整条替换期间别处清了候选标记、改了注入档位、有效期和锁：落盘后都还在', async () => {
     const store = new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ scope: 'workspace', workspacePath: '/proj', globalCandidate: true }))
-    afterGet(store, 'mem_race', async loc => { await store.update(loc.record, r => ({ ...r, globalCandidate: false })) })
-    const r = await runSavePipeline(update(), saveDeps(store))
+    const validTo = Date.now() + 30 * 86_400_000
+    afterGet(store, 'mem_race', async loc => {
+      await store.update(loc.record, r => ({ ...r, globalCandidate: false, recall: 'pinned', locked: true, lockedUntil: validTo, validTo, related: ['mem_other'] }))
+    })
+    const r = await runSavePipeline({ ...update(), scope: 'workspace' }, saveDeps(store))
+    expect(r.kind).toBe('updated')
+    vi.restoreAllMocks()
+    expect(await store.get('mem_race', { workspacePath: '/proj' })).toMatchObject({
+      content: '模型想改成这样', globalCandidate: false, recall: 'pinned', locked: true, lockedUntil: validTo, related: ['mem_other'],
+    })
+    // 有效期落盘到分钟
+    expect(Math.abs((await store.get('mem_race', { workspacePath: '/proj' }))!.validTo! - validTo)).toBeLessThan(60_000)
+  })
+
+  it('这次传了截止时间，别处同时把起点改到它之后：锁内拼出的有效期颠倒，回拒绝，别处改的留着', async () => {
+    const store = new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())
+    await store.put(record({ scope: 'workspace', workspacePath: '/proj' }))
+    const day = 86_400_000
+    const now = new Date(2030, 0, 10, 12, 0).getTime()
+    afterGet(store, 'mem_race', async loc => { await store.update(loc.record, r => ({ ...r, validFrom: now + 20 * day })) })
+    const r = await runSavePipeline({ ...update(), scope: 'workspace', validTo: '2030-01-20 12:00' }, { ...saveDeps(store), now: () => now })
+    expect(r).toMatchObject({ kind: 'rejected', code: 'validity-reversed' })
+    vi.restoreAllMocks()
+    expect(await store.get('mem_race', { workspacePath: '/proj' })).toMatchObject({ content: '旧正文', validFrom: now + 20 * day })
+  })
+
+  it('精确修改没传名称，别处同时把名称改成带密钥的：锁内按合并后的记录重查，回拒绝', async () => {
+    const store = new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())
+    await store.put(record({ scope: 'workspace', workspacePath: '/proj', content: '端口 3000' }))
+    afterGet(store, 'mem_race', async loc => { await store.update(loc.record, r => ({ ...r, name: `部署口令 ${FAKE_SECRET.github}` })) })
+    const r = await runSavePipeline({ action: 'update', change: 'correct', id: 'mem_race', sourceMode: 'user-explicit', edits: [{ oldString: '3000', newString: '8080' }] }, saveDeps(store))
+    expect(r).toMatchObject({ kind: 'rejected', code: 'secret-critical' })
+    vi.restoreAllMocks()
+    expect((await store.get('mem_race', { workspacePath: '/proj' }))!.content).toBe('端口 3000')
+  })
+
+  it('两个会话同时补证同一条：两次都生效，出处清单里两个锚都在、原来的也在', async () => {
+    const store = new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())
+    await store.put(record({ scope: 'workspace', workspacePath: '/proj' }))
+    const corroborate = (sessionId: string) => runSavePipeline(
+      { action: 'update', change: 'corroborate', id: 'mem_race', sourceMode: 'environment-observed' },
+      { ...saveDeps(store), session: { id: sessionId, lastSeq: 7 } })
+    // 第一个会话读到目标之后，第二个会话的补证整个做完
+    let nested: Promise<unknown> | undefined
+    afterGet(store, 'mem_race', async () => { nested = corroborate('s2'); await nested })
+    expect((await corroborate('s1')).kind).toBe('updated')
+    expect(await nested).toMatchObject({ kind: 'updated' })
+    vi.restoreAllMocks()
+    expect((await store.get('mem_race', { workspacePath: '/proj' }))!.sourceTrail?.map(a => a.sessionId)).toEqual(['s1', 's2', 's'])
+  })
+
+  it('子 agent 精确修改没传类型，别处同时把类型改成子 agent 写不了的：锁内按最新类型重判，回拒绝', async () => {
+    const store = new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())
+    const delegation = { sessionId: 'child', depth: 1, parentSessionId: 'root', rootSessionId: 'root' }
+    await store.put(record({ scope: 'workspace', workspacePath: '/proj', type: 'knowledge', content: '端口 3000', delegation }))
+    let hits = 0
+    // 归属检查、管线预读各读一次目标，第二次读完再改
+    const get = store.get.bind(store)
+    vi.spyOn(store, 'get').mockImplementation(async (id, hint, opts) => {
+      const r = await get(id, hint, opts)
+      if (id === 'mem_race' && ++hits === 2) await store.update(r!, cur => ({ ...cur, type: 'preference' }))
+      return r
+    })
+    const r = await runSavePipeline(
+      { action: 'update', change: 'correct', id: 'mem_race', sourceMode: 'environment-observed', edits: [{ oldString: '3000', newString: '8080' }] },
+      { ...saveDeps(store), session: { id: 'child', lastSeq: 42 }, delegation: { depth: 1, parentSessionId: 'root', rootSessionId: 'root', mode: 'one-shot' as const } })
+    vi.restoreAllMocks()
+    expect(hits).toBeGreaterThanOrEqual(2)
+    expect(r).toMatchObject({ kind: 'rejected', code: 'subagent-restricted', subcode: 'subagent-type' })
+    expect(await store.get('mem_race', { workspacePath: '/proj' })).toMatchObject({ content: '端口 3000', type: 'preference' })
+  })
+
+  it('要替代的旧记忆在读到之后被别处上了锁（修改时间没变）：照常替代，锁留着，改前快照里也带着锁', async () => {
+    const store = new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())
+    await store.put(record({ id: 'mem_old', name: '旧说法', scope: 'workspace', workspacePath: '/proj' }))
+    afterGet(store, 'mem_old', async loc => { await store.update(loc.record, r => ({ ...r, locked: true })) })
+    const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
+    const r = await runSavePipeline(candidate({ scope: 'workspace', content: '完全不同的新说法', force: true, supersedes: ['mem_old'] }), saveDeps(store, snapshots))
+    expect(r.kind).toBe('saved')
+    vi.restoreAllMocks()
+    expect(await store.get('mem_old', { workspacePath: '/proj' })).toMatchObject({ status: 'superseded', locked: true })
+    expect((await snapshots.list()).map(s => s.data.map(d => [d.id, d.locked]))).toEqual([[['mem_old', true]]])
+  })
+
+  it('别的会话刚做完一次状态变化，这次的状态变化落在它上面：它那一版留成历史版本，不并进这个会话的合并窗口', async () => {
+    const store = new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())
+    await store.put(record({ scope: 'workspace', workspacePath: '/proj' }))
+    const change = (sessionId: string, content: string) => runSavePipeline(
+      { ...update(), scope: 'workspace', change: 'state-change', content },
+      { ...saveDeps(store), session: { id: sessionId, lastSeq: 7 } })
+    let nested: Promise<unknown> | undefined
+    afterGet(store, 'mem_race', async () => { nested = change('s2', '别的会话的新状态'); await nested })
+    expect((await change('s1', '这个会话的新状态')).kind).toBe('updated')
+    expect(await nested).toMatchObject({ kind: 'updated' })
+    vi.restoreAllMocks()
+    const loc = (await store.locate('mem_race', { workspacePath: '/proj' }))!
+    expect(loc.record.content).toBe('这个会话的新状态')
+    const versions = await store.history.list(layerOf(loc), 'mem_race')
+    expect(versions.map(v => v.record.content)).toEqual(['旧正文', '别的会话的新状态'])
+    expect(versions.every(v => v.endedAt >= v.startedAt)).toBe(true)
+  })
+
+  const moves: Array<[string, (store: MemoryStore, loc: LocatedFile) => Promise<unknown>]> = [
+    ['提升为全局', (store, loc) => store.update(loc.record, ({ workspacePath: _, ...r }) => ({ ...r, scope: 'global' }))],
+    ['软删', (store, loc) => store.softDelete(loc.record, { now: later })],
+    ['移到别的项目', (store, loc) => store.put({ ...loc.record, workspacePath: '/other' }, { kind: 'workspace', workspacePath: '/proj' })],
+    ['标成已取代', (store, loc) => store.update(loc.record, r => ({ ...r, status: 'superseded' }))],
+  ]
+  it.each(moves)('预读之后目标被%s：回拒绝，不按预读时的判断写进去', async (_label, move) => {
+    const store = new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())
+    await store.put(record({ scope: 'workspace', workspacePath: '/proj' }))
+    afterGet(store, 'mem_race', async loc => { await move(store, loc) })
+    const snapshotsOf = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
+    const r = await runSavePipeline({ ...update(), scope: 'workspace' }, saveDeps(store, snapshotsOf))
     expect(r).toMatchObject({ kind: 'rejected', code: 'target-missing', subcode: 'changed-after-read' })
     vi.restoreAllMocks()
-    expect(await store.get('mem_race', { workspacePath: '/proj' })).toMatchObject({ content: '旧正文', globalCandidate: false })
+    const copies = [await store.get('mem_race', { workspacePath: '/proj' }), await store.get('mem_race', { workspacePath: '/other' })].filter(c => c !== undefined)
+    expect(copies.map(c => c.content)).toEqual(copies.map(() => '旧正文'))
+    expect(await snapshotsOf.list()).toEqual([])
   })
 
   it('PA-02：文件原样移进 .archive/（frontmatter 没改）：按已删除回拒绝，不搬回顶层', async () => {

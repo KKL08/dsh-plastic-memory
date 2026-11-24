@@ -16,10 +16,11 @@ describe('强制模板', () => {
     const tally = new Map<string, number>()
     const classOf = (order: Step[]) => describeOrder(order.filter(st => st.index < 2)).replaceAll('0', 'G').replaceAll('1', 'M')
     await fc.assert(
-      fc.asyncProperty(seedArb.filter(sd => sd.a !== 'deleted'), fc.boolean(), fc.option(writeOpArb, { nil: undefined }), interleaveScheduler(),
-        async (seed, isForced, extra, s) => {
+      // 模型改写在锁内按最新版落盘，界面先写完它照样写得进去；界面要排到后面，得让它晚开始（模型改写不延后）
+      fc.asyncProperty(seedArb.filter(sd => sd.a !== 'deleted'), fc.boolean(), fc.option(writeOpArb, { nil: undefined }), fc.nat(400), interleaveScheduler(),
+        async (seed, isForced, extra, guiDelay, s) => {
           const ops: MemOp[] = [{ kind: 'guiEdit', id: 'a' }, { kind: 'modelRewrite', id: 'a', isForced }, ...(extra === undefined ? [] : [extra])]
-          const eq = await assertSerialEquivalent(memorySubject(seed), s, ops)
+          const eq = await assertSerialEquivalent(memorySubject(seed), s, ops, [guiDelay, 0])
           const c = classOf(eq.order)
           tally.set(c, (tally.get(c) ?? 0) + 1)
         }),
@@ -28,6 +29,22 @@ describe('强制模板', () => {
     console.info(`[IL-01 模板] 对上的串行顺序分布：${JSON.stringify(Object.fromEntries(tally))}`)
     expect(tally.size).toBeGreaterThanOrEqual(2)
   }, TIMEOUT_MS)
+
+  it('精确修改 × 别处直接改写同一条：精确修改在别处改过的正文上重做时，结果同样和某个串行顺序对得上', async () => {
+    // 改写夹在精确修改的读和写之间时，精确修改被拆开比（0读→1→0写）；一次都没拆开说明没搜到重做那一支
+    const tally = new Map<string, number>()
+    await fc.assert(
+      fc.asyncProperty(headStartArb(2, 300), interleaveScheduler(), async (head, s) => {
+        const ops: MemOp[] = [{ kind: 'preciseEdit', id: 'a' }, { kind: 'update', id: 'a' }]
+        const eq = await assertSerialEquivalent(memorySubject({ a: 'workspace', b: 'workspace', isSameName: false }), s, ops, head)
+        const c = describeOrder(eq.order)
+        tally.set(c, (tally.get(c) ?? 0) + 1)
+      }),
+      interleaveParams(DEFAULT_RUNS * 2),
+    )
+    console.info(`[精确修改 × 直接改写] 对上的串行顺序分布：${JSON.stringify(Object.fromEntries(tally))}`)
+    expect([...tally.keys()].some(order => order.includes('读'))).toBe(true)
+  }, TIMEOUT_MS * 2)
 
   it('拍快照 × 清除（彻底删除最近删除里的一条，先抹掉所有快照里的它）：串行等价，且对上不止一种串行顺序', async () => {
     // 两者结果可交换，对上的顺序取与实际先后最接近的；彻底删除收尾还要重写界面视图，拍快照得晚开始很久才排得到后面
