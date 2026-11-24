@@ -34,7 +34,7 @@ describe('Config schema', () => {
       removedPresetTypes: [],
       builtinDecayDays: {},
       governance: { enabled: true, health: { sensitivity: 'normal' }, globalPromoteTarget: 'plugin-global' },
-      search: {},
+      search: { source: 'memory', dialogueTokenBudget: 1500, memoryQuotes: false, queryExpansion: true, dialogueToolResults: true },
       history: { mergeWindowMinutes: 60 },
       subagent: { maxSavesPerSession: 10 },
       accent: 'ella',
@@ -129,5 +129,34 @@ describe('Config schema', () => {
     const fromYaml = new Config(parse('search:\n  userDictionaryPath: /opt/dict/domain.txt\n') as never)
     expect(fromYaml.search.userDictionaryPath.get()).toBe('/opt/dict/domain.txt')
     expect(() => new Config({ search: { userDictionaryPath: 42 } } as never)).toThrow()
+  })
+
+  it('检索来源、原话上限、记忆带原话等键没写时取缺省值，旧配置照常解析', () => {
+    for (const raw of [{}, { search: {} }, parse('search:\n  userDictionaryPath: /opt/dict/domain.txt\n')]) {
+      const config = new Config(raw as never)
+      expect(config.search.source.get()).toBe('memory')
+      expect(config.search.dialogueTokenBudget.get()).toBe(1500)
+      expect(config.search.memoryQuotes.get()).toBe(false)
+      expect(config.search.queryExpansion.get()).toBe(true)
+      expect(config.search.dialogueToolResults.get()).toBe(true)
+    }
+  })
+
+  it('检索来源只收三个取值；记忆带原话是布尔值；这几个键 YAML 可配、volatile', () => {
+    const config = new Config(parse('search:\n  source: both\n  dialogueTokenBudget: 2400\n  memoryQuotes: true\n  queryExpansion: false\n  dialogueToolResults: false\n') as never)
+    expect(config.search.source.get()).toBe('both')
+    expect(config.search.dialogueTokenBudget.get()).toBe(2400)
+    expect(config.search.memoryQuotes.get()).toBe(true)
+    expect(config.search.queryExpansion.get()).toBe(false)
+    expect(config.search.dialogueToolResults.get()).toBe(false)
+    expect(new Config({ search: { source: 'dialogue' } } as never).search.source.get()).toBe('dialogue')
+    expect(() => new Config({ search: { source: 'raw' } } as never)).toThrow()
+    expect(() => new Config({ search: { memoryQuotes: 'user' } } as never)).toThrow()
+    expect(() => new Config({ search: { dialogueTokenBudget: '1500' } } as never)).toThrow()
+  })
+
+  it('附在记忆下面的原话上限、带原话的条数、切段大小不是配置项', () => {
+    const keys = Object.keys(new Config({} as never).search).sort()
+    expect(keys).toEqual(['dialogueTokenBudget', 'dialogueToolResults', 'memoryQuotes', 'queryExpansion', 'source', 'userDictionaryPath'])
   })
 })

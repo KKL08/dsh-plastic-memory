@@ -216,3 +216,21 @@ export const SCENE_MAX_TYPES = 8
 export const MAX_SCENES = 5
 /** 通用类型确认周期的上限（天）：一年一确认已是最长的周期，再长等于不提醒。 */
 export const DECAY_DAYS_MAX = 365
+
+/** 检索来源：配置 search.source 和 memory_search 的 source 参数用同一组取值。memory 只查记忆，dialogue 只查过往对话原话，both 两者。 */
+export const SEARCH_SOURCES = ['memory', 'dialogue', 'both'] as const
+export type SearchSource = (typeof SEARCH_SOURCES)[number]
+
+/** 原话段里的说话人。tool 只在原话检索包含工具结果时出现。 */
+export const DIALOGUE_SPEAKERS = ['user', 'assistant', 'tool'] as const
+export type DialogueSpeaker = (typeof DIALOGUE_SPEAKERS)[number]
+
+/** 原话检索给结果附的说明（search/dialogue-format.ts 给文案）。 */
+export const DIALOGUE_NOTE_CODES = [
+  'dialogue-source-off',      // 设置是只查记忆，这次要了原话：照常查记忆，不读对话记录库
+  'dialogue-unavailable',     // 原话这一路出了故障，这次只查了记忆
+  'dialogue-index-building',  // 对话记录库还在建，结果只覆盖已建好的会话
+  'dialogue-tokenizer-basic', // 分词组件缺失，原话按基础切法匹配
+  'dialogue-search-limit',    // 连续检索次数已用完
+] as const
+export type DialogueNoteCode = (typeof DIALOGUE_NOTE_CODES)[number]

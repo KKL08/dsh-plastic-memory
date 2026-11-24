@@ -55,6 +55,8 @@ import { AutoCheckupScheduler, type AutoCheckupTimer } from './gui/auto-checkup.
 import { CheckupSuggestions } from './gui/checkup-suggestions.ts'
 import { buildSessionView } from './gui/views.ts'
 import { ACCENTS, type Accent, type SessionView } from './gui/contract.ts'
+import { SEARCH_SOURCES, type SearchSource } from './contract-codes.ts'
+import { DIALOGUE_BUDGET_DEFAULT } from './search/dialogue-format.ts'
 
 /**
  * 进 GUI 的字段标 `.volatile()`：插件页或 yaml 改了它们，宿主 Loader 把新值写进运行中的引用、发 `loader/volatile-update`，
@@ -87,6 +89,16 @@ export interface Config {
   search: {
     /** jieba 用户词典（每行「词 词频 词性」）的绝对路径，追加在主词典之上；不设只用主词典。改了下一次搜索生效。 */
     userDictionaryPath: Volatile<string | undefined>
+    /** memory_search 查哪里：memory 只查记忆，dialogue 只查过往对话的原话，both 两者。 */
+    source: Volatile<SearchSource>
+    /** 一次检索里「其他原话」这一部分最多占多少 token（总量，不是单条上限）。按 300 一步取整，见 dialogueBudgetOf。 */
+    dialogueTokenBudget: Volatile<number>
+    /** 命中的记忆是否带上出处那一轮的一问一答。 */
+    memoryQuotes: Volatile<boolean>
+    /** 原话第一轮结果弱时，是否让模型从原话里挑词再搜一次。只在 source 含原话时起作用。 */
+    queryExpansion: Volatile<boolean>
+    /** 原话检索是否包含工具结果（库里只收报错和短输出）。只在查询时过滤，切换不重建对话记录库。 */
+    dialogueToolResults: Volatile<boolean>
   }
   history: {
     /** 同一会话在这么多分钟里接连对同一条记忆做的状态变化只留一次历史版本，后面的原因追加进去。设置页不露，配置文件可改；改了下一次保存生效。 */
@@ -134,6 +146,11 @@ export const Config = z.object({
   }),
   search: z.object({
     userDictionaryPath: z.string().volatile(),
+    source: z.union(SEARCH_SOURCES).default('memory').volatile(),
+    dialogueTokenBudget: z.number().default(DIALOGUE_BUDGET_DEFAULT).volatile(),
+    memoryQuotes: z.boolean().default(false).volatile(),
+    queryExpansion: z.boolean().default(true).volatile(),
+    dialogueToolResults: z.boolean().default(true).volatile(),
   }),
   history: z.object({
     mergeWindowMinutes: z.number().default(MERGE_WINDOW_MINUTES_DEFAULT).volatile(),
