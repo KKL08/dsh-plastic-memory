@@ -1,8 +1,9 @@
 // 插件设置页：三组设置的渲染、revision 冻结与冲突提示、非法值、配置文件关掉体检时置灰、状态卡。场景与类型见 Scenes.spec.tsx。
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { GUI_VIEW_VERSION, type HealthView, type LibraryView, type PendingView } from '../../src/gui/contract.ts'
+import { GUI_VIEW_VERSION, type CheckupView, type HealthView, type LibraryView, type MemoryCommand, type MemoryCommandResult, type ModelChoices, type ModelSelection, type PendingView } from '../../src/gui/contract.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
+import type { ViewState } from '../gateway.ts'
 import { createTranslator } from '../i18n.tsx'
 import { en, zh } from '../locales.ts'
 import { memory, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
@@ -419,5 +420,293 @@ describe('记忆文件位置「在访达中显示」', () => {
   it('还不知道路径时没有这个按钮', () => {
     renderInShell(<SettingsPage form={createFakeConfigForm()} onOpenMemoryPage={() => {}} now={NOW} />, createFakeGateway())
     expect(screen.queryByRole('button', { name: /中显示$/ })).toBeNull()
+  })
+})
+
+describe('自动体检用的模型', () => {
+  const CHOICES: ModelChoices = [
+    { id: 'deepseek-official', name: 'DeepSeek', models: [{ id: 'deepseek-pro', name: 'DeepSeek Pro', efforts: [{ id: 'high', name: '高' }] }] },
+    { id: 'provider-x', name: 'Provider X', models: [{ id: 'model-x', name: 'Model X', efforts: [] }] },
+  ]
+  const checkups = (model: ModelSelection | null): CheckupView => ({ version: GUI_VIEW_VERSION, governanceEnabled: true, defaultFrequency: 'manual', allResult: null, model, scopes: [] })
+
+  function setupModel(opts: { model?: ModelSelection | null; checkupsView?: ViewState<CheckupView>; value?: Record<string, unknown>; respond?: (command: MemoryCommand) => MemoryCommandResult | Promise<MemoryCommandResult>; session?: 'none' } = {}) {
+    const gateway = createFakeGateway({
+      views: { pending: pending(), health: health(NOW), library: library(3), checkups: opts.checkupsView ?? checkups(opts.model ?? null) },
+      respond: opts.respond ?? (command => command.cmd === 'list-models' ? { ok: true, cmd: command.cmd, providers: CHOICES } : { ok: true, cmd: command.cmd }),
+      ...(opts.session === 'none' ? { session: { kind: 'none' } as const } : {}),
+    })
+    const form = createFakeConfigForm(opts.value ? { value: opts.value } : {})
+    renderInShell(<SettingsPage form={form} onOpenMemoryPage={() => {}} now={NOW} />, gateway)
+    return { gateway, form, picker: () => screen.getByRole('combobox', { name: '自动体检用的模型' }) }
+  }
+  const sent = (gateway: ReturnType<typeof createFakeGateway>, cmd: MemoryCommand['cmd']) => gateway.executed.filter(e => e.command.cmd === cmd).map(e => e.command)
+
+  it('在「怎么管」里，按提供方分组列出 DeepSeek Harness 里能选的模型，当前跟随默认模型', async () => {
+    const { gateway, picker } = setupModel()
+    const manage = screen.getAllByRole('heading', { level: 2 }).find(h => h.textContent === '怎么管')!.closest('.pm-group') as HTMLElement
+    expect(within(manage).getByRole('combobox', { name: '自动体检用的模型' })).toBeInTheDocument()
+    await waitFor(() => { expect(picker().querySelectorAll('optgroup')).toHaveLength(2) })
+    expect((picker() as HTMLSelectElement).selectedOptions[0]).toHaveTextContent('跟随默认模型')
+    expect(sent(gateway, 'list-models')).toEqual([{ cmd: 'list-models' }])
+  })
+
+  it('体检视图里没有所选模型这一项（上一个发布版的进程写的）：按跟随默认模型显示，照常能选', async () => {
+    const { model: _model, ...older } = checkups(null)
+    const gateway = createFakeGateway({
+      views: { pending: pending(), health: health(NOW), library: library(3), checkups: older },
+      respond: command => command.cmd === 'list-models' ? { ok: true, cmd: command.cmd, providers: CHOICES } : { ok: true, cmd: command.cmd },
+    })
+    renderInShell(<SettingsPage form={createFakeConfigForm()} onOpenMemoryPage={() => {}} now={NOW} />, gateway)
+    const picker = screen.getByRole('combobox', { name: '自动体检用的模型' })
+    await waitFor(() => { expect(picker.querySelectorAll('optgroup')).toHaveLength(2) })
+    expect((picker as HTMLSelectElement).selectedOptions[0]).toHaveTextContent('跟随默认模型')
+    expect(picker).toBeEnabled()
+  })
+
+  it('当前值取体检视图里存的选择，带推理强度', async () => {
+    setupModel({ model: { provider: 'deepseek-official', model: 'deepseek-pro', reasoningEffort: 'high' } })
+    await waitFor(() => { expect((screen.getByRole('combobox', { name: '自动体检用的模型' }) as HTMLSelectElement).selectedOptions[0]).toHaveTextContent('DeepSeek Pro') })
+    expect((screen.getByRole('combobox', { name: '推理强度' }) as HTMLSelectElement).selectedOptions[0]).toHaveTextContent('高')
+  })
+
+  it('选一个模型立即存（自动体检的键），不进保存行；改回跟随存 null', async () => {
+    const { gateway, picker } = setupModel()
+    await waitFor(() => { expect(picker().querySelectorAll('optgroup')).toHaveLength(2) })
+    const modelX = [...picker().querySelectorAll('option')].find(o => o.textContent === 'Model X')!
+    await act(async () => { fireEvent.change(picker(), { target: { value: modelX.value } }) })
+    expect(sent(gateway, 'set-model-selection')).toEqual([{ cmd: 'set-model-selection', key: 'checkup', selection: { provider: 'provider-x', model: 'model-x' } }])
+    expect((picker() as HTMLSelectElement).selectedOptions[0]).toHaveTextContent('Model X')
+    expect(screen.queryByText(/项改动未保存/)).toBeNull()
+    expect(save()).toBeDisabled()
+    await act(async () => { fireEvent.change(picker(), { target: { value: '' } }) })
+    expect(sent(gateway, 'set-model-selection').at(-1)).toEqual({ cmd: 'set-model-selection', key: 'checkup', selection: null })
+  })
+
+  it('选推理强度：和模型一起存', async () => {
+    const { gateway } = setupModel({ model: { provider: 'deepseek-official', model: 'deepseek-pro' } })
+    const effort = await screen.findByRole('combobox', { name: '推理强度' })
+    await act(async () => { fireEvent.change(effort, { target: { value: 'high' } }) })
+    expect(sent(gateway, 'set-model-selection')).toEqual([{ cmd: 'set-model-selection', key: 'checkup', selection: { provider: 'deepseek-official', model: 'deepseek-pro', reasoningEffort: 'high' } }])
+  })
+
+  it('没存上：退回原来的值并说明', async () => {
+    const { picker } = setupModel({
+      respond: command => command.cmd === 'list-models' ? { ok: true, cmd: command.cmd, providers: CHOICES } : { ok: false, cmd: command.cmd, code: 'invalid-args' },
+    })
+    await waitFor(() => { expect(picker().querySelectorAll('optgroup')).toHaveLength(2) })
+    const modelX = [...picker().querySelectorAll('option')].find(o => o.textContent === 'Model X')!
+    await act(async () => { fireEvent.change(picker(), { target: { value: modelX.value } }) })
+    expect((picker() as HTMLSelectElement).selectedOptions[0]).toHaveTextContent('跟随默认模型')
+    expect(screen.getByText('没存上，再选一次试试。')).toBeInTheDocument()
+  })
+
+  it('列模型失败：说明没读到，只剩跟随', async () => {
+    const { picker } = setupModel({ respond: command => ({ ok: false, cmd: command.cmd, code: 'failed' }) })
+    expect(await screen.findByText('没读到能选的模型，稍后再打开这页试试。')).toBeInTheDocument()
+    expect([...picker().querySelectorAll('option')].map(o => o.textContent)).toEqual(['跟随默认模型'])
+  })
+
+  it('每个提供方都没读到：说明没读到，不说 DeepSeek Harness 里没有模型；选过的模型不标成现在用不了', async () => {
+    const { picker } = setupModel({
+      model: { provider: 'provider-x', model: 'model-x' },
+      respond: command => command.cmd === 'list-models'
+        ? { ok: true, cmd: command.cmd, providers: [{ id: 'deepseek-official', name: 'DeepSeek', models: [], listFailed: true }, { id: 'provider-x', name: 'Provider X', models: [], listFailed: true }] }
+        : { ok: true, cmd: command.cmd },
+    })
+    expect(await screen.findByText('没读到能选的模型，稍后再打开这页试试。')).toBeInTheDocument()
+    expect(screen.queryByText(/还没有能选的模型/)).toBeNull()
+    expect((picker() as HTMLSelectElement).selectedOptions[0]).toHaveTextContent(/^model-x$/)
+  })
+
+  it('部分提供方没读到：照常列出读到的，注明哪个提供方没读到；选过的模型属于没读到的提供方时不标成现在用不了', async () => {
+    const { picker } = setupModel({
+      model: { provider: 'provider-x', model: 'model-x' },
+      respond: command => command.cmd === 'list-models'
+        ? { ok: true, cmd: command.cmd, providers: [CHOICES[0]!, { id: 'provider-x', name: 'Provider X', models: [], listFailed: true }] }
+        : { ok: true, cmd: command.cmd },
+    })
+    expect(await screen.findByText('没读到 Provider X 的模型，稍后再打开这页试试。')).toBeInTheDocument()
+    expect([...picker().querySelectorAll('optgroup')].map(g => g.label)).toEqual(['DeepSeek'])
+    expect((picker() as HTMLSelectElement).selectedOptions[0]).toHaveTextContent(/^model-x$/)
+    expect(screen.queryByText('没读到能选的模型，稍后再打开这页试试。')).toBeNull()
+  })
+
+  it('没有会话：置灰，说明开一个会话后才能选，不发命令', () => {
+    const { gateway, picker } = setupModel({ session: 'none' })
+    expect(picker()).toBeDisabled()
+    expect(screen.getByText('开一个会话后才能选模型。')).toBeInTheDocument()
+    expect(gateway.executed).toEqual([])
+  })
+
+  it('配置文件关掉体检：置灰保留，说明换成原因，不列模型', () => {
+    const { gateway, picker } = setupModel({ value: section({ governance: { enabled: false, health: { sensitivity: 'normal' }, globalPromoteTarget: 'plugin-global' } }) })
+    expect(picker()).toBeDisabled()
+    const item = picker().closest('.pm-setting')!
+    expect(item).toHaveClass('pm-setting--disabled')
+    expect(item.querySelector(':scope > .pm-setting-hint')).toHaveTextContent(/^体检已在配置文件里关闭$/)
+    expect(sent(gateway, 'list-models')).toEqual([])
+  })
+
+  /** 存选择的命令由测试手动回：每发一次记一个待回的结果，按需要的先后 resolve。 */
+  function heldSaves() {
+    const held: Array<(result: MemoryCommandResult) => void> = []
+    const respond = (command: MemoryCommand): MemoryCommandResult | Promise<MemoryCommandResult> => {
+      if (command.cmd === 'list-models') return { ok: true, cmd: command.cmd, providers: CHOICES }
+      return new Promise<MemoryCommandResult>((resolve) => { held.push(resolve) })
+    }
+    /** 回第 i 次（从 0 数）存选择的结果。 */
+    const answer = async (i: number, ok: boolean) => {
+      await act(async () => { held[i]!(ok ? { ok: true, cmd: 'set-model-selection' } : { ok: false, cmd: 'set-model-selection', code: 'failed' }) })
+    }
+    return { respond, answer, count: () => held.length }
+  }
+  const optionOf = (picker: HTMLElement, name: string) => [...picker.querySelectorAll('option')].find(o => o.textContent === name)!
+  const selected = (combobox: HTMLElement) => (combobox as HTMLSelectElement).selectedOptions[0]
+  const effortPicker = () => screen.getByRole('combobox', { name: '推理强度' })
+
+  describe('连续选：保存一次只发一个', () => {
+    it('选模型后紧接着选推理强度：第二次排在第一次存好之后才发；第一次存好、视图换成第一次的值时推理强度不跳回', async () => {
+      const saves = heldSaves()
+      const { gateway, picker } = setupModel({ respond: saves.respond })
+      await waitFor(() => { expect(picker().querySelectorAll('optgroup')).toHaveLength(2) })
+      await act(async () => { fireEvent.change(picker(), { target: { value: optionOf(picker(), 'DeepSeek Pro').value } }) })
+      await act(async () => { fireEvent.change(effortPicker(), { target: { value: 'high' } }) })
+      // 第一次还没回：第二次不发，界面先显示选的
+      expect(sent(gateway, 'set-model-selection')).toEqual([{ cmd: 'set-model-selection', key: 'checkup', selection: { provider: 'deepseek-official', model: 'deepseek-pro' } }])
+      expect(selected(effortPicker())).toHaveTextContent('高')
+      await saves.answer(0, true)
+      act(() => { gateway.setView('checkups', checkups({ provider: 'deepseek-official', model: 'deepseek-pro' })) })
+      expect(selected(effortPicker())).toHaveTextContent('高')
+      expect(sent(gateway, 'set-model-selection').at(-1)).toEqual({ cmd: 'set-model-selection', key: 'checkup', selection: { provider: 'deepseek-official', model: 'deepseek-pro', reasoningEffort: 'high' } })
+      await saves.answer(1, true)
+      act(() => { gateway.setView('checkups', checkups({ provider: 'deepseek-official', model: 'deepseek-pro', reasoningEffort: 'high' })) })
+      expect(selected(effortPicker())).toHaveTextContent('高')
+      expect(saves.count()).toBe(2)
+    })
+
+    it('在途时连选几次：只补发最后一次，中间的不发', async () => {
+      const saves = heldSaves()
+      const { gateway, picker } = setupModel({ respond: saves.respond })
+      await waitFor(() => { expect(picker().querySelectorAll('optgroup')).toHaveLength(2) })
+      await act(async () => { fireEvent.change(picker(), { target: { value: optionOf(picker(), 'Model X').value } }) })
+      await act(async () => { fireEvent.change(picker(), { target: { value: optionOf(picker(), 'DeepSeek Pro').value } }) })
+      await act(async () => { fireEvent.change(picker(), { target: { value: '' } }) })
+      expect(selected(picker())).toHaveTextContent('跟随默认模型')
+      await saves.answer(0, true)
+      expect(sent(gateway, 'set-model-selection').map(c => c.cmd === 'set-model-selection' ? c.selection : undefined)).toEqual([{ provider: 'provider-x', model: 'model-x' }, null])
+      await saves.answer(1, true)
+      expect(selected(picker())).toHaveTextContent('跟随默认模型')
+    })
+
+    it('旧的一次没存上、后面还有排着的：不回滚新的选择，不提示没存上', async () => {
+      const saves = heldSaves()
+      const { picker } = setupModel({ respond: saves.respond })
+      await waitFor(() => { expect(picker().querySelectorAll('optgroup')).toHaveLength(2) })
+      await act(async () => { fireEvent.change(picker(), { target: { value: optionOf(picker(), 'Model X').value } }) })
+      await act(async () => { fireEvent.change(picker(), { target: { value: optionOf(picker(), 'DeepSeek Pro').value } }) })
+      await saves.answer(0, false)
+      expect(selected(picker())).toHaveTextContent('DeepSeek Pro')
+      expect(screen.queryByText('没存上，再选一次试试。')).toBeNull()
+      await saves.answer(1, true)
+      expect(selected(picker())).toHaveTextContent('DeepSeek Pro')
+      expect(screen.queryByText('没存上，再选一次试试。')).toBeNull()
+    })
+
+    it('最后一次没存上：退回视图里的值并提示；再选一次开始保存时提示清掉', async () => {
+      const saves = heldSaves()
+      const { picker } = setupModel({ respond: saves.respond })
+      await waitFor(() => { expect(picker().querySelectorAll('optgroup')).toHaveLength(2) })
+      await act(async () => { fireEvent.change(picker(), { target: { value: optionOf(picker(), 'Model X').value } }) })
+      await saves.answer(0, false)
+      expect(selected(picker())).toHaveTextContent('跟随默认模型')
+      expect(screen.getByText('没存上，再选一次试试。')).toBeInTheDocument()
+      await act(async () => { fireEvent.change(picker(), { target: { value: optionOf(picker(), 'Model X').value } }) })
+      expect(screen.queryByText('没存上，再选一次试试。')).toBeNull()
+      expect(selected(picker())).toHaveTextContent('Model X')
+    })
+
+    it('保存还在途时别的窗口改了视图：先不让位，仍显示刚选的', async () => {
+      const saves = heldSaves()
+      const { gateway, picker } = setupModel({ respond: saves.respond })
+      await waitFor(() => { expect(picker().querySelectorAll('optgroup')).toHaveLength(2) })
+      await act(async () => { fireEvent.change(picker(), { target: { value: optionOf(picker(), 'Model X').value } }) })
+      act(() => { gateway.setView('checkups', checkups({ provider: 'deepseek-official', model: 'deepseek-pro' })) })
+      expect(selected(picker())).toHaveTextContent('Model X')
+    })
+
+    it('存好了但视图没跟上：先显示选的；视图之后再变一次（别的窗口改回去了）就以视图为准', async () => {
+      const saves = heldSaves()
+      const { gateway, picker } = setupModel({ respond: saves.respond })
+      await waitFor(() => { expect(picker().querySelectorAll('optgroup')).toHaveLength(2) })
+      await act(async () => { fireEvent.change(picker(), { target: { value: optionOf(picker(), 'Model X').value } }) })
+      await saves.answer(0, true)
+      expect(selected(picker())).toHaveTextContent('Model X')
+      // 重读到的视图内容和之前一样（别的窗口把选择改回了跟随）：不卡在刚选的值上
+      act(() => { gateway.setView('checkups', checkups(null)) })
+      expect(selected(picker())).toHaveTextContent('跟随默认模型')
+    })
+  })
+
+  describe('体检视图没读到、会话没了', () => {
+    it.each([
+      ['还在读', { status: 'loading' } as const],
+      ['读出错', { status: 'error', message: 'boom' } as const],
+      ['还没生成', { status: 'missing' } as const],
+    ])('体检视图%s：选择器置灰，不当成「跟随默认模型」让人选', async (_label, view) => {
+      const { picker } = setupModel({ checkupsView: view })
+      await waitFor(() => { expect(picker().querySelectorAll('optgroup')).toHaveLength(2) })
+      expect(picker()).toBeDisabled()
+    })
+
+    it('体检视图读到后恢复可选，显示存的选择', async () => {
+      const { gateway, picker } = setupModel({ checkupsView: { status: 'loading' } })
+      await waitFor(() => { expect(picker().querySelectorAll('optgroup')).toHaveLength(2) })
+      act(() => { gateway.setView('checkups', checkups({ provider: 'provider-x', model: 'model-x' })) })
+      expect(picker()).toBeEnabled()
+      expect(selected(picker())).toHaveTextContent('Model X')
+    })
+
+    it('会话没了：列表没读到的提示收起，已读的模型清掉', async () => {
+      const { gateway, picker } = setupModel({
+        respond: command => command.cmd === 'list-models'
+          ? { ok: true, cmd: command.cmd, providers: [CHOICES[0]!, { id: 'provider-x', name: 'Provider X', models: [], listFailed: true }] }
+          : { ok: true, cmd: command.cmd },
+      })
+      expect(await screen.findByText('没读到 Provider X 的模型，稍后再打开这页试试。')).toBeInTheDocument()
+      act(() => { gateway.setSession({ kind: 'none' }) })
+      expect(screen.queryByText(/没读到/)).toBeNull()
+      expect(picker().querySelectorAll('optgroup')).toHaveLength(0)
+      expect(screen.getByText('开一个会话后才能选模型。')).toBeInTheDocument()
+    })
+
+    it('列模型失败后会话没了：不再提示没读到', async () => {
+      const { gateway } = setupModel({ respond: command => ({ ok: false, cmd: command.cmd, code: 'failed' }) })
+      expect(await screen.findByText('没读到能选的模型，稍后再打开这页试试。')).toBeInTheDocument()
+      act(() => { gateway.setSession({ kind: 'none' }) })
+      expect(screen.queryByText(/没读到/)).toBeNull()
+    })
+
+    it('没存上之后会话没了、或配置文件关掉体检：不再提示没存上', async () => {
+      const { gateway, form, picker } = setupModel({
+        respond: command => command.cmd === 'list-models' ? { ok: true, cmd: command.cmd, providers: CHOICES } : { ok: false, cmd: command.cmd, code: 'failed' },
+      })
+      await waitFor(() => { expect(picker().querySelectorAll('optgroup')).toHaveLength(2) })
+      await act(async () => { fireEvent.change(picker(), { target: { value: optionOf(picker(), 'Model X').value } }) })
+      expect(screen.getByText('没存上，再选一次试试。')).toBeInTheDocument()
+      act(() => { form.externalChange([{ op: 'set', path: ['governance', 'enabled'], value: false }]) })
+      expect(screen.queryByText('没存上，再选一次试试。')).toBeNull()
+      act(() => { form.externalChange([{ op: 'set', path: ['governance', 'enabled'], value: true }]) })
+      expect(screen.getByText('没存上，再选一次试试。')).toBeInTheDocument()
+      act(() => { gateway.setSession({ kind: 'none' }) })
+      expect(screen.queryByText('没存上，再选一次试试。')).toBeNull()
+    })
+  })
+
+  it('英文文案同一口径', () => {
+    const enT = createTranslator(en)
+    expect(enT('settings.checkupModel.label')).toBe('Model for automatic checkups')
+    expect(enT('settings.checkupModel.follow')).toBe('Follow the default model')
+    expect(enT('settings.checkupModel.listPartial', { providers: 'Provider X' })).toBe("Couldn't load the models from Provider X. Reopen this page to try again.")
   })
 })

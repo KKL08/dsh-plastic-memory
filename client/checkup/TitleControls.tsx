@@ -392,7 +392,7 @@ function AutoCheckup({ scope, session, view }: { scope: PageScope; session: Borr
                 </ul>
               )
               : null}
-            <p className="pm-auto-menu-foot">{t('checkup.auto.foot', { scope: foot, model: t('checkup.auto.foot.model') })}</p>
+            <p className="pm-auto-menu-foot">{t('checkup.auto.foot', { scope: foot, model: view.model == null ? t('checkup.auto.foot.model') : t('checkup.auto.foot.modelSelected', { model: view.model.model }) })}</p>
           </div>
         )
         : null}

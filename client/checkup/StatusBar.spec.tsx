@@ -279,6 +279,13 @@ describe('结果行：体检完成', () => {
     expect(within(live()).getByRole('button', { name: '新增 1 条等你决定 ›' })).toBeInTheDocument()
   })
 
+  it('选的模型用不了、这次改用默认模型：单独一行说明', () => {
+    open(APP, { views: { checkups: checkups({ scopes: { '/w/app': { lastResult: result({ by: 'auto', modelFallback: { reason: 'model-gone' } }) } } }) } })
+    const rows = [...live().querySelectorAll('p')].map(p => p.textContent)
+    expect(rows.slice(1)).toEqual(['选的模型现在用不了，这次改用了默认模型。'])
+    expect(createTranslator(en)('checkup.result.note.modelFallback')).toBe('The chosen model is unavailable right now, so this checkup used the default model.')
+  })
+
   it('为 0 的段省略，都为 0 写「没有发现新问题」；宿主没报用量不写；自动体检写「自动体检完成」', () => {
     const { gateway } = open(APP, { views: { checkups: checkups({ scopes: { '/w/app': { lastResult: result({ added: { keys: [KEY.expired], pending: 0, advice: 1 } }) } } }) } })
     expect(live()).toHaveTextContent(/^体检完成：新增 1 条可以整理 ›$/)
@@ -473,6 +480,26 @@ describe('结果行：自动体检没做完、模型用不了', () => {
     expect(live()).toHaveTextContent('默认模型现在用不了（dsh 还没有可用的默认模型），自动体检先暂停。')
     act(() => { gateway.setView('checkups', checkups({ scopes: { '/w/app': { modelUnavailable: { kind: 'no-default-model' } } } })) })
     expect(live()).toHaveTextContent(/^$/)
+  })
+  it('自动体检选的模型用不了：写「自动体检用的模型现在用不了（原因），自动体检先暂停。」，不说默认模型', () => {
+    open(APP, {
+      views: { checkups: checkups({ all: 1, scopes: { '/w/app': { isDue: true, modelUnavailable: { kind: 'model-error', hostCode: 'AUTH', isSelectedModel: true } } } }) },
+    })
+    expect(live()).toHaveTextContent('自动体检用的模型现在用不了（API key 无效或没有权限），自动体检先暂停。')
+    expect(live()).not.toHaveTextContent('默认模型')
+  })
+
+  it('提供方已不在（NO_ADAPTER）：原因写「提供方已不在」，不落到笼统的模型调用出错', () => {
+    open(APP, {
+      views: { checkups: checkups({ all: 1, scopes: { '/w/app': { isDue: true, modelUnavailable: { kind: 'model-error', hostCode: 'NO_ADAPTER', isSelectedModel: true } } } }) },
+    })
+    expect(live()).toHaveTextContent('自动体检用的模型现在用不了（提供方已不在），自动体检先暂停。')
+  })
+
+  it('英文文案同一口径', () => {
+    const enT = createTranslator(en)
+    expect(enT('checkup.result.modelUnavailable.selected', { cause: 'x' })).toBe('The model for automatic checkups is unavailable right now (x), so auto checkups are paused.')
+    expect(enT('checkup.cause.noAdapter')).toBe('the provider has been removed')
   })
 })
 

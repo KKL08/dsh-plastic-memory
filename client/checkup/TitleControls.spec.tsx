@@ -45,8 +45,9 @@ const health = (governanceEnabled = true): HealthView => ({
 })
 
 /** 体检视图夹具：own 是单独设置了的范围（键：global 或项目路径）；zeta 不在视图里，当作刚加的新项目。 */
-function checkups({ all = 'manual', own = {}, inProgress = [], governanceEnabled = true }: {
+function checkups({ all = 'manual', own = {}, inProgress = [], governanceEnabled = true, model = null }: {
   all?: AutoCheckupFrequency
+  model?: CheckupView['model']
   own?: Record<string, AutoCheckupFrequency>
   inProgress?: readonly string[]
   governanceEnabled?: boolean
@@ -59,7 +60,7 @@ function checkups({ all = 'manual', own = {}, inProgress = [], governanceEnabled
       isInProgress: inProgress.includes(key), failure: null, modelUnavailable: null, lastResult: null,
     }
   }
-  return { version: GUI_VIEW_VERSION, governanceEnabled, defaultFrequency: all, allResult: null, model: null, scopes: [scope(GLOBAL), scope(APP), scope(BLOG)] }
+  return { version: GUI_VIEW_VERSION, governanceEnabled, defaultFrequency: all, allResult: null, model, scopes: [scope(GLOBAL), scope(APP), scope(BLOG)] }
 }
 
 const views = { pending, library, health: health(), checkups: checkups() }
@@ -500,6 +501,20 @@ describe('自动体检按钮与菜单：情况表', () => {
     fireEvent.click(autoButton())
     expect(menu()).toHaveAccessibleName('app 的自动体检')
     expect(menu()).toHaveTextContent('只查 app 的记忆。用 dsh 当前的默认模型检查内容')
+  })
+
+  it('设置页选了自动体检用的模型：底部说明写选的模型，不写默认模型', () => {
+    open({ kind: 'all' }, { views: { checkups: checkups({ model: { provider: 'provider-x', model: 'model-x', reasoningEffort: 'high' } }) } })
+    fireEvent.click(autoButton())
+    expect(menu()).toHaveTextContent('全局和各项目都按这个频率查，各自计时；新项目也一样。用你在设置里选的模型 model-x 检查内容、给新冲突出处理建议，记忆越多，token 用得越多；DeepSeek Harness 没开时不查，打开后补上。')
+    expect(menu()).not.toHaveTextContent('默认模型')
+  })
+
+  it('体检视图里没有所选模型这一项（上一个发布版的进程写的）：照常打开菜单，按没选写默认模型', () => {
+    const { model: _model, ...older } = checkups()
+    open({ kind: 'all' }, { views: { checkups: older } })
+    fireEvent.click(autoButton())
+    expect(menu()).toHaveTextContent('用 dsh 当前的默认模型检查内容')
   })
 })
 

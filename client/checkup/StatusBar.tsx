@@ -56,13 +56,14 @@ const ISSUE_LABEL: Readonly<Record<string, LocaleKey>> = {
   stale: 'checkup.status.issue.stale',
 }
 
-/** 宿主错误码 → 原因（模型用不了的五个码见 governance/host-llm.ts，其余是宿主模型调用的稳定错误码）。 */
+/** 宿主错误码 → 原因（模型用不了的六个码见 governance/host-llm.ts，其余是宿主模型调用的稳定错误码）。 */
 const HOST_CODE_CAUSE: Readonly<Record<string, LocaleKey>> = {
   ACCOUNT_SIGN_IN_REQUIRED: 'checkup.cause.signIn',
   ACCOUNT_TOKEN_INVALID: 'checkup.cause.tokenInvalid',
   MISSING_CREDENTIAL: 'checkup.cause.missingCredential',
   INVALID_CREDENTIAL: 'checkup.cause.invalidCredential',
   AUTH: 'checkup.cause.auth',
+  NO_ADAPTER: 'checkup.cause.noAdapter',
   QUOTA: 'checkup.cause.quota',
   RATE_LIMIT: 'checkup.cause.rateLimit',
   TIMEOUT: 'checkup.cause.timeout',
@@ -347,10 +348,11 @@ function ResultRow({ scope, isTodoView, nav, runs, seen, checkups, now }: {
           </Line>,
         )
       }
+      // 用不了的是自动体检选的模型时照实说，不说成默认模型
       if (entry?.modelUnavailable != null && entry.frequency !== 'manual') {
         lines.push(
           <Line key="model" title={entry.modelUnavailable.message}>
-            {t('checkup.result.modelUnavailable', { cause: causeText(entry.modelUnavailable, t) })}
+            {t(entry.modelUnavailable.isSelectedModel === true ? 'checkup.result.modelUnavailable.selected' : 'checkup.result.modelUnavailable', { cause: causeText(entry.modelUnavailable, t) })}
           </Line>,
         )
       }
@@ -391,7 +393,9 @@ function ResultRow({ scope, isTodoView, nav, runs, seen, checkups, now }: {
               : code === 'baseline-truncated' ? t('checkup.result.note.baselineTruncated') : undefined
       return text === undefined ? [] : [<Line key={`${lineKey}:${code}`} title={cause?.message}>{text}</Line>]
     })
-    return [head, ...notes]
+    // 自动体检选的模型用不了、改用了默认模型：说明里最后一行
+    const fallback = result.modelFallback !== undefined ? [<Line key={`${lineKey}:model-fallback`}>{t('checkup.result.note.modelFallback')}</Line>] : []
+    return [head, ...notes, ...fallback]
   }
 
   useHeightTransition(box, lines.map(line => (isValidElement(line) ? line.key : '')).join('|'))
