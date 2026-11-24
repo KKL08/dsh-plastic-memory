@@ -11,6 +11,7 @@ import type { MemorySnapshot, PendingDecision } from '../src/governance/schema.t
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { InMemoryTable } from './helpers/in-memory-table.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
+import { userTurnLog } from './helpers/session-log.ts'
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 
@@ -19,7 +20,7 @@ function makeDeps(store = new MemoryStore(new InMemoryTable(), undefined, new In
     store,
     registry,
     snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()),
-    host: { saveContextOf: async () => ({ workspacePath: '/proj', session: { id: 's1', lastSeq: 3 } }) },
+    host: { saveContextOf: async () => ({ workspacePath: '/proj', session: { id: 's1', lastSeq: 3 } }), readSessionLog: userTurnLog },
   }
 }
 
@@ -67,7 +68,7 @@ describe('executeSave', () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const deps: SaveToolDeps = {
       ...makeDeps(store),
-      host: { saveContextOf: async () => ({ workspacePath: undefined, session: { id: 's1', lastSeq: 3 } }) },
+      host: { saveContextOf: async () => ({ workspacePath: undefined, session: { id: 's1', lastSeq: 3 } }), readSessionLog: userTurnLog },
     }
     const result = await executeSave(
       { ...base, scope: 'workspace', name: '项目规则', content: '本项目用 pnpm', summary: 'pnpm' },
@@ -83,7 +84,7 @@ describe('executeSave', () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const deps: SaveToolDeps = {
       ...makeDeps(store),
-      host: { saveContextOf: async () => ({ workspacePath: '/proj', session: { id: 's1', lastSeq: 3 } }) },
+      host: { saveContextOf: async () => ({ workspacePath: '/proj', session: { id: 's1', lastSeq: 3 } }), readSessionLog: userTurnLog },
     }
     const result = await executeSave(
       { ...base, scope: 'global', name: '全局偏好', content: '所有项目用 pnpm', summary: 'pnpm' },
@@ -184,7 +185,7 @@ describe('executeSave', () => {
       const update = await globalMemory(deps)
       const guided = await executeSave(update, fakeExec(), deps)
       expect(await executeSave({ ...base, scope: 'workspace', name: '本仓库提交不加前缀', content: '这个仓库的提交不加类型前缀', summary: '本仓库提交规范' }, fakeExec(), deps)).toMatchObject({ kind: 'saved' })
-      const nextTurn: SaveToolDeps = { ...deps, host: { saveContextOf: async () => ({ workspacePath: '/proj', session: { id: 's1', lastSeq: 9, turnStartSeq: 8 } }) } }
+      const nextTurn: SaveToolDeps = { ...deps, host: { saveContextOf: async () => ({ workspacePath: '/proj', session: { id: 's1', lastSeq: 9, turnStartSeq: 8 } }), readSessionLog: userTurnLog } }
       expect(await executeSave({ ...update, confirmGlobal: confirmCodeOf(guided) }, fakeExec(), nextTurn)).toMatchObject({ kind: 'updated' })
     })
 
@@ -210,7 +211,7 @@ describe('executeSave', () => {
     it('码绑会话：同一条记忆在两个会话里的码按会话各算', async () => {
       const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
       const shared = makeDeps(store)
-      const inSession = (id: string): SaveToolDeps => ({ ...shared, host: { saveContextOf: async () => ({ workspacePath: '/proj', session: { id, lastSeq: 3 } }) } })
+      const inSession = (id: string): SaveToolDeps => ({ ...shared, host: { saveContextOf: async () => ({ workspacePath: '/proj', session: { id, lastSeq: 3 } }), readSessionLog: userTurnLog } })
       const update = await globalMemory(inSession('a'))
       const target = (await store.get(update.id))!
       // 找一对码不同的会话 id（码会偶然撞，固定挑不撞的）
@@ -239,7 +240,7 @@ describe('executeSave', () => {
     it('没有工作目录的会话改全局记忆不用确认', async () => {
       const deps = makeDeps()
       const update = await globalMemory(deps)
-      const noWorkspace: SaveToolDeps = { ...deps, host: { saveContextOf: async () => ({ workspacePath: undefined, session: { id: 's1', lastSeq: 3 } }) } }
+      const noWorkspace: SaveToolDeps = { ...deps, host: { saveContextOf: async () => ({ workspacePath: undefined, session: { id: 's1', lastSeq: 3 } }), readSessionLog: userTurnLog } }
       expect(await executeSave(update, fakeExec(), noWorkspace)).toMatchObject({ kind: 'updated' })
     })
   })

@@ -3,9 +3,10 @@ import { applyEdits, type SaveEdit } from './edits.ts'
 import type { ChangeKind, MemoryRecord, SourceMode } from './record-schema.ts'
 import type { CodedNote, RejectCode, WarningCode } from './contract-codes.ts'
 import { ALREADY_REVIEWED_REASON, CHANGE_KINDS, CONFIDENCE_BY_SOURCE, NOT_DELEGATED_REASON, isPendingDelegated, memoryRecordSchema } from './record-schema.ts'
-import { applyChange, initialProvenance, type ChangeFields } from './change.ts'
+import { applyChange, initialProvenance, type ChangeAnchor, type ChangeFields } from './change.ts'
 import { commitChange } from './commit-change.ts'
 import { UNKNOWN_SESSION_ID } from './session-id.ts'
+import { anchorRangeOf, type AnchorFacts } from './session-log.ts'
 import type { MemoryStore } from './store.ts'
 import { newWriteOp } from './storage/table.ts'
 import { MODEL_CHANGE_STEP, ledgerSteps, modelChangeStep } from './governance/op-steps.ts'
@@ -453,6 +454,11 @@ export async function runSavePipeline(
     mergeWindowMs?: number
     /** 写入时刻（createdAt、updatedAt、有效期、快照与撤销记录）的时钟，缺省取当前时间。 */
     now?: () => number
+    /**
+     * 从会话日志读出的当轮事实（绑定层读，范围按 anchorRangeOf）：记进锚，并决定能填哪些来源方式。
+     * 不给时不记、不限（没有会话日志可读的调用方，如纯管线测试）；宿主给不出发起方要传 isUserInitiated: false。
+     */
+    turn?: AnchorFacts
   },
 ): Promise<PipelineResult> {
   const { store, registry, session } = deps
@@ -464,6 +470,15 @@ export async function runSavePipeline(
   const subagent = deps.delegation ? await checkSubagentWrite(resolved.candidate, deps) : { candidate: resolved.candidate, warnings: [] }
   if ('code' in subagent) return { kind: 'rejected', ...subagent }
   const { candidate } = subagent
+  // 不是用户本人开的轮（定时任务、别的 agent、插件投递）：用户明说、用户行为、经用户确认的动作都无从谈起，和子 agent 同一口径
+  if (deps.turn !== undefined && !deps.turn.isUserInitiated && !SUBAGENT_SOURCE_MODES.includes(candidate.sourceMode)) {
+    const opener = deps.turn.initiator === undefined ? '读不到是谁开的' : `由 ${deps.turn.initiator} 开启`
+    return {
+      kind: 'rejected',
+      code: 'not-user-initiated',
+      reason: `这一轮不是用户本人开的（${opener}），sourceMode 按观察（environment-observed）或推断（agent-inferred）填，再重发。`,
+    }
+  }
 
   // 1. 格式校验
   if (!registry.has(candidate.type)) {
@@ -585,8 +600,13 @@ export async function runSavePipeline(
   // 4. 持久化（写入前必须过 schema——KvTable.put 不校验，脏记录会让下次 domain open 整库拒载）
   // 证据锚（这条记忆出自会话的哪段事件）：eventRange = [当轮 turn/start, save 时刻]，两个数都是机械事实。
   // 模型上下文里没有 seq 标注，任何模型填的区间都是编造——锚只能由绑定层填。
-  const anchorStart = Math.min(session.turnStartSeq ?? 0, session.lastSeq)
-  const anchor = { sessionId: session.id, eventRange: [anchorStart, session.lastSeq] as [number, number], sourceMode: candidate.sourceMode }
+  const turn = deps.turn
+  const anchor: ChangeAnchor = {
+    sessionId: session.id, eventRange: anchorRangeOf(session), sourceMode: candidate.sourceMode,
+    ...(turn?.initiator !== undefined ? { initiator: turn.initiator } : {}),
+    ...(turn?.evidence !== undefined ? { evidence: turn.evidence } : {}),
+    ...(turn?.startTime !== undefined ? { at: turn.startTime } : {}),
+  }
   const by = deps.delegation ? 'subagent' : 'main'
   // update 要改的字段：怎么落到记录上由改动性质定（change.ts 的落盘行为表），补证只带把握
   let fields: ChangeFields = {}

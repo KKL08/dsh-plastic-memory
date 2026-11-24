@@ -35,6 +35,7 @@ import { fakeExec } from './helpers/exec.ts'
 import { InMemoryTable } from './helpers/in-memory-table.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 import { noInstructions } from './helpers/instructions.ts'
+import { userTurnLog } from './helpers/session-log.ts'
 
 // 治理动作只有在用户明确选择「全局整理」后才能跨项目。
 // 场景统一为：会话在项目 A，B 是另一个项目；global 记忆对任何会话都可见。
@@ -471,7 +472,7 @@ describe('memory_save update 的 cross-workspace 与 memory_source 的 forbidden
   const ctx = async () => ({ workspacePath: A as string | undefined, session: { id: 's', lastSeq: 1 } })
 
   it('memory_save / memory_source 的参数 schema 里没有 allowCrossWorkspace', () => {
-    const save = createSaveTool({ store: w.store, snapshots: w.snapshots, registry, host: { saveContextOf: ctx } })
+    const save = createSaveTool({ store: w.store, snapshots: w.snapshots, registry, host: { saveContextOf: ctx, readSessionLog: userTurnLog } })
     const source = createSourceTool({ store: w.store, host: { contextOf: ctx }, getReadEvent: () => null })
     for (const tool of [save, source]) {
       const schema = schemaOf(tool) as { properties: Record<string, unknown> }
@@ -486,7 +487,7 @@ describe('memory_save update 的 cross-workspace 与 memory_source 的 forbidden
       action: 'update' as const, change: 'correct' as const, id: 'mem_b', name: '条目', type: 'knowledge', scope: 'workspace' as const,
       content: '改写', summary: '摘要', sourceMode: 'user-explicit' as const, allowCrossWorkspace: true,
     }
-    const r = await executeSave(args, exec, { store: w2.store, snapshots: w2.snapshots, registry, host: { saveContextOf: ctx } })
+    const r = await executeSave(args, exec, { store: w2.store, snapshots: w2.snapshots, registry, host: { saveContextOf: ctx, readSessionLog: userTurnLog } })
     expect(r).toMatchObject({ kind: 'rejected', code: SAVE_CROSS })
     expect((await w2.store.get('mem_b'))!.content).toBe('原文')
   })

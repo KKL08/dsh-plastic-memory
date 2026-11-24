@@ -6,11 +6,14 @@ import type { PendingDecisionsStore } from '../governance/decisions.ts'
 import { isPendingDelegated, type MemoryRecord } from '../record-schema.ts'
 import { maskSecretSurface } from '../secrets.ts'
 import { runSavePipeline, type PipelineResult, type SaveDelegation, type SaveInput } from '../pipeline.ts'
+import { MEMORY_TOOL_NAMES } from '../contract-codes.ts'
+import { anchorFactsOf, excludesPluginEvidence } from '../session-log.ts'
+import type { HostSession } from './host-session.ts'
 
 /** memory_save 运行时需要的会话上下文，由宿主会话适配器的 saveContextOf 提供。 */
 export interface SaveContext {
   workspacePath: string | undefined
-  /** turnStartSeq 是证据锚的起点（当轮 turn/start 的 seq）；缺省时管线回退整会话锚。 */
+  /** turnStartSeq 是证据锚的起点（当轮 turn/start 的 seq）；宿主读不到时缺省，管线回退整会话锚。 */
   session: { id: string; lastSeq: number; turnStartSeq?: number }
   /** 子 agent 会话（delegationDepth ≥ 1）才有，由宿主 header 与投影填；主会话缺省。 */
   delegation?: SaveDelegation
@@ -23,7 +26,11 @@ export type SaveArgs = SaveInput
 export interface SaveToolDeps {
   store: MemoryStore
   registry: TypeRegistry
-  host: { saveContextOf(exec: ToolRunContext): Promise<SaveContext> }
+  host: { saveContextOf(exec: ToolRunContext): Promise<SaveContext>; readSessionLog: HostSession['readSessionLog'] }
+  /** 记忆文件根目录：参数里提到它的工具调用（读记忆文件）不算工具证据。缺省时只排除本插件的工具。 */
+  memoryRoot?: string
+  /** 家目录：认出记忆根目录的 ~ 写法。 */
+  homeDir?: string
   /** 改写、替代前拍快照用（快照先行）；必填，测试传内存实现。 */
   snapshots: SnapshotStore
   /** 改写、替代后记撤销记录（对话卡、右侧栏的「撤销修改」）；生产接线传入已有实例，测试可缺省。 */
@@ -104,6 +111,11 @@ export async function executeSave(
   deps: SaveToolDeps,
 ): Promise<PipelineResult> {
   const context = await deps.host.saveContextOf(exec)
+  // 当轮是谁开的、有哪类证据：读整份会话日志机械判断，读不到按非用户发起。
+  // 轮起点照宿主读到的给，读不到就是不知道，不拿整会话锚的 0 冒充当轮起点
+  const { turnStartSeq, lastSeq } = context.session
+  const isExcluded = excludesPluginEvidence({ toolNames: MEMORY_TOOL_NAMES, memoryRoot: deps.memoryRoot ?? '', homeDir: deps.homeDir })
+  const turn = anchorFactsOf(await deps.host.readSessionLog(context.session.id), { turnStartSeq, lastSeq }, isExcluded)
   const result = await runSavePipeline(args, {
     store: deps.store,
     registry: deps.registry,
@@ -119,6 +131,7 @@ export async function executeSave(
     maxSubagentSaves: deps.maxSubagentSaves?.(),
     guided: deps.guidedIn?.(context.session.id),
     mergeWindowMs: mergeWindowMs(deps.mergeWindowMinutes?.()),
+    turn,
   })
   if (result.kind === 'saved') deps.onSaved?.(context.session.id, result.record.id)
   return result

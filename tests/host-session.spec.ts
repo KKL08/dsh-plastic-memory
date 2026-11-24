@@ -51,10 +51,10 @@ describe('PA-28 宿主服务缺席、未注册、调用抛错时各自退化，�
     ['没有开着的轮', { sessionProjections: projections({ turnBoundary: { openTurnStartSeq: null } }) }, 'no open turn'],
     ['投影缺字段', { sessionProjections: projections({ turnBoundary: {} }) }, 'undefined'],
   ]
-  it.each(turnAnchorCases)('证据锚读不到 turnBoundary（%s）：起点为 0，每个会话警告一次', async (_label, services, reason) => {
+  it.each(turnAnchorCases)('证据锚读不到 turnBoundary（%s）：起点为不知道，每个会话警告一次', async (_label, services, reason) => {
     const { host, warnings } = boot(services)
     const a = session('sess-a')
-    expect((await host.contextOf(execOf(a))).session.turnStartSeq).toBe(0)
+    expect((await host.contextOf(execOf(a))).session.turnStartSeq).toBeUndefined()
     await host.contextOf(execOf(a))
     expect(warnings).toHaveLength(1)
     expect(warnings[0]).toContain('sess-a')
@@ -143,10 +143,10 @@ describe('PA-28 宿主服务缺席、未注册、调用抛错时各自退化，�
     expect(requests[1]?.sessionId).not.toBe(requests[2]?.sessionId)
   })
 
-  it('没有会话：会话 id 用哨兵，证据锚全为 0，不带委派、不警告', async () => {
+  it('没有会话：会话 id 用哨兵，证据锚终点为 0、轮起点不知道，不带委派、不警告', async () => {
     const { host, warnings } = boot()
     const context = await host.contextOf(execOf())
-    expect(context).toEqual({ workspacePath: undefined, delegationDepth: 0, session: { id: UNKNOWN_SESSION_ID, lastSeq: 0, turnStartSeq: 0 } })
+    expect(context).toEqual({ workspacePath: undefined, delegationDepth: 0, session: { id: UNKNOWN_SESSION_ID, lastSeq: 0, turnStartSeq: undefined } })
     expect(warnings).toEqual([])
   })
 })
@@ -235,5 +235,39 @@ describe('PA-29 子 agent 的保存上下文沿父链解析到根会话；父链
     const { host } = boot()
     expect(await host.workspaceOf(session('sess-a', { cwd: '/a' }))).toBe('/ws/a')
     expect(await host.workspaceOf(session('sess-b'))).toBeUndefined()
+  })
+})
+
+describe('读一个会话的整份日志', () => {
+  const events = [{ seq: 0, type: 'turn/start', time: 1, data: { turn: 1 } }, { seq: 1, type: 'user/message', time: 2, data: { role: 'user', content: [], source: { kind: 'user' } } }]
+  const readable = { async readSession(id: string) { return { session: { id, isSeeded: true, delegationDepth: 1, cwd: '/a' }, inheritedEventCount: 1, events } } }
+
+  it('读得到：header、继承前缀长度、事件原样交回', async () => {
+    const { host, warnings } = boot({ sessionQuery: readable })
+    expect(await host.readSessionLog('sess-a')).toEqual({ header: { id: 'sess-a', isSeeded: true, delegationDepth: 1, cwd: '/a' }, inheritedEventCount: 1, events })
+    expect(warnings).toEqual([])
+  })
+
+  it('宿主没给继承前缀长度：如实留空，不补成 0', async () => {
+    const { host } = boot({ sessionQuery: { async readSession(id: string) { return { session: { id, isSeeded: true }, events } } } })
+    expect((await host.readSessionLog('sess-a'))?.inheritedEventCount).toBeUndefined()
+  })
+
+  it('读不到（服务缺席、没有 readSession、读取抛错、会话不存在、返回形状不对）：返回 null，同一原因只警告一次', async () => {
+    const gone = { async readSession() { throw Object.assign(new Error('session "x" not found'), { code: 'SESSION_QUERY_SESSION_NOT_FOUND' }) } }
+    for (const sessionQuery of [undefined, throwing, {}, gone, { async readSession() { return { events: 'oops' } } }]) {
+      const { host, warnings } = boot({ sessionQuery })
+      expect(await host.readSessionLog('sess-a')).toBeNull()
+      expect(await host.readSessionLog('sess-a')).toBeNull()
+      expect(warnings.length).toBeLessThanOrEqual(1)
+    }
+  })
+
+  it('没有会话 id（哨兵）：不去问宿主，直接 null', async () => {
+    let asked = 0
+    const { host, warnings } = boot({ sessionQuery: { async readSession() { asked++; return { session: {}, inheritedEventCount: 0, events: [] } } } })
+    expect(await host.readSessionLog(UNKNOWN_SESSION_ID)).toBeNull()
+    expect(asked).toBe(0)
+    expect(warnings).toEqual([])
   })
 })

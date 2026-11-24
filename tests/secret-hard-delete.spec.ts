@@ -25,6 +25,7 @@ import { writesDuring } from './helpers/fs-writes.ts'
 import { SECRET_MASK } from '../src/secrets.ts'
 import { InMemoryTable } from './helpers/in-memory-table.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
+import { userTurnLog } from './helpers/session-log.ts'
 
 // 含密钥的记忆被遗忘时立即物理删除，所有快照里不留明文，且不破坏快照里的其他记录；
 // 疑似密钥保存时被拦下确认。
@@ -301,7 +302,7 @@ describe('密钥硬删', () => {
     if (updated.kind !== 'updated') throw new Error(updated.kind)
     expect(updated.warnings?.map(w => w.code)).toEqual([SECRET_SUSPECTED_WARNING])
 
-    const tool = createSaveTool({ store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), host: { saveContextOf: async () => ({ workspacePath: WS, session: { id: 's', lastSeq: 1 } }) } })
+    const tool = createSaveTool({ store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), host: { saveContextOf: async () => ({ workspacePath: WS, session: { id: 's', lastSeq: 1 } }), readSessionLog: userTurnLog } })
     const params = (tool.parameters as unknown as { properties: Record<string, { description?: string }> }).properties
     expect(params.force.description).toBe('跳过结构去重与疑似密钥拦截（用户已确认）')
   })

@@ -26,6 +26,7 @@ import { fakeExec } from './helpers/exec.ts'
 import { formatValidity } from '../src/validity.ts'
 import { noInstructions } from './helpers/instructions.ts'
 import { memoryText } from './helpers/memory-text.ts'
+import { userTurnLog } from './helpers/session-log.ts'
 
 // 手编检测与恢复比较投影。
 // 全部用真实目录（FileTable + .state 侧表）；文件直接改盘模拟用户手编。
@@ -79,7 +80,7 @@ function harness() {
       cache.setWorkspacePath(s, WS)
       return cache.assemble(s)
     },
-    save: (args: Parameters<typeof executeSave>[0]) => executeSave(args, fakeExec(), { store, registry, host: { saveContextOf: ctx }, snapshots }),
+    save: (args: Parameters<typeof executeSave>[0]) => executeSave(args, fakeExec(), { store, registry, host: { saveContextOf: ctx, readSessionLog: userTurnLog }, snapshots }),
     snapshot: (args: Parameters<typeof executeSnapshotTool>[0]) => executeSnapshotTool(args, { workspacePath: WS }, { store, snapshots }),
   }
 }

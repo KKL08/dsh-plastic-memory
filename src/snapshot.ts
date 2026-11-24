@@ -1,6 +1,6 @@
 import { isPendingDelegated, type MemoryRecord } from './record-schema.ts'
 import type { TypeRegistry } from './type-registry.ts'
-import { sourceNote, formatIndexLine } from './index-line.ts'
+import { sourceNote, formatIndexLine, unattendedNote } from './index-line.ts'
 import { workspaceDirName, GLOBAL_DIR, INDEX_FILE, ARCHIVE_DIR } from './storage/paths.ts'
 import { EVIDENCE_GUIDANCE, type EvidenceLookupLevel } from './evidence-guidance.ts'
 import { stalenessNote, withinValidity } from './record-freshness.ts'
@@ -185,7 +185,7 @@ export function assembleSnapshot(deps: {
   const coreIncluded: MemoryRecord[] = []
   for (const r of coreRecords) {
     // 归属前缀：模型不信来路不明的裸句，标出这是长期记忆及其类型，减少"全文在手仍重搜"
-    const line = `- [${r.id}]【记忆·${registry.get(r.type).label}】${r.content}${sourceNote(r)}${stalenessNote(r, registry.get(r.type).decayDays, now)}`
+    const line = `- [${r.id}]【记忆·${registry.get(r.type).label}】${r.content}${sourceNote(r)}${unattendedNote(r)}${stalenessNote(r, registry.get(r.type).decayDays, now)}`
     const cost = estimateTokens(line)
     if (used + cost > coreBudget) break
     parts.push(line)
@@ -228,7 +228,7 @@ export function assembleSnapshot(deps: {
     let groupCost = headerCost
     const groupTokens = { workspace: 0, global: 0 }
     for (const r of sorted) {
-      const line = formatIndexLine(r, { passive, file: files.get(r.id), note: stalenessNote(r, def.decayDays, now) })
+      const line = formatIndexLine(r, { passive, file: files.get(r.id), note: `${unattendedNote(r)}${stalenessNote(r, def.decayDays, now)}` })
       const cost = estimateTokens(line)
       if (used + groupCost + cost > limit) { exhausted = true; break }
       groupLines.push(line)

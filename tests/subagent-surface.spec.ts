@@ -17,6 +17,7 @@ import { MEMORY_COMMAND_NAME, encodeMemoryCommand, type MemoryCommand } from '..
 import type { MemoryCommandDefinition } from '../src/gui/commands.ts'
 import { fakeExec } from './helpers/exec.ts'
 import { record } from './helpers/record.ts'
+import { openUserTurn, readUserTurn, USER_TURN_BOUNDARY } from './helpers/session-log.ts'
 
 // 权限面（spec「权限面」表逐行）：经 apply() 的完整注册包装（registerWrite、只读门、宿主会话适配器）调用每个工具，
 // 在进程边界与存储入口打观察点：模型调用（宿主 llm.stream）、sessionQuery.readEvent / filterSessions、记录表的写入口
@@ -128,6 +129,7 @@ async function boot() {
   })
   const headers = new Map<string, Pick<SessionHeader, 'id' | 'delegationDepth' | 'parentSession'>>()
   const sessionQuery = {
+    readSession: readUserTurn,
     readEvent: async (request: { sessionId: string; seq: number }) => {
       effects.readEvents.push({ sessionId: request.sessionId })
       return { events: [toolResult(request.seq, `${request.sessionId} 的工具输出`)], startSeq: 0, endSeq: request.seq }
@@ -144,6 +146,7 @@ async function boot() {
   const modes = new Map<string, 'one-shot' | 'continuable'>()
   const projections = {
     stateOf: (session: { header: { id: string } }, key: string) => {
+      if (key === 'turnBoundary') return USER_TURN_BOUNDARY
       if (key !== 'subagent') return undefined
       const mode = modes.get(session.header.id)
       return mode === undefined ? {} : { identity: { mode } }
@@ -179,9 +182,10 @@ async function boot() {
     const { mode, ...meta } = header
     if (mode !== undefined) modes.set(id, mode)
     headers.set(id, { id: id as SessionId, ...meta as Partial<SessionHeader> })
-    return Session.create(id as SessionId, [], {
+    // 会话里先有用户本人开的一轮，和 sessionQuery 读回的日志一致
+    return openUserTurn(Session.create(id as SessionId, [], {
       version: SESSION_FORMAT_VERSION, id: id as SessionId, createdAt: 0, isSeeded: false, cwd: ws, ...meta as Partial<SessionHeader>,
-    })
+    }))
   }
   const exec = (s: Session) => fakeExec({ agent: { session: s, options: { provider: 'p', model: 'm' } } as unknown as ToolRunContext['agent'] })
   /** 调一个工具，只观察这次调用：进入前清空 effects、打开 fs 记录，返回结果。 */

@@ -26,6 +26,7 @@ import { AdviceIgnoreStore } from '../src/governance/advice-ignores.ts'
 import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
 import { noInstructions } from './helpers/instructions.ts'
+import { openUserTurn, readUserTurn, USER_TURN_BOUNDARY } from './helpers/session-log.ts'
 
 // Names mixing filesystem-forbidden chars, whitespace and CJK, long enough to
 // exercise the 40-char truncation path in slugifyName.
@@ -230,7 +231,10 @@ describe('子 agent 记忆的生命周期', () => {
     const listeners = new Map<string, (...args: unknown[]) => unknown>()
     // 根会话解析经 sessionQuery 读祖先 header（宿主 SessionRecord 形状）
     const headers = [{ id: 'sess-main' }, { id: 'sess-c1', delegationDepth: 1, parentSession: 'sess-main' }]
+    // 当轮起点读宿主 turnBoundary 投影：每个会话都停在用户本人开的那一轮（同 readUserTurn 读回的日志）
+    const turnProjection = { stateOf: (_s: object, key: string) => (key === 'turnBoundary' ? USER_TURN_BOUNDARY : undefined) }
     const sessionQuery = {
+      readSession: readUserTurn,
       filterSessions: async (filters: Array<{ kind: string; values: string[] }>) => headers
         .filter(h => filters.some(f => f.kind === 'id' && f.values.includes(h.id)))
         .map(h => ({ header: { version: SESSION_FORMAT_VERSION, createdAt: 0, isSeeded: false, ...h }, live: true, persisted: false })),
@@ -238,7 +242,7 @@ describe('子 agent 记忆的生命周期', () => {
     const ctx = {
       tools: { register: (def: Def) => { defs.set(def.name, def); return () => { defs.delete(def.name) } } },
       on: (event: string, fn: (...args: unknown[]) => unknown) => { listeners.set(event, fn); return () => {} },
-      get: (name: string) => (name === 'sessionQuery' ? sessionQuery : undefined),
+      get: (name: string) => (name === 'sessionQuery' ? sessionQuery : name === 'sessionProjections' ? turnProjection : undefined),
       // commands 服务不给：插件内的视图写入器按文件节流（两次替换至少隔 150ms），每次写入都等它会把 400 条序列拖到半分钟
       inject: () => () => {},
       effect: () => () => {},
@@ -257,7 +261,7 @@ describe('子 agent 记忆的生命周期', () => {
       
     })
     const session = (id: string, header: { delegationDepth?: number; parentSession?: string } = {}) =>
-      Session.create(id as SessionId, [], { version: SESSION_FORMAT_VERSION, id: id as SessionId, createdAt: 0, isSeeded: false, cwd: ws, ...header as object })
+      openUserTurn(Session.create(id as SessionId, [], { version: SESSION_FORMAT_VERSION, id: id as SessionId, createdAt: 0, isSeeded: false, cwd: ws, ...header as object }))
     const main = session('sess-main')
     const children: Record<Who, Session> = { 1: session('sess-c1', { delegationDepth: 1, parentSession: 'sess-main' }), 2: session('sess-c2', { delegationDepth: 2, parentSession: 'sess-c1' }) }
     const call = async (s: Session, tool: string, args: unknown) =>

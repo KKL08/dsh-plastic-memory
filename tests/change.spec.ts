@@ -94,12 +94,19 @@ describe('状态变化', () => {
 })
 
 describe('出处清单', () => {
-  it('封顶：新的在前，最旧的丢掉', () => {
+  it('封顶：新的在前，最旧的补证锚丢掉，新建那个写下内容的锚留在末位', () => {
     let r = base()
     for (let i = 1; i <= SOURCE_TRAIL_CAP + 2; i++) r = applyChange(r, change('corroborate', { anchor: anchor(i), at: NOW + i }))
     expect(r.sourceTrail).toHaveLength(SOURCE_TRAIL_CAP)
     expect(r.sourceTrail![0]!.sessionId).toBe(`s${SOURCE_TRAIL_CAP + 2}`)
-    expect(r.sourceTrail!.at(-1)!.sessionId).toBe('s3')
+    expect(r.sourceTrail!.at(-2)!.sessionId).toBe('s4')
+    expect(r.sourceTrail!.at(-1)).toMatchObject({ sessionId: 's0', change: 'create' })
+  })
+
+  it('封顶：留下的锚里已有写下内容的，最旧的照常丢掉', () => {
+    let r = applyChange(base(), change('refine', { anchor: anchor(1), at: NOW + 1 }))
+    for (let i = 2; i <= SOURCE_TRAIL_CAP; i++) r = applyChange(r, change('corroborate', { anchor: anchor(i), at: NOW + i }))
+    expect(r.sourceTrail!.map(a => a.sessionId)).toEqual(Array.from({ length: SOURCE_TRAIL_CAP }, (_, i) => `s${SOURCE_TRAIL_CAP - i}`))
   })
 
   it('旧文件只有 source 没有清单：source 当成第一个锚，再加上这次的', () => {

@@ -4,12 +4,12 @@
  * cwd 走创建选项）搭 exec 直调，断言宿主层面的契约：工具注册、输出深度无损 JSON、
  * 会话/工作目录解析、落盘布局、规则层/语义层 note 码、快照回路、提升候选 dismiss、
  * 证据锚悬空降级（H9a 把落盘记录的 sessionId 改成不存在的会话）、真会话下钻（H9b 读回原文）、
- * 当轮锚来自宿主 turnBoundary 投影（H13）、外部直接写进记忆目录的文件出现在新会话第一步的快照消息里（H15）、
+ * 当轮锚来自宿主 turnBoundary 投影（H13）、定时任务开的轮只能按观察或推断写且锚记着发起方（H33）、外部直接写进记忆目录的文件出现在新会话第一步的快照消息里（H15）、
  * 宿主 grep 工具搜记忆根目录时顶层命中、.archive/ 不命中（H16）、
  * 带委派 header 的真子会话存入待确认记忆、检索排在主档后、溯源只限自己的会话、父会话接受后进新会话的注入（H19）。
  * 无 key 也跑的宿主服务契约：经宿主 commands 服务执行 `/memory` 命令，结果过 GUI 契约 schema；自动体检调度器在宿主计时服务登记了定时器。
- * 宿主接口探针（H22–H30，无 key）：sessionQuery 的会话列举、父子追溯、标题、事件时间与过滤；当轮用户消息的来源标记；本进程的空闲信号；
- * 指令文件的修改时间；会话存档状态（含跨进程，第二趟）；会话卸下后读事件、另一个进程写下的会话（第二趟）；fork 型子会话的快照；经插件自有来源的消息开一轮（含续接冷会话）。
+ * 宿主接口探针（H22–H30、H32，无 key）：sessionQuery 的会话列举、父子追溯、标题、事件时间与过滤；当轮用户消息的来源标记；本进程的空闲信号；
+ * 指令文件的修改时间；会话存档状态（含跨进程，第二趟）；会话卸下后读事件、另一个进程写下的会话（第二趟）；fork 型子会话的快照；经插件自有来源的消息开一轮（含续接冷会话）；各种会话的继承前缀长度（H32）。
  * 有 DEEPSEEK_API_KEY 且宿主能选出默认模型时再跑语义扫描与取消两项、一次真实的自动体检（H17：无会话、宿主默认模型）、
  * 一次带出处的处理建议（H20：两条记忆的出处从真会话读回，交给真模型），否则标 SKIPPED。
  * run.sh 随后用同一个 DSH_HOME 再起一次宿主（HOST_CONTRACT_PHASE=restart）：第一趟把
@@ -162,10 +162,14 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
     const sessions = ctx.get('sessions') as Sessions | undefined
     if (!sessions) throw new Error('sessions service unavailable after loader.await() — host boot incomplete')
     // 宿主真 Session 搭 exec：cwd 走创建选项，会话 id 由宿主分配、live 可读（sessionQuery 优先读活会话）。
-    const mkExec = (cwd: string | undefined, model: ModelOpts = {}, signal?: AbortSignal): Exec => ({
-      agent: { session: sessions.create(undefined, cwd !== undefined ? { meta: { cwd } } : undefined), options: model },
-      signal: signal ?? new AbortController().signal,
-    })
+    // 会话里先开一轮、落一条用户本人的消息：保存按当轮起点的来源判断发起方，用户本人开的轮才能填用户明说；
+    // 当轮起点经宿主 turnBoundary 投影读到这个 turn/start
+    const mkExec = (cwd: string | undefined, model: ModelOpts = {}, signal?: AbortSignal): Exec => {
+      const session = sessions.create(undefined, cwd !== undefined ? { meta: { cwd } } : undefined)
+      session.append('turn/start', { turn: 1 })
+      session.append('user/message', createUserMessage({ content: [{ type: 'text', text: '记一下' }], source: { kind: 'user' } }), { surfaceOp: 'append' })
+      return { agent: { session, options: model }, signal: signal ?? new AbortController().signal }
+    }
     const home = process.env.DSH_HOME ?? ''
     const memoriesRoot = join(home, 'memories')
     const wsRoot = mkdtempSync(join(tmpdir(), 'pm-host-ws-'))
@@ -564,6 +568,22 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       }
     })
 
+    // H33 当轮发起方：定时任务开的一轮（起点消息的来源是 schedule），填用户明说退回；按观察写下时锚记着 schedule。
+    // 读的是宿主真会话日志，验证来源标记、整份日志的读取在宿主上都对得上。
+    await attempt('H33-TURN-INITIATOR', async () => {
+      const session = sessions.create(undefined, { meta: { cwd: wsA } })
+      session.append('turn/start', { turn: 1 })
+      session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'H33 每天汇总构建结果' }], source: { kind: 'schedule' } as never }), { surfaceOp: 'append' })
+      const exec: Exec = { agent: { session, options: {} }, signal: new AbortController().signal }
+      const asUser = await call('memory_save', { action: 'create', name: 'h33-user', summary: '定时任务', content: 'H33 定时任务里填用户明说', ...MEMORY_BASE }, exec) as { kind: string; code?: string }
+      const observed = await call('memory_save', { action: 'create', name: 'h33-observed', summary: '定时任务', content: 'H33 定时任务里按观察写', ...MEMORY_BASE, sourceMode: 'environment-observed' }, exec) as { kind: string; record?: { sourceTrail?: Array<{ initiator?: string }> } }
+      const initiator = observed.record?.sourceTrail?.[0]?.initiator
+      return {
+        ok: asUser.kind === 'rejected' && asUser.code === 'not-user-initiated' && observed.kind === 'saved' && initiator === 'schedule',
+        detail: `asUser=${asUser.kind}/${asUser.code} observed=${observed.kind} initiator=${initiator}`,
+      }
+    })
+
     // H15 外部写入可见、快照走本插件自己的消息：插件已在 wsA 上跑过多次操作之后，绕过工具直接往该 workspace 的记忆目录
     // 写一个手建文件（只有 name / type / 正文），再经宿主 agent 工厂建一个真 Agent（不跑模型），照 agent 循环的派发方式
     // 走第一步的 agent/pre-step（带一条用户消息；宿主其他插件的 pre-step 监听照常参与）：返回的 decision 里要有本插件的
@@ -661,6 +681,9 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       const fileOk = block.includes(`sessionId: ${child.header.id}`) && block.includes('depth: 1') && block.includes(`parentSessionId: ${parent.header.id}`)
         && block.includes(`rootSessionId: ${parent.header.id}`) && !block.includes('reviewed')
 
+      // 主会话这一轮由用户本人开启，主档按用户明说写
+      parent.append('turn/start', { turn: 1 })
+      parent.append('user/message', createUserMessage({ content: [{ type: 'text', text: `记下 ${token}` }], source: { kind: 'user' } }), { surfaceOp: 'append' })
       const settled = await call('memory_save', { action: 'create', name: 'h19-main', summary: '主会话记下', content: `主会话记下 ${token}「主档」`, ...MEMORY_BASE }, execOf(parent)) as Saved
       const searched = await call('memory_search', { query: token }, execOf(parent)) as { hits?: Array<{ id: string; sourceNote: string }> }
       const order = (searched.hits ?? []).map(h => h.id)
@@ -924,6 +947,85 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       } finally {
         for (const c of children) await c.dispose()
         await parent.dispose()
+      }
+    })
+
+    // H32 继承前缀的长度：readSession 读回的 inheritedEventCount 是判断「哪些事件是这个会话自己的」的唯一依据。
+    // 四种会话各建一个：普通会话；用户 fork（同宿主 fork 命令：已完成的前缀加分界标记，header 只有 isSeeded）；
+    // 子 agent fork（同 fork 后端：整份父日志当种子，带委派 header）；只回放种子、不标 isSeeded 的会话。
+    // fork 的两种在活会话和刷盘卸下后各读一次，前缀里含父会话复制过来的 turn/start，分界处是标了 inherited 的标记。
+    await attempt('H32-INHERITED-EVENT-COUNT', async () => {
+      if (!sq || !agentFactory) return { ok: false, detail: `前提缺失 sessionQuery=${!!sq} agents=${!!agentFactory}` }
+      const { buildForkSeed } = await import('@deepseek-ai/dsh-session/fork') as { buildForkSeed(events: readonly unknown[], boundary: number): unknown[] }
+      type LogShape = { session: { isSeeded?: boolean }; inheritedEventCount?: number; events: RawEventShape[] }
+      const readLog = (id: string) => sq.readSession(id) as unknown as Promise<LogShape>
+      const ws = mkWs('probe-inherited')
+      const handles: AgentHandle[] = []
+      const open = async (options: Parameters<Agents['create']>[0]) => { const h = await agentFactory.create(options); handles.push(h); return h }
+      const oneTurn = (s: SessionLike, turn: number, text: string) => {
+        s.append('turn/start', { turn })
+        s.append('user/message', userMessage(text), { surfaceOp: 'append' })
+        s.append('turn/end', { turn, reason: { kind: 'completed' } })
+      }
+      /** 读到的边界：isSeeded、inheritedEventCount、前缀里有没有 turn/start、分界处是不是 inherited 标记。 */
+      const describe = (log: LogShape) => {
+        const n = log.inheritedEventCount
+        const cut = n === undefined ? undefined : log.events[n]
+        return {
+          isSeeded: log.session.isSeeded, count: n, events: log.events.length,
+          prefixHasTurnStart: n !== undefined && log.events.slice(0, n).some(e => e.type === 'turn/start'),
+          cutIsInheritedMarker: cut?.type === 'session/end-seed' && (cut.data as { inherited?: boolean } | undefined)?.inherited === true,
+        }
+      }
+      try {
+        const parent = await open({ sessionId: `probe-inherited-parent-${rand()}`, meta: { cwd: ws } })
+        oneTurn(parent.agent.session, 1, '探针 父会话第一轮')
+        oneTurn(parent.agent.session, 2, '探针 父会话第二轮')
+        const normal = describe(await readLog(parent.agent.id))
+        const parentEvents = (await readLog(parent.agent.id)).events
+
+        // 用户 fork：继承到父会话最后一条事件为止，前缀长度 = 分界序号 + 1
+        const boundary = parentEvents.length - 1
+        const userFork = await open({
+          sessionId: `probe-inherited-userfork-${rand()}`, seed: buildForkSeed(parentEvents, boundary), inheritedEventCount: boundary + 1,
+          meta: { cwd: ws, isSeeded: true },
+        })
+        oneTurn(userFork.agent.session, 3, '探针 用户 fork 自己的一轮')
+        const userForkLive = describe(await readLog(userFork.agent.id))
+
+        // 子 agent fork：整份父日志当种子，宿主在种子后面补 inherited 标记
+        const subFork = await open({
+          sessionId: `probe-inherited-subfork-${rand()}`, seed: parentEvents, inheritedEventCount: parentEvents.length,
+          meta: { cwd: ws, parentSession: parent.agent.id, isSeeded: true, origin: 'subagent', delegationDepth: 1 },
+        })
+        oneTurn(subFork.agent.session, 3, '探针 子 agent 的任务')
+        const subForkLive = describe(await readLog(subFork.agent.id))
+
+        // 只回放种子：不标 isSeeded，种子算这个会话自己的
+        const replay = await open({ sessionId: `probe-inherited-replay-${rand()}`, seed: parentEvents, meta: { cwd: ws } })
+        const replayLive = describe(await readLog(replay.agent.id))
+
+        // 刷盘卸下后从日志文件读：前缀长度是落盘的，不是进程内的
+        for (const h of [userFork, subFork]) {
+          await store.flush(h.agent.session)
+          await h.dispose()
+          handles.splice(handles.indexOf(h), 1)
+        }
+        const userForkCold = describe(await readLog(userFork.agent.id))
+        const subForkCold = describe(await readLog(subFork.agent.id))
+
+        const parentCount = parentEvents.length
+        const isFork = (d: ReturnType<typeof describe>) => d.isSeeded === true && d.count === parentCount && d.prefixHasTurnStart && d.cutIsInheritedMarker
+        const ok = normal.isSeeded === false && normal.count === 0
+          && isFork(userForkLive) && isFork(userForkCold) && isFork(subForkLive) && isFork(subForkCold)
+          && replayLive.isSeeded === false && replayLive.count === 0
+        return {
+          ok,
+          detail: `parentEvents=${parentCount} normal=${JSON.stringify(normal)} userFork=${JSON.stringify(userForkLive)} userForkCold=${JSON.stringify(userForkCold)}`
+            + ` subagentFork=${JSON.stringify(subForkLive)} subagentForkCold=${JSON.stringify(subForkCold)} replaySeed=${JSON.stringify(replayLive)}`,
+        }
+      } finally {
+        for (const h of handles) await h.dispose()
       }
     })
 

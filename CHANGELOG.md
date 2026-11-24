@@ -57,6 +57,13 @@ All notable changes to this project are documented here. The format follows
 - Testing: `pnpm host:contract` checks on a real host that an update without
   `change` is sent back with the memory's current content, and that the
   earlier content is kept under `.history/` when it is written.
+- Memories saved while nobody was at the keyboard are labelled. When a
+  scheduled run or another agent opens the turn, a memory written in it
+  carries the note `（无人值守时写入）` ("written while unattended") wherever it
+  is injected later, and its source entry records who opened the turn and
+  whether a message from you or a tool result backs it.
+- Testing: `pnpm host:contract` also checks how many events a forked session
+  inherits and that a save in a turn opened by a schedule is rejected.
 
 ### Changed
 - The recall options of a memory type are renamed after what each chat
@@ -85,6 +92,11 @@ All notable changes to this project are documented here. The format follows
   files if it is deleted.
 - Testing: a write in a folder of 5,000 memories is compared with the same
   write in a folder of 1,000.
+- `memory_save` no longer accepts "the user said so" in a turn you did not
+  open, so a scheduled run or another agent cannot record a memory as
+  something you said. In a turn opened by a scheduled run, another agent or a
+  subagent's task, `sourceMode` must be `environment-observed` or
+  `agent-inferred`; other values are rejected with `not-user-initiated`.
 
 ### Fixed
 - A deleted memory whose 14 days in Recently deleted had run out could

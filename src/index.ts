@@ -1,4 +1,5 @@
 import { join } from 'node:path'
+import { homedir } from 'node:os'
 import z from '@deepseek-ai/schemastery'
 import type { Context, Volatile } from '@deepseek-ai/cordis'
 import type { MemoryTypeDefinition } from './types.ts'
@@ -348,7 +349,7 @@ export async function apply(ctx: Context, config: Config) {
   const allowSubagentSave = () => config.governance.enabled.get()
   const registerSave = () => registerWrite(
     createSaveTool({
-      store, registry, host, snapshots, decisions, onSaved,
+      store, registry, host, snapshots, decisions, onSaved, memoryRoot, homeDir: homedir(),
       maxSubagentSaves: () => config.subagent.maxSavesPerSession.get(),
       guidedIn, mergeWindowMinutes: () => config.history.mergeWindowMinutes.get(),
     }, { allowSubagent: allowSubagentSave() }),

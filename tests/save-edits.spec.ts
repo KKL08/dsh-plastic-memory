@@ -14,6 +14,7 @@ import { record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 import { InMemoryTable } from './helpers/in-memory-table.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
+import { userTurnLog } from './helpers/session-log.ts'
 
 // memory_save update 的精确修改（edits）：按 oldString 精确、唯一命中替换正文片段，其余正文和没传的字段原样保留。
 // 写入仍走同一条管线：密钥检查、改前快照、撤销记录、读后被改复核都照旧。
@@ -224,7 +225,7 @@ describe('必填字段按 action 校验', () => {
 
 describe('工具层', () => {
   function toolDeps(store: MemoryStore): SaveToolDeps {
-    return { store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), host: { saveContextOf: async () => ({ workspacePath: WS, session }) } }
+    return { store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), host: { saveContextOf: async () => ({ workspacePath: WS, session }), readSessionLog: userTurnLog } }
   }
 
   it('executeSave：edits 不传 tags 时保留原标签（整条更新照旧按空数组处理）', async () => {
