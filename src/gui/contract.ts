@@ -765,13 +765,13 @@ export const applyEditOpSchema = z.discriminatedUnion('kind', [
   mergeRefSchema.extend({ kind: z.literal('forget'), into: z.string().optional() }),
 ])
 export type ApplyEditOp = z.infer<typeof applyEditOpSchema>
-/** 直接改、直接合并写进去的四个字段；force：疑似密钥经用户确认后放行（高危密钥一律拦）。 */
+/** 直接改、直接合并写进去的四个字段；allowSecret：疑似密钥经用户确认后放行（高危密钥一律拦）。 */
 const editFields = {
   content: z.string().min(1),
   name: z.string().min(1),
   summary: z.string(),
   tags: z.array(z.string()),
-  force: z.boolean().optional(),
+  allowSecret: z.boolean().optional(),
   allowCrossWorkspace,
 }
 
@@ -806,11 +806,11 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
    * 撤销后记忆恢复、冲突回到待处理）。另按这条记忆此刻对应的指令文件核对依据里的基线指纹，拿不到或指令文件改过回 stale；在哪个会话里采纳都一样。指令文件不改。
    * 依据是要求时（补充要求）带 proposal（draft-proposal 回的方案，依据版本原样带回）代替 suggestionId：落盘、撤销、核对同上，结清时记来源 request；
    * 操作和结论对不上（每条恰好一项、按条目顺序，融合的改写项在合并规则选的保留方上）回 invalid-args；
-   * 改写稿含高危密钥回 secret-critical，含疑似密钥回 secret-suspected，用户确认后带 force 重发（采纳建议不再确认，force 不看）。
+   * 改写稿含高危密钥回 secret-critical，含疑似密钥回 secret-suspected，用户确认后带 allowSecret 重发（采纳建议不再确认，allowSecret 不看）。
    */
   z.object({
     cmd: z.literal('apply-proposal'), decisionId: z.string(), suggestionId: z.string().optional(), proposal: requestedProposalSchema.optional(),
-    force: z.boolean().optional(), allowCrossWorkspace,
+    allowSecret: z.boolean().optional(), allowCrossWorkspace,
   }).refine(c => (c.suggestionId === undefined) !== (c.proposal === undefined), { message: 'suggestionId 与 proposal 恰好给一个' }),
   /** 撤销一条已裁决条目：去掉 settled，记了快照的按它恢复败方（提升为全局则恢复原位）；直接改、移到项目的撤销后条目移出账本；
    *  模型改写、替代（全部记忆视图的 modelChanges）按改前快照恢复，撤销后条目标已撤销留着。
@@ -850,7 +850,7 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   /**
    * 建议整理的「直接改」：正文、名称、摘要、标签换成给定值，updatedAt、lastConfirmedAt 记为当前时间；
    * 类型、作用域、出处、有效期、置信度、取代关系、召回统计不动。base 是卡片加载时的版本，磁盘上对不上回 stale，什么都不动。
-   * 新内容含高危密钥回 secret-critical；疑似密钥回 secret-suspected，用户确认后带 force 重发。快照先行（项目记忆也拍），
+   * 新内容含高危密钥回 secret-critical；疑似密钥回 secret-suspected，用户确认后带 allowSecret 重发。快照先行（项目记忆也拍），
    * 在账本里留一条已结清的条目，结果的 decisionId 交给 undo 撤销。
    */
   z.object({ cmd: z.literal('edit-memory'), memoryId: z.string(), layer: targetScope, base: memoryBaseSchema, ...editFields }),
@@ -934,13 +934,13 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
    * 整批一份快照（pre-update），逐项写，全成后在账本里留一条已结清的 batch-edited（带逐项回执），结果的 decisionId 交给 undo 一次撤回。
    * 目标 id 重复（ops 之间、ops 与 keep 之间）、不在同一作用域、删除的 into 不指向本批的改写项或 keep 回 invalid-args；
    * 任一条不在用回 not-found；改写的目标含高危密钥、删除的目标含密钥（疑似也算）回 has-secret；版本对不上回 stale；
-   * 改写项四个面含高危密钥回 secret-critical，疑似回 secret-suspected，确认后带 force 重发。以上都什么都不写。
+   * 改写项四个面含高危密钥回 secret-critical，疑似回 secret-suspected，确认后带 allowSecret 重发。以上都什么都不写。
    */
   z.object({
     cmd: z.literal('apply-edits'),
     ops: z.array(applyEditOpSchema).min(1).max(MAX_BATCH_EDIT),
     keep: z.array(mergeRefSchema).max(MAX_BATCH_EDIT).optional(),
-    force: z.boolean().optional(),
+    allowSecret: z.boolean().optional(),
     allowCrossWorkspace,
   }),
   z.object({ cmd: z.literal('dismiss-overflow'), decisionId: z.string() }),
@@ -1045,7 +1045,7 @@ export const GUI_ERROR_CODES = [
                         // 直接改、直接合并、整理所选的应用的目标含密钥（界面上是遮盖后的正文）：什么都没动；让模型改、整理计划、补上建议、按要求生成的目标含密钥：不发给模型
   'stale',              // 直接改、直接合并、整理计划与应用：记忆在卡片加载后被改过；采纳建议：建议已换了一份，或两条在建议生成后被改过；按要求生成与应用：两条在卡片加载后或方案生成后被改过；任一类撤销（含等同撤销的恢复）：目标之后又被改过或已不在原处。什么都没动（合并撤销中途被第三方改过的停在第三方的版本）
   'secret-critical',    // 直接改、直接合并、整理所选的应用、按要求应用的新内容含高危密钥：什么都没动；让模型改、整理计划、按要求生成的要求、此前的要求、计划、上一稿或上一份方案含高危密钥：不发给模型
-  'secret-suspected',   // 直接改、直接合并、整理所选的应用、按要求应用的新内容含疑似密钥：什么都没动，用户确认后带 force 重发
+  'secret-suspected',   // 直接改、直接合并、整理所选的应用、按要求应用的新内容含疑似密钥：什么都没动，用户确认后带 allowSecret 重发
   'claimed',            // 待决项正被另一次操作（别的标签页、宿主进程或体检）认领：什么都没动
   'busy',               // 体检：范围正在体检（别的体检认领着、没过期；「全部」有一个范围认领不到也算），或体检中途认领被别的进程接手。
                         // 没认领到时什么都没动；中途被接手的这次不再提交。和待决项的 claimed 是两回事

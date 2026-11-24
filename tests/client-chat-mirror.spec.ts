@@ -12,7 +12,7 @@ import { readFileSync } from 'node:fs'
 describe('对话卡解析的文本格式与服务端渲染器一致', () => {
   it('memory_save：已保存（id / type / scope）与已更新', () => {
     const saved = record({ id: 'mem_abc', type: 'preference', scope: 'workspace' })
-    expect(parseSaveResult(renderSaveResult({ kind: 'saved', record: saved }))).toEqual({ kind: 'saved', id: 'mem_abc', type: 'preference', scope: 'workspace' })
+    expect(parseSaveResult(renderSaveResult({ kind: 'saved', record: saved, similar: [{ id: 'mem_peer', name: '相近', summary: '摘要', scope: 'global' }] }))).toEqual({ kind: 'saved', id: 'mem_abc', type: 'preference', scope: 'workspace' })
     expect(parseSaveResult(renderSaveResult({ kind: 'updated', record: saved }))).toEqual({ kind: 'updated', id: 'mem_abc', name: saved.name })
     // 已更新带上名称（只传 edits 的更新参数里没有名称，折叠行从这里取）；名称自带括号也认得
     const bracketed = record({ id: 'mem_br', name: '方案（草稿）' })
@@ -25,7 +25,7 @@ describe('对话卡解析的文本格式与服务端渲染器一致', () => {
     const multiline = record({ id: 'mem_ml', name: 'service\nconfiguration' })
     expect(parseSaveResult(renderSaveResult({ kind: 'updated', record: multiline }))).toEqual({ kind: 'updated', id: 'mem_ml', name: 'service configuration' })
     expect(parseSaveResult(renderSaveResult({ kind: 'rejected', code: 'unknown-type', reason: '未知类型' }))).toBeUndefined()
-    expect(parseSaveResult(renderSaveResult({ kind: 'duplicate-suspected', existing: [saved] }))).toBeUndefined()
+    expect(parseSaveResult(renderSaveResult({ kind: 'duplicate-suspected', existing: saved }))).toBeUndefined()
   })
 
   it('memory_save：改写全局记忆等确认时，折叠行写「确认后再改」，不写「没有记住」', () => {

@@ -1,3 +1,4 @@
+import { createSaveHints, type SaveHints } from './save-signals.ts'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import z from '@deepseek-ai/schemastery'
@@ -293,6 +294,12 @@ export async function apply(ctx: Context, config: Config) {
   const savedIds = new Map<string, string[]>()
   // 每个会话里已经回过缺改动性质引导的记忆：只在进程内存里，引导过一次后同一条再缺就按状态变化写。
   // 认不出会话的调用共用一份：宁可少引导一次，也不让它们每次都被拒
+  const saveHints = new Map<string, SaveHints>()
+  const saveHintsIn = (sessionId: string) => {
+    let hints = saveHints.get(sessionId)
+    if (hints === undefined) saveHints.set(sessionId, hints = createSaveHints())
+    return hints
+  }
   const guidedIds = new Map<string, Set<string>>()
   const guidedIn = (sessionId: string) => {
     let ids = guidedIds.get(sessionId)
@@ -351,6 +358,7 @@ export async function apply(ctx: Context, config: Config) {
     createSaveTool({
       store, registry, host, snapshots, decisions, onSaved, memoryRoot, homeDir: homedir(),
       maxSubagentSaves: () => config.subagent.maxSavesPerSession.get(),
+      saveHintsIn, tokenizer: { userDictionaryPath: () => config.search.userDictionaryPath.get(), log: ctx.logger },
       guidedIn, mergeWindowMinutes: () => config.history.mergeWindowMinutes.get(),
     }, { allowSubagent: allowSubagentSave() }),
     allowSubagentSave,

@@ -1291,14 +1291,14 @@ describe('apply-edits（整理所选：应用全部）', () => {
     expect(await e.snapshots.list()).toEqual([])
   })
 
-  it('改写项含疑似密钥：先回 secret-suspected 什么都不写；确认后带 force 重发写入', async () => {
+  it('改写项含疑似密钥：先回 secret-suspected 什么都不写；确认后带 allowSecret 重发写入', async () => {
     const e = env()
     await seed(e)
     const command = { ops: [await edit(e, 'mem_c', { content: '测试库 api_key: TESTONLY0000000000000000' }), await forget(e, 'mem_p', 'mem_c')] }
     const before = await files(e)
     expect(err(await apply(e, command)).code).toBe('secret-suspected')
     expect(await files(e)).toEqual(before)
-    ok(await apply(e, { ...command, force: true }))
+    ok(await apply(e, { ...command, allowSecret: true }))
     expect((await locateCopy(e.store, 'mem_c', wsScope))!.content).toBe('测试库 api_key: TESTONLY0000000000000000')
     expect(await statusOf(e, 'mem_p')).toBe('deleted')
   })

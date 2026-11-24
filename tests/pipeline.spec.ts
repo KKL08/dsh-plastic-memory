@@ -177,11 +177,11 @@ describe('runSavePipeline', () => {
     expect(result.record.globalCandidate).toBeUndefined()
   })
 
-  it('同实体的同类记忆触发 duplicate-suspected，force 可跳过', async () => {
+  it('同实体但不同说法的记忆照常保存', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await runSavePipeline(candidate({ content: '认证逻辑在 `src/auth.ts`' }), deps(store))
     const dup = await runSavePipeline(candidate({ content: '`src/auth.ts` 负责认证' }), deps(store))
-    expect(dup.kind).toBe('duplicate-suspected')
+    expect(dup.kind).toBe('saved')
     const forced = await runSavePipeline(candidate({ content: '`src/auth.ts` 负责认证', force: true }), deps(store))
     expect(forced.kind).toBe('saved')
   })
@@ -192,9 +192,9 @@ describe('runSavePipeline', () => {
       id: 'mem_handedit', type: 'preference', scope: 'workspace', workspacePath: '/proj',
       content: '认证逻辑在 `src/auth.ts`', summary: `认证入口 ${FAKE_SECRET.sk}`,
     }))
-    const dup = await runSavePipeline(candidate({ content: '`src/auth.ts` 负责认证' }), deps(store))
+    const dup = await runSavePipeline(candidate({ content: '认证逻辑在 `src/auth.ts`', summary: `认证入口 ${FAKE_SECRET.sk}` }), deps(store))
     if (dup.kind !== 'duplicate-suspected') throw new Error(dup.kind)
-    expect(dup.existing).toEqual([{ id: 'mem_handedit', summary: `认证入口 ${SECRET_MASK}` }])
+    expect(dup.existing).toMatchObject({ id: 'mem_handedit', summary: `认证入口 ${SECRET_MASK}` })
     expect(renderSaveResult(dup)).not.toContain(FAKE_SECRET.sk)
   })
 
@@ -260,14 +260,14 @@ describe('runSavePipeline', () => {
     expect((await store.get(live.record.id))!.status).toBe('superseded')
   })
 
-  it('PA-13：supersedes 里含高危密钥时拒存、不落盘；疑似密钥要 force', async () => {
+  it('PA-13：supersedes 里含高危密钥时拒存、不落盘；疑似密钥要 allowSecret', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const critical = await runSavePipeline(candidate({ supersedes: [FAKE_SECRET.sk] }), deps(store))
     expect(critical).toMatchObject({ kind: 'rejected', code: 'secret-critical' })
     expect(await store.query({ status: ['active', 'superseded', 'deleted'] })).toEqual([])
     const suspected = candidate({ supersedes: ['password=hunter2hunter2'] })
     expect(await runSavePipeline(suspected, deps(store))).toMatchObject({ kind: 'rejected', code: 'secret-suspected' })
-    expect((await runSavePipeline({ ...suspected, force: true }, deps(store))).kind).toBe('saved')
+    expect((await runSavePipeline({ ...suspected, allowSecret: true }, deps(store))).kind).toBe('saved')
   })
 
   // B1a：supersedes 目标必须与本次写入记录同属一个作用域
@@ -374,32 +374,31 @@ describe('runSavePipeline', () => {
     expect(list[0].data[0]!.content).toBe('旧的项目内容')
   })
 
-  // B2：判重级联——实体轴优先，实体为空才落 Dice 兜底
-  it('B2: 两条含相同实体的记忆仍判重（实体轴回归）', async () => {
+  it('两条含相同实体但不同事实的记忆照常保存', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await runSavePipeline(candidate({ scope: 'workspace', content: '认证逻辑在 `src/auth.ts`' }), deps(store))
     const dup = await runSavePipeline(candidate({ scope: 'workspace', content: '`src/auth.ts` 负责认证' }), deps(store))
-    expect(dup.kind).toBe('duplicate-suspected')
+    expect(dup.kind).toBe('saved')
   })
 
-  it('B2: 有实体但实体不重叠、字面高度相似 → 不再判重（级联生效）', async () => {
+  it('实体不同但字面几乎相同仍判重复', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const first = await runSavePipeline(
       candidate({ scope: 'workspace', content: '超时配置在 `src/config-a.ts` 里，默认三十秒', summary: '超时配置位置' }), deps(store))
     if (first.kind !== 'saved') throw new Error(first.kind)
     const second = await runSavePipeline(
       candidate({ scope: 'workspace', name: '另一处', content: '超时配置在 `src/config-b.ts` 里，默认三十秒', summary: '超时配置位置' }), deps(store))
-    expect(second.kind).toBe('saved')
+    expect(second.kind).toBe('duplicate-suspected')
   })
 
-  it('B2: 无实体的纯中文散文高相似 → 仍判重（Dice 兜底回归）', async () => {
+  it('换说法的中文散文照常保存', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const first = await runSavePipeline(
       candidate({ scope: 'workspace', content: '测试里不要 mock 数据库', summary: '测试不 mock 数据库' }), deps(store))
     if (first.kind !== 'saved') throw new Error(first.kind)
     const dup = await runSavePipeline(
       candidate({ scope: 'workspace', name: '换个说法', content: '测试的时候不要 mock 数据库', summary: '测试别 mock 数据库' }), deps(store))
-    expect(dup.kind).toBe('duplicate-suspected')
+    expect(dup.kind).toBe('saved')
   })
 
   // 真机回归：dsh defineTool 对工具输出做 lossless JSON 校验。可选字段（workspacePath/
@@ -426,9 +425,9 @@ describe('runSavePipeline', () => {
     expect(Object.values(updated.record).filter(v => v === undefined)).toEqual([])
   })
 
-  it('含疑似密钥（无厂商特征）时带 force 才落盘，保留 warnings', async () => {
+  it('含疑似密钥（无厂商特征）时带 allowSecret 才落盘，保留 warnings', async () => {
     const result = await runSavePipeline(
-      candidate({ content: '内部约定 api_key: TESTONLY0000000000000', force: true }),
+      candidate({ content: '内部约定 api_key: TESTONLY0000000000000', allowSecret: true }),
       deps(),
     )
     if (result.kind !== 'saved') throw new Error(result.kind)
@@ -458,12 +457,12 @@ describe('runSavePipeline', () => {
     expect(Object.keys(result)).not.toContain('warnings')
   })
 
-  it('update 含疑似密钥带 force 时返回 warnings', async () => {
+  it('update 含疑似密钥带 allowSecret 时返回 warnings', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const created = await runSavePipeline(candidate(), deps(store))
     if (created.kind !== 'saved') throw new Error(created.kind)
     const updated = await runSavePipeline(
-      candidate({ action: 'update', change: 'correct', id: created.record.id, content: '密码:TESTONLYpassw0rd', force: true }),
+      candidate({ action: 'update', change: 'correct', id: created.record.id, content: '密码:TESTONLYpassw0rd', allowSecret: true }),
       deps(store),
     )
     if (updated.kind !== 'updated') throw new Error(updated.kind)
@@ -471,14 +470,14 @@ describe('runSavePipeline', () => {
     expect(updated.warnings!.length).toBeGreaterThan(0)
   })
 
-  it('中文散文重复经 bigram 相似度查出（实体轴对纯中文失明）', async () => {
+  it('中文散文没有接近逐字重复就保存', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const first = await runSavePipeline(
       candidate({ scope: 'workspace', content: '测试里不要 mock 数据库', summary: '测试不 mock 数据库' }), deps(store))
     if (first.kind !== 'saved') throw new Error(first.kind)
     const dup = await runSavePipeline(
       candidate({ scope: 'workspace', name: '换个说法', content: '测试的时候不要 mock 数据库', summary: '测试别 mock 数据库' }), deps(store))
-    expect(dup.kind).toBe('duplicate-suspected')
+    expect(dup.kind).toBe('saved')
   })
 
   it('同类型不同主题的中文记忆不误判重复', async () => {
@@ -1023,7 +1022,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
     expect((await store.get('mem_self'))!).toMatchObject({ content: '主会话接受后的内容', delegation: { reviewed: { by: 'main', at: 8 } } })
   })
 
-  it('疑似密钥：原因不提 force，写明疑似密钥一律不存', async () => {
+  it('疑似密钥：原因不提 allowSecret，写明疑似密钥一律不存', async () => {
     const r = await runSavePipeline(childCandidate({ tags: ['api_key: TESTONLY0000000000000'] }), childDeps())
     if (r.kind !== 'rejected') throw new Error(r.kind)
     expect(r.code).toBe('secret-suspected')
@@ -1041,11 +1040,11 @@ describe('runSavePipeline：子 agent 写入约束', () => {
     for (const by of ['main', 'self-reviewed'] as const) {
       const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
       await store.put({ ...owned('mem_kept', by), content: '`pnpm test` 在 main 上是绿的' })
-      const r = await runSavePipeline(childCandidate({ content: '`pnpm test` 在 main 上会挂' }), childDeps(store))
-      expect(r, by).toEqual({ kind: 'duplicate-suspected', existing: [{ id: 'mem_kept', summary: 'mem_kept 旧摘要' }], isFromSubagent: true })
+      const r = await runSavePipeline(childCandidate({ content: '`pnpm test` 在 main 上是绿的', summary: 'mem_kept 旧摘要' }), childDeps(store))
+      expect(r, by).toEqual({ kind: 'duplicate-suspected', existing: { id: 'mem_kept', name: 'mem_kept', summary: 'mem_kept 旧摘要', scope: 'workspace' }, isFromSubagent: true })
       const text = renderSaveResult(r)
-      expect(text).toContain('- mem_kept：mem_kept 旧摘要')
-      expect(text).toContain('在回复里向委派方说明分歧')
+      expect(text).toContain('mem_kept')
+      expect(text).toContain('在回复里向委派方说明')
       expect(text).not.toContain('force')
     }
   })
@@ -1108,9 +1107,9 @@ describe('runSavePipeline：子 agent 写入约束', () => {
   it('主会话的去重不变：撞待确认记录照旧 duplicate-suspected，提示 force 重发', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put({ ...owned('mem_peer', 'other'), content: '`pnpm test` 在 main 上是绿的' })
-    const r = await runSavePipeline(candidate({ type: 'knowledge', scope: 'workspace', content: '`pnpm test` 在 main 上会挂' }), deps(store))
-    expect(r).toEqual({ kind: 'duplicate-suspected', existing: [{ id: 'mem_peer', summary: 'mem_peer 旧摘要' }] })
-    expect(renderSaveResult(r)).toContain('force=true')
+    const r = await runSavePipeline(candidate({ type: 'knowledge', scope: 'workspace', content: '`pnpm test` 在 main 上是绿的', summary: 'mem_peer 旧摘要' }), deps(store))
+    expect(r).toEqual({ kind: 'duplicate-suspected', existing: { id: 'mem_peer', name: 'mem_peer', summary: 'mem_peer 旧摘要', scope: 'workspace' } })
+    expect(renderSaveResult(r)).toContain('force: true')
   })
 
   describe('主会话处理待确认记录', () => {
@@ -1371,3 +1370,10 @@ describe('runSavePipeline：更新已被取代的记忆', () => {
     })
   })
 })
+
+ it('放行疑似密钥与跳过去重分别生效', async () => {
+  const d = deps()
+  const c = candidate({ content: 'password=abcdefghijk123456789' })
+  expect(await runSavePipeline({ ...c, force: true }, d)).toMatchObject({ kind: 'rejected', code: 'secret-suspected' })
+  expect(await runSavePipeline({ ...c, allowSecret: true }, d)).toMatchObject({ kind: 'saved' })
+ })

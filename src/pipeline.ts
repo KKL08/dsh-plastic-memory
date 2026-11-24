@@ -15,7 +15,9 @@ import type { PendingDecisionsStore } from './governance/decisions.ts'
 import type { SnapshotStore } from './governance/snapshots.ts'
 import { detectSecrets, maskSecretSurface } from './secrets.ts'
 import { RecordNotFoundError } from './errors.ts'
-import { extractEntities, textSimilarity, DUPLICATE_SIMILARITY_THRESHOLD } from './text.ts'
+import { runCreateGate, type SimilarMemory } from './create-gate.ts'
+import type { QueryTokenizerOptions } from './search/jieba-segmenter.ts'
+import { lostFacts, refineRemoval, factsDroppedText, refineShrankText, turnThirdSaveText, contentLongText, TURN_CREATE_HINT_AT, CONTENT_LENGTH_HINT, type SaveHints } from './save-signals.ts'
 import { toToolOutput } from './output.ts'
 import { VALIDITY_DATE_FORMAT, VALIDITY_FORMAT, formatValidity, parseValidityInput, roundValidity } from './validity.ts'
 
@@ -34,7 +36,10 @@ export interface SaveCandidate {
   /** 本机时间 YYYY-MM-DD HH:mm，或 YYYY-MM-DD（补写入时刻的时分）；落库前换算成毫秒（validity.ts）。 */
   validFrom?: string
   validTo?: string
+  /** 新建时跳过接近逐字重复的检查（模型确认是另一件事）。 */
   force?: boolean
+  /** 放行疑似密钥（用户确认不是密钥）；高危密钥照拦。 */
+  allowSecret?: boolean
   /** update 的目标是全局记忆时，模型确认这次改动对所有项目都成立：填引导里给的确认码（见 globalConfirmCode）；项目会话里不带或不对就回引导、不写入。 */
   confirmGlobal?: string
   /** update 必填：这次改动的性质，决定旧内容怎么处置（见 CHANGE_GUIDE）。create 不用。 */
@@ -62,10 +67,10 @@ export interface SaveDelegation {
 }
 
 export type PipelineResult =
-  | { kind: 'saved'; record: MemoryRecord; warnings?: SaveWarning[] }
+  | { kind: 'saved'; record: MemoryRecord; warnings?: SaveWarning[]; similar?: SimilarMemory[] }
   | { kind: 'updated'; record: MemoryRecord; warnings?: SaveWarning[] }
   /** isFromSubagent：子 agent 撞上主档，改不了也不能 force，结果文案改为让它向委派方说明分歧。 */
-  | { kind: 'duplicate-suspected'; existing: Array<{ id: string; summary: string }>; isFromSubagent?: true }
+  | { kind: 'duplicate-suspected'; existing: SimilarMemory; isFromSubagent?: true }
   | { kind: 'rejected'; code: RejectCode; reason: string; subcode?: SaveRejectSubcode }
 
 /**
@@ -81,6 +86,7 @@ export type SaveRejectSubcode =
   | 'subagent-type'
   | 'subagent-supersedes'
   | 'subagent-force'
+  | 'subagent-allow-secret'
   | 'subagent-target-gone'
   | 'subagent-not-own'
   | 'subagent-quota'
@@ -413,7 +419,7 @@ function subagentTypeProblem(type: string, registry: TypeRegistry): Rejection & 
 
 /**
  * 子 agent 写入约束：主会话不经过这里。一个判断块、一个拒绝码 subagent-restricted，原因按条写明怎么改或带回主会话。
- * 顺序固定：scope 降级（只警告）→ 依据 → 类型 → supersedes / force → update 归属 → create 配额，同时犯多条时报最前的。
+ * 顺序固定：scope 降级（只警告）→ 依据 → 类型 → supersedes → force → allowSecret → update 归属 → create 配额，同时犯多条时报最前的。
  * 通过时返回降级后的候选与警告，后面的管线照常走。
  */
 async function checkSubagentWrite(
@@ -439,13 +445,15 @@ async function checkSubagentWrite(
   if ((candidate.supersedes ?? []).length > 0) {
     return { code: 'subagent-restricted', subcode: 'subagent-supersedes', reason: '子 agent 不能用 supersedes 替代旧记忆；去掉 supersedes 重发，要替代哪条带回主会话。' }
   }
-  // force 放行的两道检查（去重、疑似密钥）都要用户点头，子 agent 问不到用户
   if (candidate.force) {
     return {
       code: 'subagent-restricted',
       subcode: 'subagent-force',
-      reason: '子 agent 不能带 force：去重、疑似密钥两道检查子 agent 都过不去。撞重复就另存或放弃，疑似密钥一律不存；去掉 force 重发。',
+      reason: '子 agent 不能带 force：和已有记忆几乎一样时，在回复里向委派方说明（带上那条的 id），由它决定。去掉 force 重发。',
     }
+  }
+  if (candidate.allowSecret) {
+    return { code: 'subagent-restricted', subcode: 'subagent-allow-secret', reason: '子 agent 不能带 allowSecret：疑似密钥一律不存，改写成不含密钥的指针再存。去掉 allowSecret 重发。' }
   }
   // update 只改本会话存下、还没升档的。写入时在写入段里按最新读数再判一次（见下方 commitChange 的 isBlocked），其间被接受、删除、提升的不覆盖
   if (candidate.action === 'update' && candidate.id !== undefined) {
@@ -468,6 +476,10 @@ async function checkSubagentWrite(
 export async function runSavePipeline(
   input: SaveInput,
   deps: {
+    /** 新建闸取候选时使用的分词器配置。 */
+    tokenizer?: QueryTokenizerOptions
+    /** 本会话的提示记账；不给时不出粒度和长度提示。 */
+    hints?: SaveHints
     store: MemoryStore
     registry: TypeRegistry
     workspacePath: string | undefined
@@ -614,28 +626,17 @@ export async function runSavePipeline(
   const confidence = Math.min(candidate.confidence ?? cap, cap)
   const corroboratedConfidence = candidate.confidence === undefined ? undefined : confidence
 
-  // 3. 结构去重（仅 create，force 跳过）：实体重叠与 bigram 相似度级联，非两轴恒开。
-  // 实体是强信号；bigram 相似度只定位为实体盲区的兜底（纯中文散文提不出实体，实体轴对它失明）。
-  // 两轴恒开会对有实体的记忆产生"同主题不同事实"的误判，故有实体时只走实体轴，实体为空才落 Dice 轴。
-  if (candidate.action === 'create' && !candidate.force) {
-    const text = `${candidate.content}\n${candidate.summary}`
-    const entities = extractEntities(text)
-    const peers = await store.query({
-      types: [candidate.type],
-      scope: { kind: 'workspace', workspacePath: deps.workspacePath! }, // create 必有 workspace 作用域（前置已拒无 cwd）
-      status: ['active'],
-    })
-    // 子 agent 只和主档比：待确认记录之间的分歧留给主会话接受时裁决，两条并存。这次要替代的旧记忆随即失效，不算重复
-    const replacedIds = new Set(replaced.map(r => r.id))
-    const hits = peers.filter(p => !replacedIds.has(p.id) && !(deps.delegation && isPendingDelegated(p))).filter(p => {
-      const peerText = `${p.content}\n${p.summary}`
-      if (entities.length > 0) return extractEntities(peerText).some(e => entities.includes(e))
-      return textSimilarity(text, peerText) >= DUPLICATE_SIMILARITY_THRESHOLD
-    })
-    if (hits.length > 0) {
-      const existing = hits.map(h => ({ id: h.id, summary: maskSecretSurface(h).summary }))
-      return deps.delegation ? { kind: 'duplicate-suspected', existing, isFromSubagent: true } : { kind: 'duplicate-suspected', existing }
-    }
+  // 检索可能加载词典，放在写入段外，避免拖住其他写入。
+  let similar: SimilarMemory[] = []
+  if (candidate.action === 'create') {
+    const gate = await runCreateGate({
+      name: candidate.name, summary: candidate.summary, content: candidate.content,
+      workspacePath: deps.workspacePath!, skipDuplicate: candidate.force === true,
+      excludeIds: new Set(replaced.map(r => r.id)),
+      ...(deps.delegation ? { subagentSessionId: session.id } : {}),
+    }, { store, tokenizer: deps.tokenizer, now: () => now })
+    if (gate.kind === 'duplicate') return { kind: 'duplicate-suspected', existing: gate.existing, ...(deps.delegation ? { isFromSubagent: true as const } : {}) }
+    similar = gate.similar
   }
 
   // 4. 持久化（写入前必须过 schema——KvTable.put 不校验，脏记录会让下次 domain open 整库拒载）
@@ -700,7 +701,7 @@ export async function runSavePipeline(
     return { kind: 'rejected', code: 'schema-invalid', reason: `字段校验失败：${parsed.error.issues.map(i => i.message).join('；')}` }
   }
 
-  // 5. 写盘前 secret 检查：高危（明确厂商特征）直接拦截、不落盘；疑似拦下待确认，force 放行并保留警告。
+  // 5. 写盘前 secret 检查：高危（明确厂商特征）直接拦截、不落盘；疑似拦下待确认，allowSecret 放行并保留警告。
   // summary 进注入索引、name 进文件名、tags 进索引行——密钥藏在哪个字段都会外泄，四个面一起查；
   // supersedes 落进文件、体检的孤儿说明会把它引出来，变化原因随历史版本落盘，一并查。补证不写内容，不查。
   type SecretFaces = Pick<MemoryRecord, 'content' | 'name' | 'summary' | 'tags' | 'supersedes'>
@@ -716,13 +717,13 @@ export async function runSavePipeline(
       } }
     }
     const found = secretHits.filter(h => h.severity === 'suspected')
-    if (found.length > 0 && !candidate.force) {
+    if (found.length > 0 && !candidate.allowSecret) {
       return { rejected: {
         kind: 'rejected',
         code: 'secret-suspected',
         reason: deps.delegation
           ? `检测到疑似密钥（${found.map(h => h.name).join('、')}），未保存。疑似密钥一律不存：改写成不含密钥的指针再存，不是密钥的带回主会话。`
-          : `检测到疑似密钥（${found.map(h => h.name).join('、')}），未保存。是密钥就改写成不含密钥的指针再存；向用户确认不是密钥后，带 force: true 重发。`,
+          : `检测到疑似密钥（${found.map(h => h.name).join('、')}），未保存。是密钥就改写成不含密钥的指针再存；向用户确认不是密钥后，带 allowSecret: true 重发。`,
       } }
     }
     return { suspected: found }
@@ -800,6 +801,14 @@ export async function runSavePipeline(
       if (committed.kind === 'invalid') return { kind: 'rejected', code: 'schema-invalid', reason: `字段校验失败：${committed.reason}` }
       clean = committed.record
       snapshotId = committed.snapshotId
+      if (!isCorroboration) {
+        const before = maskSecretSurface(committed.before, { severity: 'suspected' }).content
+        const after = maskSecretSurface(clean, { severity: 'suspected' }).content
+        const lost = lostFacts(before, after)
+        if (lost.length > 0) scopeWarnings.push({ code: 'facts-dropped', text: factsDroppedText(lost) })
+        const removal = change === 'refine' ? refineRemoval(before, after) : undefined
+        if (removal) scopeWarnings.push({ code: 'refine-shrank', text: refineShrankText(removal, snapshotId) })
+      }
       if (isRebased) {
         scopeWarnings.push({ code: 'edit-rebased', text: `保存期间这条记忆被别处改过，这次的修改已经改在最新正文上。合并后的全文：\n${maskSecretSurface(clean).content}` })
       }
@@ -823,9 +832,18 @@ export async function runSavePipeline(
       }
     }
 
+    if (deps.hints) {
+      if (candidate.action === 'create' && session.id !== UNKNOWN_SESSION_ID && session.turnStartSeq !== undefined
+        && deps.hints.noteCreate(session.turnStartSeq) === TURN_CREATE_HINT_AT) {
+        scopeWarnings.push({ code: 'turn-third-save', text: turnThirdSaveText() })
+      }
+      if (!isCorroboration && clean.content.length > CONTENT_LENGTH_HINT && deps.hints.claimLengthHint(clean.id)) {
+        scopeWarnings.push({ code: 'content-long', text: contentLongText(clean.content.length) })
+      }
+    }
     const baseResult = candidate.action === 'update'
       ? { kind: 'updated' as const, record: clean }
-      : { kind: 'saved' as const, record: clean }
+      : { kind: 'saved' as const, record: clean, ...(similar.length > 0 ? { similar } : {}) }
 
     const warnings: SaveWarning[] = [
       ...subagent.warnings,

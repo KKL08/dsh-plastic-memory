@@ -113,7 +113,7 @@ export interface CommitChangeInput<Stop = never> {
 
 export type CommitChangeResult<Stop = never> =
   /** snapshotId：改前快照，补证不拍。version：这次状态变化留下或并进去的历史版本。 */
-  | { kind: 'written'; record: MemoryRecord; snapshotId?: string; version?: { id: string; isMerged: boolean } }
+  | { kind: 'written'; record: MemoryRecord; /** 写入段里读到、这次改动拼在它上面的那一版；整条替换时被盖掉的内容以它为准。 */ before: MemoryRecord; snapshotId?: string; version?: { id: string; isMerged: boolean } }
   /** 调用方读到之后目标不在了、状态变了、换了作用域，或过不了调用方另给的条件，没写。 */
   | { kind: 'changed'; current: MemoryRecord | undefined }
   /** prepare 看了最新内容之后叫停，没写。 */
@@ -213,6 +213,7 @@ export async function commitChange<Stop = never>(input: CommitChangeInput<Stop>,
       return {
         kind: 'written',
         record: next,
+        before: target,
         ...(snapshot !== undefined ? { snapshotId: snapshot.id } : {}),
         ...(history !== undefined ? { version: { id: history.versionId, isMerged: history.mode === 'append' } } : {}),
       }

@@ -51,7 +51,7 @@ describe('锁外读撞上挪文件：在用的记录不被当成不存在', () =
   // 拍快照不在写入段里，落盘后的复核是锁外的按范围读（界面编辑、保存拍的快照整段在写入段里，同进程的改名插不进来）
   it('模型改写改名 × 拍快照：快照落盘后的复核列完全局目录、改名把 alpha.md 换成 beta.md，快照里这条不被脱敏', async () => {
     const seed: Seed = { a: 'workspace', b: 'global', isSameName: true }
-    const ops: MemOp[] = [{ kind: 'modelRewrite', id: 'b', isForced: true }, { kind: 'snapshot', ids: ['b'] }]
+    const ops: MemOp[] = [{ kind: 'modelRewrite', id: 'b', allowsSecret: true }, { kind: 'snapshot', ids: ['b'] }]
     const s = phasedScheduler([
       { op: 1, until: call => call.startsWith('rename(.state/snapshots/') },
       { op: 1, until: call => call === `readdir(${GLOBAL_DIR})` },
@@ -75,7 +75,7 @@ describe('锁外读撞上挪文件：在用的记录不被当成不存在', () =
   it('模型改写改名 × 拍快照：拍快照的预读列完全局目录、改名把 alpha.md 换成 beta.md 后才看 .archive/，仍找到它', async () => {
     // 预读不带「没找到在锁内确认」：靠扫描期间有写入在跑这一条进锁确认
     const seed: Seed = { a: 'workspace', b: 'global', isSameName: true }
-    const ops: MemOp[] = [{ kind: 'modelRewrite', id: 'b', isForced: true }, { kind: 'snapshot', ids: ['b'] }]
+    const ops: MemOp[] = [{ kind: 'modelRewrite', id: 'b', allowsSecret: true }, { kind: 'snapshot', ids: ['b'] }]
     const s = phasedScheduler([
       { op: 1, until: call => call === `readdir(${GLOBAL_DIR})` },
       { op: 0, until: call => call === `rm(${GLOBAL_DIR}/alpha.md)` },
@@ -117,7 +117,7 @@ describe('锁外读撞上挪文件：在用的记录不被当成不存在', () =
 describe('提升读完、搬家之前同一条被改过或搬走', () => {
   it('模型改写插在提升的预读与搬家之间：不提升，计入 skipped；项目里是改写后的那一版，全局没有它', async () => {
     const seed: Seed = { a: 'workspace', b: 'workspace', isSameName: false }
-    const ops: MemOp[] = [{ kind: 'promote', id: 'a' }, { kind: 'modelRewrite', id: 'a', isForced: false }]
+    const ops: MemOp[] = [{ kind: 'promote', id: 'a' }, { kind: 'modelRewrite', id: 'a', allowsSecret: false }]
     const obs = await observeSerial(memorySubject(seed), ops, [{ index: 0, part: 'read' }, { index: 1, part: 'all' }, { index: 0, part: 'commit' }])
     const result = (obs.outcomes[0] as { value: { promoted: unknown[]; skipped: string[] } }).value
     expect(result.promoted).toEqual([])
@@ -179,7 +179,7 @@ describe('快照读完、落盘前，同一条含密钥的记录只在项目这�
 describe('遗忘读完、软删之前同一条被改过', () => {
   it('模型改写插在裁决删败方的预读与软删之间：败方不删、留着改写后的那一版，条目仍未决', async () => {
     const seed: Seed = { a: 'workspace', b: 'workspace', isSameName: false, conflict: 'open' }
-    const ops: MemOp[] = [{ kind: 'resolve', verdict: 'keep-left' }, { kind: 'modelRewrite', id: 'b', isForced: true }]
+    const ops: MemOp[] = [{ kind: 'resolve', verdict: 'keep-left' }, { kind: 'modelRewrite', id: 'b', allowsSecret: true }]
     // 裁决的预读和软删都在裁决段里：同一进程里改写插不进来，只在跨进程、锁库用不了时会插进来
     const obs = await observeSerial(withoutLock(memorySubject(seed)), ops, [{ index: 0, part: 'read' }, { index: 1, part: 'all' }, { index: 0, part: 'commit' }])
     expect((obs.outcomes[0] as { value: { ok: boolean } }).value.ok).toBe(false)
@@ -195,7 +195,7 @@ describe('遗忘读完、软删之前同一条被改过', () => {
 
   it('模型改写插在遗忘的预读与软删之间：不删，计入的遗忘里没有它', async () => {
     const seed: Seed = { a: 'workspace', b: 'workspace', isSameName: false }
-    const ops: MemOp[] = [{ kind: 'forget', id: 'b' }, { kind: 'modelRewrite', id: 'b', isForced: true }]
+    const ops: MemOp[] = [{ kind: 'forget', id: 'b' }, { kind: 'modelRewrite', id: 'b', allowsSecret: true }]
     const obs = await observeSerial(memorySubject(seed), ops, [{ index: 0, part: 'read' }, { index: 1, part: 'all' }, { index: 0, part: 'commit' }])
     expect((obs.outcomes[0] as { value: { forgotten: string[] } }).value.forgotten).toEqual([])
     expect(obs.state.find(([p]) => p === `${PROJ}/beta.md`)?.[1]).toContain('模型改写 1')

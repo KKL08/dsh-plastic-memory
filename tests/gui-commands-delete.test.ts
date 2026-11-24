@@ -193,7 +193,7 @@ describe('forget 遇到含密钥的记忆', () => {
   // forget 承诺 14 天可撤销；含密钥的记忆只能物理删除，界面要先问用户，改走 hard-delete
   it.each([
     ['critical 密钥', `token ${FAKE_SECRET.sk}`],
-    ['仅 suspected（用户 force 存下的疑似口令）', 'password: TESTONLY99'],
+    ['仅 suspected（用户确认后存下的疑似口令）', 'password: TESTONLY99'],
   ])('%s：has-secret，记忆原样留着、不建快照', async (_label, content) => {
     const e = env()
     await e.store.create(record({ id: 'mem_s', content }))

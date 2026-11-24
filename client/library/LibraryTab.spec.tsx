@@ -1052,8 +1052,8 @@ describe('记忆查看：单条修改', () => {
     expect(within(row('每周五发版。')).getByText('这条刚被改过，已换成最新内容。要改请重新打开。')).toBeInTheDocument()
   })
 
-  it('故事 12：改后稿像密钥（secret-suspected）：原位确认后带 force 重发', async () => {
-    const { commands } = setup({ respond: command => (command.cmd === 'edit-memory' && command.force !== true ? { ok: false, cmd: 'edit-memory', code: 'secret-suspected' } : respondWith()(command)) })
+  it('故事 12：改后稿像密钥（secret-suspected）：原位确认后带 allowSecret 重发', async () => {
+    const { commands } = setup({ respond: command => (command.cmd === 'edit-memory' && command.allowSecret !== true ? { ok: false, cmd: 'edit-memory', code: 'secret-suspected' } : respondWith()(command)) })
     open()
     write('改成周四')
     await generate()
@@ -1061,7 +1061,7 @@ describe('记忆查看：单条修改', () => {
     const confirm = within(row()).getByRole('group', { name: '仍然保存' })
     expect(confirm).toHaveTextContent('内容里有像密钥的片段。确定不是密钥再保存。')
     await act(async () => { fireEvent.click(within(confirm).getByRole('button', { name: '仍然保存' })) })
-    expect(commands().filter(c => c.cmd === 'edit-memory').map(c => c.cmd === 'edit-memory' && c.force)).toEqual([undefined, true])
+    expect(commands().filter(c => c.cmd === 'edit-memory').map(c => c.cmd === 'edit-memory' && c.allowSecret)).toEqual([undefined, true])
     expect(within(row('每周四发版，先跑测试再打包。')).getByText('已按你的要求改写这条')).toBeInTheDocument()
   })
 
@@ -1617,7 +1617,7 @@ describe('记忆查看：整理所选的应用与撤销', () => {
     })
   })
 
-  it('应用的新内容像密钥（secret-suspected）：工作区里原位确认，「仍然保存」带 force 重发', async () => {
+  it('应用的新内容像密钥（secret-suspected）：工作区里原位确认，「仍然保存」带 allowSecret 重发', async () => {
     let calls = 0
     const { commands } = setup({ apply: () => (++calls === 1 ? { ok: false, cmd: 'apply-edits', code: 'secret-suspected', detail: '像密钥' } : applied) })
     await toApply()
@@ -1627,7 +1627,7 @@ describe('记忆查看：整理所选的应用与撤销', () => {
     await act(async () => { fireEvent.click(within(confirm).getByRole('button', { name: '仍然保存' })) })
     const sent = commands().filter(c => c.cmd === 'apply-edits')
     expect(sent).toHaveLength(2)
-    expect(sent[1]).toEqual({ ...sent[0], force: true })
+    expect(sent[1]).toEqual({ ...sent[0], allowSecret: true })
     expect(resultBar()).not.toBeNull()
   })
 

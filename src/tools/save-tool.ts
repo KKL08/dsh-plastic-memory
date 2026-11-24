@@ -56,7 +56,8 @@ export function createSaveTool(deps: SaveToolDeps, options: { allowSubagent?: bo
       supersedes: { type: 'array', items: { type: 'string' }, description: '被这条新记忆取代的旧记忆 id（action=create 时用）。旧的随即失效、不再带入；旧说法要留档时用它，只是补充或改正同一条用 action=update。' },
       validFrom: { type: 'string', description: `生效起始，本机时间。只有用户说了从什么时候开始才填；只有截止时间的，填 validTo 就够。用户说了具体时刻写 "${VALIDITY_FORMAT}"，没说就只写日期 "${VALIDITY_DATE_FORMAT}"，插件补上现在的时分。` },
       validTo: { type: 'string', description: `失效截止，本机时间。只有用户明确给了截止时间，或信息本身有确定的到期日（一次活动、临时方案）才填，其余不填。用户说了具体时刻写 "${VALIDITY_FORMAT}"（如「今天下午三点前」写 "2026-10-29 15:00"），没说就只写日期 "${VALIDITY_DATE_FORMAT}"，插件补上现在的时分；截止在今天的必须写时刻。必须晚于现在和 validFrom。到点后这条记忆不再带入新对话，也搜不到；已带入当前对话的，到下个会话或上下文压缩后才去掉。` },
-      force: { type: 'boolean', description: '跳过结构去重与疑似密钥拦截（用户已确认）' },
+      allowSecret: { type: 'boolean', description: '内容里有疑似密钥会被拦下；向用户确认不是密钥后，带 true 重发。明确的密钥一律不存。' },
+      force: { type: 'boolean', description: '新建时内容和某条已有记忆几乎一样会被拦下；确认这是另一件事后，带 true 重发这次 create。' },
       confirmGlobal: { type: 'string', description: '确认改写全局记忆时用：原样填这条记忆最近一次未保存提示里给的确认码；第一次调用不填。' },
     },
     output: {

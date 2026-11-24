@@ -116,7 +116,7 @@ export function commandOutput(outcome: CommandOutcome): string | null {
 }
 
 const CARD_MASK: MaskOptions = { severity: 'suspected' }
-/** 对话卡里的密钥一律遮掉，疑似的也遮（带 force 存下的 password= / api_key= 赋值）。 */
+/** 对话卡里的密钥一律遮掉，疑似的也遮（带 allowSecret 存下的 password= / api_key= 赋值）。 */
 export const maskCard = (text: string) => maskSecrets(text, CARD_MASK)
 
 const maskStrings = (value: unknown): unknown =>

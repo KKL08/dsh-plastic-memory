@@ -27,7 +27,7 @@ const EXPECTED: Record<GuiErrorCode, (command: MemoryCommand) => Outcome> = {
     ? { kind: 'confirm-cross', workspacePath: '/w/blog', isMove: c.cmd === 'move-memory', resend: { ...c, allowCrossWorkspace: true } as MemoryCommand }
     : raw('cross-workspace'),
   'has-secret': c => c.cmd === 'forget' ? { kind: 'confirm-secret', resend: { ...c, cmd: 'hard-delete' } } : raw('has-secret'),
-  'secret-suspected': c => c.cmd === 'edit-memory' || c.cmd === 'merge-memories' || c.cmd === 'apply-edits' ? { kind: 'confirm-suspected', resend: { ...c, force: true } } : raw('secret-suspected'),
+  'secret-suspected': c => c.cmd === 'edit-memory' || c.cmd === 'merge-memories' || c.cmd === 'apply-edits' ? { kind: 'confirm-suspected', resend: { ...c, allowSecret: true } } : raw('secret-suspected'),
   'claimed': () => ({ kind: 'handled-elsewhere' }),
   'not-found': c => OPEN_ITEM_COMMANDS.has(c.cmd) ? { kind: 'handled-elsewhere' } : isTidy(c) ? local('not-found', 'library.batch.stale')
     : is(c, 'undo') ? local('not-found', 'pending.undo.gone') : 'memoryId' in c || 'memories' in c ? local('not-found', 'pending.memory.gone') : raw('not-found'),
@@ -73,12 +73,12 @@ describe('命令往返协议：命令 × 结果码', () => {
     const forget = { ...SAMPLE_COMMANDS.forget, allowCrossWorkspace: true }
     expect(interpret(forget, refusal(forget, 'has-secret'))).toEqual({ kind: 'confirm-secret', resend: { ...forget, cmd: 'hard-delete' } })
     const edit = { ...SAMPLE_COMMANDS['edit-memory'], allowCrossWorkspace: true }
-    expect(interpret(edit, refusal(edit, 'secret-suspected'))).toEqual({ kind: 'confirm-suspected', resend: { ...edit, force: true } })
+    expect(interpret(edit, refusal(edit, 'secret-suspected'))).toEqual({ kind: 'confirm-suspected', resend: { ...edit, allowSecret: true } })
   })
 
-  it('按要求应用的融合稿像密钥：确认后带 force 重发（采纳建议不确认，照常显示原话）', () => {
+  it('按要求应用的融合稿像密钥：确认后带 allowSecret 重发（采纳建议不确认，照常显示原话）', () => {
     const apply: MemoryCommand = { cmd: 'apply-proposal', decisionId: 'd1', proposal: PROPOSAL }
-    expect(interpret(apply, refusal(apply, 'secret-suspected'))).toEqual({ kind: 'confirm-suspected', resend: { ...apply, force: true } })
+    expect(interpret(apply, refusal(apply, 'secret-suspected'))).toEqual({ kind: 'confirm-suspected', resend: { ...apply, allowSecret: true } })
   })
 
   it('stale、not-found 带回服务端列出的 memoryIds（整理所选据此等视图换成最新内容）', () => {

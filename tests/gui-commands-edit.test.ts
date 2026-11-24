@@ -320,14 +320,16 @@ describe('edit-memory（建议整理的直接改）', () => {
     expect(await e.snapshots.list()).toEqual([])
   })
 
-  it('疑似密钥先拦下等确认；带 force 重发才写', async () => {
+  it('疑似密钥先拦下等确认；带 allowSecret 重发才写', async () => {
     const e = env()
     await e.store.create(record({ id: 'mem_q', content: '旧正文' }))
     const base = await baseOf(e, 'mem_q')
     const content = '测试库 api_key: TESTONLY0000000000000000'
-    expect(err(await e.run(edit('mem_q', undefined, base, { content }))).code).toBe('secret-suspected')
+    const refusal = err(await e.run(edit('mem_q', undefined, base, { content })))
+    expect(refusal.code).toBe('secret-suspected')
+    expect(refusal.detail).toContain('allowSecret')
     expect((await e.store.get('mem_q'))!.content).toBe('旧正文')
-    ok(await e.run(edit('mem_q', undefined, base, { content, force: true })))
+    ok(await e.run(edit('mem_q', undefined, base, { content, allowSecret: true })))
     expect((await e.store.get('mem_q'))!.content).toBe(content)
   })
 
@@ -340,12 +342,12 @@ describe('edit-memory（建议整理的直接改）', () => {
     expect(await e.snapshots.list()).toEqual([])
   })
 
-  it('原记忆只含确认存下的疑似密钥（界面上是原文）：照常改，新内容仍带疑似密钥时同样要 force', async () => {
+  it('原记忆只含确认存下的疑似密钥（界面上是原文）：照常改，新内容仍带疑似密钥时同样要 allowSecret', async () => {
     const e = env()
     const content = '测试库 api_key: TESTONLY0000000000000000'
     await e.store.create(record({ id: 'mem_sq', content }))
     const next = `${content}，只在本地用`
-    ok(await e.run(edit('mem_sq', undefined, await baseOf(e, 'mem_sq'), { content: next, force: true })))
+    ok(await e.run(edit('mem_sq', undefined, await baseOf(e, 'mem_sq'), { content: next, allowSecret: true })))
     expect((await e.store.get('mem_sq'))!.content).toBe(next)
   })
 

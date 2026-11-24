@@ -158,9 +158,9 @@ describe('待处理：手动改与手动合并', () => {
     expect(screen.getByRole('button', { name: '保存' })).not.toHaveAttribute('aria-disabled')
   })
 
-  it('新内容像密钥：卡片里再确认一次，「仍然保存」带 force 重发', async () => {
+  it('新内容像密钥：卡片里再确认一次，「仍然保存」带 allowSecret 重发', async () => {
     const { commands } = setup([bloat], {
-      respond: command => (command.cmd === 'edit-memory' && command.force !== true ? { ok: false, cmd: command.cmd, code: 'secret-suspected' } : edited),
+      respond: command => (command.cmd === 'edit-memory' && command.allowSecret !== true ? { ok: false, cmd: command.cmd, code: 'secret-suspected' } : edited),
     })
     startEdit()
     await save()
@@ -168,7 +168,7 @@ describe('待处理：手动改与手动合并', () => {
     expect(screen.getByRole('button', { name: '保存' })).toHaveAttribute('aria-disabled', 'true')
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '仍然保存' })) })
     await screen.findByText('已修改')
-    expect(commands().map(c => c.cmd === 'edit-memory' && c.force)).toEqual([undefined, true])
+    expect(commands().map(c => c.cmd === 'edit-memory' && c.allowSecret)).toEqual([undefined, true])
   })
 
   it('记忆在卡片加载后被改过：没有保存，写明重新打开修改；视图换成新版本后稿子留着，再保存仍按开始改时的版本核对，不冲掉别处的改动', async () => {

@@ -40,7 +40,7 @@ const verdictArb = fc.constantFrom<Verdict>('keep-left', 'keep-right', 'keep-bot
 const decisionOpArb: fc.Arbitrary<MemOp> = fc.oneof(
   fc.record({ kind: fc.constant('resolve' as const), verdict: verdictArb }),
   fc.constant<MemOp>({ kind: 'undo' }),
-  fc.record({ kind: fc.constant('modelRewrite' as const), id: keyArb, isForced: fc.boolean() }),
+  fc.record({ kind: fc.constant('modelRewrite' as const), id: keyArb, allowsSecret: fc.boolean() }),
 )
 
 describe('IL-03 裁决、撤销与写入', () => {
@@ -62,8 +62,8 @@ describe('IL-03 强制模板', () => {
   it('裁决删一方 × 改写败方：串行等价，账本与盘面一致，且对上不止一种串行顺序', async () => {
     const tally = new Map<string, number>()
     await fc.assert(
-      fc.asyncProperty(fc.boolean(), fc.option(decisionOpArb, { nil: undefined }), headStartArb(2, 150), interleaveScheduler(), async (isForced, extra, head, s) => {
-        const ops: MemOp[] = [{ kind: 'resolve', verdict: 'keep-left' }, { kind: 'modelRewrite', id: 'b', isForced }, ...(extra === undefined ? [] : [extra])]
+      fc.asyncProperty(fc.boolean(), fc.option(decisionOpArb, { nil: undefined }), headStartArb(2, 150), interleaveScheduler(), async (allowsSecret, extra, head, s) => {
+        const ops: MemOp[] = [{ kind: 'resolve', verdict: 'keep-left' }, { kind: 'modelRewrite', id: 'b', allowsSecret }, ...(extra === undefined ? [] : [extra])]
         tallyOrder(tally, (await assertSerialEquivalent(decisionsSubject({ a: 'workspace', b: 'workspace', isSameName: false, conflict: 'open' }), s, ops, head)).order)
       }),
       interleaveParams(DEFAULT_RUNS),

@@ -1,3 +1,6 @@
+import { similarGuide } from '../create-gate.ts'
+import type { SaveHints } from '../save-signals.ts'
+import type { QueryTokenizerOptions } from '../search/jieba-segmenter.ts'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { MemoryStore } from '../store.ts'
 import type { TypeRegistry } from '../type-registry.ts'
@@ -24,6 +27,10 @@ export type SaveArgs = SaveInput
 
 /** memory_save 工具的依赖，纯逻辑层与框架绑定层共用。 */
 export interface SaveToolDeps {
+  /** 新建闸与检索共用分词配置。 */
+  tokenizer?: QueryTokenizerOptions
+  /** 接线层按会话提供提示记账。 */
+  saveHintsIn?: (sessionId: string) => SaveHints
   store: MemoryStore
   registry: TypeRegistry
   host: { saveContextOf(exec: ToolRunContext): Promise<SaveContext>; readSessionLog: HostSession['readSessionLog'] }
@@ -76,10 +83,11 @@ export function renderSaveResult(result: PipelineResult): string {
         : `已更新记忆 ${result.record.id}（${shownName(result.record)}）。${QUIET_NOTE}`
       break
     case 'duplicate-suspected': {
-      const listed = `这个主题可能已有记忆：\n${result.existing.map(e => `- ${e.id}：${e.summary}`).join('\n')}`
+      const e = result.existing
+      const listed = `和已有记忆「${e.name}」（${e.id}）几乎一样，未保存。那条的摘要：${e.summary}`
       text = result.isFromSubagent
-        ? `${listed}\n未保存。这些不是待确认记录，子 agent 改不了；看法不同就在回复里向委派方说明分歧（带上这些 id），由它决定。`
-        : `${listed}\n如需修改已有记忆，用 action=update 和对应 id 重发；确认是新信息就加 force=true 重发。`
+        ? `${listed}\n子 agent 改不了这条；有新内容或看法不同，在回复里向委派方说明（带上 ${e.id}），由它决定。`
+        : `${listed}\n按情况选一条路：\n- 同一件事又被提到：对 ${e.id} 用 action=update、change=corroborate，只传 id 和 sourceMode。\n- 多了细节或值变了：对 ${e.id} 用 action=update，按改动性质填 change（值变了填 state-change）。\n- 确实是另一件事：在这次 create 上加 force: true 重发。`
       break
     }
     case 'rejected':
@@ -93,6 +101,9 @@ export function renderSaveResult(result: PipelineResult): string {
     text = `${text}\n${warnings}`
   }
 
+  if (result.kind === 'saved' && result.similar?.length) {
+    text += `\n相近的已有记忆：\n${result.similar.map(e => `- ${e.id}「${e.name}」${e.scope === 'global' ? '（全局）' : ''}：${e.summary}`).join('\n')}\n${similarGuide(isPendingDelegated(result.record))}`
+  }
   return text
 }
 
@@ -118,6 +129,8 @@ export async function executeSave(
   const turn = anchorFactsOf(await deps.host.readSessionLog(context.session.id), { turnStartSeq, lastSeq }, isExcluded)
   const result = await runSavePipeline(args, {
     store: deps.store,
+    tokenizer: deps.tokenizer,
+    hints: deps.saveHintsIn?.(context.session.id),
     registry: deps.registry,
     // 无条件传真实 workspace 上下文：pipeline 要靠它判断 global 是否降级为候选（scope=global 时
     // 也需要知道当前有没有 workspace 作用域）。global 记忆最终不带 workspacePath 由 pipeline 组装时归 undefined。

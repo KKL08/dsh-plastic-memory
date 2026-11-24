@@ -281,33 +281,35 @@ describe('密钥硬删', () => {
     expect(await h.store.get('mem_z', { workspacePath: WS })).toBeUndefined()
   })
 
-  it('save：critical 仍拒绝；suspected 拒绝并返回 secret-suspected，force: true 放行并保留警告；force 工具说明含「疑似密钥拦截」', async () => {
+  it('save：critical 仍拒绝；suspected 拒绝并返回 secret-suspected，allowSecret: true 放行并保留警告；allowSecret 工具说明含「疑似密钥拦截」', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const deps = { store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), workspacePath: WS, session: { id: 's', lastSeq: 1 } }
 
     const critical = await runSavePipeline(candidate({ scope: 'workspace', content: `密钥 ${FAKE_SECRET.sk}` }), deps)
     expect(critical).toMatchObject({ kind: 'rejected', code: SECRET_CRITICAL })
-    const criticalForced = await runSavePipeline(candidate({ scope: 'workspace', content: `密钥 ${FAKE_SECRET.sk}`, force: true }), deps)
+    const criticalForced = await runSavePipeline(candidate({ scope: 'workspace', content: `密钥 ${FAKE_SECRET.sk}`, allowSecret: true }), deps)
     expect(criticalForced).toMatchObject({ kind: 'rejected', code: SECRET_CRITICAL })
 
     const suspected = await runSavePipeline(candidate({ scope: 'workspace', content: `内部约定 ${SUSPECTED_TEXT}` }), deps)
     expect(suspected).toMatchObject({ kind: 'rejected', code: SECRET_SUSPECTED_REJECT })
     expect(await store.query({})).toHaveLength(0)
 
-    const forced = await runSavePipeline(candidate({ scope: 'workspace', content: `内部约定 ${SUSPECTED_TEXT}`, force: true }), deps)
-    if (forced.kind !== 'saved') throw new Error(forced.kind)
-    expect(forced.warnings?.map(w => w.code)).toEqual([SECRET_SUSPECTED_WARNING])
+    const allowSecretd = await runSavePipeline(candidate({ scope: 'workspace', content: `内部约定 ${SUSPECTED_TEXT}`, allowSecret: true }), deps)
+    if (allowSecretd.kind !== 'saved') throw new Error(allowSecretd.kind)
+    expect(allowSecretd.warnings?.map(w => w.code)).toEqual([SECRET_SUSPECTED_WARNING])
 
-    // update 同样拦截，force 放行
-    const update = { action: 'update' as const, change: 'correct' as const, id: forced.record.id, scope: 'workspace' as const, content: '密码:TESTONLYpassw0rd' }
+    // update 同样拦截，allowSecret 放行
+    const update = { action: 'update' as const, change: 'correct' as const, id: allowSecretd.record.id, scope: 'workspace' as const, content: '密码:TESTONLYpassw0rd' }
     expect(await runSavePipeline(candidate(update), deps)).toMatchObject({ kind: 'rejected', code: SECRET_SUSPECTED_REJECT })
-    const updated = await runSavePipeline(candidate({ ...update, force: true }), deps)
+    const updated = await runSavePipeline(candidate({ ...update, allowSecret: true }), deps)
     if (updated.kind !== 'updated') throw new Error(updated.kind)
     expect(updated.warnings?.map(w => w.code)).toEqual([SECRET_SUSPECTED_WARNING])
 
     const tool = createSaveTool({ store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), host: { saveContextOf: async () => ({ workspacePath: WS, session: { id: 's', lastSeq: 1 } }), readSessionLog: userTurnLog } })
     const params = (tool.parameters as unknown as { properties: Record<string, { description?: string }> }).properties
-    expect(params.force.description).toBe('跳过结构去重与疑似密钥拦截（用户已确认）')
+    expect(params.force.description).not.toContain('密钥')
+    expect(params.allowSecret.description).not.toContain('重复')
+    expect(params.allowSecret.description).toBe('内容里有疑似密钥会被拦下；向用户确认不是密钥后，带 true 重发。明确的密钥一律不存。')
   })
 
   it('规则层 secret finding 建议文案改为「memory_forget 会立即物理删除，不进 14 天回收，并轮换凭证」', () => {
@@ -318,13 +320,13 @@ describe('密钥硬删', () => {
   })
 
   it('稳定码进 contract-codes，测试断常量不断文案', async () => {
-    // RejectCode / WarningCode 两边都收 secret-suspected：不带 force 是拒绝码，带 force 是警告码
+    // RejectCode / WarningCode 两边都收 secret-suspected：不带 allowSecret 是拒绝码，带 allowSecret 是警告码
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const deps = { store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), workspacePath: WS, session: { id: 's', lastSeq: 1 } }
     const rejected = await runSavePipeline(candidate({ scope: 'workspace', summary: SUSPECTED_TEXT }), deps)
     if (rejected.kind !== 'rejected') throw new Error(rejected.kind)
     expect(rejected.code).toBe(SECRET_SUSPECTED_REJECT)
-    const saved = await runSavePipeline(candidate({ scope: 'workspace', summary: SUSPECTED_TEXT, force: true }), deps)
+    const saved = await runSavePipeline(candidate({ scope: 'workspace', summary: SUSPECTED_TEXT, allowSecret: true }), deps)
     if (saved.kind !== 'saved') throw new Error(saved.kind)
     expect(saved.warnings?.[0].code).toBe(SECRET_SUSPECTED_WARNING)
   })
