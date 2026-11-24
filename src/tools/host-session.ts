@@ -3,6 +3,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import type { SemanticLlm } from '../governance/semantic-scan.ts'
 import type { SaveDelegation } from '../pipeline.ts'
 import type { DelegationHeader } from './subagent-gate.ts'
+import type { SessionLog } from '../session-log.ts'
 import { UNKNOWN_SESSION_ID } from '../session-id.ts'
 
 /** 宿主没给会话 id 时用的哨兵：会话视图、新写入名单遇到它都跳过。 */
@@ -51,4 +52,6 @@ export interface HostSession {
   ownSessionIdOf(session: object): string | undefined
   /** 会话所属项目：按会话的 cwd 解析，没有工作目录为 undefined。 */
   workspaceOf(session: object): Promise<string | undefined>
+  /** 一个会话的整份日志（活会话取当下的样子，没打开的读落盘的）；读不到为 null。 */
+  readSessionLog(sessionId: string): Promise<SessionLog | null>
 }

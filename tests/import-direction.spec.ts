@@ -19,7 +19,7 @@ type LayerName = keyof typeof LAYER
 const LEAF_MODULES = new Set([
   'text', 'secrets', 'record-freshness', 'validity', 'retention', 'contract-codes', 'index-line', 'errors',
   'kv-table', 'record-schema', 'output', 'storage/paths', 'storage/table', 'types', 'gui/contract',
-  'search/tokenizer', 'search/jieba-segmenter', 'search/dialogue-tokenizer', 'scope', 'root-lock', 'edits',
+  'search/tokenizer', 'search/jieba-segmenter', 'search/dialogue-tokenizer', 'scope', 'root-lock', 'edits', 'session-log',
 ])
 // search/ranking、search/coverage、search/window、search/memory-candidates 与 store 同层：只 import 叶子，被执行器用；分词器与 jieba 切分器留在叶子（只碰 Node 内置，词典路径与日志器由调用方注入）
 const MEMORY_MODULES = new Set([
@@ -156,6 +156,19 @@ describe('import 方向', () => {
       .map(e => `${e.from} → ${e.to}`)
       .filter(key => !present.has(key))
     expect(stale).toEqual([])
+  })
+})
+
+describe('读会话日志的一层', () => {
+  it('session-log 只 import 叶子，连 type-only 也不引执行器、存储和宿主包', () => {
+    const own = edges.filter(e => e.from === 'session-log')
+    expect(own.filter(e => e.spec.startsWith(FRAMEWORK_PREFIX)).map(e => e.spec)).toEqual([])
+    expect(own.map(e => resolveRelative(e.from, e.spec)).filter(to => to !== undefined && layerOf(to) !== 'leaf')).toEqual([])
+  })
+
+  it('tools/source 的事件类型从 session-log 导入，不自己再定义一份', () => {
+    expect(edges.some(e => e.from === 'tools/source' && resolveRelative(e.from, e.spec) === 'session-log')).toBe(true)
+    expect(readFileSync(`${SRC_DIR}tools/source.ts`, 'utf8')).not.toMatch(/interface RawEvent\b/)
   })
 })
 

@@ -2,6 +2,9 @@ import type { MemoryStore } from '../store.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { SourceRejectCode } from '../contract-codes.ts'
 import { maskSecretSurface } from '../secrets.ts'
+import type { RawEvent } from '../session-log.ts'
+
+export type { RawEvent }
 
 /** ctx.sessionQuery.readEvent 的最小契约（2026-08-28 真机探针核实） */
 export interface ReadEventFn {
@@ -12,13 +15,6 @@ export interface ReadEventFn {
     startSeq?: number
     endSeq?: number
   }>
-}
-
-export interface RawEvent {
-  type?: string
-  seq?: number
-  time?: number
-  data?: unknown
 }
 
 export interface SourceToolDeps {

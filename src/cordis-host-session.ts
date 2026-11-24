@@ -5,6 +5,7 @@ import type { SaveDelegation } from './pipeline.ts'
 import { UNKNOWN_SESSION_ID, type HostContext, type HostSession } from './tools/host-session.ts'
 import { delegationDepthOf, resolveRootSessionId, subagentModeOf, type DelegationHeader, type ProjectionReader } from './tools/subagent-gate.ts'
 import type { SemanticLlm } from './governance/semantic-scan.ts'
+import type { RawEvent, SessionHeaderLike, SessionLog } from './session-log.ts'
 import { hostSemanticLlm, type HostLlmService, type HostModelRoute } from './governance/host-llm.ts'
 
 export interface CordisHostSessionDeps {
@@ -19,6 +20,9 @@ type SessionHeader = { id?: string; cwd?: string; delegationDepth?: number; pare
 
 /** dsh-agent turnBoundary 投影里插件读的两个字段（宿主形状的子集）。 */
 type TurnBoundaryState = { lastTurn?: number; openTurnStartSeq?: number | null }
+
+/** sessionQuery.readSession 的最小契约：下界和钉版宿主都返回 header、继承前缀长度和全部事件。 */
+type LogQuery = { readSession?(sessionId: string): Promise<{ session?: SessionHeaderLike; inheritedEventCount?: number; events?: RawEvent[] }> }
 
 type HeaderQuery = { filterSessions?(filters: ReadonlyArray<{ kind: 'id'; values: readonly string[] }>): Promise<Array<{ header: DelegationHeader }>> }
 
@@ -170,5 +174,37 @@ export function createCordisHostSession(deps: CordisHostSessionDeps): HostSessio
 
   const workspaceOf = (session: object) => resolveCwd((session as { header?: SessionHeader }).header?.cwd)
 
-  return { contextOf, saveContextOf, llmOf, defaultLlm, modeOf, hasEarlierTurns, remember, ownSessionIdOf, workspaceOf }
+  // 读整份日志：继承前缀长度原样交回，宿主没给就留空——调用方据此判「分不清归属」，不能补成 0 当成都是自己的。
+  // 读不到的原因按会话 id 只警告一次：保存时每次都读，坏掉的服务不该刷屏
+  const warnedLogs = new Set<string>()
+  const readSessionLog = async (sessionId: string): Promise<SessionLog | null> => {
+    if (sessionId === UNKNOWN_SESSION_ID) return null
+    let reason: string
+    try {
+      const query = probe<LogQuery>('sessionQuery')
+      if (query === undefined) reason = 'sessionQuery service is absent'
+      else if (typeof query.readSession !== 'function') reason = 'sessionQuery has no readSession'
+      else {
+        const read = await query.readSession(sessionId)
+        if (Array.isArray(read?.events)) {
+          return {
+            header: read.session ?? {},
+            inheritedEventCount: typeof read.inheritedEventCount === 'number' ? read.inheritedEventCount : undefined,
+            events: read.events,
+          }
+        }
+        reason = 'readSession returned no event list'
+      }
+    } catch (error) {
+      reason = `readSession threw: ${String(error)}`
+    }
+    const key = `${sessionId}\u0000${reason}`
+    if (!warnedLogs.has(key)) {
+      warnedLogs.add(key)
+      logger.warn(`[plastic-memory] 读不到会话 "${sessionId}" 的日志：${reason}`)
+    }
+    return null
+  }
+
+  return { contextOf, saveContextOf, llmOf, defaultLlm, modeOf, hasEarlierTurns, remember, ownSessionIdOf, workspaceOf, readSessionLog }
 }
