@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { CHECKUP_INITIATORS } from '../contract-codes.ts'
-import { autoCheckupFrequencySchema, checkupCauseSchema, checkupResultSchema } from '../gui/contract.ts'
+import { autoCheckupFrequencySchema, checkupCauseSchema, checkupResultSchema, modelSelectionSchema, modelUnavailableCauseSchema } from '../gui/contract.ts'
 
 /** 易变召回统计的侧表行（`.state/recall-stats.json` 里的一条，见 storage/sidecar.ts）。
  *  文件永不承载这两个字段——否则每次 search 命中都产生文件 diff（git 噪音）。 */
@@ -46,7 +46,7 @@ export const checkupRecordSchema = z.object({
     failedAt: z.number(),
     cause: checkupCauseSchema,
   }).optional(),
-  modelUnavailable: checkupCauseSchema.optional(),
+  modelUnavailable: modelUnavailableCauseSchema.optional(),
   lastResult: checkupResultSchema.optional(),
 })
 export type CheckupRecord = z.infer<typeof checkupRecordSchema>
@@ -62,3 +62,11 @@ export const autoCheckupSettingSchema = z.object({
   frequency: autoCheckupFrequencySchema,
 })
 export type AutoCheckupSetting = z.infer<typeof autoCheckupSettingSchema>
+
+/**
+ * 模型选择表的一行（`.state/model-selections/<sha1(id)>.json`，见 storage/sidecar.ts），一个选择键一条。id 是选择键
+ * （`checkup`、`dreams`，见 gui/contract.ts MODEL_SELECTION_KEYS），其余字段是那份选择（提供方、模型、可选的推理强度）。
+ * 没有某个键的条目 = 跟随。几个宿主进程共用，开跑时现读。
+ */
+export const modelSelectionRowSchema = modelSelectionSchema.extend({ id: z.string() })
+export type ModelSelectionRow = z.infer<typeof modelSelectionRowSchema>

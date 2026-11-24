@@ -12,6 +12,7 @@ import { createInterface } from 'node:readline'
 import { join } from 'node:path'
 import { FileTable } from '../../src/storage/file-table.ts'
 import { SidecarStore } from '../../src/storage/sidecar.ts'
+import { ModelSelectionStore } from '../../src/governance/background-llm.ts'
 import { createAgentsMdWriter } from '../../src/storage/agents-md.ts'
 import { MemoryStore } from '../../src/store.ts'
 import { buildTypeRegistry } from '../../src/type-registry.ts'
@@ -47,6 +48,7 @@ const cache = sidecar.scanCache
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, cache, ignores, registry, memoryRoot: root, now }), now, sleep: async () => {}, lock: sidecar.lock })
 const command = createMemoryCommand({
+  selections: new ModelSelectionStore(sidecar.modelSelections),
   memoryRoot: root, store, decisions, snapshots: new SnapshotStore(sidecar.snapshots), cache,
   checkups: new CheckupRecordStore(sidecar.checkups), autoCheckups: new AutoCheckupSettingStore(sidecar.autoCheckups), ignores, registry, views,
   agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')),

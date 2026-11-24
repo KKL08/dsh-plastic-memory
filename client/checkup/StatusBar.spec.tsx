@@ -77,7 +77,7 @@ function checkups({ all = 'manual', scopes = {}, allResult = null, governanceEna
     isInProgress: false, failure: null, modelUnavailable: null, lastResult: null,
     ...scopes[scope.kind === 'global' ? 'global' : scope.workspacePath],
   })
-  return { version: GUI_VIEW_VERSION, governanceEnabled, defaultFrequency: all, allResult, scopes: [entry(GLOBAL), entry(APP), entry(BLOG)] }
+  return { version: GUI_VIEW_VERSION, governanceEnabled, defaultFrequency: all, allResult, model: null, scopes: [entry(GLOBAL), entry(APP), entry(BLOG)] }
 }
 
 const views = { pending, library, health: health(), checkups: checkups() }

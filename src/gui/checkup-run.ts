@@ -7,7 +7,7 @@ import { maskDiagnostic } from '../secrets.ts'
 import { runScan, type ScanCoreDeps, type ScanInput, type ScanNote, type ScanToolResult } from '../tools/scan.ts'
 import { checkupWorkspaces } from '../tools/scope-preread.ts'
 import type { Scope } from '../scope.ts'
-import { checkupKey, type CheckupCause, type PendingView } from './contract.ts'
+import { checkupKey, type CheckupCause, type CheckupResult, type PendingView } from './contract.ts'
 import { checkupResults, type CheckupTarget, type GlobalViews } from './views.ts'
 import type { ViewWriter } from './view-writer.ts'
 
@@ -99,6 +99,8 @@ export interface CheckupRunInput {
   signal?: AbortSignal
   /** 认领到之后、开跑之前再确认一次：返回 false 就放掉认领，结果算取消（自动体检传「仍到期」）。 */
   confirmHeld?: () => Promise<boolean>
+  /** 自动体检选的模型用不了、这次改用了默认模型：写进最近一次结果；缺省没有退回。 */
+  modelFallback?: CheckupResult['modelFallback']
 }
 
 export type CheckupRunOutcome =
@@ -199,6 +201,7 @@ export async function runCheckup(input: CheckupRunInput, deps: CheckupRunDeps): 
         const id = genId('ck')
         await deps.checkups.recordResults(checkupResults(compared.before, compared.after.pending, {
           target: resultTarget, checkupId: id, by, completedAt: deps.now(), notes: result.notes, scopeNotes,
+          ...(input.modelFallback !== undefined ? { modelFallback: input.modelFallback } : {}),
           ...(result.usageTokens !== undefined ? { usageTokens: result.usageTokens } : {}),
         }))
         checkupId = id

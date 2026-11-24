@@ -4,6 +4,7 @@ import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SidecarStore } from '../src/storage/sidecar.ts'
+import { ModelSelectionStore } from '../src/governance/background-llm.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { workspaceDirName } from '../src/storage/paths.ts'
 import { createAgentsMdWriter } from '../src/storage/agents-md.ts'
@@ -55,6 +56,7 @@ function env() {
   const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
   const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, snapshots, cache: sidecar.scanCache, ignores, registry, memoryRoot: root, now }), now, sleep: async () => {}, lock: sidecar.lock })
   const command = createMemoryCommand({
+    selections: new ModelSelectionStore(sidecar.modelSelections),
     memoryRoot: root, store, decisions, snapshots, cache: sidecar.scanCache, registry, views, ignores,
     checkups: new CheckupRecordStore(sidecar.checkups), autoCheckups: new AutoCheckupSettingStore(sidecar.autoCheckups),
     agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')),

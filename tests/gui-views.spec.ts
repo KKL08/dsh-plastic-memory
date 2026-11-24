@@ -782,7 +782,7 @@ describe('体检视图：没有活跃记忆的项目', () => {
       isCheckable: scope => scope.kind === 'global',
       lastCheckupAt: scope => scope.kind === 'global' ? null : T0 - 3 * 86_400_000, isInProgress: () => false,
       record: scope => scope.kind === 'global' ? undefined : { id: checkupKey(empty), failure: { count: 1, failedAt: T0 - 1000, cause }, modelUnavailable: cause },
-      allRecord: undefined,
+      allRecord: undefined, model: null,
     })
     expect(checkupViewSchema.parse(view)).toEqual(view)
     expect(view.scopes.map(s => [s.scope.kind, s.isCheckable])).toEqual([['global', true], ['workspace', false]])
@@ -1055,7 +1055,7 @@ describe('视图写入', () => {
     new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') }, collectCheckups: async () => view(), ...noWait, ...opts })
   const checkupAt = (now: number, governanceEnabled = true): CheckupView => buildCheckupView({
     now, governanceEnabled, settings: new Map(), scopes: [{ kind: 'global' }], isCheckable: () => true,
-    lastCheckupAt: () => null, isInProgress: () => false, record: () => undefined, allRecord: undefined,
+    lastCheckupAt: () => null, isInProgress: () => false, record: () => undefined, allRecord: undefined, model: null,
   })
   const readCheckup = async () => checkupViewSchema.parse(JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_CHECKUP_VIEW_FILE), 'utf8')))
   const tmpLeft = async () => (await listViews()).filter(n => n.includes('.tmp-'))

@@ -19,6 +19,7 @@ import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import { baselineFor, type ReadInstructions } from '../governance/instructions.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
 import type { AutoCheckupSettingStore } from '../governance/auto-checkups.ts'
+import { listModelChoices, type ModelSelectionStore } from '../governance/background-llm.ts'
 import { executeConfirm, type ConfirmOptions } from '../tools/confirm.ts'
 import { executeForget } from '../tools/forget.ts'
 import { executePromote } from '../tools/promote.ts'
@@ -59,6 +60,8 @@ export interface MemoryCommandDeps {
   checkups: CheckupRecordStore
   /** 自动体检设置表（set-auto-checkup 写它）。 */
   autoCheckups: AutoCheckupSettingStore
+  /** 后台模型的选择表（set-model-selection 写它）。 */
+  selections: Pick<ModelSelectionStore, 'set'>
   /** set-auto-checkup 写完设置表、重写体检视图后调用：本进程的自动体检调度立刻重算。缺省不通知（没有调度器）。 */
   onAutoCheckupChanged?: () => void
   /** scan 持有范围认领期间的心跳计时；缺省用进程自己的 setInterval。 */
@@ -73,8 +76,8 @@ export interface MemoryCommandDeps {
   agentsMd: AgentsMdWriter
   views: Pick<ViewWriter, 'request' | 'rewriteAll' | 'collectViews' | 'requestCheckups'>
   /** 宿主会话（与工具共用同一个适配器，exec 只带 agent）：借来的会话 → workspace、子 agent 深度、会话 id；
-   *  在它的 agent 上解析模型（null = 拿不到）。 */
-  host: ContextHost<{ workspacePath: string | undefined; delegationDepth: number; session: { id: string } }> & Pick<HostSession, 'llmOf'>
+   *  在它的 agent 上解析模型（null = 拿不到）；list-models 经它取宿主的模型目录（缺省当宿主没有，列出空表）。 */
+  host: ContextHost<{ workspacePath: string | undefined; delegationDepth: number; session: { id: string } }> & Pick<HostSession, 'llmOf'> & Partial<Pick<HostSession, 'modelCatalog'>>
   /** 按作用域取指令文件（AGENTS.md / CLAUDE.md）：体检、垂直冲突的建议与采纳都按记忆对应的那份，和借来的会话在哪个项目无关。 */
   instructions: ReadInstructions
   /** 体检开关（用时读配置）；关闭时治理类子命令返回 governance-disabled。缺省视为开启。 */
@@ -113,7 +116,7 @@ const GOVERNANCE_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve
 const READ_ONLY_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['draft-edit', 'plan-edits', 'draft-plan', 'draft-proposal'])
 
 /** 自己写视图的子命令：成功后不再按常规重写全部视图。 */
-const SELF_WRITING_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['scan', 'refresh-views', 'set-auto-checkup'])
+const SELF_WRITING_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['scan', 'refresh-views', 'set-auto-checkup', 'set-model-selection'])
 
 /** 改待决项的子命令，先认领条目再执行，同一条同时只跑一个（resolve、undo 由执行器 executeConfirm、executeUndo 自己认领）。 */
 const CLAIMED_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['promote', 'keep-local', 'dismiss-overflow'])
@@ -163,6 +166,8 @@ async function run(deps: MemoryCommandDeps, invocation: MemoryCommandInvocation)
     const llm = deps.host.llmOf(exec)
     return llm === null ? fail(command.cmd, 'llm-unavailable', '借用的会话拿不到模型') : { ok: true, cmd: command.cmd, ...(llm.model !== undefined ? { model: llm.model } : {}) }
   }
+  // 只读，和借来的会话无关：子 agent 会话也能列
+  if (command.cmd === 'list-models') return { ok: true, cmd: command.cmd, providers: await listModelChoices(deps.host.modelCatalog?.()) }
   if (GOVERNANCE_COMMANDS.has(command.cmd) && deps.isGovernanceEnabled?.() === false && !(await isEditUndo(deps.decisions, command))) {
     return fail(command.cmd, 'governance-disabled', '体检已关闭，可在配置文件里把 governance.enabled 改成 true 打开')
   }
@@ -179,7 +184,7 @@ async function run(deps: MemoryCommandDeps, invocation: MemoryCommandInvocation)
   } else {
     result = await dispatch(deps, command, gov, exec, now)
   }
-  // scan / refresh-views 自己做全量重写，set-auto-checkup 只重写体检视图
+  // scan / refresh-views 自己做全量重写，set-auto-checkup、set-model-selection 只重写体检视图
   if (result.ok && !SELF_WRITING_COMMANDS.has(command.cmd) && !READ_ONLY_COMMANDS.has(command.cmd)) await deps.views.request()
   // 卡片版本对不上、或要动的已经不在：界面落后于磁盘（多半是外面改过文件，视图没有文件监听），重写一次让界面换成现状
   else if (!result.ok && VIEW_BEHIND_CODES.has(result.code)) await deps.views.request()
@@ -431,7 +436,7 @@ async function info(deps: MemoryCommandDeps, sessionId: string): Promise<Ok> {
 
 async function dispatch(
   deps: MemoryCommandDeps,
-  command: Exclude<MemoryCommand, { cmd: 'info' | 'model-info' }>,
+  command: Exclude<MemoryCommand, { cmd: 'info' | 'model-info' | 'list-models' }>,
   gov: GovernanceContext,
   exec: ToolRunContext,
   now: number,
@@ -1155,6 +1160,12 @@ async function dispatch(
       await deps.autoCheckups.set(command.scope, command.frequency)
       await deps.views.requestCheckups()
       deps.onAutoCheckupChanged?.()
+      return { ok: true, cmd }
+    }
+
+    case 'set-model-selection': {
+      await deps.selections.set(command.key, command.selection)
+      await deps.views.requestCheckups()
       return { ok: true, cmd }
     }
 

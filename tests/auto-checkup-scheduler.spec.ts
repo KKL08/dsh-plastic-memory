@@ -12,6 +12,7 @@ import { AdviceIgnoreStore } from '../src/governance/advice-ignores.ts'
 import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
 import { hostSemanticLlm, type HostModelRoute } from '../src/governance/host-llm.ts'
+import { ModelSelectionStore, createBackgroundLlmResolver } from '../src/governance/background-llm.ts'
 import { GLOBAL_CACHE_KEY } from '../src/governance/scope-health.ts'
 import { ViewWriter, collectCheckupView, collectGlobalViews } from '../src/gui/view-writer.ts'
 import { AUTO_CHECKUP_FIRST_CHECK_MS, AUTO_CHECKUP_INTERVAL_MS, AutoCheckupScheduler, type AutoCheckupTimer } from '../src/gui/auto-checkup.ts'
@@ -21,10 +22,12 @@ import { GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, checkupKey, checkupViewSchema, typ
 import { executeScan } from '../src/tools/scan.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { fakeExec } from './helpers/exec.ts'
+import { legacyCheckupRecordSchema } from './helpers/legacy-checkup-record.ts'
 import { record } from './helpers/record.ts'
 import { DAY, NOW } from './helpers/clock.ts'
 import { instructionsOf, noInstructions } from './helpers/instructions.ts'
 import type { ReadInstructions } from '../src/governance/instructions.ts'
+import type { MemoryLogger } from '../src/store.ts'
 
 // 自动体检调度（测试切入点 2）：真实记忆根（FileTable + .state 侧表 + 视图文件），只在进程边界换成假的：
 // 时钟、宿主计时服务、宿主默认模型选择和宿主 llm 服务（按宿主真实的流形状回 text-delta / usage / finish）。
@@ -90,13 +93,26 @@ function fakeHostLlm(opts: {
   /** 生成处理建议的请求怎么回（缺省按内容检查回）；suggestionGate 给出时先等它，不理会取消（模型在卸载之后才回来）。 */
   suggestion?: () => HostReply | string
   suggestionGate?: () => Promise<void>
+  /** 宿主里配好的提供方 → 模型 → 推理强度（列模型用）；缺省只有默认模型那一个。 */
+  catalog?: Record<string, Record<string, string[]>>
 } = {}) {
+  const catalog = opts.catalog ?? { [DEFAULT_ROUTE.provider]: { [DEFAULT_ROUTE.model]: [] } }
   const requests: GenerateOptions[] = []
   let active = 0
   let maxActive = 0
   let waiters: Array<{ n: number; resolve: () => void }> = []
   return {
     requests,
+    listProviders: () => Object.keys(catalog).map(id => ({ id, name: id })),
+    async listModels(provider: string) {
+      const models = catalog[provider]
+      if (models === undefined) throw Object.assign(new Error(`no adapter registered for provider "${provider}"`), { code: 'NO_ADAPTER' })
+      return Object.keys(models).map(id => ({ id, name: id }))
+    },
+    async resolveModelInfo(provider: string, model: string) {
+      const efforts = catalog[provider]?.[model] ?? []
+      return efforts.length === 0 ? {} : { reasoning: { efforts: efforts.map(id => ({ id, name: id })) } }
+    },
     maxActive: () => maxActive,
     /** 第 n 次请求开始时 resolve。 */
     nthStarted: (n: number) => new Promise<void>(resolve => {
@@ -155,6 +171,8 @@ function env(opts: {
   suggestions?: { decisions?: (real: PendingDecisionsStore) => CheckupSuggestionsDeps['decisions'] }
   /** 各项目的指令文件；不给就哪里都没有。 */
   instructions?: ReadInstructions
+  /** 调度器的日志；缺省写到控制台。 */
+  log?: MemoryLogger
 } = {}) {
   const clock = { now: NOW }
   // 侧表也用这个时钟：认领的时间和是否残留按它算
@@ -165,7 +183,12 @@ function env(opts: {
   const governance = { isEnabled: opts.governanceEnabled ?? true }
   // 宿主默认模型选择的当前值（用例中途可以改）
   const route = { current: 'defaultModel' in opts ? opts.defaultModel : DEFAULT_ROUTE }
-  const source = { store, checkups, autoCheckups, cache, isGovernanceEnabled: () => governance.isEnabled, now: () => clock.now }
+  // 自动体检选的模型：真的选择表（同一个记忆根的侧表），选择在不在按假宿主的模型目录查
+  const selections = new ModelSelectionStore(sidecar.modelSelections)
+  const resolveLlm = createBackgroundLlmResolver({
+    selections, catalog: () => llm, llmFor: selection => hostSemanticLlm(llm, selection), defaultLlm: () => hostSemanticLlm(llm, route.current),
+  })
+  const source = { store, checkups, autoCheckups, selections, cache, isGovernanceEnabled: () => governance.isEnabled, now: () => clock.now }
   const collectViews = () => collectGlobalViews({ store, decisions, cache, ignores, checkups, registry, memoryRoot: root, now: () => clock.now })
   const writer = new ViewWriter({ memoryRoot: root, collect: collectViews, collectCheckups: () => collectCheckupView(source), now: () => clock.now, sleep: async () => {}, lock: sidecar.lock })
   const timers = fakeTimer(clock)
@@ -178,13 +201,14 @@ function env(opts: {
     checkups,
     views: writer,
     status: opts.wrapStatus?.(() => collectCheckupView(source)) ?? (() => collectCheckupView(source)),
-    // 每次开跑现读宿主默认模型（假的那份可以在用例中途改）
-    host: { defaultLlm: () => hostSemanticLlm(llm, route.current) },
+    // 每次开跑现读选择和宿主默认模型（假的那份可以在用例中途改）
+    resolveLlm: () => resolveLlm('checkup'),
     isGovernanceEnabled: () => governance.isEnabled,
     timer: timers.timer,
     onChecked: () => writer.requestCheckups(),
     onClaimChanged: () => writer.requestCheckups(),
     ...(suggestions !== undefined ? { suggestions } : {}),
+    ...(opts.log !== undefined ? { log: opts.log } : {}),
     now: () => clock.now,
   })
   live.push(scheduler)
@@ -194,7 +218,7 @@ function env(opts: {
   /** 推进时间并等这次检查（含它跑的体检）做完。 */
   const advance = async (ms: number) => { timers.advance(ms); await scheduler.whenIdle() }
   const lastResultOf = async (key: string) => (await checkups.list()).find(r => r.id === key)?.lastResult
-  return { clock, store, decisions, checkups, autoCheckups, cache, llm, governance, route, timers, scheduler, set, completed, readView, advance, sidecar, lastResultOf }
+  return { clock, store, decisions, checkups, autoCheckups, selections, cache, llm, governance, route, timers, scheduler, set, completed, readView, advance, sidecar, lastResultOf }
 }
 
 const ws = (path: string) => ({ kind: 'workspace' as const, workspacePath: path })
@@ -328,6 +352,133 @@ describe('自动体检调度：到期就在后台体检一次', () => {
     await new AutoCheckupSettingStore(other.autoCheckups).set({ kind: 'global' }, 30)
     await e.advance(AUTO_CHECKUP_INTERVAL_MS)
     expect(e.llm.requests.map(scopeOfRequest)).toEqual(['global'])
+  })
+})
+
+describe('自动体检调度：选用的模型', () => {
+  const CATALOG = { deepseek: { 'deepseek-v4-flash': [] }, 'provider-x': { 'model-a': ['low', 'high'] } }
+
+  it('选了模型和推理强度：后台体检用它们调用，结果不带退回说明；体检视图写出选的模型', async () => {
+    const e = env({ llm: fakeHostLlm({ catalog: CATALOG }) })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 1)
+    await e.selections.set('checkup', { provider: 'provider-x', model: 'model-a', reasoningEffort: 'high' })
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    expect(e.llm.requests).toHaveLength(1)
+    expect(e.llm.requests[0]).toMatchObject({ provider: 'provider-x', model: 'model-a', reasoningEffort: 'high' })
+    expect((await e.lastResultOf('global'))?.notes).toEqual([])
+    expect((await e.lastResultOf('global'))?.modelFallback).toBeUndefined()
+    expect((await e.readView()).model).toEqual({ provider: 'provider-x', model: 'model-a', reasoningEffort: 'high' })
+  })
+
+  it('没选：用宿主默认模型，请求不带推理强度；体检视图里选的模型为 null', async () => {
+    const e = env({ llm: fakeHostLlm({ catalog: CATALOG }) })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 1)
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    expect(e.llm.requests[0]).toMatchObject(DEFAULT_ROUTE)
+    expect(e.llm.requests[0]).not.toHaveProperty('reasoningEffort')
+    expect((await e.readView()).model).toBeNull()
+  })
+
+  it('选的模型下架了：自动退回默认模型照常体检、写完成记录，结果里说明「选的模型用不了，已改用默认模型」', async () => {
+    const e = env({ llm: fakeHostLlm({ catalog: CATALOG }) })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 1)
+    await e.selections.set('checkup', { provider: 'provider-x', model: 'model-gone' })
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    expect(e.llm.requests).toHaveLength(1)
+    expect(e.llm.requests[0]).toMatchObject(DEFAULT_ROUTE)
+    expect((await e.completed()).global).toMatchObject({ by: 'auto' })
+    expect((await e.lastResultOf('global'))?.modelFallback).toEqual({ reason: 'model-gone' })
+    expect((await e.lastResultOf('global'))?.notes).toEqual([])
+    // 选择本身不动：模型回来后照样用它
+    expect((await e.readView()).model).toEqual({ provider: 'provider-x', model: 'model-gone' })
+  })
+
+  it('选的提供方被删了：同样退回默认模型、照常体检并说明', async () => {
+    const e = env({ llm: fakeHostLlm({ catalog: CATALOG }) })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 1)
+    await e.selections.set('checkup', { provider: 'provider-gone', model: 'model-a' })
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    expect(e.llm.requests[0]).toMatchObject(DEFAULT_ROUTE)
+    expect((await e.lastResultOf('global'))?.modelFallback).toEqual({ reason: 'provider-gone' })
+  })
+
+  it('退回说明写进共享的体检记录后，上一个发布版照样读得出整条记录：完成时间和结果都在', async () => {
+    const e = env({ llm: fakeHostLlm({ catalog: CATALOG }) })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 1)
+    await e.selections.set('checkup', { provider: 'provider-x', model: 'model-gone' })
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    const file = join(root, '.state', 'checkups', `${createHash('sha1').update(checkupKey({ kind: 'global' })).digest('hex')}.json`)
+    const raw = JSON.parse(await readFile(file, 'utf8')) as unknown
+    expect(raw).toMatchObject({ lastResult: { modelFallback: { reason: 'model-gone' } } })
+    const legacy = legacyCheckupRecordSchema.safeParse(raw)
+    expect(legacy.success).toBe(true)
+    expect(legacy.data?.completed).toMatchObject({ by: 'auto' })
+    expect(legacy.data?.lastResult).toMatchObject({ by: 'auto', notes: [] })
+  })
+
+  it('选的模型还在列表里、调用时报 key 被拒：记「模型用不了」并注明是选的模型，日志也说是选的模型；上一个发布版照样读得出整条记录', async () => {
+    const warns: unknown[][] = []
+    const log: MemoryLogger = { info() {}, warn: (...args: unknown[]) => { warns.push(args) }, error() {} }
+    const e = env({ llm: fakeHostLlm({ catalog: CATALOG, reply: () => ({ code: 'AUTH', message: 'Incorrect API key provided' }) }), log })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 1)
+    await e.selections.set('checkup', { provider: 'provider-x', model: 'model-a' })
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    // 用的是选的模型，没有退回默认模型
+    expect(e.llm.requests.length).toBeGreaterThan(0)
+    expect(e.llm.requests.every(r => r.provider === 'provider-x')).toBe(true)
+    expect((await e.readView()).scopes[0]?.modelUnavailable).toEqual({ kind: 'model-error', hostCode: 'AUTH', isSelectedModel: true })
+    expect(warns.map(([message]) => message)).toContainEqual(expect.stringContaining('自动体检选的模型现在用不了'))
+    expect(warns.map(([message]) => message)).not.toContainEqual(expect.stringContaining('默认模型现在用不了'))
+    const file = join(root, '.state', 'checkups', `${createHash('sha1').update(checkupKey({ kind: 'global' })).digest('hex')}.json`)
+    const legacy = legacyCheckupRecordSchema.safeParse(JSON.parse(await readFile(file, 'utf8')))
+    expect(legacy.success).toBe(true)
+    expect(legacy.data?.modelUnavailable).toEqual({ kind: 'model-error', hostCode: 'AUTH' })
+  })
+
+  it('没选模型、默认模型调用时报 key 被拒：记的「模型用不了」不带所选模型的标记，日志说默认模型', async () => {
+    const warns: unknown[][] = []
+    const log: MemoryLogger = { info() {}, warn: (...args: unknown[]) => { warns.push(args) }, error() {} }
+    const e = env({ llm: fakeHostLlm({ catalog: CATALOG, reply: () => ({ code: 'AUTH', message: 'Incorrect API key provided' }) }), log })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 1)
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    expect((await e.readView()).scopes[0]?.modelUnavailable).toEqual({ kind: 'model-error', hostCode: 'AUTH' })
+    expect(warns.map(([message]) => message)).toContainEqual(expect.stringContaining('默认模型现在用不了'))
+  })
+
+  it('选的模型下架、退回的默认模型调用时报未登录：记的是默认模型用不了', async () => {
+    const e = env({ llm: fakeHostLlm({ catalog: CATALOG, reply: () => ({ code: 'ACCOUNT_SIGN_IN_REQUIRED', message: 'Sign in' }) }) })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 1)
+    await e.selections.set('checkup', { provider: 'provider-x', model: 'model-gone' })
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    expect(e.llm.requests[0]).toMatchObject(DEFAULT_ROUTE)
+    expect((await e.readView()).scopes[0]?.modelUnavailable).toEqual({ kind: 'model-error', hostCode: 'ACCOUNT_SIGN_IN_REQUIRED', message: 'Sign in' })
+  })
+
+  it('选的模型失效、宿主也没有默认模型：不跑，记「模型用不了」（没有默认模型）', async () => {
+    const e = env({ llm: fakeHostLlm({ catalog: CATALOG }), defaultModel: undefined })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 1)
+    await e.selections.set('checkup', { provider: 'provider-gone', model: 'model-a' })
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    expect(e.llm.requests).toEqual([])
+    expect((await e.readView()).scopes[0]?.modelUnavailable).toEqual({ kind: 'no-default-model' })
   })
 })
 

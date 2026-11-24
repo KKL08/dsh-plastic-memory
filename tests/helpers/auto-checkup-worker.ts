@@ -102,7 +102,7 @@ const scheduler = new AutoCheckupScheduler({
     },
   },
   status: () => collectCheckupView(source),
-  host: { defaultLlm: () => hostSemanticLlm(llm, { provider: 'deepseek', model: 'deepseek-v4-flash' }) },
+  resolveLlm: async () => ({ llm: hostSemanticLlm(llm, { provider: 'deepseek', model: 'deepseek-v4-flash' }), isSelected: false, fellBack: false }),
   isGovernanceEnabled: () => true,
   timer,
   onChecked: () => writer.requestCheckups(),

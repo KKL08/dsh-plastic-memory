@@ -45,6 +45,7 @@ import { SnapshotStore } from './governance/snapshots.ts'
 import { AdviceIgnoreStore } from './governance/advice-ignores.ts'
 import { CheckupRecordStore } from './governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from './governance/auto-checkups.ts'
+import { ModelSelectionStore, createBackgroundLlmResolver } from './governance/background-llm.ts'
 import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from './governance/schema.ts'
 import type { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import { createInstructionReader } from './governance/instructions.ts'
@@ -270,6 +271,8 @@ export async function apply(ctx: Context, config: Config) {
   const checkups = new CheckupRecordStore(sidecar.checkups)
   // 自动体检设置表：记忆页经 /memory set-auto-checkup 改，几个宿主进程共用一份
   const autoCheckups = new AutoCheckupSettingStore(sidecar.autoCheckups)
+  // 后台模型的选择表：自动体检、梦境各一个键，设置页经 /memory set-model-selection 改，几个宿主进程共用一份
+  const selections = new ModelSelectionStore(sidecar.modelSelections)
   // 指令文件（AGENTS.md / CLAUDE.md）按作用域现读，用宿主自己的指令文件包（用到时才加载，解析到宿主那份）：
   // 体检、垂直冲突的建议与采纳都按记忆对应的那份，不随会话。加载不了时垂直冲突检测跳过，体检打 baseline-missing。
   const instructions = createInstructionReader(() => import('@deepseek-ai/dsh-agent-instructions'))
@@ -419,7 +422,7 @@ export async function apply(ctx: Context, config: Config) {
   // 首次视图写入推迟到第一个 session/created（见下方）：apply 期间读账本会触发旧 KV 导入探测，
   // 那时 storageDomain 未必挂上；而没有任何会话时浏览器半侧也读不到视图，早写没有意义。
   // 体检视图与自动体检调度共用的读法：设置表、完成记录、目录清单，不读记忆文件
-  const checkupSource = { store, checkups, autoCheckups, cache: scanCache, isGovernanceEnabled: () => config.governance.enabled.get() }
+  const checkupSource = { store, checkups, autoCheckups, selections, cache: scanCache, isGovernanceEnabled: () => config.governance.enabled.get() }
   // 体检之后的后续段：给冲突逐条生成处理建议。手动体检、自动体检共用一份，进程内的「正在生成」标记随待处理视图写出
   const checkupSuggestions = new CheckupSuggestions({
     store, decisions, checkups, getReadEvent, instructions,
@@ -460,7 +463,7 @@ export async function apply(ctx: Context, config: Config) {
     // 卸载时取消手动体检之后还在跑的后续段（不等在途的模型调用）
     const unload = new AbortController()
     const command = createMemoryCommand({
-      memoryRoot, store, decisions, snapshots, cache: scanCache, checkups, autoCheckups, ignores, registry, agentsMd, views: writer, instructions,
+      memoryRoot, store, decisions, snapshots, cache: scanCache, checkups, autoCheckups, selections, ignores, registry, agentsMd, views: writer, instructions,
       onAutoCheckupChanged: () => void scheduler?.recheck(),
       suggestions: checkupSuggestions, signal: unload.signal,
       host, log: ctx.logger,
@@ -485,7 +488,10 @@ export async function apply(ctx: Context, config: Config) {
   let startupViewsPending = true
 
   // 自动体检调度：宿主有计时服务时才有（可选注册，同 commands）。计时器挂在 child 上，插件卸载时宿主停掉它们；
-  // disposer 再取消正在跑的体检并等它收尾。无会话，用宿主默认模型（host.defaultLlm）。
+  // disposer 再取消正在跑的体检并等它收尾。无会话，用自动体检选的模型，没选或选的用不了时用宿主默认模型（host.defaultLlm）。
+  const resolveBackgroundLlm = createBackgroundLlmResolver({
+    selections, catalog: host.modelCatalog, llmFor: selection => host.llmForRoute(selection), defaultLlm: host.defaultLlm,
+  })
   ctx.inject(['timer'], child => {
     const timer = child as unknown as AutoCheckupTimer
     const created = new AutoCheckupScheduler({
@@ -494,7 +500,7 @@ export async function apply(ctx: Context, config: Config) {
       // 体检前只收集；体检后立刻重写全部视图（没有视图写入器时一次体检改为现收一份）
       views: { collectViews, rewriteAll: async () => views?.rewriteAll() },
       status: () => collectCheckupView(checkupSource),
-      host,
+      resolveLlm: () => resolveBackgroundLlm('checkup'),
       isGovernanceEnabled: () => config.governance.enabled.get(),
       timer: { timeout: (callback, delayMs) => timer.timeout(callback, delayMs), interval: (callback, delayMs) => timer.interval(callback, delayMs) },
       onChecked: async () => { await views?.requestCheckups() },

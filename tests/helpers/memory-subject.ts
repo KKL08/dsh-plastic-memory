@@ -10,6 +10,7 @@ import fc from 'fast-check'
 import { FileTable } from '../../src/storage/file-table.ts'
 import { DerivedIndex } from '../../src/storage/derived-index.ts'
 import { SidecarStore } from '../../src/storage/sidecar.ts'
+import { ModelSelectionStore } from '../../src/governance/background-llm.ts'
 import { createAgentsMdWriter } from '../../src/storage/agents-md.ts'
 import { ARCHIVE_DIR, GLOBAL_DIR, STATE_DIR, isMemoryFileName, workspaceDirName } from '../../src/storage/paths.ts'
 import { MemoryStore } from '../../src/store.ts'
@@ -144,6 +145,7 @@ function withCommitPoint(store: MemoryStore, hooks: OpHooks): MemoryStore {
 function guiCommand(w: MemoryWorld, store: MemoryStore, now: number) {
   const sidecar = w.sidecar
   return createMemoryCommand({
+    selections: new ModelSelectionStore(sidecar.modelSelections),
     memoryRoot: w.root, store, decisions: w.decisions, snapshots: w.snapshots, cache: sidecar.scanCache,
     checkups: new CheckupRecordStore(sidecar.checkups), autoCheckups: new AutoCheckupSettingStore(sidecar.autoCheckups), ignores: w.ignores, registry, views: w.views,
     agentsMd: createAgentsMdWriter(join(w.root, 'AGENTS.md')),

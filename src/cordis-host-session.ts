@@ -7,6 +7,7 @@ import { delegationDepthOf, resolveRootSessionId, subagentModeOf, type Delegatio
 import type { SemanticLlm } from './governance/semantic-scan.ts'
 import type { RawEvent, SessionHeaderLike, SessionLog } from './session-log.ts'
 import { hostSemanticLlm, type HostLlmService, type HostModelRoute } from './governance/host-llm.ts'
+import type { HostModelCatalog } from './governance/background-llm.ts'
 
 export interface CordisHostSessionDeps {
   /** 按名字查宿主服务：生产传 name => ctx.get(name)，测试传假查找。 */
@@ -76,6 +77,18 @@ export function createCordisHostSession(deps: CordisHostSessionDeps): HostSessio
       return null
     }
     return hostSemanticLlm(probe<HostLlmService>('llm'), route && { ...route, sessionId: `plastic-memory-checkup-${randomUUID()}` })
+  }
+
+  // 无会话、按选中的模型（自动体检、梦境选了模型时）：同默认模型，每次另起一个派生的会话 id
+  const llmForRoute = (route: Pick<HostModelRoute, 'provider' | 'model' | 'reasoningEffort'>): SemanticLlm | null =>
+    hostSemanticLlm(probe<HostLlmService>('llm'), { ...route, sessionId: `plastic-memory-background-${randomUUID()}` })
+
+  // 列模型：宿主 llm 服务的 listProviders / listModels / resolveModelInfo，缺一个就当没有
+  const modelCatalog = (): HostModelCatalog | undefined => {
+    const llm = probe<Partial<HostModelCatalog>>('llm')
+    return typeof llm?.listProviders === 'function' && typeof llm.listModels === 'function' && typeof llm.resolveModelInfo === 'function'
+      ? llm as HostModelCatalog
+      : undefined
   }
 
   /**
@@ -217,5 +230,5 @@ export function createCordisHostSession(deps: CordisHostSessionDeps): HostSessio
     }
   }
 
-  return { sessionTitleOf, contextOf, saveContextOf, llmOf, defaultLlm, modeOf, hasEarlierTurns, remember, ownSessionIdOf, workspaceOf, readSessionLog }
+  return { sessionTitleOf, contextOf, saveContextOf, llmOf, defaultLlm, llmForRoute, modelCatalog, modeOf, hasEarlierTurns, remember, ownSessionIdOf, workspaceOf, readSessionLog }
 }

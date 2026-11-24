@@ -48,14 +48,16 @@ function actionOf(command: MemoryCommand): Summary {
     case 'unignore-advice': return { key: 'chat.command.unignoreAdvice' }
     case 'scan': return { key: 'chat.command.scan' }
     case 'set-auto-checkup': return { key: 'chat.command.autoCheckup' }
+    case 'list-models': return { key: 'chat.command.listModels' }
+    case 'set-model-selection': return { key: 'chat.command.modelSelection' }
     case 'migrate-type': return { key: 'chat.command.migrateType', params: { name: command.from } }
   }
 }
 
 const firstLine = (text: string) => text.split('\n', 1)[0]!
 
-/** 页面自己发、不是用户动作的命令：查记忆根、刷新视图、查模型。请求被中断时服务端照常做完，下次打开会再发。 */
-const MAINTENANCE: ReadonlySet<MemoryCommand['cmd']> = new Set(['info', 'refresh-views', 'model-info'])
+/** 页面自己发、不是用户动作的命令：查记忆根、刷新视图、查模型、列能选的模型。请求被中断时服务端照常做完，下次打开会再发。 */
+const MAINTENANCE: ReadonlySet<MemoryCommand['cmd']> = new Set(['info', 'refresh-views', 'model-info', 'list-models'])
 
 /**
  * 结果文本是不是「请求被中断」。宿主在请求连接关掉时只把中断错误的 message 写进结果文本，不带错误名或错误码，

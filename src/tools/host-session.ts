@@ -1,6 +1,8 @@
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { SemanticLlm } from '../governance/semantic-scan.ts'
+import type { HostModelRoute } from '../governance/host-llm.ts'
+import type { HostModelCatalog } from '../governance/background-llm.ts'
 import type { SaveDelegation } from '../pipeline.ts'
 import type { DelegationHeader } from './subagent-gate.ts'
 import type { SessionLog } from '../session-log.ts'
@@ -43,6 +45,10 @@ export interface HostSession {
   llmOf(exec: ToolRunContext): SemanticLlm | null
   /** 无会话时（自动体检）用宿主的默认模型选择，每次现读。 */
   defaultLlm(): SemanticLlm | null
+  /** 无会话时按一份模型选择（提供方、模型、可选的推理强度）调用；宿主没有 llm 服务、路由不全为 null。 */
+  llmForRoute(route: Pick<HostModelRoute, 'provider' | 'model' | 'reasoningEffort'>): SemanticLlm | null
+  /** 宿主 llm 服务里列提供方、列模型的部分，每次现取；宿主没有、或服务缺这几个方法时为 undefined。 */
+  modelCatalog(): HostModelCatalog | undefined
   modeOf(session: Session): SaveDelegation['mode']
   /** 会话是否已过了第 1 轮（重启续上或插件重载）。 */
   hasEarlierTurns(session: object): boolean

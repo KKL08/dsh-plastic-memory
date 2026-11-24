@@ -59,7 +59,7 @@ function checkups({ all = 'manual', own = {}, inProgress = [], governanceEnabled
       isInProgress: inProgress.includes(key), failure: null, modelUnavailable: null, lastResult: null,
     }
   }
-  return { version: GUI_VIEW_VERSION, governanceEnabled, defaultFrequency: all, allResult: null, scopes: [scope(GLOBAL), scope(APP), scope(BLOG)] }
+  return { version: GUI_VIEW_VERSION, governanceEnabled, defaultFrequency: all, allResult: null, model: null, scopes: [scope(GLOBAL), scope(APP), scope(BLOG)] }
 }
 
 const views = { pending, library, health: health(), checkups: checkups() }

@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SidecarStore } from '../src/storage/sidecar.ts'
+import { ModelSelectionStore } from '../src/governance/background-llm.ts'
 import { createAgentsMdWriter } from '../src/storage/agents-md.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { AdviceIgnoreStore, adviceFingerprint } from '../src/governance/advice-ignores.ts'
@@ -41,6 +42,7 @@ function env() {
   const cache = sidecar.scanCache
   const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, snapshots, cache, checkups, autoCheckups, ignores, registry, memoryRoot: root, now: () => clock.now }), now: () => clock.now, sleep: async () => {}, lock: sidecar.lock })
   const command = createMemoryCommand({
+    selections: new ModelSelectionStore(sidecar.modelSelections),
     memoryRoot: root, store, decisions, snapshots, cache, checkups, autoCheckups, ignores, registry, views,
     agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')),
     instructions: noInstructions, host: { contextOf: async () => ({ workspacePath: WS, delegationDepth: 0, session: { id: 'sess-1' } }), llmOf: () => misplacedLlm },

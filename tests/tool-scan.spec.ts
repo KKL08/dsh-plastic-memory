@@ -962,9 +962,10 @@ describe('executeScan 模型错误分类（宿主错误码从模型适配层带�
     },
   }, { provider: 'deepseek', model: 'deepseek-v4-flash' })
 
-  it('宿主的未登录、缺凭据错误码：说明码是 model-unavailable，不是 semantic-failed；带上宿主的码和原话；不写完成记录', async () => {
-    // 宿主 0.2.1-rc.2：账号路由 ACCOUNT_SIGN_IN_REQUIRED / ACCOUNT_TOKEN_INVALID，API key 路由 MISSING_CREDENTIAL / INVALID_CREDENTIAL / AUTH（401、403）
-    expect([...MODEL_UNAVAILABLE_HOST_CODES].sort()).toEqual(['ACCOUNT_SIGN_IN_REQUIRED', 'ACCOUNT_TOKEN_INVALID', 'AUTH', 'INVALID_CREDENTIAL', 'MISSING_CREDENTIAL'])
+  it('宿主的未登录、缺凭据、提供方已删错误码：说明码是 model-unavailable，不是 semantic-failed；带上宿主的码和原话；不写完成记录', async () => {
+    // 宿主 0.2.1-rc.2：账号路由 ACCOUNT_SIGN_IN_REQUIRED / ACCOUNT_TOKEN_INVALID，API key 路由 MISSING_CREDENTIAL / INVALID_CREDENTIAL / AUTH（401、403）；
+    // 提供方从宿主里删掉后请求回 NO_ADAPTER
+    expect([...MODEL_UNAVAILABLE_HOST_CODES].sort()).toEqual(['ACCOUNT_SIGN_IN_REQUIRED', 'ACCOUNT_TOKEN_INVALID', 'AUTH', 'INVALID_CREDENTIAL', 'MISSING_CREDENTIAL', 'NO_ADAPTER'])
     for (const code of MODEL_UNAVAILABLE_HOST_CODES) {
       const checkups = new CheckupRecordStore(new InMemoryKvTable<CheckupRecord>())
       const deps = makeDeps({ checkups, host: { llmOf: () => failingHost(code, `host says ${code}`) } })
