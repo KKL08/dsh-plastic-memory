@@ -83,7 +83,7 @@ dsh plugin --profile web add dsh-plastic-memory
 Installation details and upgrade notes
 
 - To install into the desktop app from the command line (`--profile desktop`): open the desktop app once, quit it completely, run the command, then reopen the app. Other profiles are created automatically if they don't exist. Either the npm-installed `dsh` or the one bundled with the desktop app works.
-- Runtime: Node.js `^22.19.0 || >=24`.
+- Runtime: Node.js `>=24.9`.
 - Upgrading from 0.1.x keeps your existing memories in place and migrates pending items automatically; profiles that share a memory folder should upgrade together, since older versions cannot read upgraded memories that have a validity period. 0.2.0 requires DeepSeek Harness v0.2.2-rc.1 or later; on an older DeepSeek Harness, upgrade it before installing this plugin.
 - DeepSeek Harness is still in pre-release and may ship breaking changes. Before upgrading DeepSeek Harness, check the supported versions in this document and the changelog.
 

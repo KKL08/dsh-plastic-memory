@@ -66,6 +66,9 @@ All notable changes to this project are documented here. The format follows
   inherits and that a save in a turn opened by a schedule is rejected.
 
 ### Changed
+- Node.js 24.9 or later is now required; Node.js 22 is no longer supported.
+  Every supported DeepSeek Harness version already requires 24.9, so a
+  working install is not affected. CI no longer runs on Node.js 22.
 - The recall options of a memory type are renamed after what each chat
   carries: Always, Search and Passive are now Full text, Summary and Brief
   index (全文, 摘要 and 简单索引 in Chinese). The settings page, the side
