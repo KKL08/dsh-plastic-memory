@@ -1,17 +1,15 @@
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { MemoryStore, QueryScope } from '../store.ts'
 import type { SearchNoteCode } from '../contract-codes.ts'
-import { expandQueryTerms } from '../text.ts'
-import { resolveLiveFirst, type LocatedRecord } from '../storage/table.ts'
-import { tokenizerForQuery, type QueryTokenizerOptions } from '../search/jieba-segmenter.ts'
-import { CJK } from '../search/tokenizer.ts'
-import { anchorTerms, compareRanked, pendingLast, rankRecords, type RankedRecord, type SearchTier } from '../search/ranking.ts'
+import type { QueryTokenizerOptions } from '../search/jieba-segmenter.ts'
+import type { SearchTier } from '../search/ranking.ts'
+import { findMemoryCandidates } from '../search/memory-candidates.ts'
 import { matchWindow } from '../search/window.ts'
-import { groupQueryTerms, judgeTopHit, matchedTerms, termHitCounts, type TermHitCount } from '../search/coverage.ts'
+import { judgeTopHit, matchedTerms, type TermHitCount } from '../search/coverage.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { ContextHost } from './host-session.ts'
 import { sourceNote } from '../index-line.ts'
-import { stalenessNote, withinValidity } from '../record-freshness.ts'
+import { stalenessNote } from '../record-freshness.ts'
 import { exposedPath, maskSecretSurface } from '../secrets.ts'
 
 /** memory_search 运行时需要的会话上下文，由宿主会话适配器的 contextOf 提供。 */
@@ -191,39 +189,18 @@ export function renderSearchResult(result: { hits: SearchHit[]; note?: string; m
   return blocks.length === 0 ? '没有匹配的记忆。' : blocks.join('\n\n')
 }
 
-const CJK_CHAR = new RegExp(`[${CJK}]`, 'u')
-
-/** 单个字母、纯数字几乎在每个文件里出现：既不作为打分 token，也不能进 any 模式预筛。单个 CJK 字是实词，保留。 */
-function isNoiseTerm(term: string): boolean {
-  return /^\p{N}+$/u.test(term) || ([...term].length === 1 && !CJK_CHAR.test(term))
-}
-
-/**
- * 填的类型在范围内有没有有效记忆：按同一范围再读一次原始记录（不带预筛、不带类型过滤），分两路算。
- * 存在性按搜索路径同序——先按请求类型过滤再取舍、过滤：同 id 跨作用域两份类型不同时，搜旧类型能搜到旧的那份，
- * 先取舍再看类型会把它漏掉。条数表另算——不按类型过滤、直接取舍过滤后按类型计数，是「不限类型时能查到的有效记忆」视图，
- * 同 id 两份只计一份。只计数，不渲染任何记录字段。类型存在时返回 undefined。
- */
-async function missingTypesNote(
-  types: readonly string[],
-  scope: QueryScope,
-  liveOf: (records: readonly LocatedRecord[]) => LocatedRecord[],
-  deps: SearchToolDeps,
-): Promise<string | undefined> {
-  const read = await deps.store.readRaw(scope)
-  if (liveOf(read.records.filter(l => types.includes(l.record.type))).length > 0) return undefined
-  const counts = new Map<string, number>()
-  for (const l of liveOf(read.records)) counts.set(l.record.type, (counts.get(l.record.type) ?? 0) + 1)
-  // 条数降序，同数按类型名；类型名来自读盘，旧场景的类型也会出现，类型表给得出标签才附
-  const table = [...counts].map(([type, count]) => {
-    const label = deps.registry.get(type).label
+/** 类型缺失说明：条数降序，同数按类型名；类型名来自读盘，旧场景的类型也会出现，类型表给得出标签才附。只有条数，不带任何记录字段。 */
+function missingTypesNote(types: readonly string[], counts: ReadonlyArray<{ type: string; count: number }>, registry: TypeRegistry): string {
+  const table = counts.map(({ type, count }) => {
+    const label = registry.get(type).label
     return { type, count, ...(label !== type ? { label } : {}) }
   }).sort((x, y) => y.count - x.count || (x.type < y.type ? -1 : x.type > y.type ? 1 : 0))
   return typesNoRecordsNote(types, table)
 }
 
 /**
- * memory_search 工具的真正执行逻辑：解析上下文、按范围读取、取舍过滤、分档打分、排序截断、标记召回。
+ * memory_search 工具的真正执行逻辑：解析上下文和范围，取记忆候选（search/memory-candidates），再截断、把已带入快照的正文换成说明、
+ * 定节选和说明码；结果定了以后才记召回。
  * 不依赖任何 dsh 框架包，测试直接调它。
  */
 export async function executeSearch(
@@ -244,50 +221,12 @@ export async function executeSearch(
     : a.scope === 'workspace' && workspacePath
       ? { kind: 'workspace', workspacePath }
       : { kind: 'visible', workspacePath }
-  const hint = scopeFilter.kind === 'global' ? undefined : scopeFilter.workspacePath
-  // 查询与记录两侧共用这一个分词器：查询含汉字时是 jieba 档（首次搜索才加载），否则 bigram
-  const tokenize = await tokenizerForQuery(a.query, deps.tokenizer)
-  // 两套词项：新 token 定前两档并打分（分词命中计词频，字段子串命中只计命中）；旧词项（expandQueryTerms）给第三档，
-  // 兜住 id 这类不打分字段的子串命中，保证今天靠子串能命中的查询仍命中
-  const tokens = [...new Set(tokenize(a.query))].filter(t => !isNoiseTerm(t))
-  const legacyTerms = expandQueryTerms(a.query)
-  // 预筛词 = token ∪ 旧词项，any 模式；两侧同一分词器，记录侧 token 必是原文连续子串，字段子串命中按定义也是，所以预筛是超集。
-  // 并集里出现噪声词项（单字母、纯数字）时不预筛：剔掉它会漏掉只靠它命中的记录，留着它预筛也几乎不跳过任何文件。
-  const unionTerms = [...new Set([...tokens, ...legacyTerms])]
-  const prefilter = unionTerms.length > 0 && !unionTerms.some(isNoiseTerm)
-    ? { prefilterTerms: unionTerms, prefilterMatch: 'any' as const }
-    : {}
-  const now = deps.now?.() ?? Date.now()
-  // 与快照预读同一条路：按范围读取 → 同 id 取舍 → active → validTo（过期的不进检索，治理扫描仍可见）
-  // types 空数组当没填：模型传 [] 表达的是不筛，按字面过滤会把全部记忆滤掉
-  const typeFilter = a.types !== undefined && a.types.length > 0 ? { types: a.types } : {}
-  const read = await deps.store.readRaw(scopeFilter, { ...typeFilter, ...prefilter })
-  const liveOf = (records: readonly LocatedRecord[]) => resolveLiveFirst(records, { workspacePath: hint })
-    .filter(l => l.record.status === 'active' && withinValidity(l.record, now))
-  const located = liveOf(read.records)
-  const candidates = located.map(l => l.record)
-  // 类型缺失说明：填了 types 而候选为空，才按同一范围再读一次（不带预筛、不带类型过滤）分辨是这几类没有、还是关键词没对上。
-  // 首次候选非空就证明这几类有记忆，二次读不推翻它：预筛改变参与取舍的副本，二次读可能选中另一份已过期的副本。
-  const typesNote = a.types !== undefined && a.types.length > 0 && candidates.length === 0
-    ? await missingTypesNote(a.types, scopeFilter, liveOf, deps)
-    : undefined
-  // 取舍后同 id 只留一份，命中按 id 取回它的文件绝对路径
-  const filePathOf = new Map(located.map(l => [l.record.id, l.filePath]))
-
-  let ranked: RankedRecord[]
-  if (tokens.length === 0 && legacyTerms.length === 0) {
-    // 零 token 查询：不做关键词过滤，范围内全部按 confidence、lastConfirmedAt 排
-    ranked = candidates.map(record => ({ record, tier: 'all' as const, coverage: 0, anchorHits: 0, score: 0, tokenHits: [] }))
-  } else {
-    ranked = rankRecords({ tokens, legacyTerms, anchors: anchorTerms(a.query), records: candidates, listedCount: read.listedCount, tokenize })
-  }
-  // 主档在前、待确认在后（深度浅的在前），再截断：主档命中不足 limit 时待确认才露出
-  ranked = pendingLast(ranked.sort(compareRanked))
-  // id 直达：查询恰等于某条可见记忆的 id，该条排第一
-  const directId = a.query.trim()
-  const direct = ranked.findIndex(e => e.record.id === directId)
-  if (direct > 0) ranked.unshift(...ranked.splice(direct, 1))
-  const isDirect = direct >= 0
+  const found = await findMemoryCandidates({ query: a.query, types: a.types, scope: scopeFilter }, deps)
+  const now = found.at
+  const ranked = found.candidates
+  const isDirect = found.isDirectHit
+  const { tokens, legacyTerms, groups } = found.diagnostics
+  const typesNote = found.diagnostics.missingTypeCounts === undefined ? undefined : missingTypesNote(a.types!, found.diagnostics.missingTypeCounts, deps.registry)
   // 全命中档（置顶的 id 直达不滤）。没有可打分 token 时 match 不起作用：留空时全在全命中档，
   // 只有噪声词项时记忆靠旧词项进子串档，没有东西可以「全部命中」，照滤会平白搜空
   const allOnly = tokens.length > 0 ? ranked.filter((e, i) => e.tier === 'all' || (isDirect && i === 0)) : ranked
@@ -295,17 +234,10 @@ export async function executeSearch(
   // 过滤放在排序之后：逐词命中条数仍按全部候选（ranked）算
   const listed = matchAll ? allOnly : ranked
   const top = listed.slice(0, limit)
-  const topIds = top.map(e => e.record.id)
   const { sessionRecall } = deps
   const handle = session.handle
-  // 拿得到会话时同一会话每条只计一次召回，拿不到时每次都计
-  if (sessionRecall && handle) await sessionRecall.markRecalled(handle, topIds)
-  else await deps.store.markRecalled(topIds, now)
   // 快照带入时的正文与现在一致才省略：冻结后改过的、同 id 取到别层副本的，快照里那份不是这一版
   const injected = sessionRecall && handle ? sessionRecall.injectedCore(handle) : undefined
-
-  // 查询分组：开头说明的判弱、逐词命中条数与逐条命中说明共用
-  const groups = groupQueryTerms(a.query, tokens, tokenize)
 
   // 说明码只看返回列表：没有全命中时，排第一的部分命中记录覆盖过半 → or-fallback，不到一半 → low-coverage；
   // 连部分命中也没有、只剩第三档 → substring-fallback（三者互斥、substring 优先）。判弱的两种、以及首条缺关键词的 or-fallback
@@ -319,8 +251,7 @@ export async function executeSearch(
   let note: { noteCode: SearchNoteCode; note: string } | undefined =
     typesNote === undefined ? undefined : { noteCode: 'types-no-records', note: typesNote }
   if (note === undefined && (allNoHit || (top.length > 0 && !hasTier('all') && !isDirect))) {
-    const rows = ranked.map(e => e.tokenHits)
-    const withCounts = (text: string) => [text, termHitNote(termHitCounts(groups, tokens, rows))].filter(x => x !== undefined).join('\n')
+    const withCounts = (text: string) => [text, termHitNote(found.diagnostics.termHits)].filter(x => x !== undefined).join('\n')
     const first = top.find(e => e.tier === 'partial')
     const verdict = first === undefined ? undefined : judgeTopHit(groups, tokens, first.tokenHits)
     if (allNoHit) note = { noteCode: 'all-no-hit', note: [withCounts(ALL_NO_HIT_NOTE), ANY_MATCH_HINT].join('\n') }
@@ -332,15 +263,15 @@ export async function executeSearch(
   // 形态判定按排名逐条做，状态只有两个：已计入的全文字数、级联是否已开始（开始后不再结束）
   let fullChars = 0
   let cascading = false
-  return {
+  const result = {
     ...note,
     ...(listed.length > top.length
       ? { moreNote: truncationNote(listed.length, top.length, limit === MAX_SEARCH_LIMIT) + (listed.length > allOnly.length && allOnly.some(e => e.tier === 'all') ? MATCH_ALL_HINT : '') }
       : {}),
     // 与注入同口径：只遮明确密钥（疑似级写入时用户已确认）；文件路径同注入，name 被遮的不给，其余遮一遍
-    hits: top.map(({ record: h, tier: rankedTier, tokenHits }, i) => {
+    hits: top.map(({ record: h, tier: rankedTier, tokenHits, filePath }, i) => {
       const masked = maskSecretSurface(h)
-      const path = exposedPath(h, filePathOf.get(h.id)!)
+      const path = exposedPath(h, filePath)
       // id 直达置顶的那条就是模型按 id 要的，不标命中情况（同它不出说明码）
       const tier = isDirect && i === 0 ? 'all' : rankedTier
       const terms = tier === 'partial' ? matchedTerms(groups, tokens, tokenHits) : []
@@ -379,4 +310,9 @@ export async function executeSearch(
       }
     }),
   }
+  // 输出定了才记召回：拿得到会话时同一会话每条只计一次，拿不到时每次都计
+  const topIds = top.map(e => e.record.id)
+  if (sessionRecall && handle) await sessionRecall.markRecalled(handle, topIds)
+  else await deps.store.markRecalled(topIds, now)
+  return result
 }
