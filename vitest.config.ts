@@ -17,7 +17,7 @@ const noSqlite = [
   'tests/undo-entry-race.spec.ts',
   'tests/hand-edit-restore.spec.ts',
   'tests/confirm-settle.spec.ts',
-  'tests/gui-commands.spec.ts',
+  'tests/gui-commands-*.test.ts',
   'tests/write-interleaving-regressions.spec.ts',
   'tests/write-interleavings-sidecar.spec.ts',
   'tests/write-interleavings-secrets.spec.ts',
@@ -29,7 +29,7 @@ export default defineConfig({
     slowTestThreshold: 1000,
     // 三个项目：服务端 tests/ 跑 Node；同一批快照相关用例在写锁不可用时再跑一遍；浏览器半侧 client/ 的组件测试跑 jsdom（spec「Testing Decisions」第 1 层）。
     projects: [
-      { extends: true, test: { name: 'node', include: ['tests/**/*.spec.ts'], exclude: ['tests/no-sqlite.spec.ts'], setupFiles: [...shiftClock, ...isolateHome] } },
+      { extends: true, test: { name: 'node', include: ['tests/**/*.spec.ts', 'tests/gui-commands-*.test.ts'], exclude: ['tests/no-sqlite.spec.ts'], setupFiles: [...shiftClock, ...isolateHome] } },
       { extends: true, test: { name: 'node-no-sqlite', include: noSqlite, setupFiles: [...shiftClock, ...isolateHome, 'tests/no-sqlite.setup.ts'] } },
       {
         extends: true,
