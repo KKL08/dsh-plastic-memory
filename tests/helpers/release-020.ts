@@ -28,3 +28,17 @@ export async function openRelease020Table(opts: { root: string; stats: unknown }
   const mod = await import(url) as { FileTable: new (options: object) => Release020Table }
   return new mod.FileTable({ ...opts, log: quiet })
 }
+
+/** 0.2.0 的待决账本表（它自己的侧表实现和条目 schema）：list 读出它认得的条目，解析不了的跳过并记日志。 */
+export interface Release020Pending { list(): Promise<Array<[string, { id: string }]>> }
+
+export async function openRelease020Pending(opts: { root: string; warnings: string[] }): Promise<Release020Pending> {
+  const load = async <T>(...path: string[]) => await import(pathToFileURL(join(releaseDir, 'lib', ...path)).href) as T
+  const sidecar = await load<{ SidecarStore: new (options: object) => { pending: Release020Pending } }>('storage', 'sidecar.js')
+  const schema = await load<Record<string, unknown>>('governance', 'schema.js')
+  const log = { ...quiet, warn: (message: string) => { opts.warnings.push(message) } }
+  return new sidecar.SidecarStore({
+    root: opts.root, log,
+    schemas: { snapshots: schema.memorySnapshotSchema, pending: schema.pendingDecisionSchema, scanCache: schema.scanCacheSchema, adviceIgnores: schema.adviceIgnoreSchema },
+  }).pending
+}

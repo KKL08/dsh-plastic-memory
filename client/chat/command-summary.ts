@@ -48,6 +48,7 @@ function actionOf(command: MemoryCommand): Summary {
     case 'ignore-advice': return { key: 'chat.command.ignoreAdvice' }
     case 'unignore-advice': return { key: 'chat.command.unignoreAdvice' }
     case 'scan': return { key: 'chat.command.scan' }
+    case 'organize-index': return { key: 'chat.command.organizeIndex' }
     case 'set-auto-checkup': return { key: 'chat.command.autoCheckup' }
     case 'list-models': return { key: 'chat.command.listModels' }
     case 'set-model-selection': return { key: 'chat.command.modelSelection' }

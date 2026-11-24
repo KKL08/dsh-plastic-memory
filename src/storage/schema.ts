@@ -48,6 +48,8 @@ export const checkupRecordSchema = z.object({
   }).optional(),
   modelUnavailable: modelUnavailableCauseSchema.optional(),
   lastResult: checkupResultSchema.optional(),
+  /** 这个范围上次整理索引做完的时刻。 */
+  organizedAt: z.number().optional(),
 })
 export type CheckupRecord = z.infer<typeof checkupRecordSchema>
 export type CheckupCompletion = NonNullable<CheckupRecord['completed']>

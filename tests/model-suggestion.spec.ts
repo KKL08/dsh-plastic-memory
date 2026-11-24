@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { jsonObjectIn } from '../src/gui/model-draft.ts'
+import { jsonObjectIn } from '../src/json-reply.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import {
   buildProposalPrompt, buildSuggestionPrompt, buildVerticalProposalPrompt, buildVerticalSuggestionPrompt, generateProposal, generateSuggestion, generateVerticalProposal,

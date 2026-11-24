@@ -96,6 +96,12 @@ export class CheckupRecordStore {
     for (const { key, result } of results) await this.table.update(key, cur => ({ ...cur, id: key, lastResult: result }))
   }
 
+  /** 这个范围整理了一次索引：记下做完的时刻，记录里的其他内容不动。持有这个范围的认领时调用。 */
+  async recordOrganized(scope: Scope, at: number): Promise<void> {
+    const key = checkupKey(scope)
+    await this.table.update(key, cur => ({ ...cur, id: key, organizedAt: at }))
+  }
+
   /**
    * 体检之后生成处理建议的用量补记到那次体检的最近一次结果上：这个键的最近一次结果仍是 checkupId 那次才加，
    * 已被之后的体检换掉的不动。宿主一次都没报过用量的结果从这次的数开始记。

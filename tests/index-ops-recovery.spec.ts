@@ -9,6 +9,9 @@ import { readIndexFiles } from '../src/storage/index-store.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import { UNSORTED_TITLE, readIndex, stampOf } from '../src/topic-index.ts'
 import type { IndexOp, IndexPlan } from '../src/topic-ops.ts'
+import { PendingDecisionsStore } from '../src/governance/decisions.ts'
+import { indexReceiptStep, ledgerSteps } from '../src/governance/op-steps.ts'
+import type { PendingDecision } from '../src/governance/schema.ts'
 import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
 import { record } from './helpers/record.ts'
 
@@ -331,5 +334,53 @@ describe('索引操作中途进程退出后的补做', () => {
       await recover()
       expect(await placement()).toEqual(BEFORE)
     })
+  })
+
+  it('整理中途退出：已经提交的操作补完后回执是确认过的、照着它能撤；没提交的操作留下的回执收尾时清掉', async () => {
+    const ledger = new InMemoryKvTable<PendingDecision>()
+    const run = async (k: number) => {
+      await rm(root, { recursive: true, force: true })
+      await rm(journalDir, { recursive: true, force: true })
+      root = await mkdtemp(join(tmpdir(), 'pm-index-ops-root-'))
+      journalDir = await mkdtemp(join(tmpdir(), 'pm-index-ops-journal-'))
+      await seed()
+      const decisions = new PendingDecisionsStore(ledger)
+      const entryId = `pd_${k}`
+      await decisions.addIndexRun(entryId, { summary: '整理', workspace: 'global' }, 1)
+      const crashed = open()
+      for (const [kind, handler] of Object.entries(ledgerSteps(decisions, quiet))) crashed.table.registerStep(kind, handler)
+      fault.remaining = k
+      await crashed.table.applyIndexOp(dir(), { kind: 'merge', from: ['甲类'], into: '乙类' }, {
+        ...OPTS,
+        prepare: async (op, plan) => { await decisions.appendIndexReceipt(entryId, { op, plan }); return [indexReceiptStep(entryId)] },
+      }).catch(() => {})
+      fault.remaining = Number.POSITIVE_INFINITY
+      fault.isDead = false
+      const isCommitted = (await placement()).mem_a!.includes('乙类')
+      // 新实例：登记同样的处理器，进一次写入段
+      const next = open()
+      for (const [kind, handler] of Object.entries(ledgerSteps(decisions, quiet))) next.table.registerStep(kind, handler)
+      await next.table.update('mem_other', global, r => ({ ...r, content: `${r.content}。` }))
+      const entry = (await decisions.listSettled()).find(e => e.id === entryId)!
+      return { decisions, entryId, entry, isCommitted, next }
+    }
+    let sawCommitted = false
+    let sawUncommitted = false
+    for (let k = 0; k < 12; k++) {
+      const { decisions, entryId, entry, isCommitted, next } = await run(k)
+      expect(entry.indexRun!.receipts.map(r => r.isConfirmed === true), `第 ${k} 次写之前退出`).toEqual([isCommitted])
+      const left = await decisions.finishIndexRun(entryId)
+      if (isCommitted) {
+        sawCommitted = true
+        expect(await placement()).toEqual({ mem_a: ['乙类'], mem_b: ['乙类'], mem_c: ['乙类'], mem_d: [UNSORTED_TITLE] })
+        expect(await next.table.undoIndexPlan(dir(), left!.indexRun!.receipts[0]!.plan)).toMatchObject({ kind: 'undone' })
+        expect(await placement()).toEqual(BEFORE)
+      } else {
+        sawUncommitted = true
+        expect(left).toBeUndefined()
+        expect(await placement()).toEqual(BEFORE)
+      }
+    }
+    expect([sawCommitted, sawUncommitted]).toEqual([true, true])
   })
 })

@@ -45,6 +45,7 @@ import { resolveHealthThresholds, type HealthSensitivity } from './governance/he
 import { PendingDecisionsStore, overflowScopeOf } from './governance/decisions.ts'
 import { ledgerSteps } from './governance/op-steps.ts'
 import { MERGE_WINDOW_MINUTES_DEFAULT, historySteps } from './commit-change.ts'
+import { INDEX_MAX_TOPICS_DEFAULT } from './topic-index.ts'
 import { SnapshotStore } from './governance/snapshots.ts'
 import { AdviceIgnoreStore } from './governance/advice-ignores.ts'
 import { CheckupRecordStore } from './governance/checkup-records.ts'
@@ -111,6 +112,10 @@ export interface Config {
     /** 同一会话在这么多分钟里接连对同一条记忆做的状态变化只留一次历史版本，后面的原因追加进去。设置页不露，配置文件可改；改了下一次保存生效。 */
     mergeWindowMinutes: Volatile<number>
   }
+  index: {
+    /** 一个作用域（全局、每个项目各算）里主题数的上限；到了上限不再新建主题。设置页不露，配置文件可改；改了下一次整理生效。 */
+    maxTopics: Volatile<number>
+  }
   subagent: {
     /** 每个子会话最多新建几条记忆（只拦 create，按本会话已存条数现数）。设置页不露，配置文件可改；改了下一次保存生效。 */
     maxSavesPerSession: Volatile<number>
@@ -161,6 +166,9 @@ export const Config = z.object({
   }),
   history: z.object({
     mergeWindowMinutes: z.number().default(MERGE_WINDOW_MINUTES_DEFAULT).volatile(),
+  }),
+  index: z.object({
+    maxTopics: z.natural().min(1).default(INDEX_MAX_TOPICS_DEFAULT).volatile(),
   }),
   subagent: z.object({
     maxSavesPerSession: z.number().default(SUBAGENT_MAX_SAVES_DEFAULT).volatile(),
@@ -492,6 +500,7 @@ export async function apply(ctx: Context, config: Config) {
       isGovernanceEnabled: () => config.governance.enabled.get(),
       isLegacyImportSettled: () => sidecar.isLegacyImportSettled(),
       getReadEvent,
+      maxTopics: () => config.index.maxTopics.get(),
     })
     commands.register(command)
     guiCommand = command.handler

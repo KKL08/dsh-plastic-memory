@@ -20,8 +20,8 @@ export function isModelChange(entry: { kind?: PendingKind }): boolean {
   return (MODEL_CHANGE_KINDS as readonly PendingKind[]).includes(kindOf(entry))
 }
 
-/** 撤销的机制：按改前快照恢复、把记忆搬回原作用域、放回清掉的标记。 */
-export type UndoMechanism = 'restore-snapshot' | 'relocate' | 'reflag'
+/** 撤销的机制：按改前快照恢复、把记忆搬回原作用域、放回清掉的标记、按回执倒着撤索引操作。 */
+export type UndoMechanism = 'restore-snapshot' | 'relocate' | 'reflag' | 'undo-index'
 /** 撤后条目的去向：回到待处理、移出账本、标已撤销留到保留窗口结束。 */
 export type UndoFate = 'reopen' | 'remove' | 'mark-undone'
 
@@ -52,6 +52,8 @@ export function undoRuleOf(entry: UndoableEntry): UndoRule {
     case 'move': return { targets: entry.memoryIds, expectedStatus: 'active', mechanism: 'relocate', fate: 'remove' }
     case 'rewrite': return { targets: entry.memoryIds, expectedStatus: 'active', mechanism: 'restore-snapshot', fate: 'mark-undone' }
     case 'supersede': return { targets: entry.memoryIds, expectedStatus: 'superseded', mechanism: 'restore-snapshot', fate: 'mark-undone' }
+    // 整理索引不动记忆：能不能撤在动手时按每个操作的效果判
+    case 'index-organize': return { targets: [], mechanism: 'undo-index', fate: 'remove' }
     default: {
       // 冲突按处理方案落盘（plan-applied）：按回执逐项恢复，不只恢复败方
       const { receipts } = entry.settled
@@ -122,13 +124,13 @@ export function undoStateOfAll(entry: UndoableEntry, copies: ReadonlyMap<string,
   return 'undoable'
 }
 
-/** 留作撤销的已结清条目（删一方、提升为全局、直接改与直接合并、整理所选的应用、移到项目、模型改写与替代）：快照过了保留窗口就无从撤销。 */
+/** 留作撤销的已结清条目（删一方、提升为全局、直接改与直接合并、整理所选的应用、移到项目、模型改写与替代、整理索引）：快照过了保留窗口就无从撤销。 */
 export function isUndoable(entry: PendingDecision): boolean {
   const undoable = asUndoable(entry)
   if (undoable === undefined) return false
   const rule = undoRuleOf(undoable)
   return verdictLoser(undoable, undoable.settled.verdict) !== undefined || undoable.settled.verdict === 'promoted'
-    || rule.expectedStatus !== undefined || rule.receipts !== undefined
+    || rule.expectedStatus !== undefined || rule.receipts !== undefined || rule.mechanism === 'undo-index'
 }
 
 /** 账本清理的截止线（与快照、最近删除同一个 RETENTION_MS）：留作撤销的条目结清超过保留窗口就清掉。 */

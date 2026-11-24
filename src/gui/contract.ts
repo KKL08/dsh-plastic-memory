@@ -1031,6 +1031,11 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
    * 不受体检开关影响。
    */
   z.object({ cmd: z.literal('set-model-selection'), key: z.enum(MODEL_SELECTION_KEYS), selection: modelSelectionSchema.nullable() }),
+  /**
+   * 整理一次一个范围的主题索引：借来的会话的模型给出归主题、改名、合并、调顺序、改说明这些操作，逐个核对后落盘；不动记忆本身。
+   * 和体检共用范围认领（正在体检或整理时回 busy）；不受体检开关影响。做成的操作记在账本的一条记录上，结果的 decisionId 交给 undo 整批撤销。
+   */
+  z.object({ cmd: z.literal('organize-index'), scope: scopeSchema }),
   z.object({ cmd: z.literal('refresh-views') }),
   /** 删掉对话记录库（过往对话的本地副本）。原话功能还开着的话，下次用到时从会话日志重建。 */
   z.object({ cmd: z.literal('delete-dialogue-records') }),
@@ -1175,6 +1180,12 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
     semanticBatches: z.number().int().positive().optional(),
     /** scan：宿主流 usage 块报的实际用量合计（所有批次、重试、跨项目重复检查）；宿主一次都没报时缺省，不拿估算顶替。 */
     usageTokens: z.number().int().nonnegative().optional(),
+    /**
+     * organize-index：这次做成了几个索引操作（applied）、落盘时对不上而跳过的（skipped）。中途停下时带 isPartial，已做成的照样可撤。
+     */
+    organized: z.object({ applied: z.number().int().nonnegative(), skipped: z.number().int().nonnegative() }).optional(),
+    /** undo 撤销一次整理索引：之后又被改过、没撤的操作数；全部撤掉时缺省。 */
+    undoSkipped: z.number().int().positive().optional(),
     /** list-models：能选的模型，按提供方分组。 */
     providers: modelChoicesSchema.optional(),
     /** migrate-type：这次改了类型或移到最近删除的条数。 */

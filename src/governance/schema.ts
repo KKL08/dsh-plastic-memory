@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { memoryRecordSchema } from '../record-schema.ts'
+import type { IndexPlan } from '../topic-ops.ts'
 import { MODEL_CHANGE_KINDS, PROPOSAL_ACTIONS, PROPOSAL_SOURCES, SUGGESTION_FAILURE_KINDS, SUGGESTION_PARSE_STAGES } from '../contract-codes.ts'
 
 /** 与 mem_ id 同模式（pipeline.ts），不引入 nanoid。 */
@@ -12,8 +13,9 @@ export function genId(prefix: string): string {
  * edit 是 GUI 直接改、直接合并留的撤销记录，move 是把全局记忆移到项目留的撤销记录：两者都生来就已结清，撤销时移出账本，不进待处理。
  * rewrite、supersede 是模型用 memory_save 改写、替代已有记忆留的撤销记录：同样生来就已结清、不进待处理；撤销后标 isUndone 留到保留窗口结束，
  * 对话卡与右侧栏据此显示「已撤销」。
+ * index-organize 是一次「整理索引」留的撤销记录：同样生来就已结清，memoryIds 为空，做过的每个索引操作各有一条回执（indexRun），撤销时逐条倒着撤。
  */
-export const PENDING_KINDS = ['conflict', 'promote-candidate', 'overflow', 'edit', 'move', ...MODEL_CHANGE_KINDS] as const
+export const PENDING_KINDS = ['conflict', 'promote-candidate', 'overflow', 'edit', 'move', ...MODEL_CHANGE_KINDS, 'index-organize'] as const
 export type PendingKind = (typeof PENDING_KINDS)[number]
 
 /** 条目种类，缺省即冲突（旧条目）。 */
@@ -33,8 +35,9 @@ export function kindOf(entry: { kind?: PendingKind }): PendingKind {
  * 不记 fingerprint，改记逐项回执 receipts。
  * plan-applied：冲突按处理方案改写了记忆（融合、垂直改写），记在冲突条目自己身上：settled 里有改前快照 snapshotId、逐项回执 receipts、
  * 依据和结论代码 proposal、改前的冲突指纹 priorFingerprint；条目 fingerprint 换成改后的。
+ * index-organized：一次整理索引（种类 index-organize），回执在条目的 indexRun 里。
  */
-export const SETTLED_VERDICTS = ['keep-both', 'dismiss', 'keep-left', 'keep-right', 'keep-local', 'promoted', 'edited', 'merged', 'moved', 'rewritten', 'superseded', 'batch-edited', 'plan-applied'] as const
+export const SETTLED_VERDICTS = ['keep-both', 'dismiss', 'keep-left', 'keep-right', 'keep-local', 'promoted', 'edited', 'merged', 'moved', 'rewritten', 'superseded', 'batch-edited', 'plan-applied', 'index-organized'] as const
 export type SettledVerdict = (typeof SETTLED_VERDICTS)[number]
 
 /**
@@ -124,6 +127,38 @@ export const suggestionFailureSchema = z.object({
 })
 export type SuggestionFailure = z.infer<typeof suggestionFailureSchema>
 
+
+const movedMemberSchema = z.object({ id: z.string(), from: z.string(), at: z.number() })
+/** 做下去的一个索引操作（存盘形状，同 topic-ops.ts 的 IndexPlan）：带撤销要用的改前数据，说到记忆只有 id，手写的文字已遮过密钥。 */
+export const indexPlanSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('assign'), page: z.string(), name: z.string(), isNew: z.boolean(), about: z.string().optional(), createdAt: z.number().optional(), moved: z.array(movedMemberSchema) }),
+  z.object({ kind: z.literal('rename'), page: z.string(), from: z.string(), to: z.string(), aboutBefore: z.string(), aliasesBefore: z.array(z.string()) }),
+  z.object({
+    kind: z.literal('merge'), page: z.string(), name: z.string(), moved: z.array(movedMemberSchema),
+    sources: z.array(z.object({
+      page: z.string(), name: z.string(), aliases: z.array(z.string()), text: z.string(), body: z.string(),
+      section: z.object({ text: z.string(), at: z.number() }).optional(),
+    })),
+    about: z.string().optional(), aboutBefore: z.string(), aliasesBefore: z.array(z.string()),
+  }),
+  z.object({ kind: z.literal('order-topics'), order: z.array(z.string()), before: z.array(z.string()) }),
+  z.object({ kind: z.literal('order-members'), page: z.string(), order: z.array(z.string()), before: z.array(z.string()) }),
+  z.object({ kind: z.literal('describe'), page: z.string(), about: z.string(), before: z.string() }),
+]) satisfies z.ZodType<IndexPlan>
+
+/**
+ * 一个索引操作的回执：op 是那次操作的 id，plan 是做下去的计划。撤销按 plan 的效果判（见 topic-ops.ts undoPlan）。
+ * 回执在写索引之前先记下，操作提交之后才标 isConfirmed；没标的是没做成的操作留下的，撤销不看它，整理收尾时清掉。
+ */
+export const indexReceiptSchema = z.object({ op: z.string(), plan: indexPlanSchema, isConfirmed: z.literal(true).optional() })
+export type IndexReceipt = z.infer<typeof indexReceiptSchema>
+
+/**
+ * 一次整理索引：回执按做的先后，一个操作一条，提交后经操作日志步骤确认（中断后已做的照样有回执）；撤掉的那条随即拿掉。
+ */
+export const indexRunSchema = z.object({ receipts: z.array(indexReceiptSchema) })
+export type IndexRun = z.infer<typeof indexRunSchema>
+
 export const pendingDecisionSchema = z.object({
   id: z.string(),
   kind: z.enum(PENDING_KINDS).optional(),
@@ -138,6 +173,8 @@ export const pendingDecisionSchema = z.object({
   fingerprint: z.string().optional(),
   /** 整理所选的应用（batch-edited）：逐项回执，与 memoryIds 同序。其余条目没有此字段。 */
   receipts: z.array(batchReceiptSchema).optional(),
+  /** 整理索引（index-organize）：这一次做过的索引操作。其余条目没有此字段。 */
+  indexRun: indexRunSchema.optional(),
   /** 模型改写、替代：哪个会话里哪次 memory_save 调用改的（对话卡按 callId、右侧栏按 sessionId 认领）；替代时 by 是替代它的那条。 */
   origin: z.object({ sessionId: z.string(), callId: z.string(), by: z.string().optional() }).optional(),
   /** 冲突：模型给的处理建议，见 storedSuggestionSchema。依据版本对不上时视图当作没有建议。其余条目没有此字段。 */

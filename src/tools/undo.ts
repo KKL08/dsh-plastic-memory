@@ -6,7 +6,8 @@ import { asUndoable, expectedFingerprints, isStillOwnWrite, undoRuleOf, undoStat
 import { verdictLoser, type MemorySnapshot, type SnapshotRecord } from '../governance/schema.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { RecordNotFoundError } from '../errors.ts'
-import { scopeAt, type Scope } from '../scope.ts'
+import { scopeAt, scopeOfLedger, type Scope } from '../scope.ts'
+import { indexReceiptUndoneStep } from '../governance/op-steps.ts'
 import { layerOf } from '../storage/history.ts'
 import { crossWorkspaceNote, gateRecords, isCopyOf, isVisible, locateCopy, type CrossWorkspaceRejection, type GovernanceContext } from './workspace-gate.ts'
 
@@ -31,7 +32,8 @@ export type UndoErrorCode = 'not-found' | 'claimed' | 'cross-workspace' | 'stale
 export type UndoReason = 'no-entry' | 'undone' | 'resettled' | 'expired' | 'changed' | 'redacted' | 'kept-third-party'
 
 export type UndoError = { kind: 'error'; code: UndoErrorCode; reason?: UndoReason; rejected?: CrossWorkspaceRejection[]; message: string }
-export type UndoResult = { kind: 'undone'; decisionId: string; restored: string[]; snapshotId?: string } | UndoError
+/** skipped：整理索引的撤销里，之后又被改过、没撤的操作数；它们的回执留在条目上。 */
+export type UndoResult = { kind: 'undone'; decisionId: string; restored: string[]; snapshotId?: string; skipped?: number } | UndoError
 
 /** 最近删除的普通恢复（没有裁决条目覆盖）多一种 failed：快照后被修改过而跳过。 */
 export type RestoreDeletedResult =
@@ -73,6 +75,7 @@ async function claimAndUndo(
       return error('stale', `待决项 ${entry.id} 在你看到之后撤销过、又重新处理了，未做任何改动`, 'resettled')
     }
     const rule = undoRuleOf(entry)
+    if (rule.mechanism === 'undo-index') return await undoIndexRun(entry, deps)
     const allow = args.allowCrossWorkspace
     if (rule.mechanism === 'relocate') return await relocate(entry, rule, allow, context, deps)
     if (rule.mechanism === 'reflag') return await reflag(entry, rule, allow, context, deps)
@@ -81,6 +84,35 @@ async function claimAndUndo(
       : await restoreVerdict(entry, rule, allow, context, deps)
   })
   return claimed.isClaimed ? claimed.value : error('claimed', `待决项 ${args.decisionId} 正在被另一次操作处理，未做任何改动`)
+}
+
+/**
+ * 撤销一次整理索引：按回执从后往前，每个操作各撤一次。撤得了的拿掉回执；效果已经不在的（主题之后又被改过）跳过、回执留着。
+ * 全部撤掉就移出账本；一个都撤不了回 stale；撤了一部分照样算撤销成功，带上跳过的个数。索引不属于哪条记忆，不过跨项目门。
+ */
+async function undoIndexRun(entry: UndoableEntry, deps: UndoDeps): Promise<UndoResult> {
+  const label = entry.workspaces?.[0]
+  const all = entry.indexRun?.receipts ?? []
+  // 上一次已经全部撤完、只差把条目移出账本：这次补上
+  if (label !== undefined && entry.indexRun !== undefined && all.length === 0) {
+    await deps.decisions.remove(entry.id)
+    return { kind: 'undone', decisionId: entry.id, restored: [] }
+  }
+  const receipts = all.filter(r => r.isConfirmed === true)
+  if (label === undefined || receipts.length === 0) return notFound(entry.id, 'no-entry')
+  const scope = scopeOfLedger(label)
+  let skipped = 0
+  for (const receipt of [...receipts].reverse()) {
+    const r = await deps.store.undoIndexPlan(scope, receipt.plan, { steps: () => [indexReceiptUndoneStep(entry.id, receipt.op)] })
+    if (r.kind === 'stale') skipped++
+  }
+  if (skipped === receipts.length) return error('stale', '这次整理动过的主题之后又被改过，撤销会冲掉之后的改动，未做任何改动', 'changed')
+  // 还没确认的回执（操作提交了、等着补做确认）这次没撤：算在没撤的个数里，记录留着
+  skipped += all.length - receipts.length
+  if (skipped === 0) await deps.decisions.remove(entry.id)
+  // 入口投影（MEMORY.md）跟着索引重新生成
+  await deps.store.maintain(scope)
+  return { kind: 'undone', decisionId: entry.id, restored: [], ...(skipped > 0 ? { skipped } : {}) }
 }
 
 /** 撤后条目的去向：回到待处理、移出账本、标已撤销留到保留窗口结束。 */

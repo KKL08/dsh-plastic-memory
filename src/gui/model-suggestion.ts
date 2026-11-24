@@ -6,7 +6,8 @@ import type { ProposalOp, SuggestionFailure } from '../governance/schema.ts'
 import { HORIZONTAL_PROPOSAL_ACTIONS, VERTICAL_PROPOSAL_ACTIONS, type ProposalAction, type SuggestionParseStage } from '../contract-codes.ts'
 import { detectSecrets, maskSecrets, secretValues } from '../secrets.ts'
 import { mergeKeeperIndex } from './contract.ts'
-import { draftOutputSchema, readJsonObject, toMemoryDraft } from './model-draft.ts'
+import { readJsonObject } from '../json-reply.ts'
+import { draftOutputSchema, toMemoryDraft } from './model-draft.ts'
 import type { SourceExcerpt } from './suggestion-source.ts'
 
 /**
