@@ -1,3 +1,4 @@
+import { createHash, type Hash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join } from 'node:path'
@@ -10,6 +11,7 @@ import { bigramSegmenter, createTokenizer, type CjkSegmenter } from './tokenizer
 export interface JiebaInstance {
   loadDict(dict: Uint8Array): void
   cutForSearch(text: string, hmm: boolean): string[]
+  cut(text: string, hmm: boolean): string[]
 }
 export interface JiebaClass {
   withDict(dict: Uint8Array): JiebaInstance
@@ -52,6 +54,7 @@ export const defaultJiebaLoader: JiebaLoader = {
 let loader: JiebaLoader = defaultJiebaLoader
 let jiebaClass: Promise<JiebaClass | undefined> | undefined
 let current: { dictionaryPath: string | undefined; jieba: Promise<JiebaInstance | undefined> } | undefined
+const dictionaryVersions = new WeakMap<JiebaInstance, string>()
 const warned = new Set<string>()
 
 /** 换加载器并清空单例与告警记录。测试用；不传参数回到真实加载器。 */
@@ -85,9 +88,20 @@ function loadJiebaClass(log: SegmenterLog): Promise<JiebaClass | undefined> {
   return jiebaClass
 }
 
-function withMainDictionary(Jieba: JiebaClass, log: SegmenterLog): JiebaInstance | undefined {
+function digest(hash: Hash): string {
+  return hash.digest('hex').slice(0, 16)
+}
+
+/**
+ * 返回实例和只喂过主词典的 hash：主词典版本取它的副本，用户词典接着在它上面算；主词典约 5 MB 的字节读完即可回收，不随实例常驻。
+ */
+function withMainDictionary(Jieba: JiebaClass, log: SegmenterLog): { jieba: JiebaInstance; mainHash: Hash } | undefined {
   try {
-    return Jieba.withDict(loader.readMainDictionary())
+    const dict = loader.readMainDictionary()
+    const jieba = Jieba.withDict(dict)
+    const mainHash = createHash('sha256').update(dict)
+    dictionaryVersions.set(jieba, digest(mainHash.copy()))
+    return { jieba, mainHash }
   } catch (err) {
     warnOnce(log, 'main-dictionary', '[plastic-memory] jieba 主词典加载失败，中文检索退回二字切分', err)
     return undefined
@@ -98,8 +112,9 @@ function withMainDictionary(Jieba: JiebaClass, log: SegmenterLog): JiebaInstance
 async function buildJieba(dictionaryPath: string | undefined, log: SegmenterLog): Promise<JiebaInstance | undefined> {
   const Jieba = await loadJiebaClass(log)
   if (Jieba === undefined) return undefined
-  const jieba = withMainDictionary(Jieba, log)
-  if (jieba === undefined || dictionaryPath === undefined) return jieba
+  const main = withMainDictionary(Jieba, log)
+  if (main === undefined || dictionaryPath === undefined) return main?.jieba
+  const { jieba, mainHash } = main
   const key = `user-dictionary:${dictionaryPath}`
   if (!isAbsolute(dictionaryPath)) {
     warnOnce(log, key, `[plastic-memory] 用户词典路径必须是绝对路径（${dictionaryPath}），只用主词典`, undefined)
@@ -114,11 +129,12 @@ async function buildJieba(dictionaryPath: string | undefined, log: SegmenterLog)
   }
   try {
     jieba.loadDict(dict)
+    dictionaryVersions.set(jieba, digest(mainHash.update(dict)))
     return jieba
   } catch (err) {
     warnOnce(log, key, `[plastic-memory] 用户词典 ${dictionaryPath} 解析失败（每行「词 词频 词性」），只用主词典`, err)
     // 解析到一半失败时实例可能已收进部分词条，换一个干净的只用主词典的实例
-    return withMainDictionary(Jieba, log)
+    return withMainDictionary(Jieba, log)?.jieba
   }
 }
 
@@ -152,11 +168,20 @@ const bigramTokenizer = createTokenizer()
  */
 export async function tokenizerForQuery(query: string, opts: QueryTokenizerOptions = {}): Promise<(text: string) => string[]> {
   if (!HAN.test(query)) return bigramTokenizer
+  const { jieba } = await currentJieba(opts)
+  return jieba === undefined ? bigramTokenizer : createTokenizer({ cjk: jiebaSegmenter(jieba) })
+}
+
+/** 复用当前单例；版本只计入成功加载的词典字节，随实例缓存，路径变化时重建。 */
+export async function currentJieba(opts: QueryTokenizerOptions = {}): Promise<{
+  jieba: JiebaInstance | undefined
+  dictionaryVersion: string | undefined
+}> {
   const log = opts.log ?? console
   const dictionaryPath = opts.userDictionaryPath?.()?.trim() || undefined
   if (current === undefined || current.dictionaryPath !== dictionaryPath) {
     current = { dictionaryPath, jieba: buildJieba(dictionaryPath, log) }
   }
   const jieba = await current.jieba
-  return jieba === undefined ? bigramTokenizer : createTokenizer({ cjk: jiebaSegmenter(jieba) })
+  return { jieba, dictionaryVersion: jieba === undefined ? undefined : dictionaryVersions.get(jieba) }
 }
