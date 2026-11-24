@@ -319,7 +319,7 @@ describe('子 agent 记忆的生命周期', () => {
             break
           }
           case 'child-update':
-            if (id) outcome = (await h.call(child, 'memory_save', { action: 'update', id, name: `子改${k}`, summary: `子改${k}`, content: `子会话改成「词${k}」`, ...childArgs })).kind
+            if (id) outcome = (await h.call(child, 'memory_save', { action: 'update', change: 'correct', id, name: `子改${k}`, summary: `子改${k}`, content: `子会话改成「词${k}」`, ...childArgs })).kind
             break
           case 'child-accept':
             if (id) outcome = (await h.call(child, 'memory_confirm', { action: 'accept-subagent', memoryId: id })).kind
@@ -331,7 +331,7 @@ describe('子 agent 记忆的生命周期', () => {
             if (id) outcome = (await h.call(h.main, 'memory_confirm', { action: 'accept-subagent', memoryId: id })).kind
             break
           case 'main-update':
-            if (id) outcome = (await h.call(h.main, 'memory_save', { action: 'update', id, name: `主改${k}`, summary: `主改${k}`, content: `主会话改成「词${k}」`, ...mainArgs })).kind
+            if (id) outcome = (await h.call(h.main, 'memory_save', { action: 'update', change: 'correct', id, name: `主改${k}`, summary: `主改${k}`, content: `主会话改成「词${k}」`, ...mainArgs })).kind
             break
           case 'main-forget':
             if (id) outcome = String((await h.call(h.main, 'memory_forget', { ids: [id], reason: '主会话删掉' }) as { ok?: boolean }).ok)

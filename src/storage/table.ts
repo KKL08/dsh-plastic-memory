@@ -2,6 +2,7 @@ import { dirname } from 'node:path'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { CodedNote, DirectoryNoteCode } from '../contract-codes.ts'
 import { scopeOfMemory, type Scope } from '../scope.ts'
+import type { VersionHistory } from './history.ts'
 
 /** 提交之后调用方要补做的一件事：kind 之外的内容由登记这一种的处理器解释，不含字段值和正文。 */
 export type OpStep = { kind: string } & Record<string, unknown>
@@ -152,6 +153,8 @@ export interface WorkspaceDirListing {
 export interface MemoryTable {
   /** global 目录的绝对路径。 */
   readonly globalDir: string
+  /** 历史版本（状态变化前的整条记录）：和记忆文件放在同一层，不进记忆表。读写在调用方的写入段里做。 */
+  readonly history: VersionHistory
   /** 某个 workspace 的目录：确定性目录名的标记匹配就用它，否则经清单找（手工改名的目录）；还没有目录时为空。
    *  经清单找时，清单里读不出的目录（记忆根、标记读不出的目录）带回 dir-unreadable 说明：这个项目的记忆可能就在里面。 */
   workspaceDirs(workspacePath: string): Promise<{ dirs: string[]; directoryNotes: DirectoryNote[] }>

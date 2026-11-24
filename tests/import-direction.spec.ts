@@ -24,7 +24,7 @@ const LEAF_MODULES = new Set([
 // search/ranking、search/coverage、search/window 与 store 同层：只 import 叶子，被执行器用；分词器与 jieba 切分器留在叶子（只碰 Node 内置，词典路径与日志器由调用方注入）
 const MEMORY_MODULES = new Set([
   'pipeline', 'store', 'snapshot', 'snapshot-message', 'runtime', 'type-registry', 'evidence-guidance', 'search/ranking', 'search/coverage',
-  'search/window',
+  'search/window', 'change', 'commit-change', 'session-id',
 ])
 // 接线层：index.ts、交给 ctx.storageDomain.open 的域定义、宿主会话适配器（后两个只被 index.ts 用）
 const ENTRY_MODULES = new Set(['index', 'domain-spec', 'cordis-host-session'])
@@ -36,6 +36,8 @@ const ALLOWED_EXCEPTIONS: ReadonlyArray<{ from: string; to: string; reason: stri
   { from: 'pipeline', to: 'governance/snapshots', reason: 'update global 前快照先行（2026-09-01 定）；改写、替代都拍（2026-10-27）' },
   { from: 'pipeline', to: 'governance/decisions', reason: '模型改写、替代后记一条已结清的撤销记录（2026-10-27 定）' },
   { from: 'pipeline', to: 'governance/op-steps', reason: '那条撤销记录随写入登记成提交后的步骤，中断后能补记' },
+  { from: 'commit-change', to: 'governance/snapshots', reason: '落盘原语改前先拍快照，中断后补留历史版本也读它（只引类型，快照表由调用方注入）' },
+  { from: 'storage/table', to: 'storage/history', reason: '记忆表契约带着历史版本的读写接口（只引类型）' },
 ]
 
 function layerOf(mod: string): LayerName | undefined {

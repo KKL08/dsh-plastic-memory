@@ -99,8 +99,8 @@ export const memoryRecordSchema = z.object({
   stateSince: z.number().optional(),
   /** 事实时间：事情什么时候发生、这个状态从什么时候起成立，按用户说的精度存。和有效期、记录时间都分开。 */
   factTime: z.string().refine(isFactTime, '事实时间的写法不认识（接受 YYYY、YYYY-MM、YYYY-MM-DD、带时刻的 ISO 8601）').optional(),
-  /** 最近一次内容改动：性质（开放取值，读取用 readChangeKind）、时间、操作 id、发起方。只改元数据的操作和补证不动它。 */
-  lastChange: z.object({ kind: z.string(), at: z.number(), op: z.string(), by: z.string().optional() }).catchall(openValue).optional(),
+  /** 最近一次内容改动：性质（开放取值，读取用 readChangeKind）、时间、操作 id、发起方、原因。只改元数据的操作和补证不动它。 */
+  lastChange: z.object({ kind: z.string(), at: z.number(), op: z.string(), by: z.string().optional(), reason: z.string().optional() }).catchall(openValue).optional(),
   /** 提交标记：最近一次写这个文件的操作 id，每次写入都更新；只用来判断中断前那次写入落盘了没有。 */
   lastWriteOp: z.string().optional(),
   /** 相关记忆的 id；写入方去重追加、限条数、按作用域校验，读取不限。 */
@@ -178,7 +178,7 @@ export function anchorsOf(record: Pick<MemoryRecord, 'source' | 'sourceTrail' | 
   const s = record.source
   if (s === undefined) return trail
   const head = trail[0]
-  const same = head !== undefined && head.sessionId === s.sessionId && head.sourceMode === s.sourceMode
+  const same = head !== undefined && head.sessionId === s.sessionId && anchorSourceMode(head) === s.sourceMode
     && head.eventRange[0] === s.eventRange[0] && head.eventRange[1] === s.eventRange[1]
   if (same) return trail
   return [{ sessionId: s.sessionId, eventRange: s.eventRange, sourceMode: s.sourceMode, at: record.updatedAt }, ...trail]

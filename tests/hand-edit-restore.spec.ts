@@ -112,7 +112,7 @@ describe('手编检测与恢复比较投影', () => {
     expect(fm.updatedAt).toBe(iso(mtime))
 
     // memory_save update：手改过的照常更新，不用 force；source 指向本次会话
-    const args = { action: 'update', id: 'mem_h', name: '包管理', type: 'preference', scope: 'workspace', content: '包管理用 pnpm，锁文件和 .npmrc 都要提交', summary: '用 pnpm', sourceMode: 'user-explicit' } as const
+    const args = { action: 'update', change: 'correct', id: 'mem_h', name: '包管理', type: 'preference', scope: 'workspace', content: '包管理用 pnpm，锁文件和 .npmrc 都要提交', summary: '用 pnpm', sourceMode: 'user-explicit' } as const
     expect((await h.save(args)).kind).toBe('updated')
     const after = await frontmatter(path)
     expect(after.source).toMatchObject({ sessionId: SESSION.id })
@@ -127,7 +127,7 @@ describe('手编检测与恢复比较投影', () => {
     expect(await h.store.get('mem_l')).not.toHaveProperty('handEdited')
     await h.assemble()                            // 维护点
     expect(await readFile(path, 'utf8')).not.toContain('handEdited')
-    const args = { action: 'update', id: 'mem_l', name: '旧标记', type: 'preference', scope: 'workspace', content: '模型更新后的正文', summary: '旧版手改', sourceMode: 'user-explicit' } as const
+    const args = { action: 'update', change: 'correct', id: 'mem_l', name: '旧标记', type: 'preference', scope: 'workspace', content: '模型更新后的正文', summary: '旧版手改', sourceMode: 'user-explicit' } as const
     expect((await h.save(args)).kind).toBe('updated')
   })
 

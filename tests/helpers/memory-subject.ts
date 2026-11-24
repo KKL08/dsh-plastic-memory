@@ -61,7 +61,7 @@ export type Verdict = 'keep-left' | 'keep-right' | 'keep-both'
 export type MemOp =
   | { kind: 'create'; name: Key | 'fresh'; scope: 'global' | 'workspace' }
   | { kind: 'update' | 'softDelete' | 'restore' | 'promote' | 'guiEdit'; id: Key }
-  | { kind: 'preciseEdit'; id: Key }
+  | { kind: 'preciseEdit' | 'corroborate'; id: Key }
   | { kind: 'guiBatch' }
   | { kind: 'hardDelete'; id: Key; layer?: 'workspace' | 'global' }
   | { kind: 'modelRewrite'; id: Key; isForced: boolean }
@@ -269,12 +269,16 @@ async function runMemOp(w: MemoryWorld, op: MemOp, index: number, hooks: OpHooks
       })
     }
     case 'preciseEdit':
+    case 'corroborate':
     case 'modelRewrite': {
       // 像模型一样：改的是全局记忆就先收到引导，抄引导里的确认码重发；其间被别处改过、码变了，就照新引导再发一次
-      const args = candidate({ action: 'update', id: IDS[op.id], name: NAMES[op.id], type: 'knowledge', scope: 'workspace', content: `模型改写 ${index}`, summary: `模型改写 ${index}`, ...(op.kind === 'modelRewrite' && op.isForced ? { force: true } : {}) })
+      const args = candidate({ action: 'update', change: 'correct', id: IDS[op.id], name: NAMES[op.id], type: 'knowledge', scope: 'workspace', content: `模型改写 ${index}`, summary: `模型改写 ${index}`, ...(op.kind === 'modelRewrite' && op.isForced ? { force: true } : {}) })
+      // 补证：同一件事又被提到，只带 id 和依据，正文不动
       const input = op.kind === 'preciseEdit'
-        ? { action: 'update' as const, id: IDS[op.id], sourceMode: 'user-explicit' as const, edits: [{ oldString: w.bases.get(op.id)?.content ?? '不存在的正文', newString: `精确修改 ${index}` }] }
-        : args
+        ? { action: 'update' as const, change: 'correct' as const, id: IDS[op.id], sourceMode: 'user-explicit' as const, edits: [{ oldString: w.bases.get(op.id)?.content ?? '不存在的正文', newString: `精确修改 ${index}` }] }
+        : op.kind === 'corroborate'
+          ? { action: 'update' as const, change: 'corroborate' as const, id: IDS[op.id], sourceMode: 'user-explicit' as const }
+          : args
       const deps = { store: withCommitPoint(w.store, hooks), registry, workspacePath: W, session: { id: 's-model', lastSeq: 1 }, snapshots: w.snapshots, decisions: w.decisions, now: () => t }
       let r = await runSavePipeline(input, deps)
       for (let attempt = 0; attempt < 3 && r.kind === 'rejected' && r.code === 'global-update-unconfirmed'; attempt++) {
@@ -339,7 +343,7 @@ function splitTag(value: unknown, op: MemOp): string | undefined {
   if (op.kind === 'guiEdit' || op.kind === 'guiBatch') return (value as { code?: string }).code === 'stale' ? 'race' : undefined
   // 锁内复核发现定位之后被恢复或改过，没有删（清账本、快照在复核之前已经做了）
   if (op.kind === 'hardDelete') return (value as { code?: string }).code === 'failed' ? 'race' : undefined
-  if (op.kind === 'modelRewrite' || op.kind === 'preciseEdit') {
+  if (op.kind === 'modelRewrite' || op.kind === 'preciseEdit' || op.kind === 'corroborate') {
     const r = value as PipelineResult
     return r.kind === 'rejected' && r.subcode === 'changed-after-read' ? 'race' : undefined
   }

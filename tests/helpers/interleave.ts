@@ -188,13 +188,15 @@ export async function withTempRoot<T>(fn: (root: string) => Promise<T>): Promise
 const TMP_RE = /\.tmp-\d+-[a-z0-9]+/g
 /** 记忆文件里的提交标记：每次写入一个新的操作 id，和内容无关。 */
 const WRITE_STAMP_RE = /^lastWriteOp: .*$/gm
+/** 写入的操作 id（最近一次内容改动里记着它）：和提交标记同一个随机值，同样只看有没有、不看取值。 */
+const WRITE_OP_ID_RE = /\bop_[a-z0-9]{6,}/g
 
 /**
- * 归一化文本：只替换临时根路径、tmp 名的随机段和提交标记，内部生成的随机 id 换成「哪个操作生成的第几个」。
+ * 归一化文本：只替换临时根路径、tmp 名的随机段、提交标记和写入的操作 id，内部生成的随机 id 换成「哪个操作生成的第几个」。
  * 时间戳不动（各测试注入确定的时钟），引用关系（谁引用谁、几次、在哪）原样保留。认不出出处的随机 id 原样留着，比较时自然不等。
  */
 export function normalizeText(text: string, root: string, ids: ReadonlyMap<string, string> = new Map()): string {
-  return text.split(root).join('<root>').replace(TMP_RE, '.tmp-*').replace(WRITE_STAMP_RE, 'lastWriteOp: *').replace(RANDOM_ID_RE, id => ids.get(id) ?? id)
+  return text.split(root).join('<root>').replace(TMP_RE, '.tmp-*').replace(WRITE_STAMP_RE, 'lastWriteOp: *').replace(WRITE_OP_ID_RE, 'op_*').replace(RANDOM_ID_RE, id => ids.get(id) ?? id)
 }
 
 /** 本次世界里随机 id 的出处表：`snap_…` → `snap@op1#0`。 */

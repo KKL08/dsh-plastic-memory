@@ -613,6 +613,7 @@ const toRecords = (rows: { name: string; summary: string; content: string; tags:
 function tapTable(t: MemoryTable, mode: 'strip' | 'spy', seen: ScopeReadOptions[]): MemoryTable {
   return {
     globalDir: t.globalDir,
+    history: t.history,
     workspaceDirs: p => t.workspaceDirs(p),
     readScope: (dirs, opts = {}) => {
       seen.push(opts)

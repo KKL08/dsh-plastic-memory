@@ -280,7 +280,7 @@ describe('写入段 × 真实的记忆根写锁', () => {
     const tagged = record({ id: 'mem_tags', name: '别的写入', scope: 'workspace', workspacePath: W, tags: [] })
     for (const r of [...targets, tagged]) await store.create(r)
     const save = (r: MemoryRecord, i: number) => runSavePipeline(
-      candidate({ action: 'update', id: r.id, name: r.name, scope: 'workspace', content: `改写 ${i}`, summary: `改写 ${i}`, force: true }),
+      candidate({ action: 'update', change: 'correct', id: r.id, name: r.name, scope: 'workspace', content: `改写 ${i}`, summary: `改写 ${i}`, force: true }),
       { store, registry, workspacePath: W, snapshots, decisions, session: { id: `会话${i}`, lastSeq: i + 1 }, now: () => 1_000 + i },
     )
     const addTag = (i: number) => store.update(tagged, r => ({ ...r, tags: [...r.tags, `t${i}`] }), { kind: 'workspace', workspacePath: W })

@@ -283,7 +283,7 @@ describe('执行器走按范围读取与两级定位', () => {
     expect(hits.hits.map(x => x.id).sort()).toEqual([idOf('h1.md'), idOf('h2.md'), idOf('h3.md')].sort())
 
     expect((await h.source(idOf('h1.md'))).kind).toBe('no-source')
-    const updated = await h.save({ action: 'update', id: idOf('h2.md'), name: '手建二', type: 'preference', scope: 'workspace', content: '格式探针 已更新', summary: '更新过', sourceMode: 'user-explicit' })
+    const updated = await h.save({ action: 'update', change: 'correct', id: idOf('h2.md'), name: '手建二', type: 'preference', scope: 'workspace', content: '格式探针 已更新', summary: '更新过', sourceMode: 'user-explicit' })
     expect(updated.kind).toBe('updated')
     const forgot = await h.forget([idOf('h3.md'), 'mem_quoted'])
     expect(forgot.forgotten.sort()).toEqual([idOf('h3.md'), 'mem_quoted'].sort())

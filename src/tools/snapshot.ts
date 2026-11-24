@@ -3,6 +3,7 @@ import type { SnapshotStore, SnapshotDiffEntry } from '../governance/snapshots.t
 import type { MemoryRecord } from '../record-schema.ts'
 import { maskSecretSurface } from '../secrets.ts'
 import { crossWorkspaceNote, gateRecords, isVisible, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark } from './workspace-gate.ts'
+import { withdrawVersion } from './undo.ts'
 
 export interface SnapshotToolDeps {
   store: MemoryStore
@@ -128,6 +129,11 @@ export async function executeSnapshotTool(
     overwrite: args.overwriteChanged ?? false,
     now: () => deps.now?.() ?? Date.now(),
   })
+  // 恢复到一次状态变化之前：那次留下的历史版本和恢复回来的内容是同一份，撤掉
+  for (const id of restored) {
+    const before = snap.data.find(r => r.id === id)
+    if (before !== undefined) await deps.store.writeSection(() => withdrawVersion(deps.store, before, snap.id))
+  }
   const changedCount = skipped.length - redacted.length
   const skippedNote = changedCount > 0
     ? `；${changedCount} 条因快照后被修改而跳过（确认覆盖请带 overwriteChanged: true）`

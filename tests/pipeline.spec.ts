@@ -93,7 +93,7 @@ describe('runSavePipeline', () => {
     const created = await runSavePipeline(candidate(), deps(store))   // sourceMode 默认 user-explicit，confidence 0.9
     if (created.kind !== 'saved') throw new Error(created.kind)
     const updated = await runSavePipeline(
-      candidate({ action: 'update', id: created.record.id, sourceMode: 'agent-inferred', confidence: 0.95 }),
+      candidate({ action: 'update', change: 'correct', id: created.record.id, sourceMode: 'agent-inferred', confidence: 0.95 }),
       deps(store),
     )
     if (updated.kind !== 'updated') throw new Error(updated.kind)
@@ -129,7 +129,7 @@ describe('runSavePipeline', () => {
     if (created.kind !== 'saved') throw new Error(created.kind)
     await store.put({ ...created.record, scope: 'global', workspacePath: undefined } as never)
     const updated = await runSavePipeline(
-      candidate({ action: 'update', id: created.record.id, confirmGlobal: await confirmFor(store, created.record.id), scope: 'global', content: '例行内容更新' }),
+      candidate({ action: 'update', change: 'correct', id: created.record.id, confirmGlobal: await confirmFor(store, created.record.id), scope: 'global', content: '例行内容更新' }),
       deps(store),
     )
     if (updated.kind !== 'updated') throw new Error(updated.kind)
@@ -144,7 +144,7 @@ describe('runSavePipeline', () => {
     if (created.kind !== 'saved') throw new Error(created.kind)
     await store.put({ ...created.record, scope: 'global', workspacePath: undefined } as never)
     const updated = await runSavePipeline(
-      candidate({ action: 'update', id: created.record.id, confirmGlobal: await confirmFor(store, created.record.id), scope: 'workspace', content: '想拉回项目' }),
+      candidate({ action: 'update', change: 'correct', id: created.record.id, confirmGlobal: await confirmFor(store, created.record.id), scope: 'workspace', content: '想拉回项目' }),
       deps(store),
     )
     if (updated.kind !== 'updated') throw new Error(updated.kind)
@@ -157,13 +157,13 @@ describe('runSavePipeline', () => {
     const created = await runSavePipeline(candidate({ scope: 'workspace' }), deps(store))
     if (created.kind !== 'saved') throw new Error(created.kind)
     const first = await runSavePipeline(
-      candidate({ action: 'update', id: created.record.id, scope: 'global' }), deps(store))
+      candidate({ action: 'update', change: 'correct', id: created.record.id, scope: 'global' }), deps(store))
     if (first.kind !== 'updated') throw new Error(first.kind)
     expect(first.record.scope).toBe('workspace')
     expect(first.record.globalCandidate).toBe(true)
     expect(first.warnings?.map(w => w.code)).toContain('update-global-candidate')
     const second = await runSavePipeline(
-      candidate({ action: 'update', id: created.record.id, scope: 'global' }), deps(store))
+      candidate({ action: 'update', change: 'correct', id: created.record.id, scope: 'global' }), deps(store))
     if (second.kind !== 'updated') throw new Error(second.kind)
     expect(second.record.globalCandidate).toBe(true)
     expect(second.warnings).toBeUndefined()
@@ -204,14 +204,14 @@ describe('runSavePipeline', () => {
     if (first.kind !== 'saved') throw new Error(first.kind)
     clock.now += 1000
     const updated = await runSavePipeline(
-      candidate({ action: 'update', id: first.record.id, content: '新内容' }), { ...deps(store), now: () => clock.now })
+      candidate({ action: 'update', change: 'correct', id: first.record.id, content: '新内容' }), { ...deps(store), now: () => clock.now })
     if (updated.kind !== 'updated') throw new Error(updated.kind)
     expect(updated.record).toMatchObject({ createdAt: 1_700_000_000_000, lastConfirmedAt: 1_700_000_001_000, updatedAt: 1_700_000_001_000 })
   })
 
   it('update 目标 id 不存在时 rejected(target-missing)', async () => {
     const result = await runSavePipeline(
-      candidate({ action: 'update', id: 'mem_不存在' }), deps())
+      candidate({ action: 'update', change: 'correct', id: 'mem_不存在' }), deps())
     expect(result).toMatchObject({ kind: 'rejected', code: 'target-missing' })
   })
 
@@ -221,7 +221,7 @@ describe('runSavePipeline', () => {
     if (created.kind !== 'saved') throw new Error(created.kind)
     await store.softDelete(created.record)
     const result = await runSavePipeline(
-      candidate({ action: 'update', id: created.record.id, content: '新内容' }), deps(store))
+      candidate({ action: 'update', change: 'correct', id: created.record.id, content: '新内容' }), deps(store))
     expect(result).toMatchObject({ kind: 'rejected', code: 'target-missing' })
   })
 
@@ -303,7 +303,7 @@ describe('runSavePipeline', () => {
     const created = await runSavePipeline(candidate({ scope: 'workspace' }), deps(store))  // workspacePath /proj
     if (created.kind !== 'saved') throw new Error(created.kind)
     const result = await runSavePipeline(
-      candidate({ action: 'update', id: created.record.id, content: '别的项目想改' }),
+      candidate({ action: 'update', change: 'correct', id: created.record.id, content: '别的项目想改' }),
       { ...deps(store), workspacePath: '/other' })
     if (result.kind !== 'rejected') throw new Error(result.kind)
     expect(result).toMatchObject({ kind: 'rejected', code: 'cross-workspace' })
@@ -314,7 +314,7 @@ describe('runSavePipeline', () => {
     const created = await runSavePipeline(candidate({ scope: 'workspace' }), deps(store))
     if (created.kind !== 'saved') throw new Error(created.kind)
     const result = await runSavePipeline(
-      candidate({ action: 'update', id: created.record.id, content: '本项目内更新' }), deps(store))
+      candidate({ action: 'update', change: 'correct', id: created.record.id, content: '本项目内更新' }), deps(store))
     expect(result.kind).toBe('updated')
   })
 
@@ -323,7 +323,7 @@ describe('runSavePipeline', () => {
     const created = await runSavePipeline(candidate({ scope: 'workspace' }), deps(store))
     if (created.kind !== 'saved') throw new Error(created.kind)
     const result = await runSavePipeline(
-      candidate({ action: 'update', id: created.record.id, content: '无 cwd 想改' }),
+      candidate({ action: 'update', change: 'correct', id: created.record.id, content: '无 cwd 想改' }),
       { ...deps(store), workspacePath: undefined })
     expect(result).toMatchObject({ kind: 'rejected', code: 'cross-workspace' })
   })
@@ -336,7 +336,7 @@ describe('runSavePipeline', () => {
     if (created.kind !== 'saved') throw new Error(created.kind)
     await store.put({ ...created.record, scope: 'global', workspacePath: undefined, content: '旧的全局内容' } as never)
     const updated = await runSavePipeline(
-      candidate({ action: 'update', id: created.record.id, confirmGlobal: await confirmFor(store, created.record.id), scope: 'global', content: '新的全局内容' }),
+      candidate({ action: 'update', change: 'correct', id: created.record.id, confirmGlobal: await confirmFor(store, created.record.id), scope: 'global', content: '新的全局内容' }),
       { ...deps(store), snapshots: snaps })
     if (updated.kind !== 'updated') throw new Error(updated.kind)
     const list = await snaps.list()
@@ -353,7 +353,7 @@ describe('runSavePipeline', () => {
     if (created.kind !== 'saved') throw new Error(created.kind)
     await store.put({ ...created.record, scope: 'global', workspacePath: undefined } as never)
     const updated = await runSavePipeline(
-      candidate({ action: 'update', id: created.record.id, confirmGlobal: await confirmFor(store, created.record.id), scope: 'global', content: '新内容' }), deps(store))
+      candidate({ action: 'update', change: 'correct', id: created.record.id, confirmGlobal: await confirmFor(store, created.record.id), scope: 'global', content: '新内容' }), deps(store))
     expect(updated.kind).toBe('updated')
   })
 
@@ -363,7 +363,7 @@ describe('runSavePipeline', () => {
     const created = await runSavePipeline(candidate({ scope: 'workspace', content: '旧的项目内容' }), deps(store))
     if (created.kind !== 'saved') throw new Error(created.kind)
     const updated = await runSavePipeline(
-      candidate({ action: 'update', id: created.record.id, scope: 'workspace', content: '本项目内更新' }),
+      candidate({ action: 'update', change: 'correct', id: created.record.id, scope: 'workspace', content: '本项目内更新' }),
       { ...deps(store), snapshots: snaps })
     if (updated.kind !== 'updated') throw new Error(updated.kind)
     expect(Object.keys(updated)).not.toContain('warnings')
@@ -420,7 +420,7 @@ describe('runSavePipeline', () => {
     // 目标是真正的 global 记录（B1b 允许维护 global；跨 workspace 才拒绝）
     await store.put({ ...created.record, scope: 'global', workspacePath: undefined } as never)
     const updated = await runSavePipeline(
-      candidate({ action: 'update', id: created.record.id, confirmGlobal: await confirmFor(store, created.record.id), scope: 'global' }), deps(store))
+      candidate({ action: 'update', change: 'correct', id: created.record.id, confirmGlobal: await confirmFor(store, created.record.id), scope: 'global' }), deps(store))
     if (updated.kind !== 'updated') throw new Error(updated.kind)
     expect(Object.values(updated.record).filter(v => v === undefined)).toEqual([])
   })
@@ -462,7 +462,7 @@ describe('runSavePipeline', () => {
     const created = await runSavePipeline(candidate(), deps(store))
     if (created.kind !== 'saved') throw new Error(created.kind)
     const updated = await runSavePipeline(
-      candidate({ action: 'update', id: created.record.id, content: '密码:TESTONLYpassw0rd', force: true }),
+      candidate({ action: 'update', change: 'correct', id: created.record.id, content: '密码:TESTONLYpassw0rd', force: true }),
       deps(store),
     )
     if (updated.kind !== 'updated') throw new Error(updated.kind)
@@ -513,7 +513,7 @@ describe('runSavePipeline', () => {
     const created = await runSavePipeline(candidate(), deps(store))
     if (created.kind !== 'saved') throw new Error(created.kind)
     const updated = await runSavePipeline(
-      candidate({ action: 'update', id: created.record.id, content: '更新内容无密钥' }),
+      candidate({ action: 'update', change: 'correct', id: created.record.id, content: '更新内容无密钥' }),
       deps(store),
     )
     if (updated.kind !== 'updated') throw new Error(updated.kind)
@@ -625,7 +625,7 @@ describe('runSavePipeline：有效期', () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const created = await save({ validFrom: '2026-11-01 09:30', validTo: '2026-11-05 18:00' }, store)
     if (created.kind !== 'saved') throw new Error(created.kind)
-    const kept = await runSavePipeline(candidate({ action: 'update', id: created.record.id, content: '例行内容更新' }), deps(store))
+    const kept = await runSavePipeline(candidate({ action: 'update', change: 'correct', id: created.record.id, content: '例行内容更新' }), deps(store))
     if (kept.kind !== 'updated') throw new Error(kept.kind)
     expect(kept.record.validFrom).toBe(local(2026, 11, 1, 9, 30))
     expect(kept.record.validTo).toBe(local(2026, 11, 5, 18, 0))
@@ -636,8 +636,8 @@ describe('runSavePipeline：有效期', () => {
     const withFrom = await save({ validFrom: '2026-11-01 09:30' }, store)
     const bare = await save({ name: '另一条', content: '完全不同的另一件事', summary: '另一条' }, store)
     if (withFrom.kind !== 'saved' || bare.kind !== 'saved') throw new Error('setup')
-    const a = await runSavePipeline(candidate({ action: 'update', id: withFrom.record.id, validTo: '2026-12-01 00:00' }), deps(store))
-    const b = await runSavePipeline(candidate({ action: 'update', id: bare.record.id, validTo: '2026-12-01' }), deps(store))
+    const a = await runSavePipeline(candidate({ action: 'update', change: 'correct', id: withFrom.record.id, validTo: '2026-12-01 00:00' }), deps(store))
+    const b = await runSavePipeline(candidate({ action: 'update', change: 'correct', id: bare.record.id, validTo: '2026-12-01' }), deps(store))
     if (a.kind !== 'updated' || b.kind !== 'updated') throw new Error('update')
     expect(a.record).toMatchObject({ validFrom: local(2026, 11, 1, 9, 30), validTo: local(2026, 12, 1, 0, 0) })
     expect(b.record).toMatchObject({ validFrom: WRITE_MINUTE, validTo: local(2026, 12, 1, 14, 37) })
@@ -647,10 +647,10 @@ describe('runSavePipeline：有效期', () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const created = await save({ validTo: '2026-11-05 18:00' }, store)
     if (created.kind !== 'saved') throw new Error(created.kind)
-    const moved = await runSavePipeline(candidate({ action: 'update', id: created.record.id, validFrom: '2026-11-01 09:30' }), deps(store))
+    const moved = await runSavePipeline(candidate({ action: 'update', change: 'correct', id: created.record.id, validFrom: '2026-11-01 09:30' }), deps(store))
     if (moved.kind !== 'updated') throw new Error(moved.kind)
     expect(moved.record).toMatchObject({ validFrom: local(2026, 11, 1, 9, 30), validTo: local(2026, 11, 5, 18, 0) })
-    const reversed = await runSavePipeline(candidate({ action: 'update', id: created.record.id, validFrom: '2026-11-06 09:00' }), deps(store))
+    const reversed = await runSavePipeline(candidate({ action: 'update', change: 'correct', id: created.record.id, validFrom: '2026-11-06 09:00' }), deps(store))
     expect(reversed).toMatchObject({ kind: 'rejected', code: 'validity-reversed' })
     expect((await store.get(created.record.id))?.validFrom).toBe(local(2026, 11, 1, 9, 30))
   })
@@ -661,7 +661,7 @@ describe('runSavePipeline：有效期', () => {
     if (created.kind !== 'saved') throw new Error(created.kind)
     const reversed = { validFrom: local(2026, 11, 5, 18, 0), validTo: local(2026, 11, 1, 9, 30) }
     await store.put({ ...created.record, ...reversed })
-    const r = await runSavePipeline(candidate({ action: 'update', id: created.record.id, content: '例行内容更新' }), deps(store))
+    const r = await runSavePipeline(candidate({ action: 'update', change: 'correct', id: created.record.id, content: '例行内容更新' }), deps(store))
     if (r.kind !== 'updated') throw new Error(r.kind)
     expect(r.record).toMatchObject(reversed)
   })
@@ -670,10 +670,10 @@ describe('runSavePipeline：有效期', () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const created = await save({ validTo: '2026-11-05 18:00' }, store)
     if (created.kind !== 'saved') throw new Error(created.kind)
-    const past = await runSavePipeline(candidate({ action: 'update', id: created.record.id, validTo: '2026-10-01 00:00' }), deps(store))
+    const past = await runSavePipeline(candidate({ action: 'update', change: 'correct', id: created.record.id, validTo: '2026-10-01 00:00' }), deps(store))
     expect(past).toMatchObject({ kind: 'rejected', code: 'validity-past' })
     vi.setSystemTime(local(2026, 11, 6))   // target 过期之后
-    const touched = await runSavePipeline(candidate({ action: 'update', id: created.record.id, content: '过期后改正文' }), deps(store))
+    const touched = await runSavePipeline(candidate({ action: 'update', change: 'correct', id: created.record.id, content: '过期后改正文' }), deps(store))
     if (touched.kind !== 'updated') throw new Error(touched.kind)
     expect(touched.record.validTo).toBe(local(2026, 11, 5, 18, 0))
   })
@@ -695,7 +695,7 @@ describe('runSavePipeline：模型改写的兜底', () => {
   it('改写：账本记一条已结清的 rewrite，指向改前快照，指纹是写下的内容，带会话与调用', async () => {
     const e = guarded()
     const target = await seed(e.store)
-    const r = await runSavePipeline(candidate({ action: 'update', id: target.id, content: '新内容' }), e.deps)
+    const r = await runSavePipeline(candidate({ action: 'update', change: 'correct', id: target.id, content: '新内容' }), e.deps)
     if (r.kind !== 'updated') throw new Error(r.kind)
     const [snap] = await e.snapshots.list()
     const [entry] = await e.decisions.listSettled()
@@ -732,7 +732,7 @@ describe('runSavePipeline：模型改写的兜底', () => {
     const e = guarded()
     const target = await seed(e.store, { name: '甲' })
     const old = await seed(e.store, { name: '乙', content: '另一件事' })
-    const r = await runSavePipeline(candidate({ action: 'update', id: target.id, content: '合并后的内容', supersedes: [old.id] }), e.deps)
+    const r = await runSavePipeline(candidate({ action: 'update', change: 'correct', id: target.id, content: '合并后的内容', supersedes: [old.id] }), e.deps)
     if (r.kind !== 'updated') throw new Error(r.kind)
     const snaps = await e.snapshots.list()
     expect(snaps).toHaveLength(1)
@@ -764,10 +764,18 @@ describe('runSavePipeline：模型改写的兜底', () => {
     const plain = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const e = guarded()
     for (const store of [plain, e.store]) await store.put({ ...(await seed(store)), id: 'mem_same', name: '同一条' })
-    const update = candidate({ action: 'update', id: 'mem_same', content: '新内容', scope: 'global' })
+    const update = candidate({ action: 'update', change: 'correct', id: 'mem_same', content: '新内容', scope: 'global' })
     const a = await runSavePipeline(update, deps(plain))
     const b = await runSavePipeline(update, e.deps)
-    const strip = (x: typeof a) => x.kind === 'updated' ? { ...x, record: { ...x.record, createdAt: 0, updatedAt: 0, lastConfirmedAt: 0 } } : x
+    // 时刻取真实时钟、操作 id 每次随机，抹平后比其余字段
+    const strip = (x: typeof a) => x.kind === 'updated' ? {
+      ...x,
+      record: {
+        ...x.record, createdAt: 0, updatedAt: 0, lastConfirmedAt: 0, stateSince: 0,
+        sourceTrail: x.record.sourceTrail?.map(anchor => ({ ...anchor, at: 0 })),
+        lastChange: x.record.lastChange && { ...x.record.lastChange, at: 0, op: x.record.lastChange.op.replace(/^op_[a-z0-9]+$/, 'op_*') },
+      },
+    } : x
     expect(strip(b)).toEqual(strip(a))
   })
 })
@@ -879,7 +887,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
   it('update 只改本会话创建、还没升档的：创建者字段不变、reviewed 为空、证据锚换成这次的', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(owned('mem_self', 'self'))
-    const r = await runSavePipeline(childCandidate({ action: 'update', id: 'mem_self', sourceMode: 'agent-inferred', content: '改过的观察' }), childDeps(store))
+    const r = await runSavePipeline(childCandidate({ action: 'update', change: 'correct', id: 'mem_self', sourceMode: 'agent-inferred', content: '改过的观察' }), childDeps(store))
     if (r.kind !== 'updated') throw new Error(r.kind)
     expect(r.record.content).toBe('改过的观察')
     expect(r.record.delegation).toEqual({ sessionId: CHILD.id, depth: 1, parentSessionId: 'sess-main', rootSessionId: 'sess-main' })
@@ -896,7 +904,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
     ]
     for (const [id, by] of cases) await store.put(owned(id, by))
     for (const [id, , why] of cases) {
-      const reason = await restricted(runSavePipeline(childCandidate({ action: 'update', id, content: '子 agent 想改成这样' }), childDeps(store)), 'subagent-not-own')
+      const reason = await restricted(runSavePipeline(childCandidate({ action: 'update', change: 'correct', id, content: '子 agent 想改成这样' }), childDeps(store)), 'subagent-not-own')
       expect(reason, id).toContain(`${id} ${why}`)
       expect((await store.get(id))!.content, id).toBe(`「${id}」的旧内容`)
     }
@@ -907,7 +915,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
     await store.put(owned('mem_self', 'self'))
     await store.softDelete((await store.get('mem_self'))!)
     for (const id of ['mem_none', 'mem_self']) {
-      const reason = await restricted(runSavePipeline(childCandidate({ action: 'update', id, content: '子 agent 想改成这样' }), childDeps(store)), 'subagent-target-gone')
+      const reason = await restricted(runSavePipeline(childCandidate({ action: 'update', change: 'correct', id, content: '子 agent 想改成这样' }), childDeps(store)), 'subagent-target-gone')
       expect(reason, id).toContain(id)
     }
     expect((await store.get('mem_self'))!.content).toBe('「mem_self」的旧内容')
@@ -916,7 +924,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
   it('update 已提升为全局的待确认记录回 subagent-restricted，全局记录不动', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put({ ...owned('mem_g', 'self'), scope: 'global', workspacePath: undefined })
-    const reason = await restricted(runSavePipeline(childCandidate({ action: 'update', id: 'mem_g', content: '子 agent 想改成这样' }), childDeps(store)), 'subagent-not-own')
+    const reason = await restricted(runSavePipeline(childCandidate({ action: 'update', change: 'correct', id: 'mem_g', content: '子 agent 想改成这样' }), childDeps(store)), 'subagent-not-own')
     expect(reason).toContain('mem_g 已经提升为全局')
     expect((await store.get('mem_g'))!.content).toBe('「mem_g」的旧内容')
   })
@@ -935,7 +943,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
       expect(await store.restoreArchived(main)).toBe(true)
       return read
     })
-    await restricted(runSavePipeline(childCandidate({ action: 'update', id: 'mem_main', content: '子 agent 想改成这样' }), childDeps(store)), 'subagent-target-gone')
+    await restricted(runSavePipeline(childCandidate({ action: 'update', change: 'correct', id: 'mem_main', content: '子 agent 想改成这样' }), childDeps(store)), 'subagent-target-gone')
     expect(checked).toBe('deleted')
     expect(await store.get('mem_main')).toMatchObject({ status: 'active', content: '「mem_main」的旧内容' })
   })
@@ -956,7 +964,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
         await realPut(change(current), { workspacePath: current.workspacePath })
         return realPut(r, hint, skipIf)
       })
-      const reason = await restricted(runSavePipeline(childCandidate({ action: 'update', id: 'mem_self', content: '子 agent 想改成这样' }), childDeps(store)), 'changed-after-read')
+      const reason = await restricted(runSavePipeline(childCandidate({ action: 'update', change: 'correct', id: 'mem_self', content: '子 agent 想改成这样' }), childDeps(store)), 'changed-after-read')
       expect(reason, label).toContain('mem_self')
       expect((await store.get('mem_self'))!.content, label).toBe('「mem_self」的旧内容')
     }
@@ -973,7 +981,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
       await store.put({ ...current, content: '主会话接受后的内容', delegation: { ...current.delegation!, reviewed: { by: 'main', at: 8 } } })
       return read
     })
-    const r = await runSavePipeline(childCandidate({ action: 'update', id: 'mem_self', content: '子 agent 想改成这样' }), childDeps(store))
+    const r = await runSavePipeline(childCandidate({ action: 'update', change: 'correct', id: 'mem_self', content: '子 agent 想改成这样' }), childDeps(store))
     expect(r).toMatchObject({ kind: 'rejected' })
     expect((await store.get('mem_self'))!).toMatchObject({ content: '主会话接受后的内容', delegation: { reviewed: { by: 'main', at: 8 } } })
   })
@@ -989,7 +997,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
   it('归属检查排在 supersedes / force 之后：改别人的记录又带 force，报 force', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(owned('mem_main', 'main'))
-    await restricted(runSavePipeline(childCandidate({ action: 'update', id: 'mem_main', force: true }), childDeps(store)), 'subagent-force')
+    await restricted(runSavePipeline(childCandidate({ action: 'update', change: 'correct', id: 'mem_main', force: true }), childDeps(store)), 'subagent-force')
   })
 
   it('去重只比主档：撞主会话写的、已升档的回 duplicate-suspected 并列出，提示向委派方说明分歧', async () => {
@@ -1047,7 +1055,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
     const d = childDeps(store, { maxSubagentSaves: 1 })
     const saved = await createMany(1, d)
     if (saved.kind !== 'saved') throw new Error(saved.kind)
-    expect((await runSavePipeline(childCandidate({ action: 'update', id: saved.record.id, content: '改一下' }), d)).kind).toBe('updated')
+    expect((await runSavePipeline(childCandidate({ action: 'update', change: 'correct', id: saved.record.id, content: '改一下' }), d)).kind).toBe('updated')
   })
 
   it('并行子级各算各的：别的子会话、主会话的记录不占本会话额度', async () => {
@@ -1073,7 +1081,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
     beforeEach(() => { vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(NOW) })
     afterEach(() => { vi.useRealTimers() })
     const CREATOR = { sessionId: CHILD.id, depth: 1, parentSessionId: 'sess-main', rootSessionId: 'sess-main' }
-    const mainUpdate = (id: string) => candidate({ action: 'update', id, type: 'knowledge', scope: 'workspace', sourceMode: 'agent-inferred', content: '主会话改写后的内容' })
+    const mainUpdate = (id: string) => candidate({ action: 'update', change: 'correct', id, type: 'knowledge', scope: 'workspace', sourceMode: 'agent-inferred', content: '主会话改写后的内容' })
 
     it('update 待确认记录即接受：reviewed 补 main 与当前时间，创建者四个字段原样，证据锚换成主会话这次的', async () => {
       const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
@@ -1131,7 +1139,7 @@ describe('runSavePipeline：改写全局记忆要确认', () => {
   it('项目会话里 update 全局记忆、没带确认码：不写入，回引导（另存项目记忆的办法和这条的确认码）', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const id = await seedGlobal(store)
-    const result = await runSavePipeline(candidate({ action: 'update', id, scope: 'global', content: '提交信息用英文祈使句，不加 feat: 前缀' }), deps(store))
+    const result = await runSavePipeline(candidate({ action: 'update', change: 'correct', id, scope: 'global', content: '提交信息用英文祈使句，不加 feat: 前缀' }), deps(store))
     if (result.kind !== 'rejected') throw new Error(result.kind)
     expect(result.code).toBe('global-update-unconfirmed')
     expect((await store.get(id))?.content).toBe('提交信息用英文祈使句')
@@ -1144,7 +1152,7 @@ describe('runSavePipeline：改写全局记忆要确认', () => {
   it('带引导里的码重发：照常改写，作用域不变', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const id = await seedGlobal(store)
-    const update = candidate({ action: 'update', id, scope: 'global', content: '所有项目的提交信息都用英文祈使句' })
+    const update = candidate({ action: 'update', change: 'correct', id, scope: 'global', content: '所有项目的提交信息都用英文祈使句' })
     const guided = await runSavePipeline(update, deps(store))
     const result = await runSavePipeline({ ...update, confirmGlobal: confirmCodeOf(guided) }, deps(store))
     if (result.kind !== 'updated') throw new Error(result.kind)
@@ -1156,11 +1164,11 @@ describe('runSavePipeline：改写全局记忆要确认', () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const id = await seedGlobal(store)
     const edits = [{ oldString: '英文祈使句', newString: '英文祈使句，不加前缀' }]
-    const unconfirmed = await runSavePipeline({ action: 'update', id, sourceMode: 'user-explicit', edits }, deps(store))
+    const unconfirmed = await runSavePipeline({ action: 'update', change: 'correct', id, sourceMode: 'user-explicit', edits }, deps(store))
     if (unconfirmed.kind !== 'rejected') throw new Error(unconfirmed.kind)
     expect(unconfirmed.code).toBe('global-update-unconfirmed')
     expect((await store.get(id))?.content).toBe('提交信息用英文祈使句')
-    const confirmed = await runSavePipeline({ action: 'update', id, sourceMode: 'user-explicit', edits, confirmGlobal: confirmCodeOf(unconfirmed) }, deps(store))
+    const confirmed = await runSavePipeline({ action: 'update', change: 'correct', id, sourceMode: 'user-explicit', edits, confirmGlobal: confirmCodeOf(unconfirmed) }, deps(store))
     if (confirmed.kind !== 'updated') throw new Error(confirmed.kind)
     expect(confirmed.record.content).toBe('提交信息用英文祈使句，不加前缀')
   })
@@ -1168,7 +1176,7 @@ describe('runSavePipeline：改写全局记忆要确认', () => {
   it('码对了、排在确认后面的检查没过：回那条检查的原因；码不对时先回引导', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const id = await seedGlobal(store)
-    const flagged = candidate({ action: 'update', id, scope: 'global', content: '提交信息用英文，password=hunter2hunter2' })
+    const flagged = candidate({ action: 'update', change: 'correct', id, scope: 'global', content: '提交信息用英文，password=hunter2hunter2' })
     expect(await runSavePipeline({ ...flagged, confirmGlobal: await confirmFor(store, id) }, deps(store))).toMatchObject({ kind: 'rejected', code: 'secret-suspected' })
     expect(await runSavePipeline(flagged, deps(store))).toMatchObject({ kind: 'rejected', code: 'global-update-unconfirmed' })
   })
@@ -1200,14 +1208,14 @@ describe('runSavePipeline：改写全局记忆要确认', () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const created = await runSavePipeline(candidate({ scope: 'workspace', content: '本项目用 pnpm' }), deps(store))
     if (created.kind !== 'saved') throw new Error(created.kind)
-    const result = await runSavePipeline(candidate({ action: 'update', id: created.record.id, scope: 'workspace', content: '本项目用 pnpm 10' }), deps(store))
+    const result = await runSavePipeline(candidate({ action: 'update', change: 'correct', id: created.record.id, scope: 'workspace', content: '本项目用 pnpm 10' }), deps(store))
     expect(result.kind).toBe('updated')
   })
 
   it('没有工作目录的会话：全局是唯一去处，不用确认', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const id = await seedGlobal(store)
-    const result = await runSavePipeline(candidate({ action: 'update', id, scope: 'global', content: '提交信息用英文祈使句，标题不超过 50 字' }), { ...deps(store), workspacePath: undefined })
+    const result = await runSavePipeline(candidate({ action: 'update', change: 'correct', id, scope: 'global', content: '提交信息用英文祈使句，标题不超过 50 字' }), { ...deps(store), workspacePath: undefined })
     expect(result.kind).toBe('updated')
   })
 })

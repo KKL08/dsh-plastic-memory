@@ -483,7 +483,7 @@ describe('memory_save update 的 cross-workspace 与 memory_source 的 forbidden
     const w2 = world()
     await w2.seed(inB('mem_b', { content: '原文' }))
     const args = {
-      action: 'update' as const, id: 'mem_b', name: '条目', type: 'knowledge', scope: 'workspace' as const,
+      action: 'update' as const, change: 'correct' as const, id: 'mem_b', name: '条目', type: 'knowledge', scope: 'workspace' as const,
       content: '改写', summary: '摘要', sourceMode: 'user-explicit' as const, allowCrossWorkspace: true,
     }
     const r = await executeSave(args, exec, { store: w2.store, snapshots: w2.snapshots, registry, host: { saveContextOf: ctx } })

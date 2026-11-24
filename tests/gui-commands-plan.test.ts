@@ -879,7 +879,7 @@ describe('撤销模型改写、替代（对话卡片、右侧栏「这次新写�
       .replace(/^validFrom: .*$/m, `validFrom: ${new Date(raw.validFrom).toISOString()}`)
       .replace(/^validTo: .*$/m, `validTo: ${new Date(raw.validTo).toISOString()}`)
     await writeFile(path, legacy)
-    expect((await save(e, { action: 'update', id: 'mem_v', name: '名-mem_v', content: '模型改写后的' })).kind).toBe('updated')
+    expect((await save(e, { action: 'update', change: 'correct', id: 'mem_v', name: '名-mem_v', content: '模型改写后的' })).kind).toBe('updated')
     const entry = await changeOf(e)
     expect(await modelChanges(e)).toEqual([expect.objectContaining({ decisionId: entry.id, state: 'undoable' })])
 
@@ -892,7 +892,7 @@ describe('撤销模型改写、替代（对话卡片、右侧栏「这次新写�
   it('撤销改写：按改前快照恢复，条目标已撤销留着，视图显示 undone；再撤一次什么都不动', async () => {
     const e = env()
     await seedMemory(e, 'mem_r', '改前的内容')
-    expect((await save(e, { action: 'update', id: 'mem_r', name: '名-mem_r', content: '模型改写后的' })).kind).toBe('updated')
+    expect((await save(e, { action: 'update', change: 'correct', id: 'mem_r', name: '名-mem_r', content: '模型改写后的' })).kind).toBe('updated')
     const entry = await changeOf(e)
     expect(await modelChanges(e)).toEqual([expect.objectContaining({
       decisionId: entry.id, kind: 'rewrite', memoryId: 'mem_r', sessionId: 'sess-1', callId: 'call-1', state: 'undoable',
@@ -910,11 +910,11 @@ describe('撤销模型改写、替代（对话卡片、右侧栏「这次新写�
 
   it.each([
     ['用户手改', async (e: ReturnType<typeof env>) => { await e.store.update({ id: 'mem_r', workspacePath: SESSION_WS }, r => ({ ...r, content: '用户又改的' })) }],
-    ['模型再改', async (e: ReturnType<typeof env>) => { await save(e, { action: 'update', id: 'mem_r', name: '名-mem_r', content: '用户又改的' }) }],
+    ['模型再改', async (e: ReturnType<typeof env>) => { await save(e, { action: 'update', change: 'correct', id: 'mem_r', name: '名-mem_r', content: '用户又改的' }) }],
   ] as const)('改写之后又被改过（%s）：不覆盖，回 stale，视图显示 changed', async (_label, changeAgain) => {
     const e = env()
     await seedMemory(e, 'mem_r', '改前的内容')
-    await save(e, { action: 'update', id: 'mem_r', name: '名-mem_r', content: '模型改写后的' })
+    await save(e, { action: 'update', change: 'correct', id: 'mem_r', name: '名-mem_r', content: '模型改写后的' })
     const entry = (await e.decisions.listSettled())[0]!
     await changeAgain(e)
     expect(err(await e.run({ cmd: 'undo', decisionId: entry.id })).code).toBe('stale')
@@ -980,7 +980,7 @@ describe('撤销模型改写、替代（对话卡片、右侧栏「这次新写�
   it('PA-40 别层有同 id 的在用副本，改写的那层文件被手工挪进 .archive/（仍写着 active）：视图按位置算已删、判 changed，撤销回 stale', async () => {
     const e = env()
     await seedMemory(e, 'mem_r', '改前的内容')
-    await save(e, { action: 'update', id: 'mem_r', name: '名-mem_r', content: '模型改写后的' })
+    await save(e, { action: 'update', change: 'correct', id: 'mem_r', name: '名-mem_r', content: '模型改写后的' })
     await e.store.create(record({ id: 'mem_r', name: '全局那份', content: '全局的另一份', scope: 'global' }))
     const entry = await changeOf(e)
     const dir = join(root, workspaceDirName(SESSION_WS))
@@ -995,7 +995,7 @@ describe('撤销模型改写、替代（对话卡片、右侧栏「这次新写�
   it('改前快照已过保留窗口：撤销回 not-found，视图不再列它', async () => {
     const e = env()
     await seedMemory(e, 'mem_r', '改前的内容')
-    await save(e, { action: 'update', id: 'mem_r', name: '名-mem_r', content: '模型改写后的' })
+    await save(e, { action: 'update', change: 'correct', id: 'mem_r', name: '名-mem_r', content: '模型改写后的' })
     const entry = await changeOf(e)
     e.clock.now = Date.now() + RETENTION_MS + 1000
     expect(await modelChanges(e)).toEqual([])
@@ -1006,7 +1006,7 @@ describe('撤销模型改写、替代（对话卡片、右侧栏「这次新写�
   it('体检关闭也能撤销（撤的是模型的写入，不是治理动作）', async () => {
     const e = env({ governanceEnabled: false })
     await seedMemory(e, 'mem_r', '改前的内容')
-    await save(e, { action: 'update', id: 'mem_r', name: '名-mem_r', content: '模型改写后的' })
+    await save(e, { action: 'update', change: 'correct', id: 'mem_r', name: '名-mem_r', content: '模型改写后的' })
     ok(await e.run({ cmd: 'undo', decisionId: (await changeOf(e)).id }))
     expect((await e.store.get('mem_r', { workspacePath: SESSION_WS }))!.content).toBe('改前的内容')
   })
@@ -1014,7 +1014,7 @@ describe('撤销模型改写、替代（对话卡片、右侧栏「这次新写�
   it('改前内容在视图里遮盖密钥', async () => {
     const e = env()
     await seedMemory(e, 'mem_r', `凭证 ${FAKE_SECRET.github}`)
-    await save(e, { action: 'update', id: 'mem_r', name: '名-mem_r', content: '换成了指针' })
+    await save(e, { action: 'update', change: 'correct', id: 'mem_r', name: '名-mem_r', content: '换成了指针' })
     expect(JSON.stringify(await modelChanges(e))).not.toContain(FAKE_SECRET.github)
   })
 })

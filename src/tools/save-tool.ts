@@ -4,6 +4,7 @@ import { SUBAGENT_MAX_SAVES_DEFAULT, type PipelineResult } from '../pipeline.ts'
 import { executeSave, renderSaveResult, type SaveToolDeps } from './save.ts'
 import { toToolOutput } from './output.ts'
 import { VALIDITY_DATE_FORMAT, VALIDITY_FORMAT } from '../validity.ts'
+import { CHANGE_KINDS } from '../record-schema.ts'
 
 /** 整条写入才必填的字段共用的说明：参数表里都是可选，必填项由管线按 action 校验。 */
 const WHOLE_WRITE = 'create 和整条 update 必填；用 edits 时不传就保留原值。'
@@ -29,6 +30,8 @@ export function createSaveTool(deps: SaveToolDeps, options: { allowSubagent?: bo
       // dsh 参数 DSL：漏写 required: true 即为可选。name、type、scope、content、summary 只在整条写入时必填（edits 时可省），由管线按 action 校验
       action: { type: 'string', enum: ['create', 'update'], required: true },
       id: { type: 'string', description: 'action=update 时必填，目标记忆 id' },
+      change: { type: 'string', enum: [...CHANGE_KINDS], description: 'action=update 时必填：这次改动的性质，决定旧内容怎么处置。corroborate（补证）：同一件事又被提到，内容不用改；只刷新确认时间、记下这次的出处，正文等内容参数不生效，只传 id 和 sourceMode。refine（细化）：旧内容仍全部成立，补上条件、原因、步骤、例外；只增不删。correct（纠错）：旧内容当时就不对，直接改掉，不留历史。state-change（状态变化）：旧内容当时成立、现在变了；旧内容整条留成历史版本，这条记忆换成现在的状态。拿不准旧内容当时成不成立，填 state-change。' },
+      changeReason: { type: 'string', description: 'change=state-change 时填：一句话说明为什么变了，随历史版本留着。' },
       name: { type: 'string', description: `简短标题（2-16 字）。${WHOLE_WRITE}` },
       type: { type: 'string', enum: typeNames, description: WHOLE_WRITE },
       scope: { type: 'string', enum: ['global', 'workspace'], description: WHOLE_WRITE },

@@ -110,7 +110,7 @@ const modelChangeOf = async (e: Env) => (await e.decisions.listSettled()).find(d
 
 async function seedRewrite(e: Env) {
   await e.store.create(record({ id: 'mem_w', name: '名-mem_w', content: '改前的内容', ...at(WS) }))
-  expect((await save(e, { action: 'update', id: 'mem_w', name: '名-mem_w', content: '模型改写后的' })).kind).toBe('updated')
+  expect((await save(e, { action: 'update', change: 'correct', id: 'mem_w', name: '名-mem_w', content: '模型改写后的' })).kind).toBe('updated')
   return modelChangeOf(e)
 }
 
@@ -211,7 +211,7 @@ describe('原样可撤：按种类的机制与撤后去向', () => {
       await e.store.create(record({ id: 'mem_h', name: '名-mem_h', content: '改前的内容', ...at(WS) }))
       await e.store.update({ id: 'mem_h', workspacePath: WS }, r => ({ ...r, content: '用户手改后的内容' }), scopeAt(WS))
       const saved = kind === 'update'
-        ? await save(e, { action: 'update', id: 'mem_h', name: '名-mem_h', content: '用户同意后的新内容' })
+        ? await save(e, { action: 'update', change: 'correct', id: 'mem_h', name: '名-mem_h', content: '用户同意后的新内容' })
         : await save(e, { name: '新说法', content: '完全不同的新说法', supersedes: ['mem_h'] })
       undoneOf(await e.undo(await modelChangeOf(e)))
       expect(await copy(e, 'mem_h', WS)).toMatchObject({ content: '用户手改后的内容', status: 'active' })

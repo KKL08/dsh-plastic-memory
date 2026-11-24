@@ -369,7 +369,7 @@ describe('memory_confirm accept-subagent 经注册处', () => {
     expect(record.delegation).toMatchObject({ sessionId: 'sess-d1', depth: 1, parentSessionId: 'sess-main', reviewed: { by: 'main' } })
     expect(isPendingDelegated(record)).toBe(false)
 
-    const updated = await h.call('memory_save', { ...saveArgs('子代理观察', '子代理看到 `vitest` 跑得动'), action: 'update', id, scope: 'global', force: false }) as Saved & { warnings?: Array<{ code: string }> }
+    const updated = await h.call('memory_save', { ...saveArgs('子代理观察', '子代理看到 `vitest` 跑得动'), action: 'update', change: 'correct', id, scope: 'global', force: false }) as Saved & { warnings?: Array<{ code: string }> }
     expect(updated.kind).toBe('updated')
     expect(updated.warnings?.map(w => w.code)).toEqual(['update-global-candidate'])
     const after = (await readBack(h.memoryRoot, id)).record

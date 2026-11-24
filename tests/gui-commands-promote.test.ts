@@ -89,7 +89,7 @@ describe('提升候选与超限', () => {
     expect(await pendingCandidates(e)).toEqual([])
     expect((await e.decisions.listSettled()).map(d => d.id)).toEqual([decisionId])
 
-    const updated = await runSavePipeline(candidate({ action: 'update', id: memoryId, name: '戊', content: '所有项目都用 vitest，覆盖率不设门槛', summary: '都用 vitest' }), {
+    const updated = await runSavePipeline(candidate({ action: 'update', change: 'correct', id: memoryId, name: '戊', content: '所有项目都用 vitest，覆盖率不设门槛', summary: '都用 vitest' }), {
       store: e.store, snapshots: e.snapshots, registry, workspacePath: SESSION_WS, session: { id: 'sess-1', lastSeq: 2 },
     })
     expect(updated.kind).toBe('updated')

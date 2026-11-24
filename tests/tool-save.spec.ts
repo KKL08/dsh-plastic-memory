@@ -105,7 +105,7 @@ describe('executeSave', () => {
     if (created.kind !== 'saved') throw new Error(created.kind)
     // 降级成了 workspace 候选，手工提到 global 模拟 promote 后
     await store.put({ ...created.record, scope: 'global', workspacePath: undefined } as never)
-    const update = { ...base, action: 'update' as const, id: created.record.id, name: '全局偏好', content: '新全局内容', summary: 'pref' }
+    const update = { ...base, action: 'update' as const, change: 'correct' as const, id: created.record.id, name: '全局偏好', content: '新全局内容', summary: 'pref' }
     const guided = await executeSave(update, fakeExec(), deps) // 第一次回引导，带确认码
     const updated = await executeSave({ ...update, confirmGlobal: confirmCodeOf(guided) }, fakeExec(), deps)
     if (updated.kind !== 'updated') throw new Error(updated.kind)
@@ -121,7 +121,7 @@ describe('executeSave', () => {
       const created = await executeSave({ ...base, name, content: `${name}：提交信息用英文`, summary: name }, fakeExec(), deps)
       if (created.kind !== 'saved') throw new Error(created.kind)
       await deps.store.put({ ...created.record, scope: 'global', workspacePath: undefined } as never)
-      return { ...base, action: 'update' as const, id: created.record.id, name, content: `${name}：提交信息用英文，不加类型前缀`, summary: name }
+      return { ...base, action: 'update' as const, change: 'correct' as const, id: created.record.id, name, content: `${name}：提交信息用英文，不加类型前缀`, summary: name }
     }
     const contentOf = async (deps: SaveToolDeps, id: string) => (await deps.store.get(id))?.content
 
@@ -253,7 +253,7 @@ describe('executeSave', () => {
     if (created.kind !== 'saved') throw new Error(created.kind)
     expect(await decisions.listSettled()).toEqual([])
     await executeSave(
-      { ...base, scope: 'workspace', action: 'update', id: created.record.id, name: '偏好', content: '新内容', summary: 'pref' },
+      { ...base, scope: 'workspace', action: 'update', change: 'correct', id: created.record.id, name: '偏好', content: '新内容', summary: 'pref' },
       fakeExec({ callId: 'call-9' } as never), deps)
     expect((await decisions.listSettled())[0]).toMatchObject({ kind: 'rewrite', origin: { sessionId: 's1', callId: 'call-9' } })
   })
@@ -317,7 +317,7 @@ describe('renderSaveResult', () => {
     )
     if (created.kind !== 'saved') throw new Error(created.kind)
     const updated = await executeSave(
-      { ...base, action: 'update', id: created.record.id, name: 'commit 语言', content: '改用中文', summary: 'commit 中文' },
+      { ...base, action: 'update', change: 'correct', id: created.record.id, name: 'commit 语言', content: '改用中文', summary: 'commit 中文' },
       fakeExec(),
       deps,
     )
@@ -361,7 +361,7 @@ describe('renderSaveResult', () => {
     )
     if (created.kind !== 'saved') throw new Error(created.kind)
     const updated = await executeSave(
-      { ...base, action: 'update', id: created.record.id, name: 'title', content: '密码:TESTONLYpassw0rd', summary: 'summary', force: true },
+      { ...base, action: 'update', change: 'correct', id: created.record.id, name: 'title', content: '密码:TESTONLYpassw0rd', summary: 'summary', force: true },
       fakeExec(),
       deps,
     )
@@ -415,8 +415,11 @@ describe('renderSaveDescription（memory_save 工具描述来源）', () => {
     expect(description).toContain('只在这时简短应一句')
   })
 
-  it('update 与 supersedes 分工：旧说法要留档时新建一条、supersedes 填旧的 id', () => {
-    expect(registry.renderSaveDescription()).toContain('更新已有记忆传 action=update 和目标 id，别重复新增；旧说法要留档时（比如决定改了），新建一条、supersedes 填旧记忆的 id。')
+  it('update 与 supersedes 分工：更新带改动性质、旧内容由状态变化留成历史版本；新记忆取代旧记忆才新建并填 supersedes', () => {
+    const description = registry.renderSaveDescription()
+    expect(description).toContain('更新已有记忆传 action=update、目标 id 和 change，别重复新增。')
+    expect(description).toContain('填 state-change，旧内容自动留成历史版本，changeReason 写变化的原因')
+    expect(description).toContain('一条新记忆取代另一条旧记忆时，新建并在 supersedes 填旧记忆的 id。')
   })
 
   it('用户要求记住时记内容本身，不记「用户让我记」这个动作', () => {

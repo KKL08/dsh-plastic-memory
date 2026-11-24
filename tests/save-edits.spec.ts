@@ -37,7 +37,7 @@ const target = (partial: Partial<MemoryRecord> = {}) => record({
 })
 
 const edit = (edits: SaveInput['edits'], partial: Partial<SaveInput> = {}): SaveInput =>
-  ({ action: 'update', id: 'mem_t', sourceMode: 'user-explicit', edits, ...partial })
+  ({ action: 'update', change: 'correct', id: 'mem_t', sourceMode: 'user-explicit', edits, ...partial })
 
 async function seeded(partial: Partial<MemoryRecord> = {}) {
   const e = env()
@@ -214,7 +214,7 @@ describe('必填字段按 action 校验', () => {
   it.each([
     ['create 缺 content', { action: 'create', name: 'n', type: 'project', scope: 'workspace', summary: 's' }, 'content'],
     ['create 缺 name、summary', { action: 'create', type: 'project', scope: 'workspace', content: 'c' }, 'name'],
-    ['update 既没 content 也没 edits', { action: 'update', id: 'mem_t', name: 'n', type: 'project', scope: 'workspace', summary: 's' }, 'edits'],
+    ['update 既没 content 也没 edits', { action: 'update', change: 'correct', id: 'mem_t', name: 'n', type: 'project', scope: 'workspace', summary: 's' }, 'edits'],
   ])('%s：schema-invalid，原因点名缺的字段', async (_label, partial, field) => {
     const e = await seeded()
     const reason = await rejected(runSavePipeline({ sourceMode: 'user-explicit', ...partial } as SaveInput, e.deps), 'schema-invalid')
@@ -230,7 +230,7 @@ describe('工具层', () => {
   it('executeSave：edits 不传 tags 时保留原标签（整条更新照旧按空数组处理）', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(target())
-    const r = await executeSave({ action: 'update', id: 'mem_t', sourceMode: 'user-explicit', edits: [{ oldString: '端口 3000', newString: '端口 8080' }] }, fakeExec(), toolDeps(store))
+    const r = await executeSave({ action: 'update', change: 'correct', id: 'mem_t', sourceMode: 'user-explicit', edits: [{ oldString: '端口 3000', newString: '端口 8080' }] }, fakeExec(), toolDeps(store))
     if (r.kind !== 'updated') throw new Error(r.kind)
     expect(r.record.tags).toEqual(['dev-server'])
   })

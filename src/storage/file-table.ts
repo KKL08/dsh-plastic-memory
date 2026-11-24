@@ -22,6 +22,7 @@ import {
   isMemoryFileName, isCompanionLikeFileName, isWorkspaceDirName, deriveFileId,
 } from './paths.ts'
 import { linkExclusive } from './exclusive-link.ts'
+import { FileVersionHistory, type VersionHistory } from './history.ts'
 import { formatIndexLine } from '../index-line.ts'
 import { maskDiagnostic } from '../secrets.ts'
 import { withinValidity } from '../record-freshness.ts'
@@ -222,6 +223,7 @@ export class FileTable implements MemoryTable {
   /** 每一行在这个进程里补做失败了几次：到上限就不再试，免得一行补不上、此后每次进写入段都扫一遍目录。 */
   private readonly recoveryFailures = new Map<string, number>()
   readonly globalDir: string
+  readonly history: VersionHistory = new FileVersionHistory()
 
   constructor(opts: FileTableOptions) {
     this.opts = opts

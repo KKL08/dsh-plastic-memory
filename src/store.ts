@@ -69,6 +69,9 @@ export class MemoryStore {
     this.stats = stats
   }
 
+  /** 历史版本（见 MemoryTable.history）。 */
+  get history() { return this.table.history }
+
   /** 按 id 定位（含非 active）；缺省是不带当前项目的会话视角，目标规则见 LocateTarget。
    *  位置即作用域（同 readRaw）：.archive/ 里 status 仍写着 active 的按 deleted 返回。 */
   async get(id: string, target: LocateTarget = {}, opts?: LocateOptions): Promise<MemoryRecord | undefined> {

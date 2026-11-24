@@ -38,6 +38,7 @@ import { OVERFLOW_MODES, type OverflowMode } from './contract-codes.ts'
 import { resolveHealthThresholds, type HealthSensitivity } from './governance/health-presets.ts'
 import { PendingDecisionsStore, overflowScopeOf } from './governance/decisions.ts'
 import { ledgerSteps } from './governance/op-steps.ts'
+import { MERGE_WINDOW_MINUTES_DEFAULT, historySteps } from './commit-change.ts'
 import { SnapshotStore } from './governance/snapshots.ts'
 import { AdviceIgnoreStore } from './governance/advice-ignores.ts'
 import { CheckupRecordStore } from './governance/checkup-records.ts'
@@ -87,6 +88,10 @@ export interface Config {
     /** jieba 用户词典（每行「词 词频 词性」）的绝对路径，追加在主词典之上；不设只用主词典。改了下一次搜索生效。 */
     userDictionaryPath: Volatile<string | undefined>
   }
+  history: {
+    /** 同一会话在这么多分钟里接连对同一条记忆做的状态变化只留一次历史版本，后面的原因追加进去。设置页不露，配置文件可改；改了下一次保存生效。 */
+    mergeWindowMinutes: Volatile<number>
+  }
   subagent: {
     /** 每个子会话最多新建几条记忆（只拦 create，按本会话已存条数现数）。设置页不露，配置文件可改；改了下一次保存生效。 */
     maxSavesPerSession: Volatile<number>
@@ -129,6 +134,9 @@ export const Config = z.object({
   }),
   search: z.object({
     userDictionaryPath: z.string().volatile(),
+  }),
+  history: z.object({
+    mergeWindowMinutes: z.number().default(MERGE_WINDOW_MINUTES_DEFAULT).volatile(),
   }),
   subagent: z.object({
     maxSavesPerSession: z.number().default(SUBAGENT_MAX_SAVES_DEFAULT).volatile(),
@@ -234,6 +242,8 @@ export async function apply(ctx: Context, config: Config) {
   store.registerSteps(ledgerSteps(decisions, ctx.logger))
   // 拍完快照落盘后复核：读完记录之后被彻底删除的那份在快照里脱敏
   const snapshots = new SnapshotStore(sidecar.snapshots, { findGone: goneCopies(store) })
+  // 状态变化写成之后留历史版本：同样启动时登记，中断后按改前快照补上
+  store.registerSteps(historySteps(store, snapshots, ctx.logger))
   const scanCache = sidecar.scanCache
   // 建议忽略表：健康分、体检、GUI 视图同一份剔除口径
   const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
@@ -263,6 +273,14 @@ export async function apply(ctx: Context, config: Config) {
   // 会话视图（进程内存）：每个会话最近一次冻结的视图，与这次对话新记的 id（可能早于首次冻结）
   const frozenViews = new Map<string, SessionView>()
   const savedIds = new Map<string, string[]>()
+  // 每个会话里已经回过缺改动性质引导的记忆：只在进程内存里，引导过一次后同一条再缺就按状态变化写。
+  // 认不出会话的调用共用一份：宁可少引导一次，也不让它们每次都被拒
+  const guidedIds = new Map<string, Set<string>>()
+  const guidedIn = (sessionId: string) => {
+    let ids = guidedIds.get(sessionId)
+    if (ids === undefined) guidedIds.set(sessionId, ids = new Set())
+    return ids
+  }
   const onSaved = (sessionId: string, memoryId: string) => {
     if (sessionId === UNKNOWN_SESSION_ID) return
     const ids = [...(savedIds.get(sessionId) ?? []), memoryId]
@@ -315,6 +333,7 @@ export async function apply(ctx: Context, config: Config) {
     createSaveTool({
       store, registry, host, snapshots, decisions, onSaved,
       maxSubagentSaves: () => config.subagent.maxSavesPerSession.get(),
+      guidedIn, mergeWindowMinutes: () => config.history.mergeWindowMinutes.get(),
     }, { allowSubagent: allowSubagentSave() }),
     allowSubagentSave,
   )

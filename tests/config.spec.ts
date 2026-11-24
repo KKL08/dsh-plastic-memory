@@ -35,6 +35,7 @@ describe('Config schema', () => {
       builtinDecayDays: {},
       governance: { enabled: true, health: { sensitivity: 'normal' }, globalPromoteTarget: 'plugin-global' },
       search: {},
+      history: { mergeWindowMinutes: 60 },
       subagent: { maxSavesPerSession: 10 },
       accent: 'ella',
       memoryRoot: '',

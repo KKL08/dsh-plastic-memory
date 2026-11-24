@@ -98,3 +98,6 @@ export function deriveFileId(relPath: string): string {
 export function isDerivedFileId(id: string): boolean {
   return /^mem_f[0-9a-f]{10}$/.test(id)
 }
+
+/** 历史版本目录（各层目录下，按记忆 id 分子目录）：状态变化前的整条记录存在这里，不进记忆表、索引、注入和默认检索。 */
+export const HISTORY_DIR = '.history'

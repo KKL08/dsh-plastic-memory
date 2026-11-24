@@ -473,7 +473,7 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
         const file = existsSync(dir) ? readdirSync(dir).find(f => f.endsWith('.md') && readFileSync(join(dir, f), 'utf8').includes(`id: ${id}`)) : undefined
         return file === undefined ? undefined : readFileSync(join(dir, file), 'utf8')
       }
-      const update = { action: 'update', id, name: 'h21-global', summary: '全局规范', content: 'H21 所有项目的提交信息都用英文', ...MEMORY_BASE, scope: 'global' }
+      const update = { action: 'update', id, change: 'refine', name: 'h21-global', summary: '全局规范', content: 'H21 所有项目的提交信息都用英文', ...MEMORY_BASE, scope: 'global' }
       const first = await call('memory_save', { ...update, confirmGlobal: 'true' }, execA) as { kind: string; code?: string; reason?: string }
       const keptOld = globalText()?.includes('H21 提交信息用英文') ?? false
       const code = /confirmGlobal: "(\d+)"/.exec(first.reason ?? '')?.[1]
@@ -483,6 +483,31 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
         ok: (promoted.promoted ?? []).some(p => p.id === id) && first.kind === 'rejected' && first.code === 'global-update-unconfirmed' && keptOld && code !== undefined
           && confirmed.kind === 'updated' && confirmed.record?.scope === 'global' && wroteNew,
         detail: `promoted=${JSON.stringify(promoted.promoted)} first=${first.kind}/${first.code} keptOld=${keptOld} code=${code} confirmed=${confirmed.kind}/${confirmed.record?.scope} wroteNew=${wroteNew}`,
+      }
+    })
+
+    // H31 更新记忆要声明改动性质：没带 change 的 update 不落盘、回引导（带这条的当前内容）；同一会话对同一条再缺一次，
+    // 按状态变化写下并说明，改前的内容在这条记忆所在目录的 .history 下留一版；补证带了正文也不改内容。
+    // 「引导过」只在进程内存里按会话记：这里核对它在真实宿主的会话 id 上接得起来。
+    await attempt('H31-CHANGE-KIND', async () => {
+      type Saved = { kind: string; code?: string; reason?: string; record?: { id: string; content: string }; warnings?: Array<{ code: string }> }
+      const created = await call('memory_save', { action: 'create', name: 'h31-deploy', summary: '部署方式', content: 'H31 部署用 Compose', ...MEMORY_BASE }, execA) as Saved
+      if (created.kind !== 'saved' || !created.record) return { ok: false, detail: `create kind=${created.kind}` }
+      const id = created.record.id
+      const update = { action: 'update', id, name: 'h31-deploy', summary: '部署方式', content: 'H31 部署改用 Kubernetes', ...MEMORY_BASE }
+      const first = await call('memory_save', update, execA) as Saved
+      const isGuided = first.kind === 'rejected' && first.code === 'change-kind-missing' && (first.reason ?? '').includes('H31 部署用 Compose')
+      const second = await call('memory_save', update, execA) as Saved
+      const isAssumed = second.kind === 'updated' && (second.warnings ?? []).some(w => w.code === 'change-kind-assumed')
+      const versions = readdirSync(memoriesRoot, { recursive: true, encoding: 'utf8' })
+        .filter(f => f.includes(join('.history', id)) && f.endsWith('.md'))
+        .map(f => readFileSync(join(memoriesRoot, f), 'utf8'))
+      const isArchived = versions.length === 1 && versions[0]!.includes('H31 部署用 Compose') && versions[0]!.includes(`versionOf: ${id}`)
+      const third = await call('memory_save', { ...update, change: 'corroborate', content: 'H31 不该写进去' }, execA) as Saved
+      const isKept = third.kind === 'updated' && third.record?.content === 'H31 部署改用 Kubernetes'
+      return {
+        ok: isGuided && isAssumed && isArchived && isKept,
+        detail: `first=${first.kind}/${first.code} second=${second.kind}/${JSON.stringify(second.warnings?.map(w => w.code))} versions=${versions.length} third=${third.kind}/${third.record?.content}`,
       }
     })
 

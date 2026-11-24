@@ -261,7 +261,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect(await store.get(created.record.id)).toEqual(created.record)
 
     const updated = await runSavePipeline({
-      action: 'update', id: created.record.id, name: '流程A-v2', type: 'procedure', scope: 'global',
+      action: 'update', change: 'correct', id: created.record.id, name: '流程A-v2', type: 'procedure', scope: 'global',
       content: '流程A 的内容 v2', summary: '流程A 摘要 v2', tags: ['流程'],
       sourceMode: 'user-explicit',
     }, deps)
