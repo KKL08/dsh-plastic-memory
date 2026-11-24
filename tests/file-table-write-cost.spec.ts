@@ -3,7 +3,6 @@ import { mkdtemp, mkdir, writeFile, readFile, readdir, rename, rm } from 'node:f
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
-import { performance } from 'node:perf_hooks'
 import { FileTable, type FileTableOptions } from '../src/storage/file-table.ts'
 import { DerivedIndex } from '../src/storage/derived-index.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
@@ -513,8 +512,8 @@ describe('按行改索引改不了的时候整份重写', () => {
   })
 })
 
-describe('写入耗时不随目录大小增长', () => {
-  async function medianWriteMs(n: number): Promise<number> {
+describe('写入读的文件数不随目录大小增长', () => {
+  async function filesReadPerWrite(n: number): Promise<string[]> {
     const ws = `/tmp/proj-size-${n}`
     const dir = join(root, workspaceDirName(ws))
     await mkdir(dir, { recursive: true })
@@ -529,22 +528,19 @@ describe('写入耗时不随目录大小增长', () => {
     const t = new FileTable({ root, stats: new InMemoryKvTable<RecallStats>(), now: () => NOW, log: quietLog, index: newIndex() })
     const target = { workspacePath: ws }
     await t.update(`mem_${n}_0`, target, r => ({ ...r, content: '预热', updatedAt: NOW }))   // 第一次：逐个读一遍记提示
-    const times: number[] = []
-    for (let i = 1; i <= 15; i++) {
-      const started = performance.now()
-      await t.update(`mem_${n}_${i}`, target, r => ({ ...r, content: `第 ${i} 次改`, updatedAt: NOW }))
-      await t.create(record({ id: `mem_${n}_new_${i}`, name: `新条目 ${i}`, scope: 'workspace', workspacePath: ws }))
-      times.push(performance.now() - started)
-    }
-    expect((await readdir(dir)).filter(f => f.endsWith('.md')).length).toBe(n + 15 + 1)
-    return times.sort((a, b) => a - b)[Math.floor(times.length / 2)]!
+    const read = await contentReads(async () => {
+      await t.update(`mem_${n}_1`, target, r => ({ ...r, content: '改一次', updatedAt: NOW }))
+      await t.create(record({ id: `mem_${n}_new`, name: '新条目', scope: 'workspace', workspacePath: ws }))
+    })
+    expect((await readdir(dir)).filter(f => f.endsWith('.md')).length).toBe(n + 1 + 1)
+    return read.map(p => p.slice(p.indexOf('/') + 1))
   }
 
-  it('5 千条的目录里改一条加建一条，耗时和 1 千条的目录在同一个量级', async () => {
-    const small = await medianWriteMs(1000)
-    const large = await medianWriteMs(5000)
-    // 逐个读文件时耗时和条数成正比（5 倍）；现在只剩列目录和改索引的一行，留一倍余量给机器抖动
-    if (process.env.PM_SHOW_TIMES) console.log(`1k ${small.toFixed(2)} ms, 5k ${large.toFixed(2)} ms`)
-    expect(large, `1 千条 ${small.toFixed(1)} ms，5 千条 ${large.toFixed(1)} ms`).toBeLessThan(small * 2.5 + 5)
-  }, 120_000)
+  it('300 条的目录里改一条加建一条，读的记忆文件和 30 条的目录一样，只有自己动到的', async () => {
+    const small = await filesReadPerWrite(30)
+    const large = await filesReadPerWrite(300)
+    // 耗时受机器抖动影响，这里数读了哪些文件：逐个读时会跟着条数涨
+    expect(large).toEqual(small)
+    expect(new Set(large)).toEqual(new Set(['m1.md']))
+  })
 })
