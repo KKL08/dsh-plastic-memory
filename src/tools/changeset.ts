@@ -221,7 +221,7 @@ export type RevertResult = { kind: 'reverted'; record: MemoryRecord } | { kind: 
  * 按一条回执还原：进写入段，读现状和改前快照，够资格（revertBlock）就只把这次改的字段改回去，写成之后把回执从条目上拿掉
  * （同一个操作里的提交后步骤，中断后补上）。不够资格什么都不动。撤销本身照常写新的提交标记。
  */
-export async function revertChange(entryId: string, receipt: ChangeReceipt, opts: { by: string }, deps: ChangesetDeps): Promise<RevertResult> {
+export async function revertChange(entryId: string, receipt: ChangeReceipt, opts: { by?: string }, deps: ChangesetDeps): Promise<RevertResult> {
   ensureSteps(deps)
   const { store } = deps
   return store.writeSection(async (): Promise<RevertResult> => {
@@ -237,7 +237,7 @@ export async function revertChange(entryId: string, receipt: ChangeReceipt, opts
       : async () => {}
     const { redacted: _redacted, ...plain } = before ?? ({} as SnapshotRecord)
     const next = reverted(receipt, current, before === undefined ? undefined : plain as MemoryRecord)
-    const op = newWriteOp({ initiator: opts.by, steps: [changeUndoneStep(entryId, receipt.op)] })
+    const op = newWriteOp({ ...(opts.by !== undefined ? { initiator: opts.by } : {}), steps: [changeUndoneStep(entryId, receipt.op)] })
     const written = await store.put(next, scope, latest => latest === undefined || !isSameRecord(latest, current), op)
     if (written === undefined) {
       await putVersionBack()

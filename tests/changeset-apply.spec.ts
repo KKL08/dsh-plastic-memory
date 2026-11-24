@@ -5,6 +5,7 @@ import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import type { MemorySnapshot, PendingDecision } from '../src/governance/schema.ts'
 import { basisOf, type ChangeOp } from '../src/governance/changeset.ts'
 import { applyChangeset, receiptsOfEntry, revertChange, type ChangesetDeps } from '../src/tools/changeset.ts'
+import { executeUndo } from '../src/tools/undo.ts'
 import { layerOf } from '../src/storage/history.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record } from './helpers/record.ts'
@@ -201,5 +202,72 @@ describe('撤销的资格', () => {
     expect((await undoAll(w)).map(x => x.kind)).toEqual(['reverted'])
     expect(await w.store.history.list(layer, 'mem_a')).toEqual([])
     expect(stable(await now(w))).toEqual(stable(read))
+  })
+})
+
+describe('整条撤销（统一的撤销入口）', () => {
+  const undo = (w: World, workspacePath?: string) =>
+    executeUndo({ decisionId: ENTRY }, { workspacePath }, { ...w.deps, ignores: { unignoreIfSame: async () => false }, now: () => T0 + 5000 })
+  const finish = (w: World) => w.decisions.finishChangeRun(ENTRY, { receipts: [] })
+
+  it('连做的几个操作逆序整批撤：记忆回到原样，条目移出账本', async () => {
+    const w = world()
+    const read = await seed(w)
+    await run(w, [
+      op(read, 'o1', { kind: 'edit', patch: { content: '第二版' }, expect: { content: '旧正文' } }),
+      op(read, 'o2', { kind: 'set-validity', patch: { validTo: T0 + 600_000 }, expect: { validTo: null } }),
+      op(read, 'o3', { kind: 'edit', patch: { content: '第三版' }, expect: { content: '旧正文' } }),
+    ])
+    await finish(w)
+    expect(await undo(w)).toMatchObject({ kind: 'undone', restored: ['mem_a'] })
+    expect(stable(await now(w))).toEqual(stable(read))
+    expect(await w.decisions.listSettled()).toEqual([])
+  })
+
+  it('期间别处改了档位和关联：照常能撤，别处的改动留着', async () => {
+    const w = world()
+    const read = await seed(w)
+    await seed(w, { id: 'mem_b', name: '乙' })
+    await run(w, [op(read, 'o1', { kind: 'edit', patch: { content: '新正文' }, expect: { content: '旧正文' } })])
+    await finish(w)
+    await w.store.update(read, cur => ({ ...cur, recall: 'never', related: ['mem_b'] }))
+    expect(await undo(w)).toMatchObject({ kind: 'undone' })
+    expect(await now(w)).toMatchObject({ content: '旧正文', recall: 'never', related: ['mem_b'] })
+  })
+
+  it('有一条撤不了：整批不动，回 stale，条目留着', async () => {
+    const w = world()
+    const a = await seed(w)
+    const b = await seed(w, { id: 'mem_b', name: '乙' })
+    await run(w, [
+      op(a, 'o1', { kind: 'edit', patch: { content: '甲新' }, expect: { content: '旧正文' } }),
+      op(b, 'o2', { kind: 'edit', patch: { content: '乙新' }, expect: { content: '旧正文' } }),
+    ])
+    await finish(w)
+    await w.store.update(a, cur => ({ ...cur, content: '别处又改了' }))
+    expect(await undo(w)).toMatchObject({ kind: 'error', code: 'stale' })
+    expect((await now(w, 'mem_b')).content).toBe('乙新')
+    expect(await receiptsOfEntry(w.decisions, ENTRY)).toHaveLength(2)
+  })
+
+  it('别的项目里的记忆：过跨项目门才撤', async () => {
+    const w = world()
+    const read = await seed(w, { scope: 'workspace', workspacePath: '/other' })
+    await run(w, [op(read, 'o1', { kind: 'edit', patch: { content: '新正文' }, expect: { content: '旧正文' } })])
+    await finish(w)
+    expect(await undo(w, '/here')).toMatchObject({ kind: 'error', code: 'cross-workspace' })
+    expect((await w.store.get('mem_a', { workspacePath: '/other' }))!.content).toBe('新正文')
+  })
+})
+
+describe('快照过了保留窗口', () => {
+  it('改前的值已不在：整批不动，说明过期', async () => {
+    const w = world()
+    const read = await seed(w)
+    await run(w, [op(read, 'o1', { kind: 'edit', patch: { content: '新正文' }, expect: { content: '旧正文' } })])
+    await w.decisions.finishChangeRun(ENTRY, { receipts: [] })
+    const late = await executeUndo({ decisionId: ENTRY }, { workspacePath: undefined }, { ...w.deps, ignores: { unignoreIfSame: async () => false }, now: () => T0 + 400 * 86_400_000 })
+    expect(late).toMatchObject({ kind: 'error', code: 'not-found', reason: 'expired' })
+    expect((await now(w)).content).toBe('新正文')
   })
 })

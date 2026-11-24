@@ -10,7 +10,9 @@ import { scopeAt, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
 import { LINK_UNDONE_STEP, indexReceiptUndoneStep, ledgerSteps, linkUndoneStep } from '../governance/op-steps.ts'
 import { newWriteOp } from '../storage/table.ts'
 import { hasDropped, linksOutside, restoreLinks, withoutLinks, type DroppedLinks } from '../links.ts'
-import { withdrawVersion } from './changeset.ts'
+import { revertChange, withdrawVersion } from './changeset.ts'
+import { firstRevertBlock, type ChangeReceipt } from '../governance/changeset.ts'
+import { GLOBAL_SCOPE_KEY } from '../scope.ts'
 import { crossWorkspaceNote, gateRecords, isCopyOf, isVisible, locateCopy, type CrossWorkspaceRejection, type GovernanceContext } from './workspace-gate.ts'
 
 export interface UndoDeps {
@@ -81,6 +83,7 @@ async function claimAndUndo(
     if (rule.mechanism === 'undo-index') return await undoIndexRun(entry, deps)
     const allow = args.allowCrossWorkspace
     if (rule.mechanism === 'unlink') return await unlink(entry, allow, context, deps)
+    if (rule.mechanism === 'revert-changes') return await revertChanges(entry, rule, allow, context, deps)
     if (rule.mechanism === 'relocate') return await relocate(entry, rule, allow, context, deps)
     if (rule.mechanism === 'reflag') return await reflag(entry, rule, allow, context, deps)
     return rule.expectedStatus !== undefined || rule.receipts !== undefined
@@ -117,6 +120,40 @@ async function undoIndexRun(entry: UndoableEntry, deps: UndoDeps): Promise<UndoR
   // 入口投影（MEMORY.md）跟着索引重新生成
   await deps.store.maintain(scope)
   return { kind: 'undone', decisionId: entry.id, restored: [], ...(skipped > 0 ? { skipped } : {}) }
+}
+
+/**
+ * 按变更集应用的条目：按回执逆序逐个还原（只把那次改的字段改回去，期间别处改的档位、锁、关联留着）。先整批推演一遍，
+ * 有一条撤不了就整批不动；动手时每条在自己的写入段里再核对一次，中途被别处抢先改了就停在那里，撤掉的回执已拿掉、剩下的留着可再撤。
+ */
+async function revertChanges(entry: UndoableEntry, rule: UndoRule, allow: boolean | undefined, context: GovernanceContext, deps: UndoDeps): Promise<UndoResult> {
+  const receipts = entry.changes ?? []
+  // 上一次已经全部撤完、只差条目的去向：这次补上
+  if (receipts.length === 0) return settleUndo(entry, rule, deps, [])
+  await deps.snapshots.sweep(deps.now?.() ?? Date.now())
+  const keyOf = (r: ChangeReceipt) => JSON.stringify([r.scopeKey, r.memoryId])
+  const currents = new Map<string, MemoryRecord | undefined>()
+  const befores = new Map<string, MemoryRecord | undefined>()
+  for (const receipt of receipts) {
+    if (!currents.has(keyOf(receipt))) {
+      currents.set(keyOf(receipt), await locateCopy(deps.store, receipt.memoryId, scopeAt(receipt.scopeKey === GLOBAL_SCOPE_KEY ? undefined : receipt.scopeKey)))
+    }
+    const snapshot = receipt.snapshotId === undefined ? undefined : await deps.snapshots.get(receipt.snapshotId)
+    befores.set(receipt.op, snapshot?.data.find(r => r.id === receipt.memoryId && r.redacted !== true))
+  }
+  const rejected = gateRecords([...currents.values()].filter(r => r !== undefined), context, allow).rejected
+  if (rejected.length > 0) return crossWorkspace(rejected)
+  const blocked = firstRevertBlock(receipts, r => currents.get(keyOf(r)), r => befores.get(r.op))
+  if (blocked !== undefined) {
+    return blocked.block === 'expired' ? notFound(`${entry.id} 改前的快照（可能已超过 14 天）`, 'expired') : changed(blocked.receipt.memoryId)
+  }
+  const restored: string[] = []
+  for (const receipt of [...receipts].reverse()) {
+    const r = await revertChange(entry.id, receipt, {}, deps)
+    if (r.kind !== 'reverted') return changed(receipt.memoryId, restored.length > 0 ? 'kept-third-party' : 'changed')
+    if (!restored.includes(receipt.memoryId)) restored.push(receipt.memoryId)
+  }
+  return settleUndo(entry, rule, deps, restored)
 }
 
 /** 撤后条目的去向：回到待处理、移出账本、标已撤销留到保留窗口结束。 */

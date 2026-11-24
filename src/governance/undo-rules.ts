@@ -20,8 +20,8 @@ export function isModelChange(entry: { kind?: PendingKind }): boolean {
   return (MODEL_CHANGE_KINDS as readonly PendingKind[]).includes(kindOf(entry))
 }
 
-/** 撤销的机制：按改前快照恢复、把记忆搬回原作用域、放回清掉的标记、按回执倒着撤索引操作、去掉这次挂上的关联和前提。 */
-export type UndoMechanism = 'restore-snapshot' | 'relocate' | 'reflag' | 'undo-index' | 'unlink'
+/** 撤销的机制：按改前快照恢复、把记忆搬回原作用域、放回清掉的标记、按回执倒着撤索引操作、去掉这次挂上的关联和前提、按变更集的回执逆序逐个还原字段。 */
+export type UndoMechanism = 'restore-snapshot' | 'relocate' | 'reflag' | 'undo-index' | 'unlink' | 'revert-changes'
 /** 撤后条目的去向：回到待处理、移出账本、标已撤销留到保留窗口结束。 */
 export type UndoFate = 'reopen' | 'remove' | 'mark-undone'
 
@@ -43,6 +43,11 @@ export interface UndoRule {
  */
 export function undoRuleOf(entry: UndoableEntry): UndoRule {
   const { verdict, isBornSettled } = entry.settled
+  // 按变更集应用的（带逐操作回执）：不管是哪一种条目，都按回执逆序还原；撤后的去向仍按种类
+  if (entry.changes !== undefined) {
+    const targets = [...new Set(entry.changes.map(r => r.memoryId))]
+    return { targets, mechanism: 'revert-changes', fate: entry.kind === 'edit' || isBornSettled === true ? 'remove' : 'reopen' }
+  }
   switch (entry.kind) {
     case 'edit': {
       if (verdict !== 'batch-edited') return { targets: entry.memoryIds, expectedStatus: 'active', mechanism: 'restore-snapshot', fate: 'remove' }
@@ -132,7 +137,7 @@ export function isUndoable(entry: PendingDecision): boolean {
   if (undoable === undefined) return false
   const rule = undoRuleOf(undoable)
   return verdictLoser(undoable, undoable.settled.verdict) !== undefined || undoable.settled.verdict === 'promoted'
-    || rule.expectedStatus !== undefined || rule.receipts !== undefined || rule.mechanism === 'undo-index' || rule.mechanism === 'unlink'
+    || rule.expectedStatus !== undefined || rule.receipts !== undefined || rule.mechanism === 'undo-index' || rule.mechanism === 'unlink' || rule.mechanism === 'revert-changes'
 }
 
 /** 账本清理的截止线（与快照、最近删除同一个 RETENTION_MS）：留作撤销的条目结清超过保留窗口就清掉。 */

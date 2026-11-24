@@ -342,3 +342,25 @@ export function reverted(receipt: ChangeReceipt, current: MemoryRecord, before: 
   }
   return next as MemoryRecord
 }
+
+/**
+ * 一组回执逆序整批撤之前先推演一遍：每条记忆从现状起，按回执从后往前逐个核对、还原，后一个撤完前一个才对得上。
+ * 任何一条撤不了就返回它和原因，调用方据此整批不动；都撤得了返回 undefined。current、before 由调用方读好给进来。
+ */
+export function firstRevertBlock(
+  receipts: readonly ChangeReceipt[],
+  current: (receipt: ChangeReceipt) => MemoryRecord | undefined,
+  before: (receipt: ChangeReceipt) => MemoryRecord | undefined,
+): { receipt: ChangeReceipt; block: RevertBlock } | undefined {
+  const state = new Map<string, MemoryRecord | undefined>()
+  const keyOf = (r: ChangeReceipt) => JSON.stringify([r.scopeKey, r.memoryId])
+  for (const receipt of [...receipts].reverse()) {
+    const key = keyOf(receipt)
+    const now = state.has(key) ? state.get(key) : current(receipt)
+    const prior = before(receipt)
+    const block = revertBlock(receipt, now, prior)
+    if (block !== undefined || now === undefined) return { receipt, block: block ?? 'gone' }
+    state.set(key, reverted(receipt, now, prior))
+  }
+  return undefined
+}

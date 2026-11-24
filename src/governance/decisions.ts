@@ -406,7 +406,8 @@ export class PendingDecisionsStore {
   async unsettle(id: string): Promise<boolean> {
     const entry = await this.table.get(id)
     if (!entry?.settled) return false
-    const { settled, fingerprint, ...open } = entry
+    // 按变更集应用的：回执撤完才走到这里，空的回执清单一起去掉，条目回到没处理过的样子
+    const { settled, fingerprint, changes: _changes, ...open } = entry
     const restored = settled.verdict === 'plan-applied' ? settled.priorFingerprint : fingerprint
     await this.table.put(id, { ...open, ...(restored !== undefined ? { fingerprint: restored } : {}) })
     // 垂直改写之后重报另挂的那条说的是改写后的记忆，撤销后记忆回到原样，它不再成立：收拢掉，同一条只留回到待处理的这条
