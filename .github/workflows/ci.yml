@@ -33,7 +33,14 @@ jobs:
       - run: scripts/check-no-local-paths.sh
       - run: pnpm typecheck
       - run: pnpm lint
-      - run: pnpm test
+      - run: pnpm test --reporter=default --reporter=junit --outputFile.junit=test-results/junit.xml
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results-check-node${{ matrix.node }}
+          path: test-results/junit.xml
+          retention-days: 14
       - run: pnpm build
       - run: scripts/check-pack-whitelist.sh
       - name: Cache the pinned dsh host
@@ -61,7 +68,14 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm lint
       # The client tests import nothing from the host, so they don't change with its version.
-      - run: pnpm exec vitest run --project node
+      - run: pnpm exec vitest run --project node --reporter=default --reporter=junit --outputFile.junit=test-results/junit.xml
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results-host-floor-node22
+          path: test-results/junit.xml
+          retention-days: 14
       - name: Cache the floor dsh host
         uses: actions/cache@v6
         with:
