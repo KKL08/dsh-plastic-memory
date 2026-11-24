@@ -182,8 +182,21 @@ All notable changes to this project are documented here. The format follows
   something you said. In a turn opened by a scheduled run, another agent or a
   subagent's task, `sourceMode` must be `environment-observed` or
   `agent-inferred`; other values are rejected with `not-user-initiated`.
+- Applying a Tidy selected plan, or a merge or rewrite proposed for a
+  conflict, now changes the memories one at a time, each with its own undo
+  snapshot, and records the edit in `lastChange`. If one of them was edited
+  in the meantime, the ones already changed are put back, as before. Undo
+  puts back only the fields the change wrote: a recall setting or links
+  changed elsewhere since then are kept. If an undo stops partway, what was
+  already undone stays undone and undoing again finishes the rest.
 
 ### Fixed
+- A memory write that was cut short and whose file was then edited by hand
+  or removed was treated as never written, so the record that lets you undo
+  it was not added. It is now added the next time a memory is written.
+- Restoring a snapshot over a memory edited since (`overwriteChanged`) left
+  the memory dated as of the snapshot, earlier than the version it replaced.
+  `lastChange` now records the restore.
 - `memory_source` showed context that DeepSeek Harness adds to a conversation
   as if you had typed it, and left out what the assistant replied. It now
   shows assistant replies and leaves the added context out.
