@@ -12,8 +12,11 @@ import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
 import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
 import { writesDuring } from './helpers/fs-writes.ts'
+import { indexText, indexTree, indexedIds, indexedIdsMatchDisk, isIndexPath, projectedCount } from './helpers/topic-index.ts'
+import { INDEX_DIR, INDEX_TOPICS_DIR } from '../src/storage/index-store.ts'
+import { UNSORTED_PAGE } from '../src/topic-index.ts'
 
-// 写入路径的开销：写完不做整目录维护、只改自己在索引里的那一行；按 id 找文件先看派生库的提示。
+// 写入路径的开销：写完不做整目录维护，也不碰主题索引和 MEMORY.md（留到维护点）；按 id 找文件先看派生库的提示。
 // 真文件系统、真 node:sqlite。reads：tracing 期间记下 readFile 读过的路径（看定位读了哪些文件的内容）。
 const { reads, hooks } = vi.hoisted(() => ({
   reads: { tracing: false, paths: [] as string[], listed: [] as string[] },
@@ -85,7 +88,6 @@ async function seed(dir: string, name: string, r: MemoryRecord | string) {
   if (dir !== globalDir() && !dir.endsWith(ARCHIVE_DIR)) await writeFile(join(dir, WORKSPACE_MARKER), WS + '\n')
   await writeFile(join(dir, name), typeof r === 'string' ? r : encodeRecord(r, {}))
 }
-const indexOf = (dir: string) => readFile(join(dir, INDEX_FILE), 'utf8')
 /** 读 fn 期间读过内容的记忆文件名（不含索引和标记）。 */
 async function contentReads(fn: () => Promise<unknown>): Promise<string[]> {
   reads.paths = []
@@ -94,6 +96,8 @@ async function contentReads(fn: () => Promise<unknown>): Promise<string[]> {
   try { await fn() } finally { reads.tracing = false }
   return reads.paths.filter(p => p.endsWith('.md') && !p.endsWith(INDEX_FILE)).map(p => p.slice(root.length + 1)).sort()
 }
+
+const callPath = (call: string) => call.replace(/^\w+\(/, '').replace(/\)$/, '')
 
 describe('写入只处理自己动到的文件', () => {
   it('写一条记忆不碰同目录的别的文件：手改过的不回写、不在用的不搬进归档、过期的不清，都留到维护点', async () => {
@@ -121,7 +125,7 @@ describe('写入只处理自己动到的文件', () => {
     expect(existsSync(join(globalDir(), ARCHIVE_DIR, 'old.md'))).toBe(false)
   })
 
-  it('写完索引就是最新的：新建、改名、改摘要、遗忘、恢复、换作用域、彻底删除之后，索引和整份重新生成的一样', async () => {
+  it('同一个目录里的写入不读不写主题索引和 MEMORY.md，换作用域只动来源目录的索引把那一行去掉；之后维护一次索引就跟上磁盘', async () => {
     for (const [name, id] of [['部署流程', 'mem_1'], ['包管理', 'mem_2'], ['测试约定', 'mem_3']] as const) {
       await seed(globalDir(), `${name}.md`, record({ id, name }))
     }
@@ -129,7 +133,7 @@ describe('写入只处理自己动到的文件', () => {
     const t = withIndex()
     const dirs = [globalDir(), wsDir()]
     await t.maintain(dirs)
-    const steps: Array<[string, () => Promise<unknown>]> = [
+    const steps: Array<[string, () => Promise<unknown>, movedFrom?: { dir: string; id: string }]> = [
       ['新建', () => t.create(record({ id: 'mem_4', name: '代码风格', summary: '缩进与命名' }))],
       ['新建排在最前', () => t.create(record({ id: 'mem_5', name: 'API 约定' }))],
       ['改名', () => t.update('mem_2', {}, r => ({ ...r, name: '依赖管理', updatedAt: NOW }))],
@@ -137,19 +141,26 @@ describe('写入只处理自己动到的文件', () => {
       ['遗忘', () => t.update('mem_1', {}, r => ({ ...r, status: 'deleted', deletedAt: NOW }))],
       ['恢复', () => t.update('mem_1', {}, ({ deletedAt: _, ...r }) => ({ ...r, status: 'active' }))],
       ['过期', () => t.update('mem_4', {}, r => ({ ...r, validTo: NOW - 1 }))],
-      ['全局搬到项目', () => t.update('mem_3', {}, r => ({ ...r, scope: 'workspace', workspacePath: WS, updatedAt: NOW }))],
-      ['项目搬到全局', () => t.update('mem_w', { workspacePath: WS }, ({ workspacePath: _, ...r }) => ({ ...r, scope: 'global', updatedAt: NOW }))],
-      ['彻底删除', () => t.delete('mem_5', {})],
+      ['全局搬到项目', () => t.update('mem_3', {}, r => ({ ...r, scope: 'workspace', workspacePath: WS, updatedAt: NOW })), { dir: globalDir(), id: 'mem_3' }],
+      ['项目搬到全局', () => t.update('mem_w', { workspacePath: WS }, ({ workspacePath: _, ...r }) => ({ ...r, scope: 'global', updatedAt: NOW })), { dir: wsDir(), id: 'mem_w' }],
     ]
-    for (const [what, step] of steps) {
-      await step()
-      const afterWrite = await Promise.all(dirs.map(indexOf))
+    for (const [what, step, movedFrom] of steps) {
+      reads.paths = []
+      reads.tracing = true
+      let writes: string[]
+      try { writes = await writesDuring(step) } finally { reads.tracing = false }
+      // 搬走的那条当场从来源目录的索引里去掉；目的目录的索引和两边的 MEMORY.md 不碰
+      const inSource = (path: string) => movedFrom !== undefined && path.startsWith(join(movedFrom.dir, INDEX_DIR))
+      expect(writes.map(callPath).filter(p => isIndexPath(p) && !inSource(p)), `${what}：写调用`).toEqual([])
+      expect(reads.paths.filter(p => isIndexPath(p) && !inSource(p)), `${what}：读调用`).toEqual([])
+      if (movedFrom !== undefined) expect(await indexedIds(movedFrom.dir), `${what}：来源目录的索引`).not.toContain(movedFrom.id)
       await t.maintain(dirs)
-      expect(await Promise.all(dirs.map(indexOf)), what).toEqual(afterWrite)
+      for (const dir of dirs) await indexedIdsMatchDisk(t, dir).catch(err => { throw new Error(`${what}：${String(err)}`) })
     }
-    expect(await indexOf(globalDir())).toContain('[mem_w] 项目备注')
-    expect(await indexOf(globalDir())).not.toContain('mem_5')
-    expect(await indexOf(wsDir())).toContain('[mem_3] 测试约定')
+    expect(await indexedIds(globalDir())).toContain('mem_w')
+    expect(await indexedIds(globalDir())).toContain('mem_4')   // 过期的照样有一行
+    expect(await indexedIds(wsDir())).toEqual(['mem_3'])
+    expect(await projectedCount(globalDir())).toBe(5)
   })
 
   it('彻底删除后索引里当场没有它的名字和摘要', async () => {
@@ -157,42 +168,21 @@ describe('写入只处理自己动到的文件', () => {
     await seed(globalDir(), 's.md', record({ id: 'mem_s', name: '机密的名字', summary: '机密的摘要' }))
     const t = withIndex()
     await t.maintain([globalDir()])
-    expect(await indexOf(globalDir())).toContain('机密的名字')
+    expect(await indexText(globalDir())).toContain('机密的名字')
     await t.delete('mem_s', {})
-    const text = await indexOf(globalDir())
-    expect(text).not.toContain('机密')
-    expect(text).toContain('[mem_a] 甲')
+    expect(await indexText(globalDir())).not.toContain('机密')
+    expect(await indexedIds(globalDir())).toEqual(['mem_a'])
   })
 
-  it('一个名字是另一个名字的开头时，写完的行序可能和整份生成的不同，维护点重写成确定的顺序', async () => {
-    await seed(globalDir(), 'x.md', record({ id: 'mem_x', name: '部署 流程' }))
-    const t = withIndex()
-    await t.maintain([globalDir()])
-    await t.create(record({ id: 'mem_y', name: '部署' }))
-    const lines = (text: string) => text.split('\n').filter(l => l.startsWith('- ')).map(l => l.slice(2, 9))
-    expect(lines(await indexOf(globalDir())).sort()).toEqual(['[mem_x]', '[mem_y]'])
-    await t.maintain([globalDir()])
-    expect(lines(await indexOf(globalDir()))).toEqual(['[mem_y]', '[mem_x]'])
-  })
-
-  it('目录里还没有索引：写入时整份生成一次，手建的文件也列进去', async () => {
+  it('目录里还没有索引：写入不建索引，维护时整份生成，手建的文件也列进去', async () => {
     await seed(globalDir(), 'hand.md', record({ id: 'mem_hand', name: '手建的' }))
     const t = withIndex()
     await t.create(record({ id: 'mem_new', name: '新写的' }))
-    const text = await indexOf(globalDir())
-    expect(text).toContain('[mem_hand] 手建的')
-    expect(text).toContain('[mem_new] 新写的')
-  })
-
-  it('索引被改成别的样子（不是插件生成的开头）：写入时整份重新生成', async () => {
-    await seed(globalDir(), 'a.md', record({ id: 'mem_a', name: '甲' }))
-    const t = withIndex()
+    expect(await indexTree(globalDir())).toBeUndefined()
+    expect(existsSync(join(globalDir(), INDEX_FILE))).toBe(false)
     await t.maintain([globalDir()])
-    await writeFile(join(globalDir(), INDEX_FILE), '随手写的东西\n')
-    await t.create(record({ id: 'mem_b', name: '乙' }))
-    expect(await indexOf(globalDir())).toMatch(/^# Memory Index\n\n/)
-    expect(await indexOf(globalDir())).toContain('[mem_a] 甲')
-    expect(await indexOf(globalDir())).toContain('[mem_b] 乙')
+    expect((await indexedIds(globalDir())).sort()).toEqual(['mem_hand', 'mem_new'])
+    expect(await projectedCount(globalDir())).toBe(2)
   })
 })
 
@@ -445,29 +435,33 @@ describe('有库没库结果一样：别人改了目录之后', () => {
   })
 })
 
-describe('按行改索引改不了的时候整份重写', () => {
-  it('摘要带换行的记忆在索引里占几行：彻底删除后一行都不剩', async () => {
+describe('索引里的文字跟着记忆走，彻底删除后不留', () => {
+  it('摘要带换行的记忆：索引里压成一行；改摘要、彻底删除之后旧文字一点不剩', async () => {
     await seed(globalDir(), 'a.md', record({ id: 'mem_a', name: '甲' }))
     const t = withIndex()
     await t.maintain([globalDir()])
     await t.create(record({ id: 'mem_multi', name: '多行的', summary: '第一行\n机密的第二行' }))
-    expect(await indexOf(globalDir())).toContain('机密的第二行')
+    await t.maintain([globalDir()])
+    expect(await indexText(globalDir())).toContain('第一行 机密的第二行')
     await t.update('mem_multi', {}, r => ({ ...r, summary: '改过的第一行\n改过的第二行', updatedAt: NOW }))
-    expect(await indexOf(globalDir())).not.toContain('机密的第二行')
+    await t.maintain([globalDir()])
+    expect(await indexText(globalDir())).not.toContain('机密的第二行')
     await t.delete('mem_multi', {})
-    expect(await indexOf(globalDir())).toBe('# Memory Index\n\n' + (await indexOf(globalDir())).split('\n').filter(l => l.startsWith('- [mem_a]')).join('\n') + '\n')
+    expect(await indexText(globalDir())).not.toContain('改过的')
+    expect(await indexedIds(globalDir())).toEqual(['mem_a'])
   })
 
-  it('摘要的第二行长得像另一条记忆的行：彻底删除后这一行也不剩', async () => {
+  it('摘要的第二行长得像另一条记忆的成员行：不被认成别的记忆，彻底删除后这段文字也不剩', async () => {
     await seed(globalDir(), 'a.md', record({ id: 'mem_a', name: '甲' }))
     const t = withIndex()
     await t.maintain([globalDir()])
-    await t.create(record({ id: 'mem_multi', name: '多行的', summary: '第一行\n- [example] 机密的尾巴' }))
-    expect(await indexOf(globalDir())).toContain('机密的尾巴')
+    await t.create(record({ id: 'mem_multi', name: '多行的', summary: '第一行\n- [别的](../../x.md "mem_fake") — 机密的尾巴' }))
+    await t.maintain([globalDir()])
+    expect(await indexText(globalDir())).toContain('机密的尾巴')
+    expect((await indexedIds(globalDir())).sort()).toEqual(['mem_a', 'mem_multi'])
     await t.delete('mem_multi', {})
-    const text = await indexOf(globalDir())
-    expect(text).not.toContain('机密的尾巴')
-    expect(text.split('\n').filter(l => l !== '' && !l.startsWith('#'))).toHaveLength(1)
+    expect(await indexText(globalDir())).not.toContain('机密的尾巴')
+    expect(await indexedIds(globalDir())).toEqual(['mem_a'])
   })
 
   it('彻底删除的当口另一边正在整层扫描：删掉的文件名不会被写回派生库', async () => {
@@ -483,18 +477,17 @@ describe('按行改索引改不了的时候整份重写', () => {
     expect(other.hasName(globalDir(), basename(file))).toBe(false)
   })
 
-  it('写锁不是跨进程互斥的：索引里别人已经删掉的行不会被带回来', async () => {
+  it('索引里留着磁盘上已经没有的记忆（别的进程拿旧索引写回来）：维护后这一行连同名字摘要一起去掉', async () => {
     await seed(globalDir(), 'a.md', record({ id: 'mem_a', name: '甲' }))
-    const lock = { run: <T>(fn: () => Promise<T>) => fn(), isExclusive: () => false }
-    const t = withIndex({ lock })
+    const t = withIndex()
     await t.maintain([globalDir()])
-    // 另一个进程拿着旧索引写回来的样子：多出一条磁盘上已经没有的记忆
-    await writeFile(join(globalDir(), INDEX_FILE), (await indexOf(globalDir())) + '- [mem_secret] 删掉的（机密的摘要） · old.md\n')
+    const unsorted = join(globalDir(), INDEX_DIR, INDEX_TOPICS_DIR, UNSORTED_PAGE)
+    await writeFile(unsorted, (await readFile(unsorted, 'utf8')) + '- [删掉的](../../old.md "mem_secret") — 机密的摘要\n')
     await t.create(record({ id: 'mem_b', name: '乙' }))
-    const text = await indexOf(globalDir())
-    expect(text).not.toContain('mem_secret')
-    expect(text).toContain('[mem_a] 甲')
-    expect(text).toContain('[mem_b] 乙')
+    await t.maintain([globalDir()])
+    expect(await indexText(globalDir())).not.toContain('mem_secret')
+    expect(await indexText(globalDir())).not.toContain('机密的摘要')
+    expect((await indexedIds(globalDir())).sort()).toEqual(['mem_a', 'mem_b'])
   })
 
   it('彻底删除后派生库里也不留这个文件名', async () => {

@@ -11,6 +11,14 @@ All notable changes to this project are documented here. The format follows
   backward or forward, search its conversation, include tool calls and results,
   and trace a sub-agent memory to its parent or child conversation. Results
   include the conversation title, start time and event counts.
+- Each memory folder now has a topic index under `_index/`. `index.md`
+  lists the topics, each with a short description, and every page in
+  `_index/topics/` lists the memories of one topic. Existing memories start
+  on the 未整理 (unsorted) page. You can edit these files by hand: change a
+  description, reorder lines, move a memory to another page. Your edits are
+  kept. When a chat next loads its memories, memories missing from the
+  index are added to the unsorted page, lines for memories that no longer
+  exist are removed, and names and summaries are brought up to date.
 - Each memory type's confirmation period can now be changed, the five
   general types included: every type card on the settings page shows its
   period, and Edit opens the form where you change it. A memory left
@@ -75,6 +83,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 - `memory_source` omits tool results by default; pass `include: "all"` to read them.
+- `MEMORY.md` is now generated from the topic index: one section per topic
+  with its description and the number of memories in it, linking to the
+  topic page. It no longer lists every memory on one page, and it is
+  refreshed when a chat loads its memories instead of on every write. A
+  `MEMORY.md` written by an earlier version of the plugin is regenerated
+  the same way.
 - Node.js 24.9 or later is now required; Node.js 22 is no longer supported.
   Every supported DeepSeek Harness version already requires 24.9, so a
   working install is not affected. CI no longer runs on Node.js 22.
@@ -100,10 +114,10 @@ All notable changes to this project are documented here. The format follows
   The "not confirmed in a while" reminder follows this, and so do the
   places that order memories by when they were last confirmed.
 - Saving or changing a memory no longer reads every file in the memory
-  folder, so a write no longer slows down as the folder grows. The write
-  updates its own line in `MEMORY.md`. Files edited by hand are picked up,
-  deleted memories are archived and expired ones are removed when a chat in
-  that project next loads its memories, instead of after every write. To
+  folder, so a write no longer slows down as the folder grows. Files edited
+  by hand are picked up, deleted memories are archived and expired ones are
+  removed when a chat in that project next loads its memories, instead of
+  after every write. To
   find a memory by id the plugin keeps a small lookup file outside the
   memory folder, one per machine. It holds memory file names (which come
   from memory names) and ids, no memory content; a permanently deleted

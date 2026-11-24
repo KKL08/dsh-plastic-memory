@@ -10,8 +10,9 @@ import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
 import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
 import { writesDuring } from './helpers/fs-writes.ts'
+import { indexedIds, isIndexPath } from './helpers/topic-index.ts'
 
-// 从磁盘读记忆目录的行为（0.2.0 起没有加载期：每个读方法直接读目录；清扫、索引再生、tmp 清理只在写路径末尾）。
+// 从磁盘读记忆目录的行为（0.2.0 起没有加载期：每个读方法直接读目录；清扫、索引核对、tmp 清理只在维护点）。
 // 本文件默认造那条"包管理用 pnpm"的 global preference（编解码/去重断言的固定样本）。
 // 「不写盘」看 node:fs/promises 的写调用记录（透传，见 helpers/fs-writes.ts）。
 vi.mock('node:fs/promises', async importOriginal => (await import('./helpers/fs-writes.ts')).recordWrites(await importOriginal()))
@@ -101,13 +102,15 @@ it('sidecar 合并：有行取行值，无行注入默认', async () => {
   expect(byId.get('mem_b')!.recallCount).toBe(0)
 })
 
-it('清扫在写路径末尾：.archive/ 里 deletedAt 超 14 天 → 物理删除；未超期保留；纯读不清', async () => {
+it('清扫在维护点：.archive/ 里 deletedAt 超 14 天 → 物理删除；未超期保留；纯读、写入都不清', async () => {
   const now = 100 * 86_400_000
   await seedArchived('old.md', record({ id: 'mem_old', status: 'deleted', updatedAt: now, deletedAt: now - DELETED_RETENTION_MS - 1 }))
   await seedArchived('fresh.md', record({ id: 'mem_fresh', status: 'deleted', updatedAt: now - 30 * 86_400_000, deletedAt: now - 1000 }))
   const t = open({ now: () => now })
   expect(((await t.locate('mem_old', {}))?.record)!.status).toBe('deleted')   // 读路径不清
-  await t.put(record({ id: 'mem_x', name: 'x', updatedAt: now }), {})   // 写该目录触发维护
+  await t.put(record({ id: 'mem_x', name: 'x', updatedAt: now }), {})
+  expect(((await t.locate('mem_old', {}))?.record)!.status).toBe('deleted')   // 写入不清
+  await t.maintain([globalDir()])
   expect((await t.locate('mem_old', {}))?.record).toBeUndefined()
   await expect(stat(join(root, GLOBAL_DIR, ARCHIVE_DIR, 'old.md'))).rejects.toThrow()
   expect(((await t.locate('mem_fresh', {}))?.record)!.status).toBe('deleted')
@@ -168,8 +171,8 @@ it('单个 workspace 目录不可读 → 该目录记录缺失，其余目录记
   }
 })
 
-describe('tmp 残留只在写路径末尾清理', () => {
-  it('本进程 pid 的 tmp 残留在写该目录后被删（自家崩溃残留）', async () => {
+describe('tmp 残留只在维护点清理', () => {
+  it('本进程 pid 的 tmp 残留在维护该目录时被删（自家崩溃残留）', async () => {
     await seedGlobal('a.md', record({ id: 'mem_a' }))
     const tmp = join(root, GLOBAL_DIR, `a.md.tmp-${process.pid}-abc123`)
     await writeFile(tmp, '残留')
@@ -177,6 +180,8 @@ describe('tmp 残留只在写路径末尾清理', () => {
     await t.locate('mem_a', {})
     expect((await stat(tmp)).isFile()).toBe(true)   // 纯读不清
     await t.put(record({ id: 'mem_b', name: 'b' }), {})
+    expect((await stat(tmp)).isFile()).toBe(true)   // 写入不清
+    await t.maintain([globalDir()])
     await expect(stat(tmp)).rejects.toThrow()
   })
 
@@ -187,6 +192,7 @@ describe('tmp 残留只在写路径末尾清理', () => {
     const mtime = (await stat(tmp)).mtimeMs
     const t = open({ now: () => mtime })   // 新鲜相对文件系统记下的 mtime 算，不假定 Date.now() 与文件系统时钟一致
     await t.put(record({ id: 'mem_b', name: 'b' }), {})
+    await t.maintain([globalDir()])
     expect((await stat(tmp)).isFile()).toBe(true)
   })
 
@@ -197,18 +203,24 @@ describe('tmp 残留只在写路径末尾清理', () => {
     const mtime = (await stat(tmp)).mtimeMs
     const t = open({ now: () => mtime + 61_000 })
     await t.put(record({ id: 'mem_b', name: 'b', updatedAt: mtime }), {})
+    await t.maintain([globalDir()])
     await expect(stat(tmp)).rejects.toThrow()
   })
 })
 
-it('MEMORY.md 内容未变时写路径末尾的再生不重写它（不空转写盘）', async () => {
+it('写入不碰主题索引和 MEMORY.md；维护时索引内容没变就不重写（不空转写盘）', async () => {
   const t = open()
-  const index = join(root, GLOBAL_DIR, 'MEMORY.md')
-  const first = await writesDuring(() => t.put(record({ id: 'mem_a', name: 'a' }), {}))
-  expect(first.filter(c => c.includes(index))).not.toEqual([])   // 首次写出索引：写调用记得到
+  const indexWrites = (calls: string[]) => calls.filter(c => isIndexPath(c.replace(/^\w+\(/, '').replace(/\)$/, '')))
+  const put = await writesDuring(() => t.put(record({ id: 'mem_a', name: 'a' }), {}))
+  expect(put).not.toEqual([])
+  expect(indexWrites(put)).toEqual([])
+  expect(indexWrites(await writesDuring(() => t.maintain([globalDir()])))).not.toEqual([])   // 首次写出索引：写调用记得到
+  expect(await indexedIds(globalDir())).toEqual(['mem_a'])
   const writes = await writesDuring(() => t.put(record({ id: 'mem_d', name: 'd', status: 'deleted', updatedAt: Date.now() }), {}))   // 不进索引：索引内容不变
   expect(writes).not.toEqual([])   // 这次 put 本身照常写盘
-  expect(writes.filter(c => c.includes(index))).toEqual([])
+  expect(indexWrites(writes)).toEqual([])
+  expect(indexWrites(await writesDuring(() => t.maintain([globalDir()])))).toEqual([])
+  expect(await indexedIds(globalDir())).toEqual(['mem_a'])
 })
 
 it('合法名称含 .tmp- 不是原子写残留：新实例、推进 61 秒后再写，记录与文件都还在', async () => {
@@ -223,6 +235,7 @@ it('合法名称含 .tmp- 不是原子写残留：新实例、推进 61 秒后�
   clock += 61_000
   const t3 = mk()
   await t3.put(record({ id: 'mem_other', name: 'other' }), {})
+  await t3.maintain([globalDir()])
   expect((await t3.locate('mem_tmp', {}))?.record.name).toBe('cache.tmp-notes')
   expect(await readdir(join(root, GLOBAL_DIR))).toContain('cache.tmp-notes.md')
 })

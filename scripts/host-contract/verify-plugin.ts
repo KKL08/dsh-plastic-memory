@@ -387,7 +387,7 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       return { ok: r.kind === 'single' && typeof r.score === 'number' && !(r.recommendationKinds ?? []).includes('semantic-never-scanned'), detail: `kind=${r.kind} score=${r.score} tier=${r.tier} kinds=${JSON.stringify(r.recommendationKinds)}` }
     })
 
-    // H4 有 cwd 会话 create 落到 workspace 作用域的 md 文件，不落 global；索引文件生成
+    // H4 有 cwd 会话 create 落到 workspace 作用域的 md 文件，不落 global
     let savedId = ''
     await attempt('H4-SAVE-LANDS-IN-WORKSPACE', async () => {
       const r = await call('memory_save', { action: 'create', name: 'host-contract-probe', summary: '契约探针', content: '由宿主契约检查写入的记录', ...MEMORY_BASE }, execA) as { kind: string; record?: { id: string; scope: string; workspacePath?: string } }
@@ -397,8 +397,7 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       const wsDirs = dirs.filter(d => d !== 'global')
       const found = wsDirs.filter(d => readdirSync(join(memoriesRoot, d)).some(f => f.endsWith('.md') && f !== 'MEMORY.md' && readFileSync(join(memoriesRoot, d, f), 'utf8').includes(`id: ${savedId}`)))
       const inGlobal = existsSync(join(memoriesRoot, 'global')) && readdirSync(join(memoriesRoot, 'global')).some(f => f.endsWith('.md') && readFileSync(join(memoriesRoot, 'global', f), 'utf8').includes(`id: ${savedId}`))
-      const index = found.length === 1 && existsSync(join(memoriesRoot, found[0], 'MEMORY.md')) && readFileSync(join(memoriesRoot, found[0], 'MEMORY.md'), 'utf8').includes(savedId)
-      return { ok: r.record.scope === 'workspace' && found.length === 1 && !inGlobal && index, detail: `scope=${r.record.scope} wsDirs=${wsDirs.join(',')} foundIn=${found.join(',')} inGlobal=${inGlobal} indexed=${index}` }
+      return { ok: r.record.scope === 'workspace' && found.length === 1 && !inGlobal, detail: `scope=${r.record.scope} wsDirs=${wsDirs.join(',')} foundIn=${found.join(',')} inGlobal=${inGlobal}` }
     })
 
     // H3b 存下第一条记忆、还没扫过：提示做第一次语义扫描（在任何 scan 之前）

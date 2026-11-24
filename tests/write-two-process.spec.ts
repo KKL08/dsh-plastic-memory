@@ -10,6 +10,7 @@ import { ARCHIVE_DIR, GLOBAL_DIR } from '../src/storage/paths.ts'
 import { FileTable } from '../src/storage/file-table.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
+import { indexedIdsMatchDisk } from './helpers/topic-index.ts'
 
 // 测试第 5 层：两个真实 Node 进程同时写同一个记忆目录（rename 只覆盖同一记录自己的文件，
 // 所以两个进程写同名异 id 的记录两条都存活）。子进程用 Node 内置类型剥离直接跑 .ts，起跑靠 stdin 握手同步。
@@ -55,8 +56,8 @@ describe('双进程写路径', () => {
     for (const r of results) expect(bodies.some(b => b.includes(r.content))).toBe(true)
     const t = new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() })
     for (const r of results) expect((await t.locate(r.id, {}))!.record.content).toBe(r.content)
-    const idx = await readFile(join(dir, 'MEMORY.md'), 'utf8')
-    for (const r of results) expect(idx).toContain(r.id)
+    await t.maintain([dir])
+    expect(await indexedIdsMatchDisk(t, dir)).toEqual(results.map(r => r.id).sort())
   }, 30_000)
 
   it('两个进程各自 save 同名异 id 再 forget：归档时 .archive/ 里同名异 id 两份都保留，顶层清空', async () => {

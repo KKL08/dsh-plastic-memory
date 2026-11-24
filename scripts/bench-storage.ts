@@ -40,7 +40,6 @@ import { resolveDuplicates, type MemoryLogger, type ScopeReadResult } from '../s
 import { CONFIDENCE_BY_SOURCE, type MemoryRecord } from '../src/record-schema.ts'
 import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
-import { formatIndexLine } from '../src/index-line.ts'
 import { SnapshotCache } from '../src/runtime.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
@@ -201,7 +200,6 @@ const gc = exposeGc()
 let warnings = 0
 const quietLog: MemoryLogger = { info() {}, warn() { warnings++ }, error() { warnings++ } }
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
-const fmtIndex = (r: MemoryRecord) => formatIndexLine(r, { passive: registry.get(r.type).recall === 'passive' })
 const newSidecar = (root: string) => new SidecarStore({
   root,
   schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema },
@@ -230,7 +228,7 @@ try {
   // 工具共用的一份运行时（对应插件加载后的接线对象；记忆本身不常驻内存）
   const sidecar = newSidecar(root)
   const newTable = (parseCache?: ParseCache<never>) =>
-    new FileTable({ root, stats: sidecar.recallStats, formatIndexLine: fmtIndex, log: quietLog, parseCache })
+    new FileTable({ root, stats: sidecar.recallStats, log: quietLog, parseCache })
   const fileTable = newTable()
   const uncached = newTable(new ParseCache({ maxEntries: 0 }))
   const visibleDirs = [join(root, workspaceDirName(currentWs)), join(root, GLOBAL_DIR)]
@@ -268,7 +266,7 @@ try {
 
   const results = [
     await bench('构造（零 I/O）', async () => {
-      new FileTable({ root, stats: newSidecar(root).recallStats, formatIndexLine: fmtIndex, log: quietLog })
+      new FileTable({ root, stats: newSidecar(root).recallStats, log: quietLog })
     }),
     await bench('readScope（当前项目 + global）', () => readVisible(fileTable)),
     await bench('readScope 冷读（每轮新缓存）', () => readVisible(newTable())),

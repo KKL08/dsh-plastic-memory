@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
-import { INDEX_FILE, workspaceDirName } from '../src/storage/paths.ts'
+import { workspaceDirName } from '../src/storage/paths.ts'
 import { createAgentsMdWriter } from '../src/storage/agents-md.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
@@ -19,22 +19,23 @@ import { candidate, record } from './helpers/record.ts'
 import { noInstructions } from './helpers/instructions.ts'
 
 // 撤销条目的指纹取本次提交的那条：A 已写盘、还没记撤销条目时 B 写进同一条，撤销 A 不能把 B 当成 A 写的盖掉。
-// fs 是进程边界：给 writeFile 套一层闸门，让 A 写盘后维护索引那一步停住；这时另一个进程（真实 writeFile）把 B 写进同一个文件，再放行 A。
+// fs 是进程边界：给 rename 套一层闸门，让 A 的记忆文件改名落盘之后、写入还没返回时停住；
+// 这时另一个进程（直接 writeFile，不经改名）把 B 写进同一个文件，再放行 A。
 const { writeGate } = vi.hoisted(() => ({
   writeGate: { current: undefined as { match: (path: string) => boolean; entered: () => void; release: Promise<void> } | undefined },
 }))
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
-  const writeFile = vi.fn(async (...args: Parameters<typeof actual.writeFile>) => {
+  const rename = vi.fn(async (...args: Parameters<typeof actual.rename>) => {
+    await actual.rename(...args)
     const g = writeGate.current
-    if (g !== undefined && g.match(String(args[0]))) {
+    if (g !== undefined && g.match(String(args[1]))) {
       writeGate.current = undefined
       g.entered()
       await g.release
     }
-    return actual.writeFile(...args)
   })
-  return { ...actual, writeFile }
+  return { ...actual, rename }
 })
 
 const WS = '/ws/race'
@@ -79,8 +80,8 @@ describe('撤销条目记本次提交的记录', () => {
     let entered!: () => void
     let release!: () => void
     const reached = new Promise<void>((resolve) => { entered = resolve })
-    // A 改了摘要：写完记忆文件后维护点要重写索引，就停在写索引的临时文件上
-    writeGate.current = { match: p => p.startsWith(join(dir, INDEX_FILE)), entered, release: new Promise((resolve) => { release = resolve }) }
+    // A 改了摘要：记忆文件改名落盘之后就停住，撤销条目还没记
+    writeGate.current = { match: p => p === file, entered, release: new Promise((resolve) => { release = resolve }) }
     const saving = e.save({ action: 'update', change: 'correct', id: 'mem_r', name: '名', summary: 'A 的摘要', content: 'A 改写的' })
     await reached
     const a = (await e.store.get('mem_r', scopeAt(WS)))!

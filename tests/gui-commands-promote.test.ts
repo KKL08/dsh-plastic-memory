@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { readFile, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { GLOBAL_DIR, INDEX_FILE, workspaceDirName } from '../src/storage/paths.ts'
+import { GLOBAL_DIR, workspaceDirName } from '../src/storage/paths.ts'
 import { candidateFingerprint } from '../src/governance/decisions.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { RETENTION_MS } from '../src/retention.ts'
@@ -13,6 +13,7 @@ import type { MemoryRecord } from '../src/record-schema.ts'
 import { candidate, record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 import { InMemoryTable } from './helpers/in-memory-table.ts'
+import { indexText, indexedIds } from './helpers/topic-index.ts'
 import { NOW, SESSION_WS, OTHER_WS, registry, root, env, ok, err, seedPair, allEntries, ledgerItems } from './helpers/gui-command-env.ts'
 
 
@@ -656,9 +657,12 @@ describe('move-memory（建议整理「放错层」的移到项目）', () => {
     expect([scope, workspacePath]).toEqual(['workspace', SESSION_WS])
     const { scope: _s, workspacePath: _w, ...before } = original()
     expect(rest).toEqual(before)
-    // 索引跟着变：项目的 MEMORY.md 有它，全局的没有
-    expect(await readFile(join(dirname(moved.filePath), INDEX_FILE), 'utf8')).toContain('装依赖用 pnpm')
-    expect(await readFile(join(root, GLOBAL_DIR, INDEX_FILE), 'utf8').catch(() => '')).not.toContain('装依赖用 pnpm')
+    // 索引跟着变：维护后项目的索引有它，全局的没有
+    await e.store.maintain({ kind: 'visible', workspacePath: SESSION_WS })
+    expect(await indexedIds(dirname(moved.filePath))).toContain('mem_g')
+    expect(await indexText(dirname(moved.filePath))).toContain('装依赖用 pnpm')
+    expect(await indexedIds(join(root, GLOBAL_DIR))).not.toContain('mem_g')
+    expect(await indexText(join(root, GLOBAL_DIR))).not.toContain('装依赖用 pnpm')
 
     const [snap] = await e.snapshots.list()
     expect(snap).toMatchObject({ memoryIds: ['mem_g'] })

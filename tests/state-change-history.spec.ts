@@ -22,6 +22,7 @@ import type { MemoryRecord } from '../src/record-schema.ts'
 import { candidate, record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 import { noInstructions } from './helpers/instructions.ts'
+import { indexText, indexedIds } from './helpers/topic-index.ts'
 
 // 更新记忆时声明改动性质，以及状态变化留历史版本：经真实的保存管线，落在真实文件表和 .state 侧表上。
 
@@ -379,8 +380,8 @@ describe('状态变化', () => {
     expect((await e.store.copiesOf(made.id))).toEqual([{ kind: 'workspace', workspacePath: WS }])
     const found = (await e.store.locate(made.id, scopeAt(WS)))!
     await e.store.maintain({ kind: 'workspace', workspacePath: WS })
-    const index = await readFile(join(dirname(found.filePath), INDEX_FILE), 'utf8')
-    expect(index.split('\n').filter(l => l.startsWith('- '))).toHaveLength(1)
+    expect(await indexedIds(dirname(found.filePath))).toEqual([made.id])
+    expect(await indexText(dirname(found.filePath))).not.toContain('Compose')
     expect(await versionsOf(e, made.id)).toHaveLength(1)
   })
 })

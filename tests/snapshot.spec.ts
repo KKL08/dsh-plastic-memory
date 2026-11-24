@@ -247,8 +247,8 @@ describe('索引与引导', () => {
     },
   })
 
-  describe('MEMORY.md 行与注入索引行末尾带文件名（同源格式，passive 不带 summary；磁盘侧不带陈旧度，注入侧带）', () => {
-    it('注入索引行以 · 相对记忆根目录的文件路径收尾，与 MEMORY.md 同一个格式器；陈旧度在文件名之前', () => {
+  describe('注入索引行末尾带文件名（passive 不带 summary，久未确认的带陈旧度）', () => {
+    it('注入索引行以 · 相对记忆根目录的文件路径收尾；陈旧度在文件名之前', () => {
       const stale = record({ id: 'mem_p', name: '冻结', type: 'project', lastConfirmedAt: 0, summary: '冻结到三月' })
       const ref = record({ id: 'mem_ref', name: '看板', type: 'link', summary: '团队看板的地址' })
       const files = new Map([['mem_p', 'myproj-1234abcd/冻结.md'], ['mem_ref', 'global/看板.md']])
@@ -266,7 +266,7 @@ describe('索引与引导', () => {
       const { text } = assembleSnapshot({ ...base, records: recs, workspacePath: WS, memoryRoot: ROOT, evidenceLookup: 'active' })
       expect(text).toContain(`${ROOT}/global/MEMORY.md`)
       expect(text).toContain(`${ROOT}/${workspaceDirName(WS)}/MEMORY.md`)
-      expect(text).toContain(`\n完整索引：\n- 全局记忆：${ROOT}/global/MEMORY.md\n- 本项目记忆：`)
+      expect(text).toContain(`\n记忆索引（按主题列出，条目在各主题页里）：\n- 全局记忆：${ROOT}/global/MEMORY.md\n- 本项目记忆：`)
       expect(text).toContain(`MEMORY.md\n\n看记忆全文：用 memory_search 按 id 或关键词查；要看文件原样，再 Read 索引行末尾的文件（路径相对 ${ROOT}/）。`)
       expect(text).not.toContain('grep')
       expect(text).toMatch(/\.archive\/[^\n]*已遗忘、已取代[^\n]*日常不要读/)
@@ -359,13 +359,13 @@ describe('索引与引导', () => {
       expect(nav).not.toContain('tag-f')
       expect(nav).toContain(`${ROOT}/global/MEMORY.md`)
       expect(nav).toContain(`${ROOT}/${workspaceDirName(WS)}/MEMORY.md`)
-      expect(nav).toContain(`用 memory_search 查询；要浏览全部条目，完整索引见 ${ROOT}/global/MEMORY.md、${ROOT}/${workspaceDirName(WS)}/MEMORY.md。`)
+      expect(nav).toContain(`用 memory_search 查询；要浏览全部条目，从 ${ROOT}/global/MEMORY.md、${ROOT}/${workspaceDirName(WS)}/MEMORY.md 进各主题页。`)
     })
 
-    it('没有记忆根目录时，导航行的完整索引指向各记忆目录的 MEMORY.md', () => {
+    it('没有记忆根目录时，导航行指向各记忆目录的 MEMORY.md', () => {
       const { text } = assembleSnapshot({ ...base, records: [1, 2].map(i => record({ id: `mem_n${i}` })), budget: 5, overflow: 'strict' })
       expect(text).toContain('索引未列全')
-      expect(text).toContain('用 memory_search 查询；要浏览全部条目，完整索引见各记忆目录的 MEMORY.md。')
+      expect(text).toContain('用 memory_search 查询；要浏览全部条目，从各记忆目录的 MEMORY.md 进各主题页。')
     })
 
     it('没有被截掉的记录时不出导航图', () => {

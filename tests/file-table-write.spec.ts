@@ -20,6 +20,7 @@ import { RecordNotFoundError } from '../src/errors.ts'
 import { captureRejection } from './helpers/errors.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 import { writesDuring } from './helpers/fs-writes.ts'
+import { indexedIds } from './helpers/topic-index.ts'
 
 // 「不触碰文件」看 node:fs/promises 的写调用记录（透传，见 helpers/fs-writes.ts），不比 mtime。
 vi.mock('node:fs/promises', async importOriginal => (await import('./helpers/fs-writes.ts')).recordWrites(await importOriginal()))
@@ -170,13 +171,12 @@ describe('FileTable 写侧', () => {
     expect(await readFile(join(root, GLOBAL_DIR, 'a.md'), 'utf8')).toContain('customField')
   })
 
-  it('MEMORY.md 在写路径末尾再生且只列 active+stale', async () => {
+  it('维护后主题索引只列在用的记忆，已删的没有', async () => {
     const t = await load()
     await t.put(record({ id: 'mem_a', name: '活着' }), {})
     await t.put(record({ id: 'mem_d', name: '已删', status: 'deleted' }), {})
-    const idx = await readFile(join(root, GLOBAL_DIR, 'MEMORY.md'), 'utf8')
-    expect(idx).toContain('mem_a')
-    expect(idx).not.toContain('mem_d')
+    await t.maintain([join(root, GLOBAL_DIR)])
+    expect(await indexedIds(join(root, GLOBAL_DIR))).toEqual(['mem_a'])
   })
 
   it('并发 update 串行化（进程内互斥）：两个并发自增最终计数为 2', async () => {
@@ -307,7 +307,7 @@ describe('写路径内核（锁内定位、排他占名、搬家与归档）', (
     expect(await readFile(join(globalDir(), `b-${'mem_a'.slice(-6)}.md`), 'utf8')).toContain('我是 A')
   })
 
-  it('status→deleted：文件移入同目录 .archive/、顶层消失、补 deletedAt（取 now）、MEMORY.md 不再列它', async () => {
+  it('status→deleted：文件移入同目录 .archive/、顶层消失、补 deletedAt（取 now）、维护后索引里没有它', async () => {
     const NOW = 1_800_000_000_000
     const t = new FileTable({ root, stats: new InMemoryKvTable<RecallStats>(), now: () => NOW })
     await t.create(record({ id: 'mem_a', name: '活着', updatedAt: NOW - 10 }))
@@ -317,9 +317,8 @@ describe('写路径内核（锁内定位、排他占名、搬家与归档）', (
     expect(await mds(globalDir())).toEqual(['活着.md'])
     expect(await mds(join(globalDir(), ARCHIVE_DIR))).toEqual(['要删.md'])
     expect(await readFile(join(globalDir(), ARCHIVE_DIR, '要删.md'), 'utf8')).toContain('deletedAt:')
-    const idx = await readFile(join(globalDir(), 'MEMORY.md'), 'utf8')
-    expect(idx).toContain('mem_a')
-    expect(idx).not.toContain('mem_d')
+    await t.maintain([globalDir()])
+    expect(await indexedIds(globalDir())).toEqual(['mem_a'])
     expect((await t.locate('mem_d', {}))!.record.deletedAt).toBe(NOW)
   })
 
@@ -394,9 +393,8 @@ describe('写路径内核（锁内定位、排他占名、搬家与归档）', (
     expect(await tmps(wsDir())).toEqual([])
     expect(await tmps(join(wsDir(), ARCHIVE_DIR))).toEqual([])
     for (const s of saved) expect((await t.locate(s.record.id, { workspacePath: WS }))!.record.content).toBe(s.record.content)
-    const idx = await readFile(join(wsDir(), 'MEMORY.md'), 'utf8')
-    for (const s of saved) expect(idx).toContain(s.record.id)
-    expect(idx).not.toContain(victim.id)
+    await t.maintain([wsDir()])
+    expect((await indexedIds(wsDir())).sort()).toEqual(saved.map(s => s.record.id).sort())
   })
 
   it('promote 到 global 后旧 workspace 文件消失、新实例只看到 global 那份；pre-promote 快照 restore 后 global 消失、workspace 回来（无双文件）', async () => {

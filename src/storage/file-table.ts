@@ -15,7 +15,7 @@ import { decodeFile, digestMismatch, encodeRecord, type DecodeOutcome, type File
 import { ParseCache, type CachedFile, type FileSignature } from './parse-cache.ts'
 import type { RootLock } from '../root-lock.ts'
 import type { OpJournal, PendingOp } from './op-journal.ts'
-import type { DerivedIndex, HintRow, LevelScan } from './derived-index.ts'
+import type { DerivedIndex, HintRow, LevelScan, TopicPageRow } from './derived-index.ts'
 import { defaultRootLock } from './root-lock.ts'
 import { describeError } from './state-files.ts'
 import {
@@ -24,9 +24,10 @@ import {
 } from './paths.ts'
 import { linkExclusive } from './exclusive-link.ts'
 import { FileVersionHistory, type VersionHistory } from './history.ts'
-import { formatIndexLine } from '../index-line.ts'
-import { maskDiagnostic } from '../secrets.ts'
-import { withinValidity } from '../record-freshness.ts'
+import { maskDiagnostic, maskSecrets } from '../secrets.ts'
+import { isPendingDelegated } from '../record-schema.ts'
+import { UNSORTED_PAGE, UNSORTED_TITLE, maskIndexText, readIndex, reconcileIndex, renderProjection, withoutMember, type IndexFiles, type IndexedMemory } from '../topic-index.ts'
+import { INDEX_DIR, INDEX_TOPICS_DIR, IndexChangedError, readIndexFiles, writeIndexFiles } from './index-store.ts'
 import { RETENTION_MS } from '../retention.ts'
 
 /** 软删记录清扫窗口：与快照保留共用 retention.ts 的单一来源（两者必须一致）。 */
@@ -88,8 +89,8 @@ const NO_PREFILTER: Prefilter = { terms: [], match: 'all' }
 export interface FileTableOptions {
   root: string
   stats: KvTable<RecallStats>
-  /** 索引行格式器由接线层注入（storage 层不依赖 registry）；缺省用无陈旧度的简版。fileName 是同目录的文件名。 */
-  formatIndexLine?: (r: MemoryRecord, fileName: string) => string
+  /** 一条记忆算不算久未确认，由接线层注入（storage 层不依赖 registry）；只用来在 MEMORY.md 里数数，缺省都不算。 */
+  isStale?: (r: MemoryRecord, now: number) => boolean
   now?: () => number
   /** 日志注入口，缺省回退 console（见 store.ts MemoryLogger）。 */
   log?: MemoryLogger
@@ -150,11 +151,6 @@ function layerDirOf(level: string): string {
 function statSignature(name: string, s: { size: number; mtimeMs: number }): string {
   return `${name}\u0000${s.size}\u0000${s.mtimeMs}`
 }
-
-const INDEX_HEADER = '# Memory Index\n\n'
-
-/** 索引里一条记忆的行：以「- [id] 」开头、以「 · 文件名」结尾。占几行的条目（名字或摘要带换行）第一行就对不上。 */
-const INDEX_LINE_RE = /^- \[[^\]]+\] .* · [^/]+\.md$/
 
 /** 记提示时读文件里的 id 行：值照原样取（可以带空格），两头的引号去掉。只是线索，命中后按完整解析的结果核对。 */
 const HINT_ID_RE = /^id:[ \t]*["']?(.*?)["']?[ \t]*$/m
@@ -726,13 +722,14 @@ export class FileTable implements MemoryTable {
 
   /**
    * 维护点（快照冻结时调用；锁内，只动给定目录，幂等）。写路径末尾不做：它的开销和目录大小成正比，写入只处理自己动到的文件
-   * （见 persist、patchIndexLine）。每个目录读顶层 + .archive/ 一遍，逐文件：
+   * （见 persist）。每个目录读顶层 + .archive/ 一遍，逐文件：
    *  - .archive/ 里 status 仍为 active 的按位置归一成 deleted（位置即作用域，不搬回顶层）；deleted 缺 deletedAt 用 mtime 补
    *  - ③ .archive/ 里 deletedAt 超保留期的物理删除，哪层都没有这个 id 了才清召回统计行（superseded 不清）
    *  - ④ 手建 / 手编回写：digest 认识且不匹配 → updatedAt 与 lastConfirmedAt 取 mtime；缺 id / 缺 digest / 时间戳形态 /
    *    缺省字段由重新 encode 补齐；判「有变化」= 重新 encode 后与磁盘原文逐字节比较，不同才写；顶层含保留键的文件不回写
    *  - ② 顶层非 active 的搬进 .archive/（撞名追加 id 片段）；已过期的 active 文件不动
-   *  - ① 再生 MEMORY.md：顶层 active 且未过期，同 id 取一份，name 再 id 排序，内容不变不写
+   *  - ① 核对主题索引（_index/）：没进索引的在用记忆补进「未整理」，已不在的条目去掉，名称和摘要按记忆同步；
+   *    再按索引重写 MEMORY.md。已过期的在用记忆照列。内容不变不写；写之前文件被别人改过就重读重算
    *  - ⑤ 陈旧 tmp 清理
    * 同 id 副本不在这里删（只在写该 id 时清理，见 persist）。
    * 读完顺手把派生库里这两层的提示按读到的记录重记一遍：没改目录修改时间的手编（原地改了 id）靠这里补上。
@@ -810,23 +807,26 @@ export class FileTable implements MemoryTable {
       }
       // 核对这一层其余的历史目录
       await this.reconcileHistory(sd, new Set(slots.filter(s => !purged.has(s)).map(s => s.record.id)))
-      // kept 只剩顶层 active（非 active 已搬走）：同 id 取一份，再过滤已过期的
-      const indexable = (located: readonly LocatedRecord[]) => resolveDuplicates(located).filter(s => withinValidity(s.record, now))
-      let text = this.indexText(indexable(kept))
-      // 别的进程可能在本轮读目录之后写进同一目录，并先一步写好了全的索引，本轮按旧清单写会盖掉它：写了就比一次顶层签名
-      // （只 readdir + stat），变了才重读顶层、按新清单再写，最多 INDEX_ROUNDS 次。插件的写都经 tmp + rename 落盘，
-      // 别处增删改都会改变名字、大小或 mtime；手编也改 mtime。最后写索引的进程以写后的目录为准，索引收敛到全的那份
+      // kept 只剩顶层 active（非 active 已搬走）。整份核对主题索引，再从索引生成 MEMORY.md。
+      // 别的进程可能在本轮读目录之后写进同一目录，按旧清单核对会把它刚加的记忆漏在索引外：写了就比一次顶层签名
+      // （只 readdir + stat），变了才重读顶层、按新清单再核对，最多 INDEX_ROUNDS 次。插件的写都经 tmp + rename 落盘，
+      // 别处增删改都会改变名字、大小或 mtime；手编也改 mtime。核对结果只由索引和清单决定，最后一轮以写后的目录为准
       let signature = signatureOf(seen)
-      for (let round = 1; await this.writeIndex(sd.dir, text) && round < INDEX_ROUNDS; round++) {
-        if (await this.topLevelSignature(sd.dir) === signature) break
+      let located: readonly LocatedRecord[] = kept
+      // 这一层有读不出来的文件时，索引里对不上清单的行先留着（见 reconcileIndex）
+      let isComplete = isLayerComplete
+      for (let round = 1; round <= INDEX_ROUNDS; round++) {
+        const outcome = await this.syncTopicIndex(sd.dir, located, now, isComplete)
+        if (outcome === 'unchanged' || round === INDEX_ROUNDS) break
+        // 索引文件在核对期间被改过的那一轮什么都没写，直接按现在的内容重来
+        if (outcome === 'written' && await this.topLevelSignature(sd.dir) === signature) break
         const fresh = new Map<string, string>()
-        const { slots } = await this.readDirs([sd], {}, fresh)
+        const reread = await this.readDirs([sd], {}, fresh)
         signature = signatureOf(fresh)
-        const next = this.indexText(indexable(slots.filter(s => s.record.status === 'active')))
-        if (next === text) break
-        text = next
+        located = reread.slots.filter(s => s.record.status === 'active')
+        isComplete = reread.quarantined.length === 0 && !reread.directoryNotes.some(isIncompleteNote)
       }
-      for (const level of [sd.dir, archive]) await this.cleanStaleTmp(level)
+      for (const level of [sd.dir, archive, join(sd.dir, INDEX_DIR), join(sd.dir, INDEX_DIR, INDEX_TOPICS_DIR)]) await this.cleanStaleTmp(level)
     }
   }
 
@@ -1010,59 +1010,75 @@ export class FileTable implements MemoryTable {
     return signatureOf(seen)
   }
 
-  /** 索引全文：只由传入的 active 记录决定。 */
-  private indexText(active: readonly LocatedRecord[]): string {
-    // 缺省格式器与注入侧同源（src/index-line.ts）。磁盘索引不带陈旧度：静态文件里的
-    // 时间相对标注会随时间失真，所以这里有意和注入侧不同。
-    // 行末带同目录的实际文件名，模型拿到即可 Read，不用再 grep id。
-    const fmt = this.opts.formatIndexLine ?? ((r: MemoryRecord, file: string) => formatIndexLine(r, { passive: false, file }))
-    // 索引行序必须确定：readdir 序跨设备不确定，多设备同步下会造成索引文件 churn。
-    // 按 name 排序（不用 localeCompare——locale 依赖环境），name 相同用 id 决胜。
-    const located = active.slice().sort(({ record: a }, { record: b }) =>
-      a.name < b.name ? -1 : a.name > b.name ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
-    const lines = located.map(l => fmt(l.record, basename(l.filePath)))
-    return `${INDEX_HEADER}${lines.join('\n')}${lines.length ? '\n' : ''}`
+  /**
+   * 整份核对这个目录的主题索引，再从索引生成 MEMORY.md；返回有没有写文件。失败不致命：索引和投影下次维护再补。
+   * 有一行的是顶层在用、已进主档的记忆（同 id 取一份）：已过期的、还没生效的照样有；子 agent 存下、还没接受的没有。
+   * 主题名、主题说明这些手写的文字落盘前遮一遍密钥；成员行出自记忆自己的名称和摘要，不在这里遮。
+   */
+  /** 把核对好的主题索引记进派生库：哪条记忆在哪一页、各页的主题名和曾用名，带各页文件此刻的签名。和记着的一样就不写。 */
+  private async recordTopicPages(dir: string, files: IndexFiles): Promise<void> {
+    const index = this.index
+    if (index === undefined) return
+    const { topics, unsorted } = readIndex(files)
+    const listed = topics.map(t => ({ page: t.fileName, title: t.name, aliases: [...new Set(t.aliases)], memberIds: [...new Set(t.memberIds)] }))
+    if (files.pages[UNSORTED_PAGE] !== undefined) listed.push({ page: UNSORTED_PAGE, title: UNSORTED_TITLE, aliases: [], memberIds: [...new Set(unsorted)] })
+    // 签名要和记下的内容出自同一份文件：取签名、读内容、再取一次签名，内容不是要记的那份或前后签名不同就记空签名
+    // （空签名和任何文件都对不上，用的人会当这一行不可信）
+    const rows: TopicPageRow[] = await Promise.all(listed.map(async p => {
+      const filePath = join(dir, INDEX_DIR, INDEX_TOPICS_DIR, p.page)
+      const sigNow = () => stat(filePath).then(s => sigOf(s), () => '')
+      const sig = await sigNow()
+      const text = await readFile(filePath, 'utf8').catch(() => undefined)
+      return { ...p, sig: text === files.pages[p.page] && sig === await sigNow() ? sig : '' }
+    }))
+    // 两边各自排好再比：库按字节序给，这里按码元序，直接比会在少数页名上总是不等
+    const shape = (list: readonly TopicPageRow[]) => JSON.stringify(list.map(p => [p.page, p.title, p.sig, p.aliases, p.memberIds]).sort((a, b) => (a[0]! < b[0]! ? -1 : 1)))
+    if (shape(index.topicPages(dir)) !== shape(rows)) index.replaceTopicPages(dir, rows)
   }
 
   /**
-   * 写入结束时只改这条记忆在 MEMORY.md 里的那一行，不重读目录：去掉这个 id 原来的行，entry 给了（顶层、在用、没过期）就按名字插回去。
-   * 行的位置按行文字比，和整份重新生成的顺序只在名字相同、或一个名字是另一个名字的开头时可能不同；快照冻结时的维护点会按确定的顺序重写。
-   * 按行改不了的时候对这个目录做一次完整维护（它写完会复核目录、收敛到全的那份）：
-   *  - 索引还不存在，或不是「开头加一行一条记忆」的样子（手改过、名字或摘要里带换行的记忆占了几行）；
-   *  - 写锁此刻不是跨进程互斥的：另一个进程可能正拿着旧索引往回写，按行改会把它刚删的行带回来。
-   * 索引是生成物，失败不致命。
+   * 核对一个目录的主题索引并再生 MEMORY.md。返回 written（写了东西）、unchanged（一点没变）、
+   * retry（索引文件在核对期间被改过，或这次没核对成：什么都没盖，下一轮按现在的内容重来）。
    */
-  private async patchIndexLine(dir: string, id: string, entry?: LocatedRecord): Promise<void> {
-    const path = join(dir, INDEX_FILE)
-    const fmt = this.opts.formatIndexLine ?? ((r: MemoryRecord, file: string) => formatIndexLine(r, { passive: false, file }))
-    const line = entry === undefined ? undefined : fmt(entry.record, basename(entry.filePath))
-    const prev = await readFile(path, 'utf8').catch(() => undefined)
-    const lines = prev?.startsWith(INDEX_HEADER) ? prev.slice(INDEX_HEADER.length).split('\n').filter(l => l !== '') : undefined
-    const isLineWise = lines !== undefined && lines.every(l => INDEX_LINE_RE.test(l)) && (line === undefined || (!line.includes('\n') && INDEX_LINE_RE.test(line)))
-    if (prev === undefined || lines === undefined || !isLineWise || this.lock.isExclusive?.() === false) {
-      await this.maintainDirs([dir])
-      return
-    }
+  /**
+   * 一条记忆搬出了这个目录（换了作用域，或这里的重复副本被清掉）：当场把它的行从这里的索引去掉，不等这个目录下次维护。
+   * 之后彻底删除它时，别的目录里就不会还留着它的名称和摘要。
+   */
+  private async dropIndexMember(dir: string, id: string): Promise<void> {
     try {
-      const own = `- [${id}] `
-      const kept = lines.filter(l => !l.startsWith(own))
-      if (line !== undefined) {
-        const at = kept.findIndex(l => l.slice(l.indexOf('] ') + 2) > entry!.record.name)
-        kept.splice(at === -1 ? kept.length : at, 0, line)
-      }
-      const text = `${INDEX_HEADER}${kept.join('\n')}${kept.length ? '\n' : ''}`
-      if (text !== prev) await this.atomicWrite(path, text)
-    } catch { /* 冻结时的维护点会重写 */ }
+      const before = await readIndexFiles(dir)
+      if (before === undefined) return
+      const next = withoutMember(before, id)
+      const written = await writeIndexFiles(dir, before, next, (filePath, text) => this.atomicWrite(filePath, text))
+      if (written.length > 0) await this.recordTopicPages(dir, next)
+    } catch (err) {
+      this.log.warn(`[plastic-memory] 没能把搬走的记忆从原目录的主题索引里去掉，等这个目录下次维护（${describeError(err)}）`)
+    }
   }
 
-  /** 写索引，内容不变不写；返回是否写了。 */
-  private async writeIndex(dir: string, text: string): Promise<boolean> {
+  private async syncTopicIndex(dir: string, active: readonly LocatedRecord[], now: number, isComplete: boolean): Promise<'written' | 'unchanged' | 'retry'> {
     try {
+      const listed = resolveDuplicates(active).filter(l => !isPendingDelegated(l.record))
+      // 手建的记忆文件名称、摘要里可能带着密钥：进索引的这一份先遮
+      const members = listed.map((l): IndexedMemory => ({ id: l.record.id, name: maskSecrets(l.record.name), summary: maskSecrets(l.record.summary), fileName: basename(l.filePath) }))
+      const before = await readIndexFiles(dir)
+      const { files } = reconcileIndex(before, members, isComplete)
+      const next = {
+        entry: maskSecrets(files.entry),
+        pages: Object.fromEntries(Object.entries(files.pages).map(([name, text]) => [name, maskIndexText(text, maskSecrets)])),
+      }
+      const written = await writeIndexFiles(dir, before, next, (filePath, text) => this.atomicWrite(filePath, text))
+      const isStale = this.opts.isStale
+      const staleIds = new Set(isStale === undefined ? [] : listed.filter(l => isStale(l.record, now)).map(l => l.record.id))
+      const projection = renderProjection(next, staleIds)
       const prev = await readFile(join(dir, INDEX_FILE), 'utf8').catch(() => '')
-      if (prev === text) return false
-      await this.atomicWrite(join(dir, INDEX_FILE), text)
-      return true
-    } catch { return false /* 索引是生成物，失败不致命 */ }
+      if (prev !== projection) await this.atomicWrite(join(dir, INDEX_FILE), projection)
+      await this.recordTopicPages(dir, next)
+      return written.length > 0 || prev !== projection ? 'written' : 'unchanged'
+    } catch (err) {
+      if (!(err instanceof IndexChangedError)) this.log.warn(`[plastic-memory] 主题索引这次没核对成，下次维护再补（${describeError(err)}）`)
+      return 'retry'
+    }
   }
 
   /** 只删两类原子写残留：① pid 段是本进程（自家崩溃）② mtime 超 60 秒的陈旧文件。多进程共用 memoryRoot 时，
@@ -1243,11 +1259,9 @@ export class FileTable implements MemoryTable {
           this.log.warn(`[plastic-memory] 历史版本没跟到新的作用域，稍后补做（${describeError(err)}）`)
         }
       }
-      const isIndexed = next.status === 'active' && withinValidity(next, this.now())
-      await this.patchIndexLine(dir, key, isIndexed ? { record: next, filePath, dir } : undefined)
       if (moved) removedFrom.add(prev.dir)
       removedFrom.delete(dir)
-      for (const other of removedFrom) await this.patchIndexLine(other, key)
+      for (const other of removedFrom) await this.dropIndexMember(other, key)
       await this.settleHints(current, changes)
       // 调用方给的操作还有账要记，由它做完再结（finishOp）；自己建的到这里就做完了
       if (isHistoryPending && given !== undefined && this.isJournaling()) this.unfinishedOwn.set(op.id, [historyMove!])
@@ -1347,12 +1361,6 @@ export class FileTable implements MemoryTable {
           if (committed !== undefined) {
             if (target.source !== undefined && target.before !== undefined) await this.removeSourceIfUnchanged(target.source, target.before, committed.located.filePath)
             await this.runSteps(row.op, row.steps, committed.located.record, fingerprintOf(committed.raw) === target.after)
-            // 中途断掉时索引可能还没改：新位置那层按这条现在的样子改一行，原来那层去掉它
-            const { located } = committed
-            const isIndexed = dirname(located.filePath) === located.dir && located.record.status === 'active' && withinValidity(located.record, this.now())
-            await this.patchIndexLine(located.dir, target.memoryId, isIndexed ? located : undefined)
-            const from = target.source === undefined ? undefined : layerDirOf(target.source.dir)
-            if (from !== undefined && from !== located.dir) await this.patchIndexLine(from, target.memoryId)
           }
         } else if (!(await this.hasFileNamed(target.dir, target.nameHash))) {
           // 补做不删文件：名字不在了可能是删成了，也可能是中断后被人改了名，分不出来。同 id 还剩着的副本留给体检报

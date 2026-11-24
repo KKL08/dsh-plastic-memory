@@ -13,7 +13,7 @@ import type { LegacyKvTables } from './storage/legacy-kv-import.ts'
 import { localStateDir, OP_JOURNAL_FILE, DERIVED_INDEX_FILE, resolveMemoryRoot } from './storage/paths.ts'
 import { OpJournal } from './storage/op-journal.ts'
 import { DerivedIndex } from './storage/derived-index.ts'
-import { formatIndexLine } from './index-line.ts'
+import { stalenessNote } from './record-freshness.ts'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { SUBAGENT_MAX_SAVES_DEFAULT } from './pipeline.ts'
@@ -248,8 +248,8 @@ export async function apply(ctx: Context, config: Config) {
     journal,
     index: derivedIndex,
     stats: sidecar.recallStats,
-    // 磁盘索引不带陈旧度（静态文件里的时间相对标注会随时间失真），注入侧的陈旧度由 snapshot.ts 计算
-    formatIndexLine: (r, file) => formatIndexLine(r, { passive: registry.get(r.type).recall === 'passive', file }),
+    // MEMORY.md 里只数久未确认的条数；逐条的陈旧度标注由 snapshot.ts 在注入时算
+    isStale: (r, now) => stalenessNote(r, registry.get(r.type).decayDays, now) !== '',
     log: ctx.logger,
   })
   // 加载期零 I/O：FileTable 构造不碰磁盘，每个操作读它涉及的目录（磁盘是唯一真相，外部改动下次操作就能看到）
