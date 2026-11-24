@@ -2,7 +2,7 @@ import { sidecarSchemas } from './helpers/sidecar-schemas.ts'
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { chmod, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, relative } from 'node:path'
+import { join, relative, sep } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { ARCHIVE_DIR, GLOBAL_DIR, HISTORY_DIR, INDEX_FILE, STATE_DIR, workspaceDirName } from '../src/storage/paths.ts'
@@ -22,6 +22,8 @@ import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord, candidate } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 import { writesDuring } from './helpers/fs-writes.ts'
+import { indexedIds, isIndexPath } from './helpers/topic-index.ts'
+import { INDEX_DIR } from '../src/storage/index-store.ts'
 import { SECRET_MASK } from '../src/secrets.ts'
 import { InMemoryTable } from './helpers/in-memory-table.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
@@ -142,7 +144,7 @@ describe('密钥硬删', () => {
     }
     // 顶层与 .archive/ 只剩软删的干净条目
     const tree = await listTree(wsDir())
-    expect(tree.filter(p => p.endsWith('.md') && p !== INDEX_FILE)).toEqual([join(ARCHIVE_DIR, '干净条目.md')])
+    expect(tree.filter(p => p.endsWith('.md') && !isIndexPath(join(wsDir(), p)))).toEqual([join(ARCHIVE_DIR, '干净条目.md')])
     expect((await h.store.get('mem_clean', { workspacePath: WS }))?.status).toBe('deleted')
     const text = await allMemoryText()
     for (const secret of [FAKE_SECRET.sk, FAKE_SECRET.github, FAKE_SECRET.aws, SUSPECTED_TEXT]) expect(text).not.toContain(secret)
@@ -185,7 +187,7 @@ describe('密钥硬删', () => {
     expect((await readdir(snapDir())).filter(n => n.includes('.tmp-'))).toEqual([])
   })
 
-  it('验收场景：含三条记录的手动快照，硬删其中一条后另两条字节级不变、show 与 diff 正常、restore 恢复另两条并把脱敏那条计入 skipped 且说明已硬删；除被删文件与 MEMORY.md 外记忆目录没有写调用、目录项不变；重写中途失败（临时文件写到一半、rename 失败）快照文件仍是完整旧版', async () => {
+  it('验收场景：含三条记录的手动快照，硬删其中一条后另两条字节级不变、show 与 diff 正常、restore 恢复另两条并把脱敏那条计入 skipped 且说明已硬删；除被删文件、这一层的主题索引与 MEMORY.md 外记忆目录没有写调用、目录项不变；重写中途失败（临时文件写到一半、rename 失败）快照文件仍是完整旧版', async () => {
     const h = harness()
     await h.store.create(wsRec({ id: 'mem_x', name: '测试框架', content: '用 vitest' }))
     await h.store.create(wsRec({ id: 'mem_y', name: '提交语言', content: 'commit 用英文' }))
@@ -227,13 +229,14 @@ describe('密钥硬删', () => {
     const writes = await writesDuring(async () => { forgot = await h.forget(['mem_z']) })
     expect(forgot!.hardDeleted).toEqual(['mem_z'])
 
-    // 记忆目录（.state/ 除外）只写三处，都是删除的必然结果：删掉被删文件和它的历史版本目录、重写 MEMORY.md（派生索引必须去掉被删条目那一行）。
-    // 其余文件没有写调用，目录项只少了被删文件。
-    const touched = [join(root, zFile), join(wsDir(), INDEX_FILE), join(wsDir(), HISTORY_DIR, 'mem_z')]
+    // 记忆目录（.state/ 除外）只写这几处，都是删除的必然结果：删掉被删文件和它的历史版本目录、核对这一层的主题索引并重写 MEMORY.md
+    // （索引必须去掉被删条目那一行）。其余文件没有写调用，主题索引之外的目录项只少了被删文件。
+    const touched = [join(root, zFile), join(wsDir(), INDEX_FILE), join(wsDir(), INDEX_DIR), join(wsDir(), HISTORY_DIR, 'mem_z')]
     expect(writes.some(c => c.includes(touched[0]!))).toBe(true)
     expect(writes.filter(c => !c.includes(join(root, STATE_DIR)) && !touched.some(p => c.includes(p)))).toEqual([])
-    expect(await listTree(root)).toEqual(before.filter(rel => rel !== zFile))
-    expect(await readFile(join(wsDir(), INDEX_FILE), 'utf8')).not.toContain('mem_z')
+    const isOwnIndex = (rel: string) => join(root, rel).startsWith(wsDir() + sep) && isIndexPath(join(root, rel))
+    expect((await listTree(root)).filter(rel => !isOwnIndex(rel))).toEqual(before.filter(rel => rel !== zFile && !isOwnIndex(rel)))
+    expect((await indexedIds(wsDir())).sort()).toEqual(['mem_x', 'mem_y'])
     expect(await allMemoryText()).not.toContain(SUSPECTED_TEXT)
 
     // 另两条字节级不变；快照仍过 schema，经原子路径重写
@@ -270,7 +273,7 @@ describe('密钥硬删', () => {
     const fresh = harness()
     expect(await fresh.store.get('mem_x', { workspacePath: WS })).toMatchObject({ name: '测试框架', content: '用 vitest', status: 'active' })
     expect(await fresh.store.get('mem_y', { workspacePath: WS })).toMatchObject({ name: '提交语言', content: 'commit 用英文', status: 'active' })
-    expect((await listTree(wsDir())).filter(p => p.endsWith('.md') && p !== INDEX_FILE)).toEqual(['提交语言.md', '测试框架.md'])
+    expect((await listTree(wsDir())).filter(p => p.endsWith('.md') && !isIndexPath(join(wsDir(), p)))).toEqual(['提交语言.md', '测试框架.md'])
     // overwriteChanged 也不恢复脱敏记录
     const forced = await h.snapshot({ action: 'restore', snapshotId: manual.snapshotId, overwriteChanged: true })
     if (forced.kind !== 'restored') throw new Error(forced.kind)

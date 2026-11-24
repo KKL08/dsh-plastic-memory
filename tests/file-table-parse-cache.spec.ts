@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
 import { ParseCache } from '../src/storage/parse-cache.ts'
 import { decodeFile, encodeRecord, type FileLocation } from '../src/storage/frontmatter.ts'
-import { ARCHIVE_DIR, GLOBAL_DIR, INDEX_FILE, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
+import { ARCHIVE_DIR, GLOBAL_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
 import { MemoryStore } from '../src/store.ts'
 import { executeSearch } from '../src/tools/search.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
@@ -14,6 +14,7 @@ import type { MemoryRecord } from '../src/record-schema.ts'
 import { record } from './helpers/record.ts'
 import { fakeExec } from './helpers/exec.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
+import { indexText, indexedIds } from './helpers/topic-index.ts'
 
 // 解析缓存接进 FileTable 的读取路径（readScope、检索）：在文件系统边界看读了哪些记忆文件的内容，
 // 外部改写用真实的 utimes / rename；粗时间戳与「读取中途卡住」在 stat / readFile 上模拟。
@@ -316,7 +317,7 @@ describe('解析缓存：写路径逐出与维护点', () => {
     expect(await exists(path)).toBe(true)
     expect(await exists(join(globalDir(), ARCHIVE_DIR, 'a.md'))).toBe(false)
     await t.maintain([globalDir()])
-    expect(await readFile(join(globalDir(), INDEX_FILE), 'utf8')).toContain('mem_a')
+    expect(await indexedIds(globalDir())).toEqual(['mem_a'])
   })
 
   it('PC-08：缓存原文需要重新编码、磁盘上其实不同：不回写', async () => {
@@ -342,18 +343,18 @@ describe('解析缓存：写路径逐出与维护点', () => {
     expect(cache.lookup(path, await signatureOf(path), GLOBAL)).toBeUndefined()
   })
 
-  it('PC-08：racy 窗口内被同大小改写的在用记录，维护点写出的 MEMORY.md 反映新内容', async () => {
+  it('PC-08：racy 窗口内被同大小改写的在用记录，维护点写出的主题索引反映新内容', async () => {
     const path = await seed('a', { id: 'mem_a', name: 'aaaa', summary: '旧摘要xx' })
     const T = 1_800_000_000_000
     fsHooks.coarseTime = T   // 改写前后签名相同
     const t = newTable()
     clock = T + 1_000
     await t.maintain([globalDir()])
-    expect(await readFile(join(globalDir(), INDEX_FILE), 'utf8')).toContain('旧摘要xx')
+    expect(await indexText(globalDir())).toContain('旧摘要xx')
     await writeFile(path, (await readFile(path, 'utf8')).replace('旧摘要xx', '新摘要yy'))
     clock = T + 6_000
     await t.maintain([globalDir()])
-    const index = await readFile(join(globalDir(), INDEX_FILE), 'utf8')
+    const index = await indexText(globalDir())
     expect(index).toContain('新摘要yy')
     expect(index).not.toContain('旧摘要xx')
   })

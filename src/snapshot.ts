@@ -74,8 +74,8 @@ function truncationNav(omitted: ReadonlyArray<{ type: string; records: readonly 
   const lines = [`\n索引未列全：另有 ${total} 条记忆未列出（${omitted.map(o => `${o.type} ${o.records.length} 条`).join('、')}）。`]
   if (topTags.length > 0) lines.push(`高频标签：${topTags.map(([t, n]) => `${t}（${n}）`).join('、')}。`)
   lines.push(indexPaths.length > 0
-    ? `用 memory_search 查询；要浏览全部条目，完整索引见 ${indexPaths.join('、')}。`
-    : '用 memory_search 查询；要浏览全部条目，完整索引见各记忆目录的 MEMORY.md。')
+    ? `用 memory_search 查询；要浏览全部条目，从 ${indexPaths.join('、')} 进各主题页。`
+    : '用 memory_search 查询；要浏览全部条目，从各记忆目录的 MEMORY.md 进各主题页。')
   return lines.join('\n')
 }
 
@@ -258,7 +258,7 @@ export function assembleSnapshot(deps: {
   // 私有记忆（跨项目泄漏）。跨项目透明可读的只应是 global；别项目记忆除非用户明确给路径才访问。
   if (deps.memoryRoot) {
     const [globalIndex, workspaceIndex] = indexPaths
-    const lines = ['\n完整索引：', `- 全局记忆：${globalIndex}`]
+    const lines = ['\n记忆索引（按主题列出，条目在各主题页里）：', `- 全局记忆：${globalIndex}`]
     if (workspaceIndex !== undefined) lines.push(`- 本项目记忆：${workspaceIndex}`)
     lines.push(
       '',

@@ -12,11 +12,14 @@ import { record as baseRecord } from './helpers/record.ts'
 import { RecordNotFoundError } from '../src/errors.ts'
 import { captureRejection } from './helpers/errors.ts'
 import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
+import { indexedIds, isIndexPath, projectedCount } from './helpers/topic-index.ts'
+import { INDEX_DIR, INDEX_TOPICS_DIR } from '../src/storage/index-store.ts'
+import { UNSORTED_PAGE } from '../src/topic-index.ts'
 
 // 两个宿主进程同时搬同一个 id 的文件：两个 FileTable 实例共用一个记忆根目录，各有各的写入段，互不排队
 // （跨进程那一层不排斥，即锁库用不了时两个进程之间的情形）。
 // fs 是进程边界：给 link / rm / rename 套一层，在指定路径的调用之前或之后插进另一个实例的整次写入，交错时机确定，不靠 sleep。
-// 不管怎么交错，写之前存在的 id 写完至少还剩一个文件；索引最后列全目录里的记忆。
+// 不管怎么交错，写之前存在的 id 写完至少还剩一个文件；维护之后索引列全目录里的记忆。
 type Op = 'link' | 'rm' | 'rename' | 'copyFile'
 const { hooks, reads, volume } = vi.hoisted(() => ({
   hooks: [] as Array<{ op: string; path: string; when: 'before' | 'after'; run: () => Promise<unknown> }>,
@@ -215,24 +218,30 @@ describe('两个进程同时维护同一个目录', () => {
   })
 })
 
-describe('两个进程各自写完再生同一个目录的索引', () => {
-  it('B 按旧清单写索引之前 A 已写全：B 写完重读目录发现清单变了，再写一次，索引两条都有', async () => {
+describe('两个进程各自维护同一个目录的索引', () => {
+  it('B 按旧清单写索引之前 A 已写进新记忆并维护完：B 写完复核目录发现清单变了，再核对一次，索引两条都有', async () => {
     const a = newTable()
     const b = newTable()
-    // B 落盘、读完目录（只有自己）之后、索引换上去之前，A 整次写完（它的索引已含两条）；B 随后用旧清单盖掉
-    at('before', 'rename', join(globalDir(), INDEX_FILE), () => asOtherProcess(() => a.create(record({ id: 'mem_a', name: '抢名' }))))
     await b.create(record({ id: 'mem_b', name: '抢名' }))
-    const index = await readFile(join(globalDir(), INDEX_FILE), 'utf8')
-    expect(index).toContain('mem_a')
-    expect(index).toContain('mem_b')
+    // B 读完目录（只有自己）之后、第一页索引换上去之前，A 整次写完并维护（它的索引已含两条）；B 随后用旧清单盖掉
+    const unsorted = join(globalDir(), INDEX_DIR, INDEX_TOPICS_DIR, UNSORTED_PAGE)
+    at('before', 'rename', unsorted, () => asOtherProcess(async () => {
+      await a.create(record({ id: 'mem_a', name: '抢名' }))
+      await a.maintain([globalDir()])
+    }))
+    await b.maintain([globalDir()])
+    expect(hooks).toEqual([])   // 交错确实发生了
+    expect((await indexedIds(globalDir())).sort()).toEqual(['mem_a', 'mem_b'])
+    expect(await projectedCount(globalDir())).toBe(2)
   })
 
-  it('没有别的进程同时写：写完索引只比一次签名，不重读目录里的记忆文件', async () => {
+  it('没有别的进程同时写：核对完索引只比一次签名，不重读目录里的记忆文件', async () => {
     for (const n of ['甲', '乙', '丙']) await seed(record({ id: `mem_${n}`, name: n }), `${n}.md`)
     const t = newTable()
+    await t.create(record({ id: 'mem_new', name: '新' }))
     reads.length = 0
-    await t.create(record({ id: 'mem_new', name: '新' }))   // 索引从无到有，必写
-    const memoryReads = reads.filter(p => p.endsWith('.md') && !p.endsWith(INDEX_FILE))
+    await t.maintain([globalDir()])   // 索引从无到有，必写
+    const memoryReads = reads.filter(p => p.endsWith('.md') && !isIndexPath(p))
     // 维护点读目录时每个文件读一次；签名没变就不再读第二遍
     expect(memoryReads.sort()).toEqual(['丙.md', '乙.md', '新.md', '甲.md'].map(n => join(globalDir(), n)).sort())
   })
@@ -240,9 +249,11 @@ describe('两个进程各自写完再生同一个目录的索引', () => {
   it('目录没变：索引内容不变就不再写（不空转写盘）', async () => {
     const t = newTable()
     await t.create(record({ id: 'mem_a', name: '甲' }))
+    await t.maintain([globalDir()])
     const { rename } = await import('node:fs/promises')
     vi.mocked(rename).mockClear()
     await t.maintain([globalDir()])
-    expect(vi.mocked(rename).mock.calls.filter(c => String(c[1]) === join(globalDir(), INDEX_FILE))).toEqual([])
+    expect(vi.mocked(rename).mock.calls.filter(c => isIndexPath(String(c[1])))).toEqual([])
+    expect(await indexedIds(globalDir())).toEqual(['mem_a'])
   })
 })

@@ -156,6 +156,41 @@ describe('派生索引库', () => {
     }
   })
 
+  describe('主题索引的成员表', () => {
+    const pages = [
+      { page: '_unsorted.md', title: '未整理', aliases: [], memberIds: ['mem_c'], sig: 's0' },
+      { page: 'release.md', title: '发版', aliases: ['上线', '发布'], memberIds: ['mem_b', 'mem_a'], sig: 's1' },
+      { page: 'style.md', title: '写法', aliases: [], memberIds: ['mem_a'], sig: 's2' },
+    ]
+
+    it('整份重记后查得回来：各页的主题名、曾用名、成员保持给的顺序，一条记忆列在哪几页也查得到', () => {
+      const { index } = open()
+      expect(index.topicPages(G)).toEqual([])
+      index.replaceTopicPages(G, pages)
+      expect(index.topicPages(G)).toEqual(pages)
+      expect(index.pagesOf(G, 'mem_a')).toEqual(['release.md', 'style.md'])
+      expect(index.pagesOf(G, 'mem_x')).toEqual([])
+    })
+
+    it('重记是整份替换：没再给的页、曾用名、成员都不留；别的层不动', () => {
+      const { index } = open()
+      index.replaceTopicPages(G, pages)
+      index.replaceTopicPages('/root/ws', pages)
+      index.replaceTopicPages(G, [{ page: 'style.md', title: '文风', aliases: ['写法'], memberIds: ['mem_b'], sig: 's3' }])
+      expect(index.topicPages(G)).toEqual([{ page: 'style.md', title: '文风', aliases: ['写法'], memberIds: ['mem_b'], sig: 's3' }])
+      expect(index.pagesOf(G, 'mem_a')).toEqual([])
+      expect(index.topicPages('/root/ws')).toEqual(pages)
+    })
+
+    it('丢掉一层时成员表一起丢', () => {
+      const { index } = open()
+      index.replaceTopicPages(G, pages)
+      index.dropLevel(G)
+      expect(index.topicPages(G)).toEqual([])
+      expect(index.pagesOf(G, 'mem_a')).toEqual([])
+    })
+  })
+
   it('另一个进程记下的，这个进程查得到', () => {
     replace(open().index, G, [['a.md', 'mem_a']])
     expect(open().index.namesOf(G, 'mem_a')).toEqual(['a.md'])

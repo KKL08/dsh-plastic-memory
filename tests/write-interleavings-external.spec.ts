@@ -1,14 +1,16 @@
 import { describe, it, vi } from 'vitest'
 import { readdir, readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import fc from 'fast-check'
 import { decodeFile } from '../src/storage/frontmatter.ts'
-import { ARCHIVE_DIR, GLOBAL_DIR, INDEX_FILE, isMemoryFileName, workspaceDirName } from '../src/storage/paths.ts'
+import { ARCHIVE_DIR, GLOBAL_DIR, isMemoryFileName, workspaceDirName } from '../src/storage/paths.ts'
 import { resolveDuplicates } from '../src/storage/table.ts'
-import { withinValidity } from '../src/record-freshness.ts'
+import { isPendingDelegated } from '../src/record-schema.ts'
+import { memberLine } from '../src/topic-index.ts'
+import { indexText, indexedIds } from './helpers/topic-index.ts'
 import { interleaveParams, interleaveRuns, interleaveScheduler, observeConcurrent, scheduleTrace } from './helpers/interleave.ts'
-import { STORE_NOW, W, externalOpArb, labelOf, memorySubject, seedArb, writeOpArb, type MemoryWorld } from './helpers/memory-subject.ts'
+import { W, externalOpArb, labelOf, memorySubject, seedArb, writeOpArb, type MemoryWorld } from './helpers/memory-subject.ts'
 
 // 文件系统是进程边界：存储层 import 的 node:fs/promises 换成夹具包过的那份，调用的全序交给调度器（见 helpers/interleave.ts）
 vi.mock('node:fs/promises', async () => (await import('./helpers/interleave.ts')).interleavedFs)
@@ -20,18 +22,16 @@ describe('IL-04 外部写者', () => {
   /** 本插件的写入抛出的、调用方按约定处理的错误；其他错误算未处理的异常。 */
   const EXPECTED_ERRORS = /^(RecordNotFoundError|ConcurrentModificationError):/
 
-  /** 一个目录的 MEMORY.md 与该目录顶层在用文件一致：每条在用记忆一行，行末是它的文件名。 */
+  /** 一个目录的主题索引与该目录顶层在用文件一致：每条在用、已进主档的记忆一行（过期的也有），行链到它的文件名。 */
   async function indexMismatch(w: MemoryWorld, dir: string): Promise<string | undefined> {
     const { records } = await w.store.readRaw(dir === join(w.root, GLOBAL_DIR) ? { kind: 'global' } : { kind: 'workspace', workspacePath: W })
-    const expected = resolveDuplicates(records.filter(l => l.dir === dir && l.record.status === 'active' && withinValidity(l.record, STORE_NOW)))
-      .map(l => `${l.record.id} · ${l.filePath.slice(dir.length + 1)}`).sort()
-    const text = await readFile(join(dir, INDEX_FILE), 'utf8').catch(() => undefined)
-    if (text === undefined) return expected.length === 0 ? undefined : `${dir} 缺 ${INDEX_FILE}`
-    const listed = text.split('\n').flatMap(line => {
-      const m = /^- \[(\S+)\] .* · (\S+)$/.exec(line)
-      return m ? [`${m[1]} · ${m[2]}`] : []
-    }).sort()
-    return isDeepStrictEqual(listed, expected) ? undefined : `${INDEX_FILE} 与文件不一致：列出 ${JSON.stringify(listed)}，应为 ${JSON.stringify(expected)}`
+    const expected = resolveDuplicates(records.filter(l => l.dir === dir && l.record.status === 'active' && !isPendingDelegated(l.record)))
+    const listed = [...await indexedIds(dir)].sort()
+    const ids = expected.map(l => l.record.id).sort()
+    if (!isDeepStrictEqual(listed, ids)) return `${dir} 的主题索引与文件不一致：列出 ${JSON.stringify(listed)}，应为 ${JSON.stringify(ids)}`
+    const text = await indexText(dir)
+    const stale = expected.filter(({ record: r, filePath }) => !text.includes(memberLine({ id: r.id, name: r.name, summary: r.summary, fileName: basename(filePath) })))
+    return stale.length === 0 ? undefined : `${dir} 的主题索引里这几条的名称、摘要或文件名没跟上：${stale.map(l => l.record.id).join(', ')}`
   }
 
   it('IL-04：IL-01 的操作夹着不拿锁的原始改写：不崩、无残留、文件都能解析、下一次维护后索引与文件一致', async () => {

@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
 import { OpJournal } from '../src/storage/op-journal.ts'
 import { createRootLock } from '../src/storage/root-lock.ts'
 import { layerOf, STATE_CHANGE_VERSION } from '../src/storage/history.ts'
-import { GLOBAL_DIR, HISTORY_DIR, INDEX_FILE, workspaceDirName } from '../src/storage/paths.ts'
+import { GLOBAL_DIR, HISTORY_DIR, workspaceDirName } from '../src/storage/paths.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import type { MemorySnapshot } from '../src/governance/schema.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
@@ -14,6 +14,7 @@ import { MemoryStore } from '../src/store.ts'
 import { commitChange, historySteps } from '../src/commit-change.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 import { record } from './helpers/record.ts'
+import { indexedIds } from './helpers/topic-index.ts'
 
 // 状态变化写到一半进程退出：在进程边界（node:fs/promises 的写调用）注入，第 k 次写调用之前「进程没了」。
 // 然后换一个新实例进一次写入段，看补做之后记忆和历史版本对不对得上。改前快照放在不受注入影响的表里：它在写文件之前就落盘了。
@@ -193,8 +194,12 @@ describe('历史版本跟着记忆走，中途进程退出', () => {
     await fresh()
     return total
   }
-  /** 各层（全局、项目）的 MEMORY.md 里有没有这条记忆的行。 */
-  const indexed = () => Promise.all(layers().map(async dir => (await readFile(join(dir, INDEX_FILE), 'utf8').catch(() => '')).includes('[mem_a]')))
+  /** 维护两层之后，各层（全局、项目）的主题索引里有没有这条记忆。 */
+  const indexed = async (w: ReturnType<typeof open>) => {
+    await w.store.maintain(global)
+    await w.store.maintain(inWs)
+    return Promise.all(layers().map(async dir => (await indexedIds(dir)).includes('mem_a')))
+  }
   /** 在记忆现在所在的那一层接着改它一次。 */
   const editAgain = (w: ReturnType<typeof open>, isInProject: boolean) =>
     w.store.update({ id: 'mem_a', workspacePath: isInProject ? WS : undefined }, r => ({ ...r, summary: '接着改' }), isInProject ? inWs : global)
@@ -216,8 +221,8 @@ describe('历史版本跟着记忆走，中途进程退出', () => {
       const [inGlobal, inProject] = await whereabouts(next)
       const expected = inProject[0] ? [[false, []], [true, ['第一版']]] : [[true, ['第一版']], [false, []]]
       expect([inGlobal, inProject], `第 ${k} 次写调用之前退出`).toEqual(expected)
-      // 索引只在记忆所在的那一层列它；之后还能接着改
-      expect(await indexed(), `第 ${k} 次写调用之前退出`).toEqual([inGlobal[0], inProject[0]])
+      // 维护后索引只在记忆所在的那一层列它；之后还能接着改
+      expect(await indexed(next), `第 ${k} 次写调用之前退出`).toEqual([inGlobal[0], inProject[0]])
       expect((await editAgain(next, inProject[0])).summary, `第 ${k} 次写调用之前退出`).toBe('接着改')
       outcomes.add(inProject[0] ? '已搬' : '没搬')
       await fresh()
@@ -242,24 +247,24 @@ describe('历史版本跟着记忆走，中途进程退出', () => {
       // 历史版本只有一份「第一版」，而且有历史目录的那一层就有这条记忆
       expect(places.flatMap(([, versions]) => versions), `第 ${k} 次写调用之前退出`).toEqual(['第一版'])
       for (const [hasMemory, versions] of places) if (versions.length > 0) expect(hasMemory, `第 ${k} 次写调用之前退出`).toBe(true)
-      expect(await indexed(), `第 ${k} 次写调用之前退出`).toEqual(places.map(([hasMemory]) => hasMemory))
+      expect(await indexed(next), `第 ${k} 次写调用之前退出`).toEqual(places.map(([hasMemory]) => hasMemory))
       await fresh()
     }
   })
 
-  it('移到项目时项目那层的历史目录被挡住：写入照样成功，两层索引当场就对；挡住的东西拿掉后补做把历史搬过去，还能接着改', async () => {
+  it('移到项目时项目那层的历史目录被挡住：写入照样成功，维护后两层索引就对；挡住的东西拿掉后补做把历史搬过去，还能接着改', async () => {
     const { snapshotTable, first } = await withVersion()
     const wsLayer = layers()[1]!
     await first.store.create(record({ id: 'mem_ws', name: '项目里的', scope: 'workspace', workspacePath: WS }))
     await writeFile(join(wsLayer, HISTORY_DIR), '挡路')
     expect((await moveToWs(first)).scope).toBe('workspace')
-    expect(await indexed()).toEqual([false, true])
+    expect(await indexed(first)).toEqual([false, true])
     await rm(join(wsLayer, HISTORY_DIR))
     alive()
     const next = open(snapshotTable)
     await touchOther(next)
     expect(await whereabouts(next)).toEqual([[false, []], [true, ['第一版']]])
-    expect(await indexed()).toEqual([false, true])
+    expect(await indexed(next)).toEqual([false, true])
     expect((await editAgain(next, true)).summary).toBe('接着改')
   })
 

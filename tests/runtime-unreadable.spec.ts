@@ -16,6 +16,7 @@ import { InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 import { record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 import { sidecarSchemas } from './helpers/sidecar-schemas.ts'
+import { indexTree, indexedIds } from './helpers/topic-index.ts'
 
 // 进程边界的故障注入：readdir 列某个目录（prefix 为真时含其下全部路径）、readFile 读某个文件时抛权限错误
 const fault = vi.hoisted(() => ({ dir: '', prefix: true, file: '', reason: '权限不足' }))
@@ -52,7 +53,8 @@ afterEach(async () => {
 
 const globalDir = () => join(root, GLOBAL_DIR)
 const wsDir = () => join(root, workspaceDirName(WS))
-const indexOf = (dir: string) => readFile(join(dir, INDEX_FILE), 'utf8')
+/** 一个目录的索引现状：MEMORY.md 全文和 _index/ 下的全部目录项与内容。 */
+const indexOf = async (dir: string) => ({ projection: await readFile(join(dir, INDEX_FILE), 'utf8'), tree: await indexTree(dir) })
 const logger = () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn() })
 /** 只看快照缓存记的目录读取日志（失败与恢复）。 */
 const dirLogs = (log: ReturnType<typeof logger>) => [
@@ -149,16 +151,18 @@ describe('快照目录读取', () => {
 })
 
 describe('有目录读不出时不冻结、不写盘', () => {
-  it.each([['无项目会话（全部读不出）', undefined], ['项目会话（部分读不出）', WS]] as const)('%s：MEMORY.md 原样不动', async (_label, workspacePath) => {
+  it.each([['无项目会话（全部读不出）', undefined], ['项目会话（部分读不出）', WS]] as const)('%s：主题索引和 MEMORY.md 原样不动', async (_label, workspacePath) => {
     const { store, assembleIn } = world()
     await store.create(globalMemory('mem_g', '全局回答约定'))
     await store.create(projectMemory('mem_p', '项目回答约定'))
     // 先正常冻结一次，维护点写出两个目录的索引
     await assembleIn(WS)
     const before = { global: await indexOf(globalDir()), ws: await indexOf(wsDir()) }
-    expect(before.global).toContain('mem_g')
+    expect(await indexedIds(globalDir())).toEqual(['mem_g'])
+    expect(await indexedIds(wsDir())).toEqual(['mem_p'])
     fault.dir = globalDir()
     await assembleIn(workspacePath)
+    fault.dir = ''   // 故障撤掉再看盘面，否则列不出索引目录
     expect({ global: await indexOf(globalDir()), ws: await indexOf(wsDir()) }).toEqual(before)
   })
 

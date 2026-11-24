@@ -14,6 +14,7 @@ import { record as baseRecord } from './helpers/record.ts'
 import { MemoryStore } from '../src/store.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 import { writesDuring } from './helpers/fs-writes.ts'
+import { indexedIds } from './helpers/topic-index.ts'
 
 // 读侧内核：磁盘是唯一真相、读路径零写入、
 // 预筛是超集、加载期零 I/O。只测 FileTable；双后端一致的语义在 table-conformance.spec.ts。
@@ -338,6 +339,9 @@ describe('目录级说明与目录名确定性', () => {
     expect((await t.locate('mem_a', { workspacePath: '/home/dev/p' }))!.dir).toBe(renamed)
     await t.update('mem_a', {}, r => ({ ...r, content: '改过', updatedAt: 2 }))
     await t.put(record({ id: 'mem_b', name: 'b', scope: 'workspace', workspacePath: '/home/dev/p' }), { workspacePath: '/home/dev/p' })
+    expect((await readdir(renamed)).filter(n => n.endsWith('.md')).sort()).toEqual(['a.md', 'b.md'])
+    await t.maintain([renamed])   // 索引也落在改名的目录里
+    expect((await indexedIds(renamed)).sort()).toEqual(['mem_a', 'mem_b'])
     expect((await readdir(renamed)).filter(n => n.endsWith('.md')).sort()).toEqual(['MEMORY.md', 'a.md', 'b.md'])
     await expect(stat(wsDir('/home/dev/p'))).rejects.toThrow()   // 没有另建确定性目录
   })

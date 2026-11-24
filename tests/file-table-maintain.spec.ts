@@ -19,9 +19,11 @@ import type { RecallStats } from '../src/storage/schema.ts'
 import { isPendingDelegated, type MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
 import { fakeExec } from './helpers/exec.ts'
-import { formatIndexLine } from '../src/index-line.ts'
 import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
 import { writesDuring } from './helpers/fs-writes.ts'
+import { indexText, indexedIds, isIndexPath, projectedCount } from './helpers/topic-index.ts'
+import { INDEX_DIR } from '../src/storage/index-store.ts'
+import { PROJECTION_NOTE, UNSORTED_PAGE, memberLine } from '../src/topic-index.ts'
 
 // 维护点（写路径末尾与快照冻结时的目录整理）。只测 FileTable 专属的磁盘效应；
 // 双后端一致的语义在 table-conformance.spec.ts。全部用真实目录，不 mock 自己的模块。
@@ -96,14 +98,29 @@ async function treeEntries(dir: string, prefix = ''): Promise<string[]> {
 }
 /** 写调用里落在 dir 下的（含原子写的临时文件）。 */
 const writesUnder = (calls: string[], dir: string) => calls.filter(c => c.includes(dir))
+const callPath = (call: string) => call.replace(/^\w+\(/, '').replace(/\)$/, '')
+
+/**
+ * 插件写出的文件在稳态下维护点不回写：写入不碰索引，第一次维护只写主题索引和 MEMORY.md，别的目录项不变；
+ * 再维护一次就一点不写、目录项全不变。
+ */
+async function expectOnlyIndexWritten(maintain: () => Promise<unknown>) {
+  const outside = async () => (await treeEntries(root)).filter(e => !isIndexPath(`/${e}`))
+  const before = await outside()
+  expect((await writesDuring(maintain)).filter(c => !isIndexPath(callPath(c)))).toEqual([])
+  expect(await outside()).toEqual(before)
+  const settled = await treeEntries(root)
+  expect(await writesDuring(maintain)).toEqual([])
+  expect(await treeEntries(root)).toEqual(settled)
+}
 
 function open(opts: Partial<ConstructorParameters<typeof FileTable>[0]> = {}) {
   const stats = new InMemoryKvTable<RecallStats>()
   return { table: new FileTable({ root, stats, ...opts }), stats }
 }
 
-describe('维护点动作 ①：再生 MEMORY.md', () => {
-  it('只列顶层 active 且未过期的记录，按 name 再 id 排序；内容不变不写', async () => {
+describe('维护点动作 ①：核对主题索引、再生 MEMORY.md', () => {
+  it('顶层在用的记录每条一行（过期的也有），归档的没有；「未整理」按 name 再 id 排序；内容不变不写', async () => {
     const now = Date.now()
     await writeMem(globalDir(), 'b.md', record({ id: 'mem_b', name: 'beta' }))
     await writeMem(globalDir(), 'a2.md', record({ id: 'mem_a2', name: 'alpha' }))
@@ -112,26 +129,27 @@ describe('维护点动作 ①：再生 MEMORY.md', () => {
     await writeMem(archiveOf(globalDir()), 'arch.md', record({ id: 'mem_arch', name: '归档', status: 'deleted', deletedAt: now }))
     const { table } = open()
     // 第一次写出索引：写调用确实记得到
-    expect(writesUnder(await writesDuring(() => table.maintain([globalDir()])), join(globalDir(), INDEX_FILE))).not.toEqual([])
-    const idx = await readFile(join(globalDir(), INDEX_FILE), 'utf8')
-    const ids = [...idx.matchAll(/\[(mem_\w+)\]/g)].map(m => m[1])
-    expect(ids).toEqual(['mem_a1', 'mem_a2', 'mem_b'])
+    const first = await writesDuring(() => table.maintain([globalDir()]))
+    expect(writesUnder(first, join(globalDir(), INDEX_FILE))).not.toEqual([])
+    expect(writesUnder(first, join(globalDir(), INDEX_DIR))).not.toEqual([])
+    expect(await indexedIds(globalDir())).toEqual(['mem_a1', 'mem_a2', 'mem_b', 'mem_exp'])
+    expect(await projectedCount(globalDir())).toBe(4)
     expect(await writesDuring(() => table.maintain([globalDir()]))).toEqual([])
   })
 })
 
-describe('MEMORY.md 行与注入索引行末尾带文件名（同源格式，passive 不带 summary；磁盘侧不带陈旧度，注入侧带）', () => {
-  it('MEMORY.md 行以 · 磁盘上的实际文件名收尾；超过衰退期也不带陈旧度', async () => {
+describe('索引成员行链到磁盘上的实际文件名', () => {
+  it('成员行按记忆 id 链到磁盘上的实际文件名；超过衰退期也不带陈旧度', async () => {
     // project 衰减 7 天，lastConfirmedAt 远在过去；手起的文件名与 slug(name) 不同，索引照实写磁盘文件名
     const r = record({ id: 'mem_gw', name: '网关路由表', type: 'project', summary: '路由表', tags: ['gateway'] })
     await writeMem(globalDir(), '网关路由表-手写.md', r)
     const { table } = open()
     await table.maintain([globalDir()])
-    const idx = await readFile(join(globalDir(), INDEX_FILE), 'utf8')
-    const line = idx.split('\n').find(l => l.includes('[mem_gw]'))!
-    expect(line).toBe(formatIndexLine(r, { passive: false, file: '网关路由表-手写.md' }))
-    expect(line).toBe('- [mem_gw] 网关路由表（路由表） — gateway · 网关路由表-手写.md')
-    expect(line).not.toContain('未确认')
+    const page = await readFile(join(globalDir(), INDEX_DIR, 'topics', UNSORTED_PAGE), 'utf8')
+    const line = page.split('\n').find(l => l.includes('"mem_gw"'))!
+    expect(line).toBe(memberLine({ id: 'mem_gw', name: '网关路由表', summary: '路由表', fileName: '网关路由表-手写.md' }))
+    expect(line).toBe('- [网关路由表](../../%E7%BD%91%E5%85%B3%E8%B7%AF%E7%94%B1%E8%A1%A8-%E6%89%8B%E5%86%99.md "mem_gw") — 路由表')
+    expect(await indexText(globalDir())).not.toContain('未确认')
   })
 })
 
@@ -273,7 +291,7 @@ describe('维护点动作 ④：手建 / 手编文件回写', () => {
     const { records, directoryNotes } = await table.readScope([wsDir()])
     expect(records.map(r => r.record.name)).toEqual(['手写'])
     expect(directoryNotes.map(n => [n.code, n.path])).toEqual([['reserved-keys', path]])
-    expect(await readFile(join(wsDir(), INDEX_FILE), 'utf8')).toContain('手写')
+    expect(await indexText(wsDir())).toContain('手写')
   })
 
   it('.archive/ 里含保留键的文件照常回写：保留键去掉，active 归一成 deleted', async () => {
@@ -293,9 +311,7 @@ describe('维护点动作 ④：手建 / 手编文件回写', () => {
     await table.create(wsRecord({ id: 'mem_w1', name: '一', tags: ['a', 'b'], summary: '摘要', content: '多行\n正文' }))
     await table.create(record({ id: 'mem_g1', name: '二', validTo: Date.now() + DAY, supersedes: ['mem_x'], globalCandidate: true }))
     await table.update('mem_w1', {}, r => ({ ...r, status: 'deleted', updatedAt: Date.now() }))
-    const before = await treeEntries(root)
-    expect(await writesDuring(() => table.maintain([globalDir(), wsDir()]))).toEqual([])
-    expect(await treeEntries(root)).toEqual(before)
+    await expectOnlyIndexWritten(() => table.maintain([globalDir(), wsDir()]))
   })
 })
 
@@ -321,9 +337,7 @@ describe('维护点回写带着委派块', () => {
     await table.create(record({ id: 'mem_d', delegation }))
     await table.update('mem_d', {}, r => ({ ...r, content: '改写', updatedAt: Date.now() }))
     expect((await table.locate('mem_d', {}))!.record.delegation).toEqual(delegation)
-    const before = await treeEntries(root)
-    expect(await writesDuring(() => table.maintain([globalDir()]))).toEqual([])
-    expect(await treeEntries(root)).toEqual(before)
+    await expectOnlyIndexWritten(() => table.maintain([globalDir()]))
   })
 })
 
@@ -448,15 +462,13 @@ describe('维护点动作 ⑤：陈旧 tmp 清理', () => {
 })
 
 describe('维护点的边界', () => {
-  it('过期（validTo 已过）的 active 文件不搬家：留在顶层、不重写，只不进 MEMORY.md', async () => {
+  it('过期（validTo 已过）的 active 文件不搬家：留在顶层、不重写，索引里照样有一行', async () => {
     const path = await writeMem(globalDir(), 'exp.md', record({ id: 'mem_exp', name: '过期', validTo: Date.now() - DAY }))
     await writeMem(globalDir(), 'live.md', record({ id: 'mem_live', name: '有效' }))
     const { table } = open()
     expect(writesUnder(await writesDuring(() => table.maintain([globalDir()])), path)).toEqual([])
     expect(await mds(globalDir())).toEqual(['exp.md', 'live.md'])
-    const idx = await readFile(join(globalDir(), INDEX_FILE), 'utf8')
-    expect(idx).toContain('mem_live')
-    expect(idx).not.toContain('mem_exp')
+    expect(await indexedIds(globalDir())).toEqual(['mem_live', 'mem_exp'])
   })
 
   it('只动给定目录：维护 global 时 workspace 目录一字不动', async () => {
@@ -478,17 +490,17 @@ describe('维护点的边界', () => {
     expect(await mds(globalDir())).toEqual([])
     expect(await mds(archiveOf(globalDir()))).toEqual(['x.md'])
     expect(await frontmatter(path)).toMatchObject({ status: 'deleted', deletedAt: iso(moved) })
-    expect((await readFile(join(globalDir(), INDEX_FILE), 'utf8'))).not.toContain('mem_x')
+    expect(await indexedIds(globalDir())).toEqual([])
   })
 
-  it('维护点本身不删同 id 副本：两份都在，MEMORY.md 只列一次', async () => {
+  it('维护点本身不删同 id 副本：两份都在，索引里只有一行', async () => {
     await writeMem(globalDir(), 'dup-a.md', record({ id: 'mem_dup', name: '重复', updatedAt: 100 }))
     await writeMem(globalDir(), 'dup-b.md', record({ id: 'mem_dup', name: '重复', updatedAt: 200 }))
     const { table } = open()
     await table.maintain([globalDir()])
     expect(await mds(globalDir())).toEqual(['dup-a.md', 'dup-b.md'])
-    const idx = await readFile(join(globalDir(), INDEX_FILE), 'utf8')
-    expect(idx.match(/mem_dup/g)).toHaveLength(1)
+    expect(await indexedIds(globalDir())).toEqual(['mem_dup'])
+    expect(await projectedCount(globalDir())).toBe(1)
   })
 })
 
@@ -527,7 +539,7 @@ describe('快照冻结是维护点', () => {
     return { table, store, cache, log, assemble }
   }
 
-  it('手改 status 为 deleted 的文件在冻结后进 .archive/ 且带 deletedAt；手改的 MEMORY.md 被覆盖', async () => {
+  it('手改 status 为 deleted 的文件在冻结后进 .archive/ 且带 deletedAt；索引跟上，手改的 MEMORY.md 按索引重新生成', async () => {
     await writeMem(wsDir(), 'gone.md', wsRecord({ id: 'mem_gone', name: '手删', status: 'deleted' }), WS)
     await writeMem(wsDir(), 'live.md', wsRecord({ id: 'mem_live', name: '有效', content: '有效 正文' }))
     await writeRaw(wsDir(), INDEX_FILE, '# 我手动改过的索引，别动\n私货\n')
@@ -538,10 +550,13 @@ describe('快照冻结是维护点', () => {
     expect(await mds(wsDir())).toEqual(['live.md'])
     expect(await mds(archiveOf(wsDir()))).toEqual(['gone.md'])
     expect(await frontmatter(join(archiveOf(wsDir()), 'gone.md'))).toHaveProperty('deletedAt')
-    const idx = await readFile(join(wsDir(), INDEX_FILE), 'utf8')
-    expect(idx).not.toContain('私货')
-    expect(idx).toContain('mem_live')
-    expect(await readFile(join(globalDir(), INDEX_FILE), 'utf8')).toBe('# Memory Index\n\n')
+    expect(await readFile(join(wsDir(), INDEX_FILE), 'utf8')).not.toContain('私货')
+    expect(await indexedIds(wsDir())).toEqual(['mem_live'])
+    expect(await projectedCount(wsDir())).toBe(1)
+    const globalProjection = await readFile(join(globalDir(), INDEX_FILE), 'utf8')
+    expect(globalProjection.startsWith(PROJECTION_NOTE)).toBe(true)
+    expect(globalProjection).not.toContain('另一个手改索引')
+    expect(await indexedIds(globalDir())).toEqual([])
   })
 
   it('会话没有 workspace（解析为 undefined）时只维护 global，workspace 目录不动', async () => {

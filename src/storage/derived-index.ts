@@ -19,7 +19,7 @@ import type { MemoryLogger } from './table.ts'
  * - 文件名由记忆名生成，可能带用户写进去的东西：删掉的行当场抹掉（secure_delete），不用 WAL，免得删掉的名字留在日志文件里。
  */
 
-const SCHEMA_VERSION = 1
+const SCHEMA_VERSION = 2
 
 /** 库忙时最多等这么久：查找记忆在锁外的读路径上也会用到这个库，不能让它卡住。 */
 const BUSY_TIMEOUT_MS = 50
@@ -42,6 +42,16 @@ export interface LevelScan extends LevelStamp {
 
 /** 一个文件的提示：文件名、文件里的 id（读不出记 null）、stat 签名（不知道记空串）。 */
 export type HintRow = readonly [name: string, id: string | null, sig: string]
+
+/** 主题索引的一页：文件名、主题名、曾用名、列在这页的记忆 id，以及记下时这页文件的 stat 签名。 */
+export interface TopicPageRow {
+  page: string
+  title: string
+  aliases: readonly string[]
+  memberIds: readonly string[]
+  /** 用的人拿它和文件现在的签名比：对不上就是这页在别处改过，这一行不能信。 */
+  sig: string
+}
 
 export interface DerivedIndexOptions {
   /** 库文件的路径（接线层给 localStateDir 下的那个）。 */
@@ -130,11 +140,46 @@ export class DerivedIndex {
     }))
   }
 
-  /** 这一层不在了，或它的提示信不过了：下次用到重新扫。 */
+  /** 这一层不在了，或它的提示信不过了：下次用到重新扫。主题索引的成员表一起丢，下次维护重记。 */
   dropLevel(level: string): void {
     this.exec(db => inTransaction(db, () => {
       db.prepare('DELETE FROM id_hints WHERE level = ?').run(level)
       db.prepare('DELETE FROM level_scans WHERE level = ?').run(level)
+      deleteTopicPages(db, level)
+    }))
+  }
+
+  /** 这一层主题索引记着的各页，按文件名排；没记过或库不可用为空。 */
+  topicPages(level: string): TopicPageRow[] {
+    return this.exec(db => {
+      const pages = db.prepare('SELECT page, title, sig FROM topic_pages WHERE level = ? ORDER BY page').all(level) as Array<{ page: string; title: string; sig: string }>
+      const aliases = db.prepare('SELECT page, alias FROM topic_aliases WHERE level = ? ORDER BY ord').all(level) as Array<{ page: string; alias: string }>
+      const members = db.prepare('SELECT page, id FROM topic_members WHERE level = ? ORDER BY ord').all(level) as Array<{ page: string; id: string }>
+      const byPage = new Map(pages.map(p => [p.page, { page: p.page, title: p.title, aliases: [] as string[], memberIds: [] as string[], sig: p.sig }]))
+      for (const a of aliases) byPage.get(a.page)?.aliases.push(a.alias)
+      for (const m of members) byPage.get(m.page)?.memberIds.push(m.id)
+      return [...byPage.values()]
+    }) ?? []
+  }
+
+  /** 这条记忆列在这一层的哪几页（文件名，按名排）。 */
+  pagesOf(level: string, id: string): string[] {
+    const rows = this.exec(db => db.prepare('SELECT page FROM topic_members WHERE level = ? AND id = ? ORDER BY page').all(level, id) as Array<{ page: string }>) ?? []
+    return rows.map(r => r.page)
+  }
+
+  /** 这一层的主题索引整份重记：原来的页、曾用名、成员全部换成给的这些。主题索引每次维护整份核对，不做补记。 */
+  replaceTopicPages(level: string, pages: readonly TopicPageRow[]): void {
+    this.exec(db => inTransaction(db, () => {
+      deleteTopicPages(db, level)
+      const page = db.prepare('INSERT INTO topic_pages(level, page, title, sig) VALUES (?, ?, ?, ?)')
+      const alias = db.prepare('INSERT OR IGNORE INTO topic_aliases(level, page, alias, ord) VALUES (?, ?, ?, ?)')
+      const member = db.prepare('INSERT OR IGNORE INTO topic_members(level, page, id, ord) VALUES (?, ?, ?, ?)')
+      for (const p of pages) {
+        page.run(level, p.page, p.title, p.sig)
+        for (const [ord, a] of p.aliases.entries()) alias.run(level, p.page, a, ord)
+        for (const [ord, id] of p.memberIds.entries()) member.run(level, p.page, id, ord)
+      }
     }))
   }
 
@@ -237,12 +282,19 @@ function openIndex(sqlite: SqliteModule, path: string): DatabaseSync {
         db.exec('CREATE TABLE IF NOT EXISTS level_scans(level TEXT PRIMARY KEY, mtime_ms REAL NOT NULL, ino REAL NOT NULL, scanned_at REAL NOT NULL, listing TEXT NOT NULL, rev REAL NOT NULL)')
         db.exec('CREATE TABLE IF NOT EXISTS id_hints(level TEXT NOT NULL, name TEXT NOT NULL, id TEXT, sig TEXT NOT NULL, PRIMARY KEY(level, name))')
         db.exec('CREATE INDEX IF NOT EXISTS id_hints_by_id ON id_hints(level, id)')
+        db.exec('CREATE TABLE IF NOT EXISTS topic_pages(level TEXT NOT NULL, page TEXT NOT NULL, title TEXT NOT NULL, sig TEXT NOT NULL, PRIMARY KEY(level, page))')
+        db.exec('CREATE TABLE IF NOT EXISTS topic_aliases(level TEXT NOT NULL, page TEXT NOT NULL, alias TEXT NOT NULL, ord INTEGER NOT NULL, PRIMARY KEY(level, page, alias))')
+        db.exec('CREATE TABLE IF NOT EXISTS topic_members(level TEXT NOT NULL, page TEXT NOT NULL, id TEXT NOT NULL, ord INTEGER NOT NULL, PRIMARY KEY(level, page, id))')
+        db.exec('CREATE INDEX IF NOT EXISTS topic_members_by_id ON topic_members(level, id)')
         db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
       })
     }
     try {
       db.prepare('SELECT level, mtime_ms, ino, scanned_at, listing, rev FROM level_scans LIMIT 1').get()
       db.prepare('SELECT level, name, id, sig FROM id_hints LIMIT 1').get()
+      db.prepare('SELECT level, page, title, sig FROM topic_pages LIMIT 1').get()
+      db.prepare('SELECT level, page, alias, ord FROM topic_aliases LIMIT 1').get()
+      db.prepare('SELECT level, page, id, ord FROM topic_members LIMIT 1').get()
     } catch (err) {
       // 版本号对、表的样子不对（开发中的旧库）：同样换新库
       if (isSqliteBusy(err) || isCorrupt(err)) throw err
@@ -269,6 +321,10 @@ function inTransaction<T>(db: DatabaseSync, fn: () => T): T {
 
 function currentRev(db: DatabaseSync, level: string): number | undefined {
   return (db.prepare('SELECT rev FROM level_scans WHERE level = ?').get(level) as { rev: number } | undefined)?.rev
+}
+
+function deleteTopicPages(db: DatabaseSync, level: string): void {
+  for (const table of ['topic_pages', 'topic_aliases', 'topic_members']) db.prepare(`DELETE FROM ${table} WHERE level = ?`).run(level)
 }
 
 function insertRows(db: DatabaseSync, level: string, rows: readonly HintRow[]): void {

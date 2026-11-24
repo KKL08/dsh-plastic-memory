@@ -15,7 +15,9 @@ import { apply, Config, inject } from '../src/index.ts'
 import { SidecarStore, STATE_DIR, RECALL_STATS_FILE } from '../src/storage/sidecar.ts'
 import { KV_IMPORT_MARKER } from '../src/storage/legacy-kv-import.ts'
 import { kvImportMarkerSchema } from '../src/storage/schema.ts'
-import { INDEX_FILE, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
+import { WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
+import { FileTable } from '../src/storage/file-table.ts'
+import { indexedIds, isIndexPath } from './helpers/topic-index.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { TypeRegistryError } from '../src/errors.ts'
 import { buildSemanticPrompt } from '../src/governance/semantic-scan.ts'
@@ -2373,7 +2375,7 @@ describe('写锁接线', () => {
         fakeExec({ agent: { session: openUserTurn(hostSession(`sess-${name}`, { cwd })), options: {} } } as never)) as Promise<{ kind: string; record?: { id: string } }>
       return { ctx, save }
     }
-    // 挂住每一次记忆文件的写入（写临时文件那一步，目录索引不算），按到达顺序排队；另记下拿写锁时建锁库目录的调用（每次尝试拿锁都会建一次）
+    // 挂住每一次记忆文件的写入（写临时文件那一步，主题索引和 MEMORY.md 不算），按到达顺序排队；另记下拿写锁时建锁库目录的调用（每次尝试拿锁都会建一次）
     const memoryDir = join(memoryRoot, workspaceDirName(cwd))
     const prefix = `writeFile(${memoryDir}${sep}`
     const lockDir = join(memoryRoot, STATE_DIR, 'lock')
@@ -2382,7 +2384,7 @@ describe('写锁接线', () => {
     let onArrive: (() => void) | undefined
     fsTrace.hold = call => {
       if (call === `mkdir(${lockDir})`) lockAttempts++
-      if (!call.startsWith(prefix) || !call.includes('.md.tmp-') || call.startsWith(`${prefix}${INDEX_FILE}`)) return undefined
+      if (!call.startsWith(prefix) || !call.includes('.md.tmp-') || isIndexPath(call.slice('writeFile('.length).split('.tmp-')[0]!)) return undefined
       return new Promise<void>(release => {
         arrivals.push({ name: call.slice(prefix.length).split('.md.tmp-')[0]!, release })
         onArrive?.()
@@ -2419,9 +2421,10 @@ describe('写锁接线', () => {
     for (const probe of probes) await probe()
 
     const files = (await readdir(memoryDir)).sort()
-    expect(files).toEqual([WORKSPACE_MARKER, INDEX_FILE, 'alpha.md', 'beta.md', 'gamma.md'])
-    const index = await readFile(join(memoryDir, INDEX_FILE), 'utf8')
-    for (const r of saved) expect(index).toContain(r.record!.id)
+    expect(files).toEqual([WORKSPACE_MARKER, 'alpha.md', 'beta.md', 'gamma.md'])
+    // 维护一次，索引收敛到磁盘上的三条
+    await new FileTable({ root: memoryRoot, stats: new SidecarStore({ root: memoryRoot, schemas: sidecarSchemas }).recallStats }).maintain([memoryDir])
+    expect((await indexedIds(memoryDir)).sort()).toEqual(saved.map(r => r.record!.id).sort())
   })
 
   it('RL-19 接线层：界面裁决命令认领之后整段在写锁内', async () => {

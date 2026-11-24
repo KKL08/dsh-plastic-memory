@@ -4,7 +4,7 @@ import { writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { computeDigest, encodeRecord, splitFrontmatter } from '../src/storage/frontmatter.ts'
 import { editFingerprint } from '../src/governance/snapshots.ts'
-import { GLOBAL_DIR, INDEX_FILE } from '../src/storage/paths.ts'
+import { GLOBAL_DIR } from '../src/storage/paths.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { RETENTION_MS } from '../src/retention.ts'
 import { ViewWriter } from '../src/gui/view-writer.ts'
@@ -15,6 +15,7 @@ import { candidate, record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 import { NOW, SESSION_WS, OTHER_WS, registry, root, env, ok, err, seedPair, allEntries, ledgerItems } from './helpers/gui-command-env.ts'
 import { memoryText } from './helpers/memory-text.ts'
+import { indexText, indexedIds } from './helpers/topic-index.ts'
 
 
 describe('refresh-views', () => {
@@ -102,7 +103,7 @@ describe('edit-memory（建议整理的直接改）', () => {
     cmd: 'edit-memory', memoryId, layer: scopeOf(workspacePath), base, content: '新正文', name: '新名称', summary: '新摘要', tags: ['新标签'], ...fields,
   })
 
-  it('文件里 content / name / summary / tags 是新值；updatedAt、lastConfirmedAt 刷新，digest 重算，不标手改，索引行重写；其余字段一概不动', async () => {
+  it('文件里 content / name / summary / tags 是新值；updatedAt、lastConfirmedAt 刷新，digest 重算，不标手改，维护后索引里是新摘要；其余字段一概不动', async () => {
     const e = env()
     const original = record({
       id: 'mem_e', name: '发版流程', type: 'project', scope: 'workspace', workspacePath: SESSION_WS,
@@ -128,7 +129,9 @@ describe('edit-memory（建议整理的直接改）', () => {
     const fm = splitFrontmatter(await readFile(path, 'utf8')).data
     expect(fm.digest).toBe(computeDigest('发版步骤', '新摘要', '新正文'))
     expect(fm).not.toHaveProperty('handEdited')
-    const index = await readFile(join(dirname(path), INDEX_FILE), 'utf8')
+    await e.store.maintain({ kind: 'visible', workspacePath: SESSION_WS })
+    expect(await indexedIds(dirname(path))).toEqual(['mem_e'])
+    const index = await indexText(dirname(path))
     expect(index).toContain('新摘要')
     expect(index).not.toContain('旧摘要')
 

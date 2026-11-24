@@ -9,7 +9,7 @@ import { FileTable } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { createRootLock } from '../src/storage/root-lock.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
-import { GLOBAL_DIR, INDEX_FILE, STATE_DIR, slugifyName } from '../src/storage/paths.ts'
+import { GLOBAL_DIR, STATE_DIR, slugifyName } from '../src/storage/paths.ts'
 import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { executeSearch } from '../src/tools/search.ts'
@@ -27,6 +27,7 @@ import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
 import { fireUntilSettled, manualTimers, type ManualTimers } from './helpers/manual-timers.ts'
 import { signal, waitForSignal } from './helpers/signal-files.ts'
 import { spawnWorker, type LineWorker } from './helpers/spawn-worker.ts'
+import { indexedIdsMatchDisk } from './helpers/topic-index.ts'
 
 // 写锁接进文件表、侧表、认领与 withClaim 之后的外部行为：真 node:sqlite、真临时目录；
 // 另一个进程用真子进程，同进程里的另一个实例用另一个 RootLock（两个实例互斥，同 RL-03）。退避计时注入手动计时器，不真等。
@@ -347,8 +348,8 @@ describe('RL-15 热重载：旧实例的迟到写入与新实例互斥', () => {
     for (const [id, name] of [['mem_x', '旧甲'], ['mem_y', '旧乙'], ['mem_z', '新丙']] as const) {
       expect((await table.locate(id, {}))?.record.name, id).toBe(name)
     }
-    const index = await readFile(join(root, GLOBAL_DIR, INDEX_FILE), 'utf8')
-    for (const id of ['mem_x', 'mem_y', 'mem_z']) expect(index).toContain(id)
+    await table.maintain([join(root, GLOBAL_DIR)])
+    expect(await indexedIdsMatchDisk(table, join(root, GLOBAL_DIR))).toEqual(['mem_x', 'mem_y', 'mem_z'])
     expect((await readdir(join(root, GLOBAL_DIR))).filter(n => n.includes('.tmp-'))).toEqual([])
   })
 })
@@ -376,8 +377,8 @@ describe('RL-08 两个进程同名 create', () => {
     }
     expect(fileNames.filter(n => n === `${base}.md`)).toHaveLength(1)
     expect(new Set(fileNames).size).toBe(100)
-    const index = await readFile(join(dir, INDEX_FILE), 'utf8')
-    for (const id of ids) expect(index).toContain(id)
+    await table.maintain([dir])
+    expect(await indexedIdsMatchDisk(table, dir)).toEqual([...ids].sort())
   }, 30_000)
 })
 
