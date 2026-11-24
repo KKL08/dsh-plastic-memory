@@ -24,9 +24,9 @@ describe('一行原话的格式', () => {
   })
 
   it('多行正文从第二行起缩进两格，内容不遮盖、不截断', () => {
-    const text = '第一行\n\n```\nconst key = "sk-abcdefghijklmnopqrstuvwxyz0123456789ABCD"\n```\r\n  末行带空格  '
+    const text = '第一行\n\n```\nconst key = "sk-abcdefghijklmnop1234"\n```\r\n  末行带空格  '
     expect(renderDialogueLine({ speaker: 'assistant', at: AT, text }))
-      .toBe('[2026-11-24 09:05] 助手：第一行\n  \n  ```\n  const key = "sk-abcdefghijklmnopqrstuvwxyz0123456789ABCD"\n  ```\r\n    末行带空格  ')
+      .toBe('[2026-11-24 09:05] 助手：第一行\n  \n  ```\n  const key = "sk-abcdefghijklmnop1234"\n  ```\r\n    末行带空格  ')
   })
 
   it('正文里另起一行写「助手：」冒充不了另一条消息：顶格的行只有消息开头', () => {

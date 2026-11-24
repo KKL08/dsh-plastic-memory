@@ -60,7 +60,7 @@ const MEMORIES: MemoryRecord[] = [
   mem('mem_long', { type: 'knowledge', scope: 'workspace', workspacePath: WS, content: `缓存策略说明。${'这一段讲缓存失效的细节，写得很长。'.repeat(120)}数据库连接池上限是二十。${'后面还有一大段无关内容。'.repeat(120)}` }),
   mem('mem_pending', { type: 'knowledge', content: '数据库迁移脚本放在 migrations 目录。', confidence: 0.99, delegation: { sessionId: 's-child', depth: 1, parentSessionId: 's-main' } }),
   mem('mem_expired', { type: 'knowledge', content: '数据库临时账号下周收回。', validTo: NOW - DAY }),
-  mem('mem_secret', { type: 'knowledge', content: '数据库连接串里的口令是 sk-abcdefghijklmnopqrstuvwxyz0123456789ABCD，不要外传。' }),
+  mem('mem_secret', { type: 'knowledge', content: '数据库连接串里的口令是 sk-abcdefghijklmnop1234，不要外传。' }),
   mem('mem_english', { type: 'knowledge', content: 'Use vitest for unit tests; playwright covers the login flow.', tags: ['testing'] }),
   mem('mem_cache_a', { type: 'knowledge', content: `缓存键的命名。${'键名带上租户和版本，避免串数据。'.repeat(150)}` }),
   mem('mem_cache_b', { type: 'knowledge', content: `缓存预热的做法。${'发布后先预热热点数据，再放流量。'.repeat(150)}` }),
@@ -163,8 +163,8 @@ describe('取记忆候选', () => {
     expect(hits.map(h => h.id)).toEqual(found.candidates.slice(0, 5).map(c => c.record.id))
     // 密钥在候选里没有遮盖，输出时由执行器遮
     const secret = await findMemoryCandidates({ query: '口令', scope: { kind: 'visible', workspacePath: WS } }, { store, now: () => NOW })
-    expect(secret.candidates[0].record.content).toContain('sk-abcdefghijklmnopqrstuvwxyz0123456789ABCD')
-    expect((await search({ query: '口令' })).hits[0].content).not.toContain('sk-abcdefghijklmnopqrstuvwxyz0123456789ABCD')
+    expect(secret.candidates[0].record.content).toContain('sk-abcdefghijklmnop1234')
+    expect((await search({ query: '口令' })).hits[0].content).not.toContain('sk-abcdefghijklmnop1234')
   })
 
   it('查询恰是某条记忆的 id：那一条在最前，并标出是 id 直达', async () => {
