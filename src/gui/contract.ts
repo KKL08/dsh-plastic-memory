@@ -1032,6 +1032,8 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
    */
   z.object({ cmd: z.literal('set-model-selection'), key: z.enum(MODEL_SELECTION_KEYS), selection: modelSelectionSchema.nullable() }),
   z.object({ cmd: z.literal('refresh-views') }),
+  /** 删掉对话记录库（过往对话的本地副本）。原话功能还开着的话，下次用到时从会话日志重建。 */
+  z.object({ cmd: z.literal('delete-dialogue-records') }),
   /**
    * 设置页改名或删除自建类型时处理已有记忆（全库：全局和所有项目，等同 allowCrossWorkspace）。retype 把这一类的记忆
    * （在用的和最近删除里的）改成 to，不刷新更新、确认时间；forget 把在用的这一类移到最近删除，含密钥的不动、计数返回。

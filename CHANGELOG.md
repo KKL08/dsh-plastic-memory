@@ -7,6 +7,14 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- The plugin can keep a searchable local copy of past conversations, built
+  from the conversation logs of DeepSeek Harness, for the projects that have
+  memories and the project of the current chat. It is only built once the
+  search source includes past conversations or memories carry their source
+  dialogue; both are off by default for now. The copy holds the full text of
+  what you and the assistant said, plus short or failed tool results, stays
+  on this machine outside the memory folder, and is rebuilt from the logs if
+  deleted. `/memory delete-dialogue-records` deletes it.
 - After an update, `memory_save` lists numbers, dates, names and paths that
   are no longer in the memory, and points out a refinement that removed a
   large part of the text. It also suggests combining memories when a single

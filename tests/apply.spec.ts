@@ -409,6 +409,11 @@ describe('GUI 命令接线', () => {
     expect(body).toMatchObject({ ok: true, cmd: 'info', info: { memoryRoot, views: { session: join(memoryRoot, '.state', 'gui', 'session-sess-x.json') } } })
   })
 
+  it('执行回调：delete-dialogue-records 在没建过对话记录库时也成功', async () => {
+    const { exec } = await withCommands()
+    expect((await exec('/memory delete-dialogue-records')).body).toEqual({ ok: true, cmd: 'delete-dialogue-records' })
+  })
+
   it('执行回调：refresh-views 写出视图文件；改记忆的子命令落盘后也重写视图', async () => {
     const { memoryRoot, exec } = await withCommands()
     expect((await exec('/memory refresh-views')).body).toEqual({ ok: true, cmd: 'refresh-views' })
@@ -626,7 +631,7 @@ describe('自动体检接线', () => {
     // 不借会话：请求带的是这次体检另起的 id，不是哪个对话的
     expect(ctx.llmRequests[0]).toHaveProperty('sessionId', expect.stringMatching(/^plastic-memory-checkup-/))
     // 完成记录由执行器写；之后还要重写视图、放掉认领，认领的心跳停了只剩每 10 分钟的检查
-    await vi.waitFor(() => expect(timer.timers.filter(t => t.isLive).map(t => [t.delayMs, t.every])).toEqual([[10 * 60_000, true]]))
+    await vi.waitFor(() => expect(timer.timers.filter(t => t.isLive).map(t => [t.delayMs, t.every])).toEqual([[5_000, true], [10 * 60_000, true]]))
     await ctx.dispose()
     expect(timer.timers.filter(t => t.isLive)).toEqual([])
   })

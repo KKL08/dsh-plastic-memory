@@ -8,6 +8,7 @@
  * 宿主 grep 工具搜记忆根目录时顶层命中、.archive/ 不命中（H16）、
  * 带委派 header 的真子会话存入待确认记忆、检索排在主档后、溯源只限自己的会话、父会话接受后进新会话的注入（H19）。
  * 无 key 也跑的宿主服务契约：经宿主 commands 服务执行 `/memory` 命令，结果过 GUI 契约 schema；自动体检调度器在宿主计时服务登记了定时器。
+ * 对话记录库（H34，无 key）：从真会话的日志建库，用同一套分词搜到用户本人说的话，定时任务发的不收；按宿主的会话清单把库建完。
  * 宿主接口探针（H22–H30、H32，无 key）：sessionQuery 的会话列举、父子追溯、标题、事件时间与过滤；当轮用户消息的来源标记；本进程的空闲信号；
  * 指令文件的修改时间；会话存档状态（含跨进程，第二趟）；会话卸下后读事件、另一个进程写下的会话（第二趟）；fork 型子会话的快照；经插件自有来源的消息开一轮（含续接冷会话）；各种会话的继承前缀长度（H32）。
  * 有 DEEPSEEK_API_KEY 且宿主能选出默认模型时再跑语义扫描与取消两项、一次真实的自动体检（H17：无会话、宿主默认模型）、
@@ -30,6 +31,10 @@ import { createSystemMessage, createToolResultMessage, createUserMessage } from 
 import type { Context } from '@deepseek-ai/cordis'
 import { memoryCommandResultSchema } from '../../src/gui/contract.ts'
 import { SidecarStore } from '../../src/storage/sidecar.ts'
+import { DialogueRecordStore } from '../../src/storage/dialogue-records.ts'
+import { DialogueCatchup } from '../../src/tools/dialogue-catchup.ts'
+import { DIALOGUE_BM25_WEIGHTS, dialogueTokenizer } from '../../src/search/dialogue-tokenizer.ts'
+import { createCordisHostSession } from '../../src/cordis-host-session.ts'
 import { PendingDecisionsStore, baselineFingerprint, conflictFingerprint } from '../../src/governance/decisions.ts'
 import { INSTRUCTION_MAX_BYTES } from '../../src/governance/instructions.ts'
 import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../../src/governance/schema.ts'
@@ -807,6 +812,45 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
         detail: `byCwd=${byCwd.length} byParent=${JSON.stringify(byParent.map(id => id === child.header.id ? 'child' : id))} listSessions=${listed} ancestors=${trace.ancestors.map(a => a.header.id === pid ? 'parent' : a.header.id).join(',')}`
           + ` title=${title}${titleNote} events=${events.length} times=${hasTimes} seqRange=${JSON.stringify(range)} typeUserMessage=${JSON.stringify(typed)} timeRange=${timed.length} beforeFirstEvent=${beforeFirst.length}`
           + ` readEvent(after:51)=${windowCode} searchEvents=${searchCode}`,
+      }
+    })
+
+    // H34 对话记录库：从宿主真会话的日志建库，再用同一套分词搜中文双字词。H22 的会话里用户本人发的那条要搜得到，
+    // 定时任务发的那条不收；库里的文本和发出去的逐字相同。库建在临时目录，不碰装好的插件自己的那份。
+    await attempt('H34-DIALOGUE-RECORDS', async () => {
+      if (!sq || probeParent === undefined) return { ok: false, detail: '前提缺失：H22 没建出会话' }
+      const pid = probeParent.header.id
+      const cwd = probeParent.header.cwd
+      const quiet = { info: () => {}, warn: () => {}, error: () => {} }
+      const records = new DialogueRecordStore({ path: join(mkdtempSync(join(tmpdir(), 'h34-')), 'dialogue-records.sqlite'), log: quiet })
+      const tokenizer = await dialogueTokenizer()
+      const catchup = new DialogueCatchup({
+        store: records, log: quiet,
+        host: createCordisHostSession({ lookup: key => ctx.get(key), logger: quiet, resolveCwd: async dir => dir }),
+        noReview: { isMarkedNoReview: async () => false, sessionIds: async () => new Set<string>() },
+        tokenizer: async () => tokenizer,
+        workspaceOf: async dir => dir,
+        knownWorkspaces: async () => [],
+        isEnabled: () => true,
+        sessionStore: 'host-contract',
+      })
+      try {
+        const readiness = await catchup.beforeSearch({ sessionId: pid, cwd, isSubagent: false }, 5_000, 0)
+        if (readiness.kind !== 'ready') return { ok: false, detail: `readiness=${readiness.kind}` }
+        // 再把待建队列推完：建完的前提是宿主列得出会话清单（列不出就一直停在「在建」），同项目的其他会话也经清单收进来
+        let built = await catchup.advance(5_000)
+        for (let i = 0; i < 5 && built.kind === 'ready' && built.status !== 'ready'; i++) built = await catchup.advance(5_000)
+        const builtStatus = built.kind === 'ready' ? built.status : built.kind
+        const listed = built.kind === 'ready' ? built.coverage.sessions : 0
+        const hits = records.search(readiness.gen, tokenizer.match('用户本人')!.all, { limit: 10, weights: DIALOGUE_BM25_WEIGHTS })
+        const fromSchedule = records.search(readiness.gen, tokenizer.match('定时任务')!.all, { limit: 10, weights: DIALOGUE_BM25_WEIGHTS })
+        const hit = hits.find(h => h.sessionId === pid)
+        return {
+          ok: hit?.text === 'H22 用户本人发的消息' && hit.speaker === 'user' && fromSchedule.length === 0 && readiness.isCaughtUp && builtStatus === 'ready',
+          detail: `status=${builtStatus} sessions=${listed} caughtUp=${readiness.isCaughtUp} hit=${JSON.stringify(hit?.text)} speaker=${hit?.speaker} scheduleHits=${fromSchedule.length} degraded=${tokenizer.degraded}`,
+        }
+      } finally {
+        catchup.stop()
       }
     })
 

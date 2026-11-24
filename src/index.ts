@@ -11,7 +11,11 @@ import { FileTable } from './storage/file-table.ts'
 import { SidecarStore } from './storage/sidecar.ts'
 import { createRootLock } from './storage/root-lock.ts'
 import type { LegacyKvTables } from './storage/legacy-kv-import.ts'
-import { localStateDir, OP_JOURNAL_FILE, DERIVED_INDEX_FILE, resolveMemoryRoot } from './storage/paths.ts'
+import { localStateDir, OP_JOURNAL_FILE, DERIVED_INDEX_FILE, DIALOGUE_RECORDS_FILE, resolveMemoryRoot } from './storage/paths.ts'
+import { DialogueRecordStore } from './storage/dialogue-records.ts'
+import { CATCHUP_BACKGROUND_BUDGET_MS, CATCHUP_BACKGROUND_INTERVAL_MS, DialogueCatchup } from './tools/dialogue-catchup.ts'
+import { NoReviewList } from './storage/no-review.ts'
+import { dialogueTokenizer } from './search/dialogue-tokenizer.ts'
 import { OpJournal } from './storage/op-journal.ts'
 import { DerivedIndex } from './storage/derived-index.ts'
 import { stalenessNote } from './record-freshness.ts'
@@ -292,6 +296,23 @@ export async function apply(ctx: Context, config: Config) {
   }
   // 宿主会话的读取集中在适配器：探测、退化、同一会话只警告一次是它的内部规则
   const host = createCordisHostSession({ lookup: name => ctx.get(name), logger: ctx.logger, resolveCwd })
+  // 对话记录库：过往对话的本地副本，在记忆根之外、每台机器一份，能从会话日志整份重建。检索来源含原话或记忆带原话时才建、才读会话日志。
+  // 「不回看」清单在记忆根里，几个进程同一份；标上之后把这个会话已经收进本机的对话记录清掉
+  const noReview = new NoReviewList(memoryRoot, sessionId => dialogueCatchup.dropSession(sessionId))
+  const isDialogueEnabled = () => config.search.source.get() !== 'memory' || config.search.memoryQuotes.get()
+  const dialogueCatchup = new DialogueCatchup({
+    store: new DialogueRecordStore({ path: join(localStateDir(memoryRoot), DIALOGUE_RECORDS_FILE), log: ctx.logger }),
+    host,
+    noReview,
+    tokenizer: () => dialogueTokenizer({ userDictionaryPath: () => config.search.userDictionaryPath.get(), log: ctx.logger }),
+    // 不经 resolveCwd：那里会把解析结果记进会话归属对照，建库列到的会话不该进那张表
+    workspaceOf: cwd => resolveWorkspacePath(ctx, cwd),
+    knownWorkspaces: async () => [...new Set((await fileTable.listWorkspaceDirs()).entries.map(e => e.workspacePath))],
+    isEnabled: isDialogueEnabled,
+    sessionStore: process.env.DSH_HOME ?? join(homedir(), '.dsh'),
+    log: ctx.logger,
+  })
+  ctx.effect(() => () => { dialogueCatchup.stop() }, 'plastic-memory: dialogue records')
   // 会话视图（进程内存）：每个会话最近一次冻结的视图，与这次对话新记的 id（可能早于首次冻结）
   const frozenViews = new Map<string, SessionView>()
   const savedIds = new Map<string, string[]>()
@@ -465,6 +486,7 @@ export async function apply(ctx: Context, config: Config) {
     const command = createMemoryCommand({
       memoryRoot, store, decisions, snapshots, cache: scanCache, checkups, autoCheckups, selections, ignores, registry, agentsMd, views: writer, instructions,
       onAutoCheckupChanged: () => void scheduler?.recheck(),
+      deleteDialogueRecords: () => dialogueCatchup.destroy(),
       suggestions: checkupSuggestions, signal: unload.signal,
       host, log: ctx.logger,
       isGovernanceEnabled: () => config.governance.enabled.get(),
@@ -511,7 +533,15 @@ export async function apply(ctx: Context, config: Config) {
     })
     scheduler = created
     created.start()
+    // 对话记录库的后台推进：一次只跑一段，上一段没跑完这一拍就跳过；功能关着时什么都不做
+    let isAdvancing = false
+    const stopAdvancing = timer.interval(() => {
+      if (isAdvancing || !isDialogueEnabled()) return
+      isAdvancing = true
+      void dialogueCatchup.advance(CATCHUP_BACKGROUND_BUDGET_MS).finally(() => { isAdvancing = false })
+    }, CATCHUP_BACKGROUND_INTERVAL_MS)
     return async () => {
+      stopAdvancing()
       if (scheduler === created) scheduler = undefined
       await created.dispose()
     }
@@ -544,6 +574,8 @@ export async function apply(ctx: Context, config: Config) {
       disposeSave()
       disposeSave = registerSave()
     }
+    // 原话功能关掉：在途的建库停下、关连接；库文件留着，要删走 delete-dialogue-records
+    if (changed('search.source', 'search.memoryQuotes') && !isDialogueEnabled()) dialogueCatchup.stop()
     // search.userDictionaryPath 不用在这里处理：memory_search 每次现读路径，变了下一次搜索就重建分词实例
     // 只有组装快照时读的字段变了才让冻结快照过期；主题色、提升路径、体检灵敏度这类改了不重建
     if (changed(...typeKeys, 'snapshotTokenBudget', 'snapshotOverflow', 'evidenceLookup')) {
