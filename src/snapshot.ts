@@ -47,9 +47,14 @@ const CJK_PRICED = new RegExp(String.raw`[${CJK}\u3000-\u303f\uff00-\uffef]`, 'u
  * 默认上限 4,000 约合 6,700 个中文字。按十分之一 token 的整数累加，避免 0.6 × 5 这类浮点误差多进一。
  */
 export function estimateTokens(text: string): number {
+  return Math.ceil(tokenTenths(text) / 10)
+}
+
+/** estimateTokens 取整前的值，单位是十分之一 token。按码点边界分段时可以累加：各段之和除以十向上取整，等于整段的估算。 */
+export function tokenTenths(text: string): number {
   let tenths = 0
   for (const ch of text) tenths += CJK_PRICED.test(ch) ? 6 : 3
-  return Math.ceil(tenths / 10)
+  return tenths
 }
 
 /** 注入排序：confidence 降序 → lastConfirmedAt 降序。recallCount 不参与：被宽泛查询扫到的记忆不该越排越前。 */
