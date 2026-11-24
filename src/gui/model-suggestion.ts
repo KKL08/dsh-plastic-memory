@@ -3,8 +3,9 @@ import { z } from 'zod'
 import type { MemoryRecord } from '../record-schema.ts'
 import { modelError, type SemanticLlm } from '../governance/semantic-scan.ts'
 import type { ProposalOp, SuggestionFailure } from '../governance/schema.ts'
+import { hasForeignSecret as isForeignSecretIn } from '../governance/changeset.ts'
 import { HORIZONTAL_PROPOSAL_ACTIONS, VERTICAL_PROPOSAL_ACTIONS, type ProposalAction, type SuggestionParseStage } from '../contract-codes.ts'
-import { detectSecrets, maskSecrets, secretValues } from '../secrets.ts'
+import { maskSecrets } from '../secrets.ts'
 import { mergeKeeperIndex } from './contract.ts'
 import { readJsonObject } from '../json-reply.ts'
 import { draftOutputSchema, toMemoryDraft } from './model-draft.ts'
@@ -179,21 +180,11 @@ export function proposalOps(parsed: ParsedSuggestion, records: readonly [MemoryR
   }
 }
 
-const surfaceText = (f: { content: string; name: string; summary: string; tags: readonly string[] }) => `${f.content}\n${f.name}\n${f.summary}\n${f.tags.join(' ')}`
-
 /**
- * 改写稿里的密钥是不是带进来的：有高危密钥，或有疑似密钥的值不等于两条原文里的任何一个（模型自己编的、截短或加长的、从别处带进来的），算带进来。
- * 按完整的值比，不看标签和分隔符：只改了标签写法的同一个值算原文已有。
- * 稿不遮盖（遮了采纳会把占位文字写进记忆），带进来就整份不要；原文里本来就有、用户保存时确认过的疑似值原样保留不算。
+ * 改写稿里的密钥是不是带进来的（判法见治理层的 hasForeignSecret）。稿不遮盖（遮了采纳会把占位文字写进记忆），带进来就整份不要。
  */
 function hasForeignSecret(ops: readonly ProposalOp[], records: readonly MemoryRecord[]): boolean {
-  const original = new Set(records.flatMap(r => secretValues(surfaceText(r), { severity: 'suspected' })))
-  return ops.some(op => {
-    if (op.kind !== 'edit') return false
-    const text = surfaceText(op)
-    if (detectSecrets(text).some(h => h.severity === 'critical')) return true
-    return secretValues(text, { severity: 'suspected' }).some(value => !original.has(value))
-  })
+  return ops.some(op => op.kind === 'edit' && isForeignSecretIn({ content: op.content, name: op.name, summary: op.summary, tags: [...op.tags] }, records))
 }
 
 /**

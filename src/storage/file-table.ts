@@ -1549,7 +1549,8 @@ export class FileTable implements MemoryTable {
       }
       throw new Error(`unreachable: ${fullIdName}`)   // 全 id 名不会是保留名，循环必在它那里返回或抛错
     } finally {
-      await rm(tmp, { force: true })   // 占名成功后 tmp 仍在（link 多出的名字或复制的源）；rename 过的已不存在
+      // 占名成功后 tmp 仍在（link 多出的名字或复制的源）；rename 过的已不存在。清不掉不算写入失败：新文件已经落下，残留的临时文件由维护清
+      await rm(tmp, { force: true }).catch(() => {})
     }
   }
 
@@ -1590,10 +1591,13 @@ export class FileTable implements MemoryTable {
         ...(prev !== undefined && !isInPlace ? { source: { dir: dirname(prev.filePath), nameHash: fingerprintOf(basename(prev.filePath)) } } : {}),
       }, historyMove === undefined ? [] : [historyMove])
       let filePath: string
+      // 文件已经带着提交标记落在目标目录里、不会再被撤回：在日志行上记一笔。之后文件被不拿锁的写（手改）换掉、标记没了，补做也认这次写成了
+      const markCommitted = () => { if (this.isJournaling()) this.journal!.markCommitted(op.id) }
       if (prev !== undefined && isInPlace) {
         filePath = prev.filePath
         if (!(await this.unchangedSince(prev))) throw new StaleReadError()
         await this.atomicWrite(filePath, text)   // 自己的文件：rename 只覆盖同一记录自己的文件
+        markCommitted()
       } else {
         if (prev !== undefined && !(await this.unchangedSince(prev))) throw new StaleReadError()
         await mkdir(level, { recursive: true })
@@ -1601,11 +1605,14 @@ export class FileTable implements MemoryTable {
         filePath = claim.path
         // 先写新后删旧；崩溃窗口由读路径的同 id 取舍兜底。占名可能落回原路径（候选名正被自己占着），
         // 路径比较忽略大小写：大小写不敏感文件系统上不能删掉刚写的自己。
-        if (prev !== undefined && prev.filePath.toLowerCase() !== filePath.toLowerCase()) {
-          if (!(await this.unchangedSince(prev))) {
-            await this.withdrawClaim(prev.filePath, claim, text)   // 占名期间旧文件被改或不见了：按规则撤回新文件，重来
-            throw new StaleReadError()
-          }
+        const isSourceLeft = prev !== undefined && prev.filePath.toLowerCase() !== filePath.toLowerCase()
+        if (isSourceLeft && !(await this.unchangedSince(prev))) {
+          await this.withdrawClaim(prev.filePath, claim, text)   // 占名期间旧文件被改或不见了：按规则撤回新文件，重来
+          throw new StaleReadError()
+        }
+        // 记在删旧文件之前：旧文件一时删不掉，这次写入也已经成了，剩下的那份由补做清
+        markCommitted()
+        if (isSourceLeft) {
           await this.removeFile(prev.filePath)
           changes.push({ path: prev.filePath })
         }
@@ -1704,7 +1711,8 @@ export class FileTable implements MemoryTable {
    * 补做被打断的操作（每次顶层的段拿到写锁先跑）。写入整段都在锁里，这时看到的待完成行一定来自没走完的上一段：
    * 进程中途退出，或那一段抛了错。按行里记的目标判提交了没有：
    *  - 写文件：目标目录里有这个 id、提交标记等于操作 id 的文件算已提交。原来那份（文件位置会变的写入先写新、后删旧）
-   *    原文还是改前的样子才删；被改过就两份都留，读路径照常取舍，体检报同 id 多份。
+   *    原文还是改前的样子才删；被改过就两份都留，读路径照常取舍，体检报同 id 多份。文件上找不到标记、日志行上记着
+   *    写成了的（写成之后被手改换掉或删了）也算已提交。
    *  - 彻底删除：那个文件不在了算已提交，哪里都没有这个 id 了就清召回统计。补做不删文件：同 id 的其余副本留着，体检报。
    * 已提交的把提交后的步骤补完；没提交的作废，改前快照留着无害。一行补做失败留到下一次，不挡别的行；
    * 同一行在这个进程里连着失败几次就不再试。更新的版本记的行（目标种类或步骤不认识）不动。
@@ -1726,6 +1734,11 @@ export class FileTable implements MemoryTable {
           if (committed !== undefined) {
             if (target.source !== undefined && target.before !== undefined) await this.removeSourceIfUnchanged(target.source, target.before, committed.located.filePath)
             await this.runSteps(row.op, row.steps, committed.located.record, fingerprintOf(committed.raw) === target.after)
+          } else if (row.isCommitted === true) {
+            // 日志行上记着写成了，文件上却找不到这次的提交标记：写成之后被不拿锁的写换掉或删了。步骤照补，按不是原样算，
+            // 拿目标目录里这个 id 现在的那份（没有就不给）；原来那份不动，分不出它和现在这份的关系
+            const current = await this.findStamped(target.dir, target.memoryId, undefined)
+            await this.runSteps(row.op, row.steps, current?.located.record, false)
           }
         } else if (target.kind === 'index') {
           // 读不出（不是不存在）会抛：不能当成没提交而作废
@@ -1752,15 +1765,19 @@ export class FileTable implements MemoryTable {
     return this.locked(async () => {
       const own = target.kind === 'global' ? [{ dir: this.globalDir, loc: { scope: 'global' } as FileLocation }] : await this.hintDirs(target.workspacePath)
       const written = (await this.scanForId(id, own)).find(copy => copy.writeOp === opId)
+      // 日志行上记着已提交、文件上却找不到：读不出，或之后被手改换掉了。不能答「没写」，调用方会把它的改前快照当没用的删掉
+      if (written === undefined && this.isJournaling() && this.journal!.pending().some(row => row.op === opId && row.isCommitted === true)) {
+        throw new Error(`操作 ${opId} 已经提交，但这一刻在文件上认不出它`)
+      }
       return written && this.toLocated(written)
     })
   }
 
   /**
-   * 目录里这个 id、提交标记等于 opId 的文件。每个文件只读一次，指纹和记录出自同一份原文；原文里没有这个操作 id 的不解析。
+   * 目录里这个 id、提交标记等于 opId 的文件（opId 不给时只按 id 找）。每个文件只读一次，指纹和记录出自同一份原文；原文里没有这个操作 id 的不解析。
    * 有文件读不出（权限、占用）又没找到时抛错：不能当成「没有」，否则这一行会被当成没提交而作废。
    */
-  private async findStamped(level: string, id: string, opId: string): Promise<{ located: LocatedFile; raw: string } | undefined> {
+  private async findStamped(level: string, id: string, opId: string | undefined): Promise<{ located: LocatedFile; raw: string } | undefined> {
     const listed = await this.listMemoryFiles(level)
     if ('note' in listed) throw new Error(listed.note.text)
     const dir = layerDirOf(level)
@@ -1778,11 +1795,11 @@ export class FileTable implements MemoryTable {
         if (errnoCode(err) !== 'ENOENT') unreadable = name
         continue
       }
-      if (!frontmatterOf(raw).includes(opId)) continue
+      if (!frontmatterOf(raw).includes(opId ?? id)) continue
       const decoded = decodeFile(raw, { path: filePath, loc: loc.loc, relPath: relative(this.opts.root, filePath), mtimeMs })
-      if (!decoded.ok || decoded.record.id !== id || decoded.record.lastWriteOp !== opId) continue
+      if (!decoded.ok || decoded.record.id !== id || (opId !== undefined && decoded.record.lastWriteOp !== opId)) continue
       const { lastWriteOp: writeOp, ...record } = decoded.record
-      return { located: { record, extras: decoded.extras, filePath, dir, writeOp }, raw }
+      return { located: { record, extras: decoded.extras, filePath, dir, ...(writeOp !== undefined ? { writeOp } : {}) }, raw }
     }
     if (unreadable !== undefined) throw new Error(`${level} 里有文件读不出（${unreadable}），分不出这次写入提交了没有`)
     return undefined

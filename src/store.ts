@@ -3,7 +3,7 @@ import type { MemoryRecord } from './record-schema.ts'
 import { RecordNotFoundError } from './errors.ts'
 import { expandQueryTerms, matchScore } from './text.ts'
 import {
-  byPosition, outgoingLinks, resolveLiveFirst, sortLinkRefs,
+  byPosition, newWriteOp, outgoingLinks, resolveLiveFirst, sortLinkRefs,
   type LinkQuery, type MemoryLogger, type MemoryTable, type LocateTarget, type LocateOptions, type ScopeReadOptions, type ScopeReadResult, type KeywordMatch,
   type DirectoryNote, type QuarantineEntry, type OpStep, type OpStepHandler, type WriteOp, type IndexOpOptions, type IndexOpOutcome, type IndexUndoOutcome,
 } from './storage/table.ts'
@@ -117,6 +117,9 @@ export class MemoryStore {
   hasStep(kind: string): boolean {
     return this.stepHandlers.has(kind)
   }
+
+  /** 起一个写入操作（id 现生成）：要把操作 id 写进记录里、又不直接碰存储层的调用方用。 */
+  newOp(init: { initiator?: string } = {}): WriteOp { return newWriteOp(init) }
 
   /** 带着 op 的那次写入落盘了：做掉它提交后的步骤（见 MemoryTable.finishOp）。没有操作日志的表在这里直接做。 */
   async finishOp(op: WriteOp, written?: MemoryRecord): Promise<void> {

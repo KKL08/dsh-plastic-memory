@@ -7,7 +7,7 @@ import { type PendingTable } from '../src/governance/decisions.ts'
 import { editFingerprint } from '../src/governance/snapshots.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { RETENTION_MS } from '../src/retention.ts'
-import { GUI_VIEW_DIR, deletedViewSchema, libraryViewSchema, type MemoryCommand } from '../src/gui/contract.ts'
+import { GUI_VIEW_DIR, deletedViewSchema, libraryViewSchema, type MemoryCommand, type MemoryCommandResult } from '../src/gui/contract.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
 import { scopeAt, type Scope } from '../src/scope.ts'
 import { locateCopy } from '../src/tools/workspace-gate.ts'
@@ -1168,7 +1168,7 @@ describe('apply-edits（整理所选：应用全部）', () => {
     Promise.all(SEED.map(async m => { const at = await e.store.locate(m.id, scopeAt(workspacePath)); return at === undefined ? undefined : [at.filePath, await memoryText(at.filePath)] }))
   const statusOf = async (e: ReturnType<typeof env>, id: string) => (await locateCopy(e.store, id, wsScope))?.status
 
-  it('混合批次：按计划顺序逐项写，整批一份快照，删除项进最近删除并清掉指向它们的账本条目，记一条带逐项回执的 batch-edited', async () => {
+  it('混合批次：按计划顺序逐项写，每项各拍一份改前快照，删除项进最近删除并清掉指向它们的账本条目，记一条带逐项回执的 batch-edited', async () => {
     const e = env()
     await seed(e)
     const stale = await e.decisions.upsert({ memoryIds: ['mem_p', 'mem_x'], summary: '旧冲突', fingerprint: 'fp' }, 1)
@@ -1190,10 +1190,12 @@ describe('apply-edits（整理所选：应用全部）', () => {
     expect(deletedViewSchema.parse(await e.readView('deleted')).items.map(i => i.memory.id).sort()).toEqual(['mem_b', 'mem_p'])
 
     const snaps = await e.snapshots.list()
-    expect(snaps).toHaveLength(1)
-    expect(snaps[0]).toMatchObject({ id: body.snapshotId, operation: 'pre-update', description: '整理所选 4 条前' })
-    expect([...snaps[0]!.memoryIds].sort()).toEqual(['mem_b', 'mem_c', 'mem_e', 'mem_p'])
-    expect(snaps[0]!.data.find(r => r.id === 'mem_c')?.content).toBe('提交前依次跑 pnpm lint && prettier --write .')
+    expect(snaps.map(s => [s.operation, s.memoryIds]).sort((a, b) => String(a[1]).localeCompare(String(b[1])))).toEqual([
+      ['pre-forget', ['mem_b']], ['pre-update', ['mem_c']], ['pre-update', ['mem_e']], ['pre-forget', ['mem_p']],
+    ])
+    expect(snaps.find(s => s.memoryIds.includes('mem_c'))!.data[0]?.content).toBe('提交前依次跑 pnpm lint && prettier --write .')
+    // 结果里带的是第一项的快照
+    expect(snaps.find(s => s.memoryIds.includes('mem_p'))!.id).toBe(body.snapshotId)
 
     const entries = await allEntries(e)
     expect(entries.map(d => d.id)).toEqual([body.decisionId])
@@ -1333,11 +1335,19 @@ describe('apply-edits（整理所选：应用全部）', () => {
   })
 
   describe('应用中途失败：已写的退回（故障在进程边界注入：另一个会话改磁盘、写盘报错）', () => {
-    type Method = 'update' | 'softDeleteUnlessSecret' | 'put'
-    /** 包一层 store 的写方法：调用前后插入别的动作。call 是原来的调用。 */
-    function intercept(e: ReturnType<typeof env>, method: Method, around: (id: string, call: () => Promise<unknown>) => Promise<unknown>) {
+    type Method = 'softDeleteUnlessSecret' | 'put'
+    /**
+     * 包一层 store 的写方法：调用前后插入别的动作。call 是原来的调用，nth 是这条记忆第几次走到这个方法（从 1 起）。
+     * 改写和退回都走 put：一条记忆的第 1 次是应用，第 2 次是退回。
+     */
+    function intercept(e: ReturnType<typeof env>, method: Method, around: (id: string, call: () => Promise<unknown>, nth: number) => Promise<unknown>) {
       const original = (e.store[method] as (...args: unknown[]) => Promise<unknown>).bind(e.store)
-      e.store[method] = ((r: { id: string }, ...rest: unknown[]) => around(r.id, () => original(r, ...rest))) as never
+      const seen = new Map<string, number>()
+      e.store[method] = ((r: { id: string }, ...rest: unknown[]) => {
+        const nth = (seen.get(r.id) ?? 0) + 1
+        seen.set(r.id, nth)
+        return around(r.id, () => original(r, ...rest), nth)
+      }) as never
     }
     /** 别处（另一个会话、外部编辑器）直接改磁盘：绕过包装。 */
     function elsewhereOf(e: ReturnType<typeof env>) {
@@ -1348,19 +1358,21 @@ describe('apply-edits（整理所选：应用全部）', () => {
     // SEED 顺序：files() 的下标 0 mem_p、1 mem_c、2 mem_e、3 mem_b
     const P = 0, C = 1, B = 3
 
-    it('锁内第 k 条被别处改过：停在那一条，已写的按快照退回、文件逐字节复原，整批 stale 且 memoryIds 列出那一条，不记账', async () => {
+    it('锁内第 k 条被别处改过：停在那一条，已写的按回执退回、文件逐字节复原，整批 stale 且 memoryIds 列出那一条，不记账', async () => {
       const e = env()
       await seed(e)
       const elsewhere = elsewhereOf(e)
       const command = { ops: [await edit(e, 'mem_c'), await forget(e, 'mem_p', 'mem_c'), await edit(e, 'mem_e'), await edit(e, 'mem_b')] }
       const before = await files(e)
-      intercept(e, 'update', async (id, call) => { if (id === 'mem_e') await elsewhere('mem_e', '别处刚改的'); return call() })
+      intercept(e, 'put', async (id, call, nth) => { if (id === 'mem_e' && nth === 1) await elsewhere('mem_e', '别处刚改的'); return call() })
       e.clock.now = LATER
       expect(err(await apply(e, command))).toMatchObject({ code: 'stale', memoryIds: ['mem_e'] })
       const after = await files(e)
       expect([after[P], after[C], after[B]]).toEqual([before[P], before[C], before[B]])
       expect(await contentOf(e, 'mem_e')).toBe('别处刚改的')
       expect(await allEntries(e)).toEqual([])
+      // 退回的几项当没发生过：各自的改前快照也不留
+      expect(await e.snapshots.list()).toEqual([])
       expect(deletedViewSchema.parse(await e.readView('deleted')).items).toEqual([])
     })
 
@@ -1384,13 +1396,12 @@ describe('apply-edits（整理所选：应用全部）', () => {
       const elsewhere = elsewhereOf(e)
       const command = { ops: [await edit(e, 'mem_c'), await edit(e, 'mem_b'), await forget(e, 'mem_p', 'mem_c'), await edit(e, 'mem_e')] }
       const before = await files(e)
-      intercept(e, 'update', async (id, call) => { if (id === 'mem_e') await elsewhere('mem_e', '别处刚改的'); return call() })
-      const once = new Set(['mem_c', 'mem_b'])
-      intercept(e, 'put', async (id, call) => {
-        if (!once.delete(id)) return call()
+      intercept(e, 'put', async (id, call, nth) => {
+        if (id === 'mem_e' && nth === 1) await elsewhere('mem_e', '别处刚改的')
         // 回退之前，别处在本批写下的版本上接着改
-        if (id === 'mem_c') { await elsewhere('mem_c', '别处接着改的'); return call() }
-        throw new Error('磁盘满了')
+        if (id === 'mem_c' && nth === 2) await elsewhere('mem_c', '别处接着改的')
+        if (id === 'mem_b' && nth === 2) throw new Error('磁盘满了')
+        return call()
       })
       e.clock.now = LATER
       const body = ok(await apply(e, command))
@@ -1413,8 +1424,11 @@ describe('apply-edits（整理所选：应用全部）', () => {
       await seed(e)
       const elsewhere = elsewhereOf(e)
       const command = { ops: [await edit(e, 'mem_c'), await edit(e, 'mem_e')] }
-      intercept(e, 'update', async (id, call) => { if (id === 'mem_e') await elsewhere('mem_e', '别处刚改的'); return call() })
-      intercept(e, 'put', async (id, call) => { if (id === 'mem_c') await elsewhere('mem_c', '别处接着改的'); return call() })
+      intercept(e, 'put', async (id, call, nth) => {
+        if (id === 'mem_e' && nth === 1) await elsewhere('mem_e', '别处刚改的')
+        if (id === 'mem_c' && nth === 2) await elsewhere('mem_c', '别处接着改的')
+        return call()
+      })
       const body = ok(await apply(e, command))
       expect(body).toMatchObject({ isPartial: true, memoryIds: [], unrecordedIds: ['mem_c'] })
       expect(body.decisionId).toBeUndefined()
@@ -1427,8 +1441,12 @@ describe('apply-edits（整理所选：应用全部）', () => {
       const elsewhere = elsewhereOf(e)
       const command = { ops: [await edit(e, 'mem_c'), await edit(e, 'mem_b'), await edit(e, 'mem_e')] }
       const before = await files(e)
-      intercept(e, 'update', async (id, call) => { if (id === 'mem_e') await elsewhere('mem_e', '别处刚改的'); return call() })
-      intercept(e, 'put', async (id, call) => { const r = await call(); if (id === 'mem_c') throw new Error('写完报错'); return r })
+      intercept(e, 'put', async (id, call, nth) => {
+        if (id === 'mem_e' && nth === 1) await elsewhere('mem_e', '别处刚改的')
+        const r = await call()
+        if (id === 'mem_c' && nth === 2) throw new Error('写完报错')
+        return r
+      })
       expect(err(await apply(e, command))).toMatchObject({ code: 'stale', memoryIds: ['mem_e'] })
       const after = await files(e)
       expect([after[C], after[B]]).toEqual([before[C], before[B]])
@@ -1436,14 +1454,14 @@ describe('apply-edits（整理所选：应用全部）', () => {
     })
 
     it.each([
-      ['改写', 'update', 'mem_e'],
+      ['改写', 'put', 'mem_e'],
       ['删除', 'softDeleteUnlessSecret', 'mem_b'],
     ] as const)('%s项写盘后抛错（写完维护目录时报错）：重读确认已落盘，这一项也退回，其余照样退回，错误照常报出', async (_label, method, failing) => {
       const e = env()
       await seed(e)
       const command = { ops: [await edit(e, 'mem_c'), await forget(e, 'mem_p', 'mem_c'), await edit(e, 'mem_e'), await forget(e, 'mem_b')] }
       const before = await files(e)
-      intercept(e, method, async (id, call) => { const r = await call(); if (id === failing) throw new Error('维护目录失败'); return r })
+      intercept(e, method, async (id, call, nth) => { const r = await call(); if (id === failing && nth === 1) throw new Error('维护目录失败'); return r })
       e.clock.now = LATER
       expect(err(await apply(e, command))).toMatchObject({ code: 'failed', detail: '维护目录失败' })
       expect(await files(e)).toEqual(before)
@@ -1451,18 +1469,20 @@ describe('apply-edits（整理所选：应用全部）', () => {
     })
 
     /** 包一层账本侧表：写进新的整批条目时出错（写进去之前、或写进去之后）。 */
-    const ledgerFailing = (when: 'before' | 'after') => (table: PendingTable): PendingTable => ({
+    const ledgerFailing = (when: 'before' | 'after-create' | 'after-finish', fault = { isFired: false }) => (table: PendingTable): PendingTable => ({
       get: k => table.get(k), list: () => table.list(), delete: k => table.delete(k), deleteIf: (k, isStill) => table.deleteIf(k, isStill), claim: k => table.claim(k),
       put: async (k, v) => {
         const isBatch = v.settled?.verdict === 'batch-edited'
         if (isBatch && when === 'before') throw new Error('账本写不进去')
         await table.put(k, v)
-        if (isBatch && when === 'after') throw new Error('写完之后清理报错')
+        // 整批的条目动手前先建、每项写成后往上记回执、最后收尾：建条目那一次、收尾那一次（带逐项回执）各试一遍，只出一次错
+        const isHit = when === 'after-create' ? v.changes === undefined || v.changes.length === 0 : when === 'after-finish' && v.receipts !== undefined
+        if (isBatch && isHit && !fault.isFired) { fault.isFired = true; throw new Error('写完之后清理报错') }
       },
     })
 
-    it('记账时新条目写进去之后才报错：按快照重读账本，新条目在就算成功', async () => {
-      const e = env({ wrapPending: ledgerFailing('after') })
+    it.each(['after-create', 'after-finish'] as const)('记账写进去之后才报错（%s）：重读账本，条目在就算成功', async (when) => {
+      const e = env({ wrapPending: ledgerFailing(when) })
       await seed(e)
       const before = await files(e)
       e.clock.now = LATER
@@ -1482,6 +1502,71 @@ describe('apply-edits（整理所选：应用全部）', () => {
       expect(err(await apply(e, { ops: [await edit(e, 'mem_c'), await forget(e, 'mem_p', 'mem_c')] }))).toMatchObject({ code: 'failed', detail: '账本写不进去' })
       expect(await files(e)).toEqual(before)
       expect(await allEntries(e)).toEqual([])
+    })
+
+    it('一项写成之后记账报错、这时文件又被手改（提交标记还在）：退回不盖掉手改，这一项列进没记上账的', async () => {
+      const fault = { isFired: false }
+      const e: ReturnType<typeof env> = env({ wrapPending: table => ({
+        get: k => table.get(k), list: () => table.list(), delete: k => table.delete(k), deleteIf: (k, isStill) => table.deleteIf(k, isStill), claim: k => table.claim(k),
+        put: async (k, v) => {
+          if (v.changes?.length === 1 && !fault.isFired) {
+            fault.isFired = true
+            const path = (await e.store.locate('mem_c', wsScope))!.filePath
+            await writeFile(path, (await readFile(path, 'utf8')).replace('mem_c 改写后', '手改的正文'))
+            throw new Error('账本写不进去')
+          }
+          await table.put(k, v)
+        },
+      }) })
+      await seed(e)
+      e.clock.now = LATER
+      const body = ok(await apply(e, { ops: [await edit(e, 'mem_c'), await edit(e, 'mem_e')] }))
+      expect(fault.isFired).toBe(true)
+      expect((await locateCopy(e.store, 'mem_c', wsScope))?.content).toBe('手改的正文')
+      expect(body).toMatchObject({ isPartial: true, unrecordedIds: ['mem_c'], memoryIds: [] })
+      expect((await locateCopy(e.store, 'mem_e', wsScope))?.content).toBe('VS Code 装 prettier 扩展。')
+    })
+
+    it('版本核对过了、第一项还没写，别的会话给其中一条补了证：和进来之前补的一样按被改过算，什么都不写', async () => {
+      const fault = { isFired: false }
+      const e: ReturnType<typeof env> = env({ wrapPending: table => ({
+        get: k => table.get(k), list: () => table.list(), delete: k => table.delete(k), deleteIf: (k, isStill) => table.deleteIf(k, isStill), claim: k => table.claim(k),
+        put: async (k, v) => {
+          await table.put(k, v)
+          if (v.changes?.length === 0 && !fault.isFired) {
+            fault.isFired = true
+            const r = (await locateCopy(e.store, 'mem_e', wsScope))!
+            await e.store.update(r, c => ({ ...c, source: { ...c.source!, sessionId: '别的会话' }, lastConfirmedAt: LATER + 5 }))
+          }
+        },
+      }) })
+      await seed(e)
+      e.clock.now = LATER
+      const ops = [await edit(e, 'mem_c'), await edit(e, 'mem_e')]
+      expect(err(await apply(e, { ops }))).toMatchObject({ code: 'stale', memoryIds: ['mem_e'] })
+      expect(fault.isFired).toBe(true)
+      expect((await locateCopy(e.store, 'mem_c', wsScope))?.content).toBe('提交前依次跑 pnpm lint && prettier --write .')
+      expect(await allEntries(e)).toEqual([])
+      expect(await e.snapshots.list()).toEqual([])
+    })
+
+    it('一批还在逐项写，另一个标签页这时撤销它：撤销不动，说正在处理；写完之后照常能撤', async () => {
+      let undoing: Promise<MemoryCommandResult> | undefined
+      const e: ReturnType<typeof env> = env({ wrapPending: table => ({
+        get: k => table.get(k), list: () => table.list(), delete: k => table.delete(k), deleteIf: (k, isStill) => table.deleteIf(k, isStill), claim: k => table.claim(k),
+        put: async (k, v) => {
+          await table.put(k, v)
+          if (v.changes?.length === 1 && undoing === undefined) undoing = e.run({ cmd: 'undo', decisionId: k })
+        },
+      }) })
+      await seed(e)
+      const before = await files(e)
+      e.clock.now = LATER
+      const body = ok(await apply(e, { ops: [await edit(e, 'mem_p'), await edit(e, 'mem_c'), await edit(e, 'mem_e'), await edit(e, 'mem_b')] }))
+      expect(err(await undoing!)).toMatchObject({ code: 'claimed' })
+      expect((await allEntries(e)).map(d => [d.id, d.changes?.length])).toEqual([[body.decisionId, 4]])
+      ok(await e.run({ cmd: 'undo', decisionId: body.decisionId! }))
+      expect(await files(e)).toEqual(before)
     })
   })
 
@@ -1503,6 +1588,30 @@ describe('apply-edits（整理所选：应用全部）', () => {
       expect([...undone.memoryIds!].sort()).toEqual(ops.map(op => op.memoryId).sort())
       expect(await files(e)).toEqual(before)
       expect(deletedViewSchema.parse(await e.readView('deleted')).items).toEqual([])
+      expect(await allEntries(e)).toEqual([])
+    })
+
+    it('上一个版本记下的整批条目（整批一份快照、只有逐项回执）：照旧一次恢复整批', async () => {
+      const e = env()
+      await seed(e)
+      const before = await files(e)
+      const [c, p] = [(await locateCopy(e.store, 'mem_c', wsScope))!, (await locateCopy(e.store, 'mem_p', wsScope))!]
+      const snapshot = await e.snapshots.capture({ operation: 'pre-update', description: '整理所选 2 条前', records: [c, p] }, NOW)
+      const edited = await e.store.update(c, r => ({ ...r, content: '旧版本改写的', updatedAt: LATER }), scopeAt(SESSION_WS))
+      await e.store.softDelete(p, { at: scopeAt(SESSION_WS), now: LATER })
+      const deleted = (await locateCopy(e.store, 'mem_p', wsScope))!
+      const entry = await e.decisions.addSettled({
+        kind: 'edit', memoryIds: ['mem_c', 'mem_p'], summary: '整理所选 2 条', workspaces: [SESSION_WS, SESSION_WS],
+        receipts: [
+          { memoryId: 'mem_c', op: 'edit', fingerprint: editFingerprint(edited), expectedStatus: 'active' },
+          { memoryId: 'mem_p', op: 'forget', fingerprint: editFingerprint(deleted), expectedStatus: 'deleted' },
+        ],
+      }, 'batch-edited', LATER, { snapshotId: snapshot.id })
+      e.clock.now = LATER + 1000
+
+      const undone = ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
+      expect([...undone.memoryIds!].sort()).toEqual(['mem_c', 'mem_p'])
+      expect(await files(e)).toEqual(before)
       expect(await allEntries(e)).toEqual([])
     })
 
@@ -1540,25 +1649,31 @@ describe('apply-edits（整理所选：应用全部）', () => {
       expect((await allEntries(e)).map(d => d.id)).toEqual([body.decisionId])
     })
 
-    it('第二项写回后才抛错（写完维护目录时报错）：已写回的连同这一项一起退回，条目留着，修好后能重撤', async () => {
+    it('第二项写回后才抛错（写完维护目录时报错）：已写回的算撤了，错误照常报出，条目带着剩下的回执留着，修好后接着撤完', async () => {
       const e = env()
       await seed(e)
       const before = await files(e)
       const body = ok(await apply(e, { ops: [await forget(e, 'mem_p', 'mem_c'), await edit(e, 'mem_c'), await edit(e, 'mem_e')] }))
       const applied = await files(e)
-      const restore = e.snapshots.restore.bind(e.snapshots)
-      e.snapshots.restore = (async (...args: Parameters<typeof restore>) => {
-        const r = await restore(...args)
-        if (args[1]?.includes('mem_c') === true) throw new Error('维护目录失败')
+      // 撤销按回执倒着来：mem_e、mem_c、mem_p。mem_c 的还原写下之后抛错
+      const put = e.store.put.bind(e.store)
+      e.store.put = (async (...args: Parameters<typeof put>) => {
+        const r = await put(...args)
+        if (args[0].id === 'mem_c') throw new Error('维护目录失败')
         return r
-      }) as typeof restore
+      }) as typeof put
       expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! }))).toMatchObject({ code: 'failed', detail: '维护目录失败' })
-      expect(await files(e)).toEqual(applied)
-      expect((await allEntries(e)).map(d => d.id)).toEqual([body.decisionId])
+      const half = await files(e)
+      expect([half[1], half[2]]).toEqual([before[1], before[2]])
+      expect(half[0]).toEqual(applied[0])
+      const [entry] = await allEntries(e)
+      expect(entry).toMatchObject({ id: body.decisionId })
+      expect(entry!.changes!.map(c => c.memoryId)).toEqual(['mem_p'])
 
-      e.snapshots.restore = restore
+      e.store.put = put
       ok(await e.run({ cmd: 'undo', decisionId: body.decisionId! }))
       expect(await files(e)).toEqual(before)
+      expect(await allEntries(e)).toEqual([])
     })
 
     it('改前快照缺了其中一项（已清掉）：撤不了（not-found，过期），整批不动', async () => {

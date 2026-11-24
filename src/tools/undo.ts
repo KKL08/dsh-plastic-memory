@@ -3,14 +3,15 @@ import type { PendingDecisionsStore } from '../governance/decisions.ts'
 import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import { editFingerprint, isConflicting, type SnapshotStore } from '../governance/snapshots.ts'
 import { asUndoable, expectedFingerprints, isStillOwnWrite, undoRuleOf, undoStateOf, undoStateOfAll, type TargetCopies, type UndoableEntry, type UndoRule } from '../governance/undo-rules.ts'
-import { verdictLoser, type MemorySnapshot, type SnapshotRecord } from '../governance/schema.ts'
+import { snapshotIdFor, verdictLoser, type MemorySnapshot, type SnapshotRecord } from '../governance/schema.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { RecordNotFoundError } from '../errors.ts'
 import { scopeAt, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
 import { LINK_UNDONE_STEP, indexReceiptUndoneStep, ledgerSteps, linkUndoneStep } from '../governance/op-steps.ts'
 import { newWriteOp } from '../storage/table.ts'
-import { layerOf } from '../storage/history.ts'
 import { hasDropped, linksOutside, restoreLinks, withoutLinks, type DroppedLinks } from '../links.ts'
+import { revertChange, withdrawVersion } from './changeset.ts'
+import { firstRevertBlock, type ChangeReceipt } from '../governance/changeset.ts'
 import { crossWorkspaceNote, gateRecords, isCopyOf, isVisible, locateCopy, type CrossWorkspaceRejection, type GovernanceContext } from './workspace-gate.ts'
 
 export interface UndoDeps {
@@ -81,6 +82,7 @@ async function claimAndUndo(
     if (rule.mechanism === 'undo-index') return await undoIndexRun(entry, deps)
     const allow = args.allowCrossWorkspace
     if (rule.mechanism === 'unlink') return await unlink(entry, allow, context, deps)
+    if (rule.mechanism === 'revert-changes') return await revertChanges(entry, rule, allow, context, deps)
     if (rule.mechanism === 'relocate') return await relocate(entry, rule, allow, context, deps)
     if (rule.mechanism === 'reflag') return await reflag(entry, rule, allow, context, deps)
     return rule.expectedStatus !== undefined || rule.receipts !== undefined
@@ -119,6 +121,42 @@ async function undoIndexRun(entry: UndoableEntry, deps: UndoDeps): Promise<UndoR
   return { kind: 'undone', decisionId: entry.id, restored: [], ...(skipped > 0 ? { skipped } : {}) }
 }
 
+/**
+ * 按变更集应用的条目：按回执逆序逐个还原（只把那次改的字段改回去，期间别处改的档位、锁、关联留着）。先整批推演一遍，
+ * 有一条撤不了就整批不动；动手时每条在自己的写入段里再核对一次，中途被别处抢先改了就停在那里，撤掉的回执已拿掉、剩下的留着可再撤。
+ */
+async function revertChanges(entry: UndoableEntry, rule: UndoRule, allow: boolean | undefined, context: GovernanceContext, deps: UndoDeps): Promise<UndoResult> {
+  const receipts = entry.changes ?? []
+  // 上一次已经全部撤完、只差条目的去向：这次补上
+  if (receipts.length === 0) return settleUndo(entry, rule, deps, [])
+  await deps.snapshots.sweep(deps.now?.() ?? Date.now())
+  const keyOf = (r: ChangeReceipt) => JSON.stringify([r.scopeKey, r.memoryId])
+  const currents = new Map<string, MemoryRecord | undefined>()
+  const befores = new Map<string, MemoryRecord | undefined>()
+  for (const receipt of receipts) {
+    if (!currents.has(keyOf(receipt))) {
+      currents.set(keyOf(receipt), await locateCopy(deps.store, receipt.memoryId, scopeOfLedger(receipt.scopeKey)))
+    }
+    const snapshot = receipt.snapshotId === undefined ? undefined : await deps.snapshots.get(receipt.snapshotId)
+    befores.set(receipt.op, snapshot?.data.find(r => r.id === receipt.memoryId && r.redacted !== true))
+  }
+  const rejected = gateRecords([...currents.values()].filter(r => r !== undefined), context, allow).rejected
+  if (rejected.length > 0) return crossWorkspace(rejected)
+  const blocked = firstRevertBlock(receipts, r => currents.get(keyOf(r)), r => befores.get(r.op))
+  if (blocked !== undefined) {
+    return blocked.block === 'expired' ? notFound(`${entry.id} 改前的快照（可能已超过 14 天）`, 'expired') : changed(blocked.receipt.memoryId)
+  }
+  const restored: string[] = []
+  for (const receipt of [...receipts].reverse()) {
+    const r = await revertChange(entry.id, receipt, {}, deps)
+    if (r.kind !== 'reverted') return changed(receipt.memoryId, restored.length > 0 ? 'kept-third-party' : 'changed')
+    // 这一条已经还原、回执也拿掉了，只是收尾出了错：照实报出去，剩下的回执留着，修好后再撤
+    if (r.error !== undefined) throw r.error
+    if (!restored.includes(receipt.memoryId)) restored.push(receipt.memoryId)
+  }
+  return settleUndo(entry, rule, deps, restored)
+}
+
 /** 撤后条目的去向：回到待处理、移出账本、标已撤销留到保留窗口结束。 */
 async function settleUndo(entry: UndoableEntry, rule: UndoRule, deps: UndoDeps, restored: string[]): Promise<UndoResult> {
   if (rule.fate === 'remove') await deps.decisions.remove(entry.id)
@@ -146,25 +184,6 @@ async function gateRestore(records: readonly SnapshotRecord[], target: 'exact' |
     return current !== undefined && !isVisible(current, context) ? current : r
   }))
   return gateRecords(seen, context, allow).rejected
-}
-
-/**
- * 撤销一次状态变化前，先把它在历史版本里留下的撤掉：这一版是它留的档就删掉，是并进别人留的那版就拿掉它那一笔（连同它给的原因）。
- * 按改前快照的 id 认是哪一次写入。先撤版本、再恢复记忆：中途断掉只是少一个历史版本，不会留下和当前页内容相同的版本。
- * 返回放回去的函数：恢复没成时照原样放回。
- */
-export async function withdrawVersion(store: MemoryStore, before: SnapshotRecord, snapshotId: string): Promise<() => Promise<void>> {
-  const found = await store.locate(before.id, scopeAt(before.workspacePath))
-  if (found === undefined) return async () => {}
-  const layer = layerOf(found)
-  for (const version of await store.history.list(layer, before.id)) {
-    const index = version.writes.findIndex(w => w.snapshot === snapshotId)
-    if (index < 0) continue
-    if (index === 0) await store.history.remove(layer, before.id, version.versionId)
-    else await store.history.write(layer, { ...version, writes: version.writes.filter((_, i) => i !== index) })
-    return () => store.history.write(layer, version)
-  }
-  return async () => {}
 }
 
 /**
@@ -471,11 +490,11 @@ export async function restoreDeleted(
   const isCovered = (r: SnapshotRecord) => r.id === memoryId && (scope === undefined || isCopyOf(r, scope))
   const covers = (s: MemorySnapshot | undefined) => s?.data.some(r => isCovered(r) && r.redacted !== true) === true
   const entry = (await deps.decisions.listSettled())
-    .filter(d => verdictLoser(d, d.settled!.verdict) === memoryId && covers(snapshots.find(s => s.id === d.settled!.snapshotId))).at(-1)
+    .filter(d => verdictLoser(d, d.settled!.verdict) === memoryId && covers(snapshots.find(s => s.id === snapshotIdFor(d, memoryId)))).at(-1)
   if (entry !== undefined) {
     const at = entry.settled!.at
     if (entry.settled!.verdict === 'plan-applied') {
-      return restoreMergedLoser({ decisionId: entry.id, at, memoryId }, snapshots.find(s => s.id === entry.settled!.snapshotId)!, args.allowCrossWorkspace, context, deps)
+      return restoreMergedLoser({ decisionId: entry.id, at, memoryId }, snapshots.find(s => s.id === snapshotIdFor(entry, memoryId))!, args.allowCrossWorkspace, context, deps)
     }
     const r = await claimAndUndo({ decisionId: entry.id, allowCrossWorkspace: args.allowCrossWorkspace }, context, deps,
       current => current.settled.at === at && verdictLoser(current, current.settled.verdict) === memoryId)
@@ -503,3 +522,5 @@ export async function restoreDeleted(
   }
   return { kind: 'restored', restored: r.restored, snapshotId: snapshot.id }
 }
+
+export { withdrawVersion }

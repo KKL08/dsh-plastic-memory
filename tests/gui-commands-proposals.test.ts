@@ -220,14 +220,16 @@ describe('apply-proposal（采纳融合建议：保留方改写成融合稿，�
   }
   const deletedItems = async (e: ReturnType<typeof env>) => deletedViewSchema.parse(await e.readView('deleted')).items
 
-  it('保留方改写成融合稿、另一条软删，一份快照覆盖两条；条目结清为 plan-applied，带回执、依据、改后指纹，引用被删那条的其他条目清掉', async () => {
+  it('保留方改写成融合稿、另一条软删，两条各拍一份改前快照；条目结清为 plan-applied，带回执、依据、改后指纹，引用被删那条的其他条目清掉', async () => {
     const { e, entry, suggestion } = await merged()
     const other = (await e.decisions.upsert({ memoryIds: ['mem_b', 'mem_c'], summary: '另一条冲突', fingerprint: 'fp-bc' }, 1)).entry
     e.clock.now = LATER
     const body = ok(await adopt(e, entry.id, suggestion.id))
-    const [snap] = await e.snapshots.list()
+    const snaps = await e.snapshots.list()
+    expect(snaps.map(s => s.data.map(r => [r.id, r.content])).sort()).toEqual([[['mem_a', '用 pnpm']], [['mem_b', '用 npm']]])
+    // 结果和条目上带的是第一项（融合稿）的快照
+    const snap = snaps.find(s => s.memoryIds.includes('mem_a'))
     expect(body).toEqual({ ok: true, cmd: 'apply-proposal', decisionId: entry.id, memoryIds: ['mem_a', 'mem_b'], snapshotId: snap!.id })
-    expect(snap!.data.map(r => [r.id, r.content])).toEqual([['mem_a', '用 pnpm'], ['mem_b', '用 npm']])
     const a = (await e.store.get('mem_a'))!
     const b = (await e.store.get('mem_b'))!
     expect(a).toMatchObject({ ...DRAFT, status: 'active', updatedAt: LATER })
@@ -250,6 +252,23 @@ describe('apply-proposal（采纳融合建议：保留方改写成融合稿，�
     // 最近删除的来由：融合时并入了另一条，对方是保留方
     expect((await deletedItems(e)).map(i => [i.memory.id, i.cause])).toEqual([['mem_b', { decisionId: entry.id, verdict: 'plan-applied', counterpartId: 'mem_a', snapshotId: snap!.id }]])
     expect(pendingViewSchema.parse(await e.readView('pending')).items.filter(i => 'decisionId' in i && i.decisionId === entry.id)).toEqual([])
+  })
+
+  it('融合稿和保留方现在的内容一模一样：照常采纳，只删另一条，条目结清，撤销后另一条回来', async () => {
+    // 稿取保留方（seedPair 建的 mem_a）此刻的四项，一个字不差
+    const keeper = record({ id: 'mem_a', name: '甲', content: '用 pnpm' })
+    const same = { content: keeper.content, summary: keeper.summary, name: keeper.name, tags: keeper.tags }
+    const e2 = env({ llm: answering(said(same)) })
+    await seedPair(e2)
+    const { entry, suggestion } = await suggestMerge(e2)
+    const before = await files(e2)
+    e2.clock.now = LATER
+    const body = ok(await adopt(e2, entry.id, suggestion.id))
+    expect(body.memoryIds).toEqual(['mem_a', 'mem_b'])
+    expect((await e2.store.get('mem_b'))!.status).toBe('deleted')
+    expect((await e2.decisions.listSettled()).map(d => [d.id, d.settled?.verdict])).toEqual([[entry.id, 'plan-applied']])
+    ok(await e2.run({ cmd: 'undo', decisionId: entry.id }))
+    expect(await files(e2)).toEqual(before)
   })
 
   it('撤销：两条逐字节恢复原样，冲突回到待处理，指纹还原，原来的建议还在卡上', async () => {
@@ -410,9 +429,15 @@ describe('apply-proposal（采纳融合建议：保留方改写成融合稿，�
 
   describe('写到一半失败（故障在进程边界注入：另一个会话改磁盘、写盘报错、账本写不进去）', () => {
     type Method = 'softDeleteUnlessSecret' | 'put'
-    function intercept(e: ReturnType<typeof env>, method: Method, around: (id: string, call: () => Promise<unknown>) => Promise<unknown>) {
+    /** nth：这条记忆第几次走到这个方法（从 1 起）。融合稿的写入和退回都走 put：mem_a 的第 1 次是写入，第 2 次是退回。 */
+    function intercept(e: ReturnType<typeof env>, method: Method, around: (id: string, call: () => Promise<unknown>, nth: number) => Promise<unknown>) {
       const original = (e.store[method] as (...args: unknown[]) => Promise<unknown>).bind(e.store)
-      e.store[method] = ((r: { id: string }, ...rest: unknown[]) => around(r.id, () => original(r, ...rest))) as never
+      const seen = new Map<string, number>()
+      e.store[method] = ((r: { id: string }, ...rest: unknown[]) => {
+        const nth = (seen.get(r.id) ?? 0) + 1
+        seen.set(r.id, nth)
+        return around(r.id, () => original(r, ...rest), nth)
+      }) as never
     }
     /** 别处直接改磁盘：绕过包装。 */
     const elsewhere = (e: ReturnType<typeof env>) => {
@@ -438,7 +463,7 @@ describe('apply-proposal（采纳融合建议：保留方改写成融合稿，�
       const { e, entry, suggestion } = await merged()
       const change = elsewhere(e)
       intercept(e, 'softDeleteUnlessSecret', async (id, call) => { if (id === 'mem_b') await change('mem_b', '别处刚改的'); return call() })
-      intercept(e, 'put', async (id, call) => { if (id === 'mem_a') await change('mem_a', '别处接着改的'); return call() })
+      intercept(e, 'put', async (id, call, nth) => { if (id === 'mem_a' && nth === 2) await change('mem_a', '别处接着改的'); return call() })
       const body = ok(await adopt(e, entry.id, suggestion.id))
       expect(body).toMatchObject({ isPartial: true, memoryIds: [], unrecordedIds: ['mem_a'] })
       expect(body.decisionId).toBeUndefined()
@@ -452,8 +477,7 @@ describe('apply-proposal（采纳融合建议：保留方改写成融合稿，�
       const before = await files(e)
       const change = elsewhere(e)
       intercept(e, 'softDeleteUnlessSecret', async (id, call) => { if (id === 'mem_b') await change('mem_b', '别处刚改的'); return call() })
-      let isFirst = true
-      intercept(e, 'put', async (_id, call) => { if (isFirst) { isFirst = false; throw new Error('磁盘满了') } return call() })
+      intercept(e, 'put', async (id, call, nth) => { if (id === 'mem_a' && nth === 2) throw new Error('磁盘满了'); return call() })
       e.clock.now = LATER
       const body = ok(await adopt(e, entry.id, suggestion.id))
       expect(body).toMatchObject({ isPartial: true, memoryIds: ['mem_a'], unrecordedIds: [] })
@@ -465,13 +489,14 @@ describe('apply-proposal（采纳融合建议：保留方改写成融合稿，�
     })
 
     /** 包一层账本侧表：写进结清的条目时出错（写进去之前、或写进去之后）。 */
-    const ledgerFailing = (when: 'before' | 'after') => (table: PendingTable): PendingTable => ({
+    const ledgerFailing = (when: 'before' | 'after', fault = { isFired: false }) => (table: PendingTable): PendingTable => ({
       get: k => table.get(k), list: () => table.list(), delete: k => table.delete(k), deleteIf: (k, isStill) => table.deleteIf(k, isStill), claim: k => table.claim(k),
       put: async (k, v) => {
         const isPlan = v.settled?.verdict === 'plan-applied'
         if (isPlan && when === 'before') throw new Error('账本写不进去')
         await table.put(k, v)
-        if (isPlan && when === 'after') throw new Error('写完之后清理报错')
+        // 只出一次错：之后撤销还要往这条上写
+        if (isPlan && when === 'after' && !fault.isFired) { fault.isFired = true; throw new Error('写完之后清理报错') }
       },
     })
 
@@ -496,8 +521,7 @@ describe('apply-proposal（采纳融合建议：保留方改写成融合稿，�
     it('结账没写进去、退回融合稿时写盘又报错：回 isPartial，A 记一笔可撤销的账，B 已退回，冲突条目不结清', async () => {
       const { e, entry, suggestion } = await merged({ wrapPending: ledgerFailing('before') })
       const before = await files(e)
-      let isFirst = true
-      intercept(e, 'put', async (id, call) => { if (id === 'mem_a' && isFirst) { isFirst = false; throw new Error('磁盘满了') } return call() })
+      intercept(e, 'put', async (id, call, nth) => { if (id === 'mem_a' && nth === 2) throw new Error('磁盘满了'); return call() })
       e.clock.now = LATER
       const body = ok(await adopt(e, entry.id, suggestion.id))
       expect(body).toMatchObject({ isPartial: true, memoryIds: ['mem_a'], unrecordedIds: [] })
@@ -512,8 +536,7 @@ describe('apply-proposal（采纳融合建议：保留方改写成融合稿，�
       const { e, entry, suggestion } = await merged()
       const before = await files(e)
       intercept(e, 'softDeleteUnlessSecret', async (_id, call) => { await call(); throw new Error('目录维护报错') })
-      let isFirst = true
-      intercept(e, 'put', async (id, call) => { if (id === 'mem_b' && isFirst) { isFirst = false; throw new Error('磁盘满了') } return call() })
+      intercept(e, 'put', async (id, call, nth) => { if (id === 'mem_b' && nth === 1) throw new Error('磁盘满了'); return call() })
       e.clock.now = LATER
       const body = ok(await adopt(e, entry.id, suggestion.id))
       expect(body).toMatchObject({ isPartial: true, memoryIds: ['mem_b'], unrecordedIds: [] })
@@ -578,13 +601,13 @@ describe('apply-proposal（采纳融合建议：保留方改写成融合稿，�
     expect((await e.store.get('mem_b'))!.content).toBe('用 npm，password: TESTONLY99')
   })
 
-  it('两个标签页同时采纳：只成一次，只拍一份快照；另一次回 claimed 或 not-found', async () => {
+  it('两个标签页同时采纳：只成一次，快照只有成的那次拍的两份；另一次回 claimed 或 not-found', async () => {
     const { e, entry, suggestion } = await merged()
     const other = env()
     const results = await Promise.all([adopt(e, entry.id, suggestion.id), adopt(other, entry.id, suggestion.id)])
     expect(results.filter(r => r.ok)).toHaveLength(1)
     expect(['claimed', 'not-found']).toContain(err(results.find(r => !r.ok)!).code)
-    expect(await e.snapshots.list()).toHaveLength(1)
+    expect((await e.snapshots.list()).map(s => s.memoryIds).sort()).toEqual([['mem_a'], ['mem_b']])
     expect((await e.store.get('mem_a'))!.content).toBe(DRAFT.content)
     expect((await e.decisions.listSettled()).map(d => d.settled?.verdict)).toEqual(['plan-applied'])
   })

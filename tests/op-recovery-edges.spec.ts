@@ -13,13 +13,13 @@ import { record } from './helpers/record.ts'
 // 补做遇到的边角：中断之后、补做之前，文件被人动过或一时读不出，以及日志里有读不懂的行。
 // 在进程边界注入：指定路径的删除失败、指定路径读不出。
 
-const fault = vi.hoisted(() => ({ failRemove: '', unreadable: '' }))
+const fault = vi.hoisted(() => ({ failRemove: '', unreadable: '', isTmpStuck: false }))
 vi.mock('node:fs/promises', async (importOriginal) => {
   const fs = await importOriginal<typeof import('node:fs/promises')>()
   return {
     ...fs,
     rm: async (...args: Parameters<typeof fs.rm>) => {
-      if (String(args[0]) === fault.failRemove) throw new Error('删不掉')
+      if (String(args[0]) === fault.failRemove || (fault.isTmpStuck && String(args[0]).includes('.md.tmp-'))) throw new Error('删不掉')
       return fs.rm(...args)
     },
     readFile: async (...args: Parameters<typeof fs.readFile>) => {
@@ -41,7 +41,7 @@ beforeEach(async () => {
   root = join(base, 'memories')
 })
 afterEach(async () => {
-  Object.assign(fault, { failRemove: '', unreadable: '' })
+  Object.assign(fault, { failRemove: '', unreadable: '', isTmpStuck: false })
   for (const journal of journals.splice(0)) journal.close()
   await rm(base, { recursive: true, force: true })
 })
@@ -93,6 +93,26 @@ it('写成之后、补做之前文件被人改了：步骤拿到改后的内容�
   const next = open()
   await next.enter()
   expect(next.ran).toEqual([{ content: '用户改过的正文', isIntact: false }])
+})
+
+it('写成之后、补做之前文件被人整个换过（提交标记也没了）：仍算写成了，步骤拿到现在的内容并知道不是原样', async () => {
+  const p = await seedCommitted()
+  const text = await readFile(p.path, 'utf8')
+  expect(text).toContain(p.op.id)
+  await writeFile(p.path, text.split('\n').filter(line => !line.includes(p.op.id)).join('\n').replace('第二版', '用户改过的正文'))
+  const next = open()
+  await next.enter()
+  expect(next.ran).toEqual([{ content: '用户改过的正文', isIntact: false }])
+  expect(next.journal.pending()).toEqual([])
+})
+
+it('写成之后、补做之前文件被人删了：仍算写成了，步骤照补，拿不到记录', async () => {
+  const p = await seedCommitted()
+  await rm(p.path)
+  const next = open()
+  await next.enter()
+  expect(next.ran).toEqual([{ content: undefined, isIntact: false }])
+  expect(next.journal.pending()).toEqual([])
 })
 
 it('写成了的文件一时读不出：这一行留着，读得出之后再补做', async () => {
@@ -168,4 +188,39 @@ it('调用方结操作时有一步没人会做：这一行留在日志里，认�
   await p.table.finishOp(op, written)
   expect(p.ran).toEqual([])
   expect(p.journal.pending().map(row => row.op)).toEqual([op.id])
+})
+
+it('改名的写入：新文件落下了、旧文件删不掉，随后新文件被人整个换过（提交标记也没了）：仍算写成了，步骤照补', async () => {
+  const p = await seed()
+  fault.failRemove = p.path
+  const op = newWriteOp({ steps: [{ kind: STEP }] })
+  await expect(p.table.update('mem_a', global, r => ({ ...r, name: '乙', content: '第二版' }), op)).rejects.toThrow('删不掉')
+  fault.failRemove = ''
+  const renamed = join(dirname(p.path), '乙.md')
+  const text = await readFile(renamed, 'utf8')
+  expect(text).toContain(op.id)
+  await writeFile(renamed, text.split('\n').filter(line => !line.includes(op.id)).join('\n').replace('第二版', '别人换的正文'))
+  const next = open()
+  await next.enter()
+  expect(next.journal.pending()).toEqual([])
+  expect(next.ran).toEqual([{ content: '别人换的正文', isIntact: false }])
+})
+
+it('改名的写入：新文件落下了、临时文件清不掉：写入照常算成，步骤照做', async () => {
+  const p = await seed()
+  fault.isTmpStuck = true
+  const op = newWriteOp({ steps: [{ kind: STEP }] })
+  const written = await p.table.update('mem_a', global, r => ({ ...r, name: '乙', content: '第二版' }), op)
+  await p.table.finishOp(op, written)
+  expect(p.ran).toEqual([{ content: '第二版', isIntact: true }])
+  expect(p.journal.pending()).toEqual([])
+})
+
+it('按操作 id 查落没落盘：提交了、文件这一刻读不出时报错，不答「没写」；读得出就找得到；没写过的答没有', async () => {
+  const p = await seedCommitted()
+  fault.unreadable = p.path
+  await expect(p.table.locateWrittenBy('mem_a', global, p.op.id)).rejects.toThrow('已经提交')
+  fault.unreadable = ''
+  expect((await p.table.locateWrittenBy('mem_a', global, p.op.id))?.record.content).toBe('第二版')
+  expect(await p.table.locateWrittenBy('mem_a', global, 'op_never')).toBeUndefined()
 })

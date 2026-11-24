@@ -183,11 +183,14 @@ for (const [kindIndex, kind] of undoKinds.entries()) {
             if (op === ops[selected]) {
               before = current
               const added = (await w.snapshots.list()).filter(s => !oldSnapshots.has(s.id))
-              expect(added).toHaveLength(1)
-              snapshotId = added[0]!.id
+              // 界面批量写入每项各拍一份改前快照，其余写法一次一份
               const targets = kind === 'guiBatch' ? [0, 1] : [id === 'a' ? 0 : 1]
-              expect(added[0]!.data).toEqual(targets.map(i => before[i]))
-              decisionId = (await w.decisions.listSettled()).find(d => d.settled?.snapshotId === snapshotId)?.id
+              expect(added).toHaveLength(targets.length)
+              snapshotId = added[0]!.id
+              const snapped = added.flatMap(s => s.data)
+              expect(snapped).toHaveLength(targets.length)
+              expect(snapped).toEqual(expect.arrayContaining(targets.map(i => before[i])))
+              decisionId = (await w.decisions.listSettled()).find(d => added.some(s => s.id === d.settled?.snapshotId))?.id
               if (kind !== 'forget' && kind !== 'promote') expect(decisionId).toBeDefined()
             }
           }
