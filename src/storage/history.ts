@@ -1,6 +1,8 @@
-import { mkdir, readdir, readFile, rm, rename, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import type { Dirent } from 'node:fs'
+import { mkdir, readdir, readFile, rm, rmdir, rename, writeFile } from 'node:fs/promises'
+import { basename, dirname, join } from 'node:path'
 import type { MemoryRecord } from '../record-schema.ts'
+import { linkExclusive } from './exclusive-link.ts'
 import { decodeFile, encodeRecord, type FileLocation } from './frontmatter.ts'
 import { HISTORY_DIR } from './paths.ts'
 import type { LocatedRecord } from './table.ts'
@@ -48,6 +50,15 @@ export interface VersionHistory {
   /** 按版本 id 整份写下（已有就换掉）。 */
   write(layer: HistoryLayer, version: HistoryVersion): Promise<void>
   remove(layer: HistoryLayer, memoryId: string, versionId: string): Promise<void>
+  /** 删掉一条记忆在这一层（记忆目录）的全部历史版本。没有就什么都不做。 */
+  removeAll(dir: string, memoryId: string): Promise<void>
+  /**
+   * 把一条记忆的历史版本从一层搬到另一层。目标层已有这条记忆的历史时逐个并进去，排他地占名、不盖掉已有的版本：
+   * 同名且内容相同的去掉源头那份，同名不同内容的换一个版本 id。能重复执行：源头已经没有就什么都不做。
+   */
+  move(fromDir: string, toDir: string, memoryId: string): Promise<void>
+  /** 这一层里有历史版本的记忆 id。 */
+  memoryIds(dir: string): Promise<string[]>
 }
 
 /** 版本带的变化原因：各次写入给的原因按先后连起来。 */
@@ -57,8 +68,13 @@ export function versionReason(version: Pick<HistoryVersion, 'writes'>): string {
 
 /** 版本 id：结束时刻的 UTC 紧凑写法（到毫秒）；同一毫秒已有版本时加两位序号。 */
 export function newVersionId(endedAt: number, taken: readonly string[]): string {
-  const base = new Date(endedAt).toISOString().replace(/[-:.]/g, '')
-  if (!taken.includes(base)) return base
+  return freeVersionId(new Date(endedAt).toISOString().replace(/[-:.]/g, ''), taken)
+}
+
+/** 版本 id 被占了就在基础写法后面加两位序号；已带序号的按基础写法重新数。 */
+export function freeVersionId(versionId: string, taken: readonly string[]): string {
+  if (!taken.includes(versionId)) return versionId
+  const base = versionId.replace(/-\d{2}$/, '')
   for (let n = 2; ; n++) {
     const id = `${base}-${String(n).padStart(2, '0')}`
     if (!taken.includes(id)) return id
@@ -132,10 +148,15 @@ const VERSION_FILE_RE = /^([0-9A-Za-z-]+)\.md$/
 
 /** 历史版本落在磁盘上：`<层目录>/.history/<记忆 id>/<版本 id>.md`，内容是改前的整个记忆文件加版本自己的几个键。 */
 export class FileVersionHistory implements VersionHistory {
-  private dirOf(layer: HistoryLayer, memoryId: string): string {
+  private dirOf(layer: Pick<HistoryLayer, 'dir'>, memoryId: string): string {
+    // 空 id 会落到 `.history/` 本身，删它就删了这一层所有记忆的历史：不收
+    if (memoryId === '') throw new Error('历史版本要有记忆 id，空 id 不收')
     // 整段是点的 id（`.`、`..`）编码后还是点，会指回上层目录：点也转掉
     const name = encodeURIComponent(memoryId)
-    return join(layer.dir, HISTORY_DIR, /^\.+$/.test(name) ? name.replaceAll('.', '%2E') : name)
+    const dir = join(layer.dir, HISTORY_DIR, /^\.+$/.test(name) ? name.replaceAll('.', '%2E') : name)
+    // 删除和搬移只动 `.history/` 下面直接的那一层
+    if (dirname(dir) !== join(layer.dir, HISTORY_DIR) || basename(dir) === '') throw new Error(`历史目录不在 ${HISTORY_DIR}/ 下面：${dir}`)
+    return dir
   }
 
   async list(layer: HistoryLayer, memoryId: string): Promise<HistoryVersion[]> {
@@ -174,5 +195,76 @@ export class FileVersionHistory implements VersionHistory {
 
   async remove(layer: HistoryLayer, memoryId: string, versionId: string): Promise<void> {
     await rm(join(this.dirOf(layer, memoryId), `${versionId}.md`), { force: true })
+  }
+
+  async removeAll(dir: string, memoryId: string): Promise<void> {
+    await rm(this.dirOf({ dir }, memoryId), { recursive: true, force: true })
+  }
+
+  async move(fromDir: string, toDir: string, memoryId: string): Promise<void> {
+    const from = this.dirOf({ dir: fromDir }, memoryId)
+    const to = this.dirOf({ dir: toDir }, memoryId)
+    if (from === to) return
+    let names: string[]
+    try {
+      names = await readdir(from)
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return
+      throw err
+    }
+    await mkdir(dirname(to), { recursive: true })
+    try {
+      // 目标层还没有这条记忆的历史：整个目录一次搬过去（rename 只会换掉空目录）
+      await rename(from, to)
+      return
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code
+      if (code !== 'ENOTEMPTY' && code !== 'EEXIST') throw err
+    }
+    for (const name of names) {
+      const versionId = VERSION_FILE_RE.exec(name)?.[1]
+      if (versionId === undefined) await rm(join(from, name), { force: true })   // 写到一半的临时文件
+      else await this.transfer(join(from, name), to, versionId)
+    }
+    // 只删这时已经空了的源目录：列目录之后才写进来的版本留着，下次再搬
+    await rmdir(from).catch((err: NodeJS.ErrnoException) => { if (err.code !== 'ENOENT' && err.code !== 'ENOTEMPTY') throw err })
+  }
+
+  /**
+   * 把一个版本文件放进目标目录：排他地占名（不盖掉别人刚写下的版本），占到了才删源头那份。
+   * 同名的已在：内容相同是上次搬到一半留下的同一份，删掉源头；不同就换一个版本 id 再占。
+   */
+  private async transfer(source: string, to: string, versionId: string): Promise<void> {
+    const tried: string[] = []
+    for (let candidate = versionId; ; candidate = freeVersionId(versionId, tried)) {
+      const target = join(to, `${candidate}.md`)
+      try {
+        await linkExclusive(source, target)
+        break
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
+      }
+      const [mine, theirs] = await Promise.all([readFile(source, 'utf8'), readFile(target, 'utf8').catch(() => undefined)])
+      if (mine === theirs) break
+      tried.push(candidate)
+    }
+    await rm(source, { force: true })
+  }
+
+  async memoryIds(dir: string): Promise<string[]> {
+    let entries: Dirent[]
+    try {
+      entries = await readdir(join(dir, HISTORY_DIR), { withFileTypes: true })
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return []
+      throw err
+    }
+    return entries.filter(e => e.isDirectory()).flatMap(e => {
+      try {
+        return [decodeURIComponent(e.name)]
+      } catch {
+        return []   // 不是插件写下的目录名
+      }
+    })
   }
 }

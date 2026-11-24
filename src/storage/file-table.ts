@@ -17,6 +17,7 @@ import type { RootLock } from '../root-lock.ts'
 import type { OpJournal, PendingOp } from './op-journal.ts'
 import type { DerivedIndex, HintRow, LevelScan } from './derived-index.ts'
 import { defaultRootLock } from './root-lock.ts'
+import { describeError } from './state-files.ts'
 import {
   WORKSPACE_MARKER, INDEX_FILE, GLOBAL_DIR, ARCHIVE_DIR, workspaceDirName, slugifyName, isReservedFileName,
   isMemoryFileName, isCompanionLikeFileName, isWorkspaceDirName, deriveFileId,
@@ -42,6 +43,10 @@ const TMP_SUFFIX_RE = /\.tmp-(\d+)-[a-z0-9]+$/
 const WRITE_ATTEMPTS = 3
 /** 同一行在一个进程里最多补做几次。 */
 const RECOVERY_ATTEMPTS = 3
+
+/** 换作用域提交之后把历史版本目录搬过去：文件表自己记进操作日志的一步，中断后按日志补做。 */
+export const HISTORY_MOVE_STEP = 'history-move'
+interface HistoryMoveStep extends OpStep { kind: typeof HISTORY_MOVE_STEP; memoryId: string; from: string; to: string }
 
 /** 维护点写索引后发现目录变了、按新清单重写的总次数上限（含第一次写）。 */
 const INDEX_ROUNDS = 3
@@ -129,6 +134,16 @@ interface ScopeDir { dir: string; loc: FileLocation }
 
 function errnoCode(err: unknown): string | undefined {
   return (err as NodeJS.ErrnoException | undefined)?.code
+}
+
+/** 读得不全的目录说明：目录读不了、项目目录缺标记，里面的记忆没读到。 */
+function isIncompleteNote(note: DirectoryNote): boolean {
+  return note.code === 'dir-unreadable' || note.code === 'marker-missing'
+}
+
+/** 一层（顶层或 .archive/）所属的记忆目录。 */
+function layerDirOf(level: string): string {
+  return basename(level) === ARCHIVE_DIR ? dirname(level) : level
 }
 
 /** 单个文件在目录签名里的一项：名字、大小、mtime。 */
@@ -222,6 +237,10 @@ export class FileTable implements MemoryTable {
   private readonly settledOnEnter = new Set<string>()
   /** 每一行在这个进程里补做失败了几次：到上限就不再试，免得一行补不上、此后每次进写入段都扫一遍目录。 */
   private readonly recoveryFailures = new Map<string, number>()
+  /** 调用方给的操作里没做成的文件表自己的步骤：结操作时再试一次，还不成就把行留给补做。 */
+  private readonly unfinishedOwn = new Map<string, OpStep[]>()
+  /** 整份核对时拿不准归属的历史目录（层目录 + 记忆 id）：这个进程里不再为它扫各个作用域。 */
+  private readonly unresolvedOrphans = new Set<string>()
   readonly globalDir: string
   readonly history: VersionHistory = new FileVersionHistory()
 
@@ -236,6 +255,7 @@ export class FileTable implements MemoryTable {
     // 每次拿到写锁先看有没有被打断的操作：平时一行都没有
     if (this.journal !== undefined) this.lock.onEnter?.(() => this.recoverPending())
     this.globalDir = join(opts.root, GLOBAL_DIR)
+    this.stepHandlers.set(HISTORY_MOVE_STEP, raw => this.followMove(raw as HistoryMoveStep))
   }
 
   inSection<T>(fn: () => Promise<T>): Promise<T> {
@@ -728,7 +748,13 @@ export class FileTable implements MemoryTable {
       const scannedAt = Date.now()
       const priorRevs = [sd.dir, archive].map(level => this.index?.levelScan(level)?.rev)
       const levelStats = await Promise.all([sd.dir, archive].map(level => stat(level).then(s => ({ mtimeMs: s.mtimeMs, ino: s.ino }), () => undefined)))
-      const { slots } = await this.readDirs([sd], { includeArchive: true }, seen)
+      const { slots, quarantined, directoryNotes } = await this.readDirs([sd], { includeArchive: true }, seen)
+      // 这一层每个文件都读出来了：没读到某个 id 才能说明这一层没有它
+      const isLayerComplete = quarantined.length === 0 && !directoryNotes.some(isIncompleteNote)
+      const isExpired = (slot: Slot) => dirname(slot.filePath) === archive && slot.record.status !== 'superseded'
+        && (slot.record.deletedAt ?? slot.mtimeMs) < cutoff
+      // 到期清扫之后这一层还留着的 id：同 id 还有别的副本，历史是那一份的
+      const staying = new Set(slots.filter(s => !isExpired(s)).map(s => s.record.id))
       for (const [i, level] of [sd.dir, archive].entries()) {
         const at = levelStats[i]
         if (at === undefined) continue
@@ -737,14 +763,18 @@ export class FileTable implements MemoryTable {
         this.index?.replaceLevel(level, { ...at, scannedAt, listing: '' }, rows, priorRevs[i])
       }
       const kept: LocatedRecord[] = []
+      const purged = new Set<Slot>()
       for (const slot of slots) {
         const inArchive = dirname(slot.filePath) === archive
         let record = slot.record
         if (inArchive && record.status === 'active') record = { ...record, status: 'deleted' }
         if (record.status === 'deleted' && record.deletedAt === undefined) record = { ...record, deletedAt: slot.mtimeMs }
-        if (inArchive && record.status === 'deleted' && record.deletedAt! < cutoff) {
+        if (isExpired(slot)) {
           if (!(await this.unchangedSince(slot))) continue
+          // 历史先删、删干净了才删记忆文件，不留记忆没了、历史还在的样子；删不掉或拿不准就这条这次不清，下次维护再试
+          if (!staying.has(record.id) && !(await this.removeExpiredHistory(record.id, sd.dir, isLayerComplete))) continue
           await this.removeFile(slot.filePath)
+          purged.add(slot)
           // 同 delete：别层还有这个 id 时统计行是它的。只在真删过期文件时全盘找一次，平常的维护不多读
           if ((await this.locateSlot(record.id)) === undefined) await this.opts.stats.delete(record.id)
           continue
@@ -778,6 +808,8 @@ export class FileTable implements MemoryTable {
         if (!keepAsIs && text !== slot.raw && await this.unchangedSince(slot)) await this.atomicWrite(slot.filePath, text)
         if (!inArchive) kept.push({ record, filePath: slot.filePath, dir: slot.dir })
       }
+      // 核对这一层其余的历史目录
+      await this.reconcileHistory(sd, new Set(slots.filter(s => !purged.has(s)).map(s => s.record.id)))
       // kept 只剩顶层 active（非 active 已搬走）：同 id 取一份，再过滤已过期的
       const indexable = (located: readonly LocatedRecord[]) => resolveDuplicates(located).filter(s => withinValidity(s.record, now))
       let text = this.indexText(indexable(kept))
@@ -796,6 +828,124 @@ export class FileTable implements MemoryTable {
       }
       for (const level of [sd.dir, archive]) await this.cleanStaleTmp(level)
     }
+  }
+
+  /**
+   * 整份核对历史版本：这一层里有历史目录、记忆却已不在这一层（顶层和 .archive/ 都没有）的，按解析出的 id 到各个作用域（含 .archive/）找：
+   * 只在另一层找到就把目录迁过去，哪里都找不到才清掉。旧版本删了记忆、旧版本搬家只搬了记忆文件、换作用域中途断掉又没有操作日志，
+   * 都靠这里收拾。拿不准的时候不动：有目录读不了、缺标记，有记忆文件读不出、解析不了（可能就是这条），或几层都有这个 id；
+   * 写锁不跨进程互斥时也不动（另一个进程可能正把这条记忆搬进搬出，两次读目录都看不到它）。
+   * 拿不准的这个进程里记下不再查，一个目录出错只跳过它。present：这一层此刻有的记忆 id。
+   */
+  private async reconcileHistory(own: ScopeDir, present: ReadonlySet<string>): Promise<void> {
+    if (this.lock.isExclusive?.() === false) return
+    const { dir } = own
+    const memo = (id: string) => `${dir}\n${id}`
+    try {
+      const orphans = (await this.history.memoryIds(dir)).filter(id => !present.has(id) && !this.unresolvedOrphans.has(memo(id)))
+      if (orphans.length === 0) return
+      const layers = await this.idLayers(own)
+      for (const id of orphans) {
+        try {
+          const homes = layers?.get(id)
+          if (layers === undefined || homes?.has(dir) === true || (homes?.size ?? 0) > 1) this.unresolvedOrphans.add(memo(id))
+          else if (homes === undefined) await this.history.removeAll(dir, id)
+          else await this.history.move(dir, [...homes][0]!, id)
+        } catch (err) {
+          this.unresolvedOrphans.add(memo(id))
+          this.log.warn(`[plastic-memory] 核对历史版本时 ${dir} 里的一个历史目录没处理成，这个进程里先不管它（${describeError(err)}）`)
+        }
+      }
+    } catch (err) {
+      this.log.warn(`[plastic-memory] 核对 ${dir} 的历史版本失败，下次维护再说（${describeError(err)}）`)
+    }
+  }
+
+  /**
+   * 各作用域（global、各项目目录和 own，各含 .archive/）里每个 id 在哪几层，按解析出的 id 认。
+   * 读不全返回 undefined：有目录读不了、缺标记，或有记忆文件读不出、解析不了，缺的那份可能就是要找的。
+   */
+  private async idLayers(own: ScopeDir): Promise<Map<string, Set<string>> | undefined> {
+    const listing = await this.listWorkspaceDirs()
+    if (listing.directoryNotes.some(isIncompleteNote)) return undefined
+    const dirs = new Map<string, ScopeDir>([[own.dir, own], [this.globalDir, { dir: this.globalDir, loc: { scope: 'global' } }]])
+    for (const e of listing.entries) dirs.set(e.dir, { dir: e.dir, loc: { scope: 'workspace', workspacePath: e.workspacePath } })
+    const read = await this.readDirs([...dirs.values()], { includeArchive: true })
+    if (read.quarantined.length > 0 || read.directoryNotes.some(isIncompleteNote)) return undefined
+    const layers = new Map<string, Set<string>>()
+    for (const slot of read.slots) layers.set(slot.record.id, (layers.get(slot.record.id) ?? new Set<string>()).add(slot.dir))
+    return layers
+  }
+
+  /** 这一层（顶层和 .archive/）有没有这个 id 的记忆，按解析出的 id 认。读不全返回 undefined。 */
+  private async holdsCopy(dir: string, id: string): Promise<boolean | undefined> {
+    const { scopeDirs, directoryNotes } = await this.resolveDirs([dir])
+    if (directoryNotes.length > 0) return undefined
+    if (scopeDirs.length === 0) return false   // 目录已经不在
+    const read = await this.readDirs(scopeDirs, { includeArchive: true })
+    if (read.quarantined.length > 0 || read.directoryNotes.some(isIncompleteNote)) return undefined
+    return read.slots.some(slot => slot.record.id === id)
+  }
+
+  /**
+   * 到期清扫一条记忆前先删它的历史（这一层已没有同 id 的别的副本）。这一层有读不出、解析不了的文件时，坏掉的可能就是同 id 还在用的那份：
+   * 这一层有它的历史就不删，返回 false，记忆文件也先留着。返回历史是否都删干净了。
+   */
+  private async removeExpiredHistory(id: string, dir: string, isLayerComplete: boolean): Promise<boolean> {
+    if (!isLayerComplete && (await this.history.memoryIds(dir).catch(() => [id])).includes(id)) {
+      this.log.warn(`[plastic-memory] ${dir} 里有读不出的记忆文件，到期的一条记忆和它的历史这次先不清`)
+      return false
+    }
+    return this.removeOwnedHistory(id, new Set(isLayerComplete ? [dir] : []), false)
+  }
+
+  /**
+   * 删掉一条物理删除了的记忆在各层的历史，含它以前住过的层（旧版本搬家只搬了记忆文件）。cleared：这次删除清空了这个 id 的层，直接删。
+   * 别的层里还有这个 id 的在用或已删副本时，那里的历史是那一份的，不动。
+   * 拿不准（记忆根目录列不出来、某层读不全）或删不掉时：isStrict 就抛错，彻底删除要在删记忆文件之前知道；否则记一笔，返回 false。
+   */
+  private async removeOwnedHistory(id: string, cleared: ReadonlySet<string>, isStrict: boolean): Promise<boolean> {
+    if (id === '') return true   // 空 id 的记忆不留历史
+    let isClean = true
+    const fail = (err: unknown) => {
+      if (isStrict) throw err
+      isClean = false
+      this.log.warn(`[plastic-memory] 一条记忆的历史版本没删干净，下次维护再说（${describeError(err)}）`)
+    }
+    const listing = await this.listWorkspaceDirs()
+    if (listing.directoryNotes.some(n => n.path === this.opts.root)) {
+      fail(new Error(`记忆根目录列不出来，分不出这条记忆以前住过哪些层：${this.opts.root}`))
+      return false
+    }
+    // 读不了、缺标记的项目目录也看：它的 .history/ 里可能有
+    const layers = new Set([this.globalDir, ...cleared, ...listing.entries.map(e => e.dir), ...listing.directoryNotes.filter(isIncompleteNote).map(n => n.path)])
+    for (const layer of layers) {
+      try {
+        if (!(await this.history.memoryIds(layer)).includes(id)) continue
+        if (!cleared.has(layer)) {
+          const holds = await this.holdsCopy(layer, id)
+          if (holds === true) continue
+          if (holds === undefined) throw new Error(`${layer} 读不全，分不出那里的历史版本是不是这条记忆的`)
+        }
+        await this.history.removeAll(layer, id)
+      } catch (err) {
+        fail(err)
+      }
+    }
+    return isClean
+  }
+
+  /**
+   * 换作用域后把历史版本跟过去（写入当场和中断后补做共用）。源头那一层又有了这个 id 的在用或已删副本（补做前那里另建了同 id 的一条），
+   * 或读不全分不出来时不搬：那里的历史可能已经是那一条的，留给整份核对。
+   */
+  private async followMove(step: HistoryMoveStep): Promise<void> {
+    if (!(await this.history.memoryIds(step.from)).includes(step.memoryId)) return
+    if ((await this.holdsCopy(step.from, step.memoryId)) !== false) {
+      this.log.warn(`[plastic-memory] ${step.from} 里还有同 id 的记忆，历史版本先不搬，留给整份核对`)
+      return
+    }
+    await this.history.move(step.from, step.to, step.memoryId)
   }
 
   /** 动手前的复核（维护点与写路径共用）：磁盘原文仍等于读到的那份。读不出（已删、不可读）也算变了。
@@ -1053,11 +1203,12 @@ export class FileTable implements MemoryTable {
       // 这次会动到的几层：新文件那层、原文件那层、要清的副本那几层，还有改索引的顶层
       const current = await this.currentLevels([level, dir, ...(prev === undefined ? [] : [dirname(prev.filePath), prev.dir, ...prev.copies.map(c => dirname(c.filePath))])])
       const changes: Array<{ path: string; id?: string }> = []
+      const historyMove: HistoryMoveStep | undefined = moved ? { kind: HISTORY_MOVE_STEP, memoryId: key, from: prev.dir, to: dir } : undefined
       this.beginOp(op, {
         kind: 'write', memoryId: key, dir: level, fields: changedFields(prev?.record, next),
         ...(prev !== undefined ? { before: fingerprintOf(prev.raw) } : {}), after: fingerprintOf(text),
         ...(prev !== undefined && !isInPlace ? { source: { dir: dirname(prev.filePath), nameHash: fingerprintOf(basename(prev.filePath)) } } : {}),
-      })
+      }, historyMove === undefined ? [] : [historyMove])
       let filePath: string
       if (prev !== undefined && isInPlace) {
         filePath = prev.filePath
@@ -1081,6 +1232,17 @@ export class FileTable implements MemoryTable {
       }
       changes.push({ path: filePath, id: key })
       const removedFrom = await this.removeOtherCopies(key, filePath, dir, isOwnDirOnly, prev?.copies ?? [], changes)
+      // 换了作用域：历史版本跟过去。写入已经提交，这一步没做成不算写入失败：行留在日志里，下一次进写入段补搬；
+      // 没有日志时整份核对按 id 找过去
+      let isHistoryPending = false
+      if (historyMove !== undefined) {
+        try {
+          await this.followMove(historyMove)
+        } catch (err) {
+          isHistoryPending = true
+          this.log.warn(`[plastic-memory] 历史版本没跟到新的作用域，稍后补做（${describeError(err)}）`)
+        }
+      }
       const isIndexed = next.status === 'active' && withinValidity(next, this.now())
       await this.patchIndexLine(dir, key, isIndexed ? { record: next, filePath, dir } : undefined)
       if (moved) removedFrom.add(prev.dir)
@@ -1088,7 +1250,8 @@ export class FileTable implements MemoryTable {
       for (const other of removedFrom) await this.patchIndexLine(other, key)
       await this.settleHints(current, changes)
       // 调用方给的操作还有账要记，由它做完再结（finishOp）；自己建的到这里就做完了
-      if (given === undefined) this.endOp(op.id)
+      if (isHistoryPending && given !== undefined && this.isJournaling()) this.unfinishedOwn.set(op.id, [historyMove!])
+      if (given === undefined && !isHistoryPending) this.endOp(op.id)
     }
     if (volatileChanged) {
       await this.opts.stats.put(key, { id: key, recallCount: next.recallCount, lastRecalledAt: next.lastRecalledAt })
@@ -1103,10 +1266,11 @@ export class FileTable implements MemoryTable {
     return this.journal !== undefined && this.lock.isExclusive?.() !== false
   }
 
-  private beginOp(op: WriteOp, target: PendingOp['target']): void {
+  /** own：文件表自己要补做的步骤，排在调用方的步骤后面；只进日志，正常写完时由文件表当场做掉。 */
+  private beginOp(op: WriteOp, target: PendingOp['target'], own: readonly OpStep[] = []): void {
     if (!this.isJournaling()) return
     this.journal!.begin({
-      op: op.id, at: this.now(), target, steps: [...op.steps],
+      op: op.id, at: this.now(), target, steps: [...op.steps, ...own],
       ...(op.initiator !== undefined ? { initiator: op.initiator } : {}), ...(op.batch !== undefined ? { batch: op.batch } : {}),
     })
   }
@@ -1136,6 +1300,8 @@ export class FileTable implements MemoryTable {
   async finishOp(op: WriteOp, written?: MemoryRecord): Promise<void> {
     await this.locked(async () => {
       // 结操作自己也是进一次写入段：这一行还待完成的话，进段时已经按同一套步骤补完了
+      const own = this.unfinishedOwn.get(op.id)
+      this.unfinishedOwn.delete(op.id)
       if (this.settledOnEnter.delete(op.id)) return
       // 有一步没人会做（处理器没登记）：行留着，等登记了的进程来补，不做一半就销账
       if (!this.knowsSteps(op.steps)) {
@@ -1143,6 +1309,14 @@ export class FileTable implements MemoryTable {
         return
       }
       await this.runSteps(op.id, op.steps, written)
+      if (own !== undefined) {
+        try {
+          await this.runSteps(op.id, own, written)
+        } catch (err) {
+          this.log.warn(`[plastic-memory] 操作 ${op.id} 有一步没做成，留在日志里下次补做（${describeError(err)}）`)
+          return
+        }
+      }
       this.endOp(op.id)
     })
   }
@@ -1173,6 +1347,12 @@ export class FileTable implements MemoryTable {
           if (committed !== undefined) {
             if (target.source !== undefined && target.before !== undefined) await this.removeSourceIfUnchanged(target.source, target.before, committed.located.filePath)
             await this.runSteps(row.op, row.steps, committed.located.record, fingerprintOf(committed.raw) === target.after)
+            // 中途断掉时索引可能还没改：新位置那层按这条现在的样子改一行，原来那层去掉它
+            const { located } = committed
+            const isIndexed = dirname(located.filePath) === located.dir && located.record.status === 'active' && withinValidity(located.record, this.now())
+            await this.patchIndexLine(located.dir, target.memoryId, isIndexed ? located : undefined)
+            const from = target.source === undefined ? undefined : layerDirOf(target.source.dir)
+            if (from !== undefined && from !== located.dir) await this.patchIndexLine(from, target.memoryId)
           }
         } else if (!(await this.hasFileNamed(target.dir, target.nameHash))) {
           // 补做不删文件：名字不在了可能是删成了，也可能是中断后被人改了名，分不出来。同 id 还剩着的副本留给体检报
@@ -1206,7 +1386,7 @@ export class FileTable implements MemoryTable {
   private async findStamped(level: string, id: string, opId: string): Promise<{ located: LocatedFile; raw: string } | undefined> {
     const listed = await this.listMemoryFiles(level)
     if ('note' in listed) throw new Error(listed.note.text)
-    const dir = basename(level) === ARCHIVE_DIR ? dirname(level) : level
+    const dir = layerDirOf(level)
     const loc = await this.locationOf(dir)
     if (loc === undefined || 'note' in loc) return undefined
     let unreadable: string | undefined
@@ -1296,6 +1476,10 @@ export class FileTable implements MemoryTable {
         kind: 'delete', memoryId: id, dir: dirname(slot.filePath), nameHash: fingerprintOf(basename(slot.filePath)),
         before: fingerprintOf(found.raw), scopeDir: slot.dir, isOwnDirOnly: isScopeTarget(at),
       })
+      // 历史版本先于记忆文件删：中途断掉最多是记忆还在、历史没了，不会留下记忆已删、旧内容（可能带密钥）还在的历史。
+      // 要删的是这一层和（按会话定位时）全局里这个 id 的全部副本，这几层的历史直接删；它以前住过的层也删。
+      // 有哪一层删不掉或拿不准就在这里报错，记忆文件不动
+      await this.removeOwnedHistory(id, new Set(isScopeTarget(at) ? [slot.dir] : [slot.dir, this.globalDir]), true)
       await this.removeFile(slot.filePath)
       // 彻底删除（密钥硬删、最近删除里的彻底删除）的承诺是「可见集合里再没有它」：global 与该记录目录里同 id 的其余副本
       // （含 .archive/）一并物理删除；给作用域时只删该目录里的，别的作用域里的同 id 副本是另一张卡

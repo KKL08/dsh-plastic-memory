@@ -45,6 +45,12 @@ All notable changes to this project are documented here. The format follows
   update removes that version again. Several such changes to one memory
   from the same conversation within an hour keep one version
   (`history.mergeWindowMinutes`).
+- A memory's history versions follow it: deleting it for good (including
+  when it held a secret, or when its 14 days in Recently deleted run out)
+  deletes them too, and promoting it or moving it to a project takes them
+  along. History versions of memories that were already deleted, promoted or
+  moved are moved to where the memory now is, or removed if it no longer
+  exists, the next time a chat loads its memories.
 - Each memory file lists the conversations it came from (`sourceTrail`, the
   eight most recent), and `lastChange` records the last change to its
   content, with the reason when one was given.

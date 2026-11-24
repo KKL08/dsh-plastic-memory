@@ -17,6 +17,8 @@ export interface Release020Table {
   /** 整条替换：0.2.0 的 memory_save 改写走这条，记录由调用方给全（它读出来的记录不带新键） */
   put(value: MemoryRecord, from: Scope | undefined): Promise<unknown>
   locate(id: string, target: Scope): Promise<{ record: MemoryRecord } | undefined>
+  /** 物理删除（0.2.0 的彻底删除、密钥硬删走这条）。 */
+  delete(id: string, at: Scope): Promise<boolean>
 }
 
 const quiet = { info() {}, warn() {}, error() {}, debug() {} }
