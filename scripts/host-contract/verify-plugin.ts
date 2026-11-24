@@ -8,8 +8,8 @@
  * 宿主 grep 工具搜记忆根目录时顶层命中、.archive/ 不命中（H16）、
  * 带委派 header 的真子会话存入待确认记忆、检索排在主档后、溯源只限自己的会话、父会话接受后进新会话的注入（H19）。
  * 无 key 也跑的宿主服务契约：经宿主 commands 服务执行 `/memory` 命令，结果过 GUI 契约 schema；自动体检调度器在宿主计时服务登记了定时器。
- * 宿主接口探针（H22–H30，无 key）：sessionQuery 的会话列举、父子追溯、标题、事件时间与过滤；当轮用户消息的来源标记；本进程的空闲信号；
- * 指令文件的修改时间；会话存档状态（含跨进程，第二趟）；会话卸下后读事件、另一个进程写下的会话（第二趟）；fork 型子会话的快照；经插件自有来源的消息开一轮（含续接冷会话）。
+ * 宿主接口探针（H22–H30、H32，无 key）：sessionQuery 的会话列举、父子追溯、标题、事件时间与过滤；当轮用户消息的来源标记；本进程的空闲信号；
+ * 指令文件的修改时间；会话存档状态（含跨进程，第二趟）；会话卸下后读事件、另一个进程写下的会话（第二趟）；fork 型子会话的快照；经插件自有来源的消息开一轮（含续接冷会话）；各种会话的继承前缀长度（H32）。
  * 有 DEEPSEEK_API_KEY 且宿主能选出默认模型时再跑语义扫描与取消两项、一次真实的自动体检（H17：无会话、宿主默认模型）、
  * 一次带出处的处理建议（H20：两条记忆的出处从真会话读回，交给真模型），否则标 SKIPPED。
  * run.sh 随后用同一个 DSH_HOME 再起一次宿主（HOST_CONTRACT_PHASE=restart）：第一趟把
@@ -924,6 +924,85 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       } finally {
         for (const c of children) await c.dispose()
         await parent.dispose()
+      }
+    })
+
+    // H32 继承前缀的长度：readSession 读回的 inheritedEventCount 是判断「哪些事件是这个会话自己的」的唯一依据。
+    // 四种会话各建一个：普通会话；用户 fork（同宿主 fork 命令：已完成的前缀加分界标记，header 只有 isSeeded）；
+    // 子 agent fork（同 fork 后端：整份父日志当种子，带委派 header）；只回放种子、不标 isSeeded 的会话。
+    // fork 的两种在活会话和刷盘卸下后各读一次，前缀里含父会话复制过来的 turn/start，分界处是标了 inherited 的标记。
+    await attempt('H32-INHERITED-EVENT-COUNT', async () => {
+      if (!sq || !agentFactory) return { ok: false, detail: `前提缺失 sessionQuery=${!!sq} agents=${!!agentFactory}` }
+      const { buildForkSeed } = await import('@deepseek-ai/dsh-session/fork') as { buildForkSeed(events: readonly unknown[], boundary: number): unknown[] }
+      type LogShape = { session: { isSeeded?: boolean }; inheritedEventCount?: number; events: RawEventShape[] }
+      const readLog = (id: string) => sq.readSession(id) as unknown as Promise<LogShape>
+      const ws = mkWs('probe-inherited')
+      const handles: AgentHandle[] = []
+      const open = async (options: Parameters<Agents['create']>[0]) => { const h = await agentFactory.create(options); handles.push(h); return h }
+      const oneTurn = (s: SessionLike, turn: number, text: string) => {
+        s.append('turn/start', { turn })
+        s.append('user/message', userMessage(text), { surfaceOp: 'append' })
+        s.append('turn/end', { turn, reason: { kind: 'completed' } })
+      }
+      /** 读到的边界：isSeeded、inheritedEventCount、前缀里有没有 turn/start、分界处是不是 inherited 标记。 */
+      const describe = (log: LogShape) => {
+        const n = log.inheritedEventCount
+        const cut = n === undefined ? undefined : log.events[n]
+        return {
+          isSeeded: log.session.isSeeded, count: n, events: log.events.length,
+          prefixHasTurnStart: n !== undefined && log.events.slice(0, n).some(e => e.type === 'turn/start'),
+          cutIsInheritedMarker: cut?.type === 'session/end-seed' && (cut.data as { inherited?: boolean } | undefined)?.inherited === true,
+        }
+      }
+      try {
+        const parent = await open({ sessionId: `probe-inherited-parent-${rand()}`, meta: { cwd: ws } })
+        oneTurn(parent.agent.session, 1, '探针 父会话第一轮')
+        oneTurn(parent.agent.session, 2, '探针 父会话第二轮')
+        const normal = describe(await readLog(parent.agent.id))
+        const parentEvents = (await readLog(parent.agent.id)).events
+
+        // 用户 fork：继承到父会话最后一条事件为止，前缀长度 = 分界序号 + 1
+        const boundary = parentEvents.length - 1
+        const userFork = await open({
+          sessionId: `probe-inherited-userfork-${rand()}`, seed: buildForkSeed(parentEvents, boundary), inheritedEventCount: boundary + 1,
+          meta: { cwd: ws, isSeeded: true },
+        })
+        oneTurn(userFork.agent.session, 3, '探针 用户 fork 自己的一轮')
+        const userForkLive = describe(await readLog(userFork.agent.id))
+
+        // 子 agent fork：整份父日志当种子，宿主在种子后面补 inherited 标记
+        const subFork = await open({
+          sessionId: `probe-inherited-subfork-${rand()}`, seed: parentEvents, inheritedEventCount: parentEvents.length,
+          meta: { cwd: ws, parentSession: parent.agent.id, isSeeded: true, origin: 'subagent', delegationDepth: 1 },
+        })
+        oneTurn(subFork.agent.session, 3, '探针 子 agent 的任务')
+        const subForkLive = describe(await readLog(subFork.agent.id))
+
+        // 只回放种子：不标 isSeeded，种子算这个会话自己的
+        const replay = await open({ sessionId: `probe-inherited-replay-${rand()}`, seed: parentEvents, meta: { cwd: ws } })
+        const replayLive = describe(await readLog(replay.agent.id))
+
+        // 刷盘卸下后从日志文件读：前缀长度是落盘的，不是进程内的
+        for (const h of [userFork, subFork]) {
+          await store.flush(h.agent.session)
+          await h.dispose()
+          handles.splice(handles.indexOf(h), 1)
+        }
+        const userForkCold = describe(await readLog(userFork.agent.id))
+        const subForkCold = describe(await readLog(subFork.agent.id))
+
+        const parentCount = parentEvents.length
+        const isFork = (d: ReturnType<typeof describe>) => d.isSeeded === true && d.count === parentCount && d.prefixHasTurnStart && d.cutIsInheritedMarker
+        const ok = normal.isSeeded === false && normal.count === 0
+          && isFork(userForkLive) && isFork(userForkCold) && isFork(subForkLive) && isFork(subForkCold)
+          && replayLive.isSeeded === false && replayLive.count === 0
+        return {
+          ok,
+          detail: `parentEvents=${parentCount} normal=${JSON.stringify(normal)} userFork=${JSON.stringify(userForkLive)} userForkCold=${JSON.stringify(userForkCold)}`
+            + ` subagentFork=${JSON.stringify(subForkLive)} subagentForkCold=${JSON.stringify(subForkCold)} replaySeed=${JSON.stringify(replayLive)}`,
+        }
+      } finally {
+        for (const h of handles) await h.dispose()
       }
     })
 
