@@ -106,7 +106,7 @@ export class InMemoryTable implements MemoryTable {
 
   /** 落槽位（与 FileTable.persist 同规则）：status 离开 active 进 .archive/（deleted 缺 deletedAt 补 now）；目录、层、slug 都没变
    *  就留在原路径，否则在目标层重新取名；落下后清掉可见集合（global + 该记录的目录）里同 id 的其余副本，给作用域时只清该目录。返回实际落下的记录。 */
-  private place(prev: LocatedFile | undefined, value: MemoryRecord, isOwnDirOnly = false): MemoryRecord {
+  private async place(prev: LocatedFile | undefined, value: MemoryRecord, isOwnDirOnly = false): Promise<MemoryRecord> {
     const next = value.status === 'deleted' && value.deletedAt === undefined ? { ...value, deletedAt: this.now() } : value
     if (prev) this.slots.delete(prev.filePath)
     const sameLocation = prev !== undefined && prev.record.scope === next.scope && prev.record.workspacePath === next.workspacePath
@@ -119,6 +119,7 @@ export class InMemoryTable implements MemoryTable {
       if (s.record.id === next.id && s.filePath !== filePath && ((!isOwnDirOnly && s.dir === this.globalDir) || s.dir === dir)) this.slots.delete(s.filePath)
     }
     this.slots.set(filePath, { record: next, extras: prev?.extras ?? {}, filePath, dir })
+    if (prev !== undefined && prev.dir !== dir) await this.history.move(prev.dir, dir, next.id)   // 换作用域：历史版本跟过去
     return next
   }
 
@@ -127,6 +128,8 @@ export class InMemoryTable implements MemoryTable {
   async maintain(dirs: string[]) {
     const want = new Set(dirs)
     const now = this.now()
+    const ids = (dir: string) => new Set([...this.slots.values()].filter(s => s.dir === dir).map(s => s.record.id))
+    const before = new Map(dirs.map(dir => [dir, ids(dir)]))
     for (const s of [...this.slots.values()].filter(s => want.has(s.dir))) {
       const archive = join(s.dir, ARCHIVE_DIR)
       const inArchive = dirname(s.filePath) === archive
@@ -140,10 +143,20 @@ export class InMemoryTable implements MemoryTable {
         this.slots.set(filePath, { ...s, record, filePath })
       } else if (record !== s.record) this.slots.set(s.filePath, { ...s, record })
     }
+    // 历史版本：到期清掉的随之删；记忆已不在这一层的迁到它所在的那一层，哪里都没有才清
+    for (const dir of want) {
+      const present = ids(dir)
+      for (const id of await this.history.memoryIds(dir)) {
+        if (present.has(id)) continue
+        const home = before.get(dir)?.has(id) === true ? undefined : pickLiveFirst([...this.slots.values()].filter(s => s.record.id === id))?.dir
+        if (home !== undefined) await this.history.move(dir, home, id)
+        else await this.history.removeAll(dir, id)
+      }
+    }
   }
 
   async create(record: MemoryRecord) {
-    this.place(undefined, record)   // 不定位：新 id 直接占名
+    await this.place(undefined, record)   // 不定位：新 id 直接占名
   }
   async put(value: MemoryRecord, from: LocateTarget, skipIf?: (current: MemoryRecord | undefined) => boolean) {
     // 与 FileTable 同语义：put 不承载召回统计（召回统计住侧表，由 MemoryStore.markRecalled 写）
@@ -161,7 +174,10 @@ export class InMemoryTable implements MemoryTable {
     if (!current || skipIf?.(current)) return false
     // 与 FileTable 同语义：可见集合（global + 该记录目录）里同 id 的其余副本一并删除；给作用域时只删该目录里的
     for (const s of this.slots.values()) {
-      if (s.record.id === id && ((!isScopeTarget(at) && s.dir === this.globalDir) || s.dir === current.dir)) this.slots.delete(s.filePath)
+      if (s.record.id === id && ((!isScopeTarget(at) && s.dir === this.globalDir) || s.dir === current.dir)) {
+        this.slots.delete(s.filePath)
+        await this.history.removeAll(s.dir, id)
+      }
     }
     return true
   }

@@ -1,17 +1,19 @@
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { anchorsOf, type MemoryRecord } from '../src/record-schema.ts'
 import { FileTable } from '../src/storage/file-table.ts'
 import { splitFrontmatter } from '../src/storage/frontmatter.ts'
+import { STATE_CHANGE_VERSION, type HistoryVersion } from '../src/storage/history.ts'
+import { GLOBAL_DIR, HISTORY_DIR, workspaceDirName } from '../src/storage/paths.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
 import { record } from './helpers/record.ts'
 import { openRelease020Table } from './helpers/release-020.ts'
 
 // 新旧版本共用一个记忆根：用 0.2.0 发布包对同一个临时记忆根读写，再由新版本读，对照 spec「兼容与迁移」的表。
-// 这里先覆盖格式定稿涉及的两行，后面的票各自补自己那一行。
+// 这里覆盖格式定稿涉及的两行和历史版本涉及的「删除」「提升或移动」两行，后面的票各自补自己那一行。
 
 const quiet = { info() {}, warn() {}, error() {}, debug() {} }
 const global = { kind: 'global' } as const
@@ -34,6 +36,9 @@ const withNewKeys = (): MemoryRecord => record({
   related: ['mem_rel'], premises: [{ id: 'mem_pre', digest: 'd1:0123456789abcdef' }], recall: 'unlisted',
   locked: true, lockedUntil: Date.UTC(2027, 0, 1),
 })
+/** 一条记忆状态变化前的样子：直接放进它那一层的历史目录。 */
+const versionOf = (r: MemoryRecord): HistoryVersion => ({ versionId: '20261101T000000000Z', record: r, extras: {}, startedAt: r.createdAt, endedAt: r.updatedAt + 1, kind: STATE_CHANGE_VERSION, writes: [] })
+const exists = (path: string) => stat(path).then(() => true, () => false)
 const pick = (r: MemoryRecord) => Object.fromEntries(NEW_KEYS.map(k => [k, r[k]]))
 /** 文件上的提交标记：不在记录里，随定位结果带出来。 */
 const stampOf = async (id: string) => (await current().locate(id, global))?.writeOp
@@ -111,6 +116,36 @@ describe('新旧版本共用一个记忆根（0.2.0 发布包）', () => {
     const oldLines = byOld.split('\n')
     const changed = byNew.split('\n').flatMap((line, i) => line === oldLines[i] ? [] : [line.split(':')[0]])
     expect(changed).toEqual(['digest', 'lastWriteOp', '新版本改过的正文'])
+  })
+
+  it('0.2.0 彻底删除一条记忆：历史版本留着，下次整份核对清掉', async () => {
+    const rec = record({ name: '发版步骤' })
+    const table = current()
+    await table.create(rec)
+    const dir = join(root, GLOBAL_DIR)
+    await table.history.write({ dir, loc: { scope: 'global' } }, versionOf(rec))
+    const old = await openRelease020Table({ root, stats })
+    expect(await old.delete(rec.id, global)).toBe(true)
+    expect(await exists(join(dir, HISTORY_DIR, rec.id))).toBe(true)
+    await current().maintain([dir])
+    expect(await exists(join(dir, HISTORY_DIR, rec.id))).toBe(false)
+  })
+
+  it('0.2.0 提升一条记忆：只搬记忆文件，历史版本留在项目里；下次整份核对按 id 找到全局那份，把历史目录迁过去', async () => {
+    const WS = '/tmp/pm-compat-020-ws'
+    const rec = record({ name: '发版步骤', scope: 'workspace', workspacePath: WS })
+    const table = current()
+    await table.create(rec)
+    const wsDir = join(root, workspaceDirName(WS))
+    const globalDir = join(root, GLOBAL_DIR)
+    await table.history.write({ dir: wsDir, loc: { scope: 'workspace', workspacePath: WS } }, versionOf(rec))
+    const old = await openRelease020Table({ root, stats })
+    await old.update(rec.id, { kind: 'workspace', workspacePath: WS }, ({ workspacePath: _w, ...r }) => ({ ...r, scope: 'global' }))
+    expect((await current().locate(rec.id, global))?.record.scope).toBe('global')
+    expect(await exists(join(wsDir, HISTORY_DIR, rec.id))).toBe(true)
+    await current().maintain([wsDir])
+    expect(await exists(join(wsDir, HISTORY_DIR, rec.id))).toBe(false)
+    expect((await current().history.list({ dir: globalDir, loc: { scope: 'global' } }, rec.id)).map(v => v.record.content)).toEqual([rec.content])
   })
 
   it('0.2.0 丢掉 source 里它不认识的子字段，所以锚的新字段放在出处清单里', async () => {

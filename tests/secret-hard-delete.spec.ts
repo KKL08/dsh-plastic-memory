@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
-import { ARCHIVE_DIR, GLOBAL_DIR, INDEX_FILE, STATE_DIR, workspaceDirName } from '../src/storage/paths.ts'
+import { ARCHIVE_DIR, GLOBAL_DIR, HISTORY_DIR, INDEX_FILE, STATE_DIR, workspaceDirName } from '../src/storage/paths.ts'
 import { MemoryStore, type MemoryLogger } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
@@ -226,9 +226,9 @@ describe('密钥硬删', () => {
     const writes = await writesDuring(async () => { forgot = await h.forget(['mem_z']) })
     expect(forgot!.hardDeleted).toEqual(['mem_z'])
 
-    // 记忆目录（.state/ 除外）只写两处，都是删除的必然结果：删掉被删文件、重写 MEMORY.md（派生索引必须去掉被删条目那一行）。
+    // 记忆目录（.state/ 除外）只写三处，都是删除的必然结果：删掉被删文件和它的历史版本目录、重写 MEMORY.md（派生索引必须去掉被删条目那一行）。
     // 其余文件没有写调用，目录项只少了被删文件。
-    const touched = [join(root, zFile), join(wsDir(), INDEX_FILE)]
+    const touched = [join(root, zFile), join(wsDir(), INDEX_FILE), join(wsDir(), HISTORY_DIR, 'mem_z')]
     expect(writes.some(c => c.includes(touched[0]!))).toBe(true)
     expect(writes.filter(c => !c.includes(join(root, STATE_DIR)) && !touched.some(p => c.includes(p)))).toEqual([])
     expect(await listTree(root)).toEqual(before.filter(rel => rel !== zFile))
