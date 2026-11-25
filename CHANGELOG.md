@@ -365,6 +365,12 @@ All notable changes to this project are documented here. The format follows
   when the fact held and the session it came from. Versions merged in from
   another memory name that memory. Clicking a version shows its name and
   content, and Back to list returns to the row it was opened from.
+- Details also draw a memory's direct links as a graph: memories it points to
+  on the left, memories that point to it on the right, and conflicts waiting
+  for you as dashed lines. Clicking a neighbour makes it the centre, a
+  neighbour in another scope opens in that scope, and a conflict opens in
+  To do. Replaced, deleted and unreadable neighbours are marked, and the
+  graph says when links may be incomplete.
 
 ### Changed
 - Testing: `pnpm host:contract` runs the default-model automatic checkup

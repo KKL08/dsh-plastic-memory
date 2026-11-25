@@ -13,6 +13,7 @@ import { batchEditCss } from './library/batch-edit.tsx'
 import { groupsCss } from './library/groups.tsx'
 import { libraryTabCss } from './library/LibraryTab.tsx'
 import { memoryDetailCss } from './library/MemoryDetail.tsx'
+import { relationGraphCss } from './library/RelationGraph.tsx'
 import { sharedTabCss } from './library/shared.tsx'
 import { memoryPageCss } from './MemoryPage.tsx'
 import { editCss } from './pending/edit.tsx'
@@ -33,7 +34,7 @@ import { settingsCss } from './ui/Settings.tsx'
 
 export const SLOT_STYLES = {
   page: {
-    dismissButtonCss, memoryPageCss, titleControlsCss, statusBarCss, confirmCss, sharedTabCss, groupsCss, libraryTabCss, memoryDetailCss, batchEditCss,
+    dismissButtonCss, memoryPageCss, titleControlsCss, statusBarCss, confirmCss, sharedTabCss, groupsCss, libraryTabCss, memoryDetailCss, relationGraphCss, batchEditCss,
     deletedTabCss, editCss, editModesCss, modelEditCss, moveCss, pendingCss, proposalCss, suggestionCss,
   },
   sidebar: { confirmCss, modelChangeCss, sidebarTabCss },
