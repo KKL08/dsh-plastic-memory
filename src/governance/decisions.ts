@@ -681,6 +681,35 @@ export class PendingDecisionsStore {
     await this.table.put(id, { ...entry, changes: entry.changes.filter(r => r.op !== op) })
   }
 
+  /** 一个组开始做之前记上（重复记不多一条）。条目已不在返回 false。在写入段里调用。 */
+  async openGroup(id: string, group: string): Promise<boolean> {
+    const entry = await this.table.get(id)
+    if (entry === undefined) return false
+    if (entry.openGroups?.includes(group) !== true) await this.table.put(id, { ...entry, openGroups: [...(entry.openGroups ?? []), group] })
+    return true
+  }
+
+  /** 一个组做成了、或撤干净了：拿掉标记。在写入段里调用。 */
+  async closeGroup(id: string, group: string): Promise<void> {
+    const entry = await this.table.get(id)
+    if (entry?.openGroups?.includes(group) !== true) return
+    const { openGroups, ...rest } = entry
+    const left = openGroups.filter(g => g !== group)
+    await this.table.put(id, left.length > 0 ? { ...rest, openGroups: left } : rest)
+  }
+
+  /** 带着没做完的组的条目（未决、已结清的都算）。 */
+  async withOpenGroups(): Promise<PendingDecision[]> {
+    return (await this.table.list()).map(([, e]) => e).filter(e => (e.openGroups?.length ?? 0) > 0)
+  }
+
+  /** 一条变更集条目上的组都撤干净之后：一条回执都没剩的整条移出账本（只对 addChangeRun 记的条目）。在写入段里调用。 */
+  async removeEmptyRun(id: string): Promise<void> {
+    const entry = await this.table.get(id)
+    if (entry?.settled === undefined || entry.changes === undefined || entry.changes.length > 0 || (entry.openGroups?.length ?? 0) > 0) return
+    await this.table.delete(id)
+  }
+
   /**
    * 一次变更集收尾：一个操作都没做成（或都撤掉了）的整条移出账本；做成了的补上给视图和旧版本读的整条指纹回执（receipts）、
    * 涉及的记忆和改前快照（取第一条回执的）。返回留下的条目。只用在 addChangeRun 记的条目上。
@@ -689,6 +718,8 @@ export class PendingDecisionsStore {
     const entry = await this.table.get(id)
     if (entry?.changes === undefined || entry.settled === undefined) return undefined
     if (entry.changes.length === 0) {
+      // 还有没做完的组：提交了、回执还没补上的那一步要靠这条条目，留着
+      if ((entry.openGroups?.length ?? 0) > 0) return entry
       await this.table.delete(id)
       return undefined
     }

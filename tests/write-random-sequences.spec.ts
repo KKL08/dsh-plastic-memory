@@ -111,6 +111,8 @@ const concurrentOpArb = fc.oneof(
   fc.record({ kind: fc.constant('preciseEdit' as const), id: keyArb }),
   fc.record({ kind: fc.constant('corroborate' as const), id: keyArb }),
   fc.constant<MemOp>({ kind: 'guiBatch' }),
+  fc.constant<MemOp>({ kind: 'groupMerge' }),
+  fc.record({ kind: fc.constant('lock' as const), id: keyArb }),
 )
 for (const seed of seeds) it(`种子 ${seed}：共享记忆的并发写入结果及盘面与串行一致`, async () => {
   const [[initial, ops], turns] = sequenceCase(seed, fc.tuple(seedArb, fc.array(concurrentOpArb, { minLength: 3, maxLength: 4 })), 4)
@@ -228,3 +230,16 @@ for (const kind of ['preciseEdit', 'guiBatch'] as const) it(`共享记忆：${un
     await assertSerialEquivalent(base, scheduler, xs)
   })
 }, 30_000)
+
+// 成组方案和单条写入、上锁交错：组要么全做成、要么撤干净，结果仍与某个串行顺序一致
+for (const [name, rival] of [
+  ['单条写入', [{ kind: 'modelRewrite', id: 'a', allowsSecret: true }, { kind: 'preciseEdit', id: 'b' }]],
+  ['上锁', [{ kind: 'lock', id: 'b' }, { kind: 'guiEdit', id: 'a' }]],
+] as const satisfies ReadonlyArray<readonly [string, readonly MemOp[]]>) {
+  for (const seed of seeds) it(`种子 ${seed}：成组方案与${name}交错仍与串行一致`, async () => {
+    const [ops, turns] = sequenceCase(seed, fc.shuffledSubarray<MemOp>([{ kind: 'groupMerge' }, ...rival], { minLength: 3, maxLength: 3 }), 3)
+    await checkSequence(seed, ops, turns, async (xs, scheduler) => {
+      await assertSerialEquivalent(base, scheduler, xs)
+    })
+  }, 30_000)
+}

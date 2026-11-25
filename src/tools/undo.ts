@@ -10,7 +10,7 @@ import { scopeAt, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
 import { LINK_UNDONE_STEP, indexReceiptUndoneStep, ledgerSteps, linkUndoneStep } from '../governance/op-steps.ts'
 import { newWriteOp } from '../storage/table.ts'
 import { hasDropped, linksOutside, restoreLinks, withoutLinks, type DroppedLinks } from '../links.ts'
-import { revertChange, withdrawVersion } from './changeset.ts'
+import { receiptsOfEntry, revertChange, settleOpenGroups, withdrawVersion } from './changeset.ts'
 import { firstRevertBlock, type ChangeReceipt } from '../governance/changeset.ts'
 import { crossWorkspaceNote, gateRecords, isCopyOf, isVisible, locateCopy, type CrossWorkspaceRejection, type GovernanceContext } from './workspace-gate.ts'
 
@@ -126,7 +126,12 @@ async function undoIndexRun(entry: UndoableEntry, deps: UndoDeps): Promise<UndoR
  * 有一条撤不了就整批不动；动手时每条在自己的写入段里再核对一次，中途被别处抢先改了就停在那里，撤掉的回执已拿掉、剩下的留着可再撤。
  */
 async function revertChanges(entry: UndoableEntry, rule: UndoRule, allow: boolean | undefined, context: GovernanceContext, deps: UndoDeps): Promise<UndoResult> {
-  const receipts = entry.changes ?? []
+  // 中断留下的半个组先撤掉：它的几步本来就不该留着，撤完再按剩下的回执算
+  let receipts = entry.changes ?? []
+  if ((entry.openGroups?.length ?? 0) > 0) {
+    await settleOpenGroups(deps, { by: 'undo', own: entry.id })
+    receipts = await receiptsOfEntry(deps.decisions, entry.id)
+  }
   // 上一次已经全部撤完、只差条目的去向：这次补上
   if (receipts.length === 0) return settleUndo(entry, rule, deps, [])
   await deps.snapshots.sweep(deps.now?.() ?? Date.now())

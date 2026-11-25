@@ -24,6 +24,9 @@ import { executePromote, type PromoteResult } from '../../src/tools/promote.ts'
 import { executeSnapshotTool } from '../../src/tools/snapshot.ts'
 import { executeForget } from '../../src/tools/forget.ts'
 import { runSavePipeline, type PipelineResult } from '../../src/pipeline.ts'
+import { applyChangeset } from '../../src/tools/changeset.ts'
+import { mergePlan } from '../../src/governance/changeset-plans.ts'
+import { DREAMS_INITIATOR } from '../../src/governance/write-gate.ts'
 import { buildTypeRegistry } from '../../src/type-registry.ts'
 import { ViewWriter, collectGlobalViews } from '../../src/gui/view-writer.ts'
 import { createMemoryCommand } from '../../src/gui/commands.ts'
@@ -64,6 +67,10 @@ export type MemOp =
   | { kind: 'update' | 'softDelete' | 'restore' | 'promote' | 'guiEdit'; id: Key }
   | { kind: 'preciseEdit' | 'corroborate'; id: Key }
   | { kind: 'guiBatch' }
+  /** 后台（记忆梦境）把 b 并进 a：一组，存活方改成融合稿、被合并方软删。 */
+  | { kind: 'groupMerge' }
+  /** 用户给一条记忆上锁。 */
+  | { kind: 'lock'; id: Key }
   | { kind: 'hardDelete'; id: Key; layer?: 'workspace' | 'global' }
   | { kind: 'modelRewrite'; id: Key; allowsSecret: boolean }
   | { kind: 'external'; id: Key; isTwoStep: boolean }
@@ -270,6 +277,22 @@ async function runMemOp(w: MemoryWorld, op: MemOp, index: number, hooks: OpHooks
         })),
       })
     }
+    case 'groupMerge': {
+      // 像后台任务一样：先读两条，按读到的出方案，再应用
+      const [keeper, merged] = await Promise.all((['a', 'b'] as const).map(key => w.store.get(IDS[key], { workspacePath: W })))
+      if (keeper?.status !== 'active' || merged?.status !== 'active') return 'absent'
+      const entryId = `pd_group_${index}`
+      const store = withCommitPoint(w.store, hooks)
+      await w.decisions.addChangeRun(entryId, { kind: 'edit', summary: `合并 ${index}`, workspaces: [], memoryIds: [] }, 'batch-edited', t)
+      const ops = mergePlan({ group: `g${index}`, keeper, merged: [merged], fused: { content: `合并 ${index}` } })
+      const r = await applyChangeset(ops, { entryId, by: DREAMS_INITIATOR, at: t, isSecretChecked: true }, { store, snapshots: w.snapshots, decisions: w.decisions, log: silent })
+      await store.writeSection(() => w.decisions.finishChangeRun(entryId, { writes: [] }))
+      return { group: r.groups?.[0], reasons: r.outcomes.flatMap(o => (o.kind === 'skipped' ? [o.reason] : [])) }
+    }
+    case 'lock': {
+      const store = withCommitPoint(w.store, hooks)
+      return (await store.updateIfLive(at(op.id), cur => ({ ...cur, locked: true }))) === undefined ? 'absent' : 'locked'
+    }
     case 'preciseEdit':
     case 'corroborate':
     case 'modelRewrite': {
@@ -330,7 +353,7 @@ export const labelOf = (op: MemOp) => {
     case 'hardDelete': return `hardDelete(${op.id}${op.layer === undefined ? '' : `,${op.layer}`})`
     case 'recall': return `recall(${op.ids.join('+')})`
     case 'snapshot': return `snapshot(${op.ids.length === 0 ? '可见' : op.ids.join('+')})`
-    case 'guiBatch': case 'restoreSnapshot': case 'undo': return op.kind
+    case 'guiBatch': case 'groupMerge': case 'restoreSnapshot': case 'undo': return op.kind
     case 'resolve': return `resolve(${op.verdict})`
     default: return `${op.kind}(${op.id})`
   }
@@ -350,6 +373,12 @@ function splitTag(value: unknown, op: MemOp): string | undefined {
     // 精确修改在别处改过的正文上重做成功：结果里带着期间有人改过的说明，整体串行重放同样复现不出，也在提交点拆开比
     if (r.kind === 'updated' && r.warnings?.some(w => w.code === 'edit-rebased') === true) return 'race'
     return r.kind === 'rejected' && r.subcode === 'changed-after-read' ? 'race' : undefined
+  }
+  if (op.kind === 'groupMerge') {
+    // 读到之后、动手之前别处改了（核对没过），或做到一半被挡下撤回了：串行重放复现不出
+    const r = value as { group?: { state: string }; reasons?: string[] }
+    if (r.group?.state === 'rolled-back') return 'race'
+    return r.group?.state === 'skipped' && r.reasons?.some(reason => reason !== 'group' && reason !== 'locked' && reason !== 'has-secret') === true ? 'race' : undefined
   }
   if (op.kind === 'promote') {
     const r = value as PromoteResult

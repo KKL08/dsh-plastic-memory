@@ -191,6 +191,8 @@ export const pendingDecisionSchema = z.object({
   indexRun: indexRunSchema.optional(),
   /** 按变更集应用的条目：逐个操作的回执，按做的先后，一个操作提交后记一条、撤掉后拿掉（见 changeset.ts）。有它的条目撤销按它逐个还原字段。 */
   changes: z.array(changeReceiptSchema).optional(),
+  /** 还没做完的组（见 ChangeOp.group）：开始前记上，做成或撤干净后拿掉。留在这里的是中断或没撤干净的，下次应用、撤销之前先按回执撤回。 */
+  openGroups: z.array(z.string()).optional(),
   /** 只挂关联、前提的保存（link）：这一次新加的 id（已有的不算）。撤销只去掉这些。其余条目没有此字段。 */
   links: linkIdsSchema.optional(),
   /** 模型改写、替代：哪个会话里哪次 memory_save 调用改的（对话卡按 callId、右侧栏按 sessionId 认领）；替代时 by 是替代它的那条。 */
