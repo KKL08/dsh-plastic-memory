@@ -8,7 +8,7 @@ import { memoryRelativePath } from './storage/paths.ts'
 import type { TypeRegistry } from './type-registry.ts'
 import type { EvidenceLookupLevel } from './evidence-guidance.ts'
 import { assembleSnapshot, overflowLevel, type OverflowMode, type SnapshotUsage } from './snapshot.ts'
-import type { OverflowLevel } from './contract-codes.ts'
+import type { OverflowLevel, SearchSource } from './contract-codes.ts'
 import { relaxedCap, type SessionView, type SnapshotOrigin } from './gui/contract.ts'
 import { ledgerLabel, scopeOfLedger, type Scope } from './scope.ts'
 
@@ -77,6 +77,9 @@ export interface SnapshotCacheDeps {
   budget: number
   memoryRoot?: string
   evidenceLookup?: EvidenceLookupLevel
+  /** 记忆带原话、检索来源：下钻引导按它们选文案（见 evidenceGuidance）。 */
+  memoryQuotes?: boolean
+  searchSource?: SearchSource
   /** 超出上限的处理，缺省 relax（与配置默认一致）。 */
   overflow?: OverflowMode
   /** 给出时，每次冻结按会话所属项目（无项目为 'global'）同步超限提醒。 */

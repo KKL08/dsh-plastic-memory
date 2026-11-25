@@ -223,6 +223,14 @@ export function relocateByTime(anchor: { at: number }, events: readonly RawEvent
   return found
 }
 
+/**
+ * 锚时间和按序号取到的事件对不对得上：落在 [锚起点那条事件的时间, 锚区间之后第一条带时间的事件的时间] 里。
+ * 起点事件没有时间算对不上；区间之后没有带时间的事件时只看下界。对不上时由调用方决定要不要按时间重新定位。
+ */
+export function anchorTimeMatches(anchorAt: number, startTime: number | undefined, nextTime: number | undefined): boolean {
+  return typeof startTime === 'number' && startTime <= anchorAt && (nextTime === undefined || anchorAt <= nextTime)
+}
+
 /** 产生一条工具结果的那次调用。 */
 export interface ToolCallInfo {
   name: string

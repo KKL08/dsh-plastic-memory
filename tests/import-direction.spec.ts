@@ -24,7 +24,7 @@ const LEAF_MODULES = new Set([
 // search/ranking、search/coverage、search/window、search/memory-candidates 与 store 同层：只 import 叶子，被执行器用；分词器与 jieba 切分器留在叶子（只碰 Node 内置，词典路径与日志器由调用方注入）
 const MEMORY_MODULES = new Set([
   'pipeline', 'create-gate', 'store', 'snapshot', 'snapshot-message', 'runtime', 'type-registry', 'evidence-guidance', 'search/ranking', 'search/coverage',
-  'search/window', 'search/dialogue-rank', 'search/segments', 'search/dialogue-intake', 'search/memory-candidates', 'search/dialogue-format', 'change', 'commit-change', 'merged-history', 'session-id', 'links',
+  'search/window', 'search/dialogue-rank', 'search/memory-quotes', 'search/segments', 'search/dialogue-intake', 'search/memory-candidates', 'search/dialogue-format', 'change', 'commit-change', 'merged-history', 'session-id', 'links',
 ])
 // 接线层：index.ts、交给 ctx.storageDomain.open 的域定义、宿主会话适配器（后两个只被 index.ts 用）
 const ENTRY_MODULES = new Set(['index', 'domain-spec', 'cordis-host-session'])

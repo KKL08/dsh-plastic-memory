@@ -2,10 +2,10 @@ import { isPendingDelegated, type MemoryRecord } from './record-schema.ts'
 import type { TypeRegistry } from './type-registry.ts'
 import { sourceNote, formatIndexLine, unattendedNote } from './index-line.ts'
 import { workspaceDirName, GLOBAL_DIR, INDEX_FILE, ARCHIVE_DIR } from './storage/paths.ts'
-import { EVIDENCE_GUIDANCE, type EvidenceLookupLevel } from './evidence-guidance.ts'
+import { evidenceGuidance, type EvidenceLookupLevel } from './evidence-guidance.ts'
 import { stalenessNote, withinValidity } from './record-freshness.ts'
 import { exposedPath, maskSecretSurface } from './secrets.ts'
-import type { OverflowLevel, OverflowMode } from './contract-codes.ts'
+import type { OverflowLevel, OverflowMode, SearchSource } from './contract-codes.ts'
 import { relaxedTier } from './gui/contract.ts'
 import { CJK } from './search/tokenizer.ts'
 import { SNAPSHOT_MESSAGE_PREFIX } from './snapshot-message.ts'
@@ -129,6 +129,10 @@ export function assembleSnapshot(deps: {
   memoryRoot?: string
   /** 证据下钻档位：给出时在快照末尾拼对应引导文案；缺省不拼（纯测试场景）。 */
   evidenceLookup?: EvidenceLookupLevel
+  /** 记忆带原话（search.memoryQuotes）：决定下钻引导用哪套文案。缺省关。 */
+  memoryQuotes?: boolean
+  /** 检索来源（search.source）：含原话或记忆带原话开着时，下钻引导补一句按消息引用看更多内容。缺省只查记忆。 */
+  searchSource?: SearchSource
   /** 超出上限时：relax（缺省）需要多少带多少，strict 按优先级装入、超出的截掉。 */
   overflow?: OverflowMode
   /** 持久型子会话自己的会话 id：它创建的待确认记录照常注入。缺省（主会话、一次性子会话）一条待确认记录都不带。 */
@@ -275,7 +279,7 @@ export function assembleSnapshot(deps: {
   if (usage !== undefined) parts.push(usage)
   parts.push(`\n${MEMORY_AS_DATA_NOTE}`)
   // 证据下钻引导：固定尾注不计预算（与磁盘路径行同待遇，预算是软约束）
-  if (deps.evidenceLookup) parts.push(`\n${EVIDENCE_GUIDANCE[deps.evidenceLookup]}`)
+  if (deps.evidenceLookup) parts.push(`\n${evidenceGuidance(deps.evidenceLookup, { memoryQuotes: deps.memoryQuotes ?? false, searchSource: deps.searchSource ?? 'memory' })}`)
   // 导航图与固定尾注：不计上限，归固定说明
   for (const part of parts.slice(tailStart)) tokens.fixed += estimateTokens(part)
 

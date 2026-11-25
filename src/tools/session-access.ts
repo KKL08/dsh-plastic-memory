@@ -19,10 +19,41 @@ export function anchorReadPolicy(
   anchorSessionId: string,
   context: { workspacePath: string | undefined; session?: { id: string }; delegation?: object },
 ): { ok: true } | { ok: false; kind: 'forbidden' } | { ok: false; kind: 'rejected'; code: 'subagent-restricted'; reason: string } {
-  if (record.scope === 'workspace' && record.workspacePath !== context.workspacePath) return { ok: false, kind: 'forbidden' }
+  if (record.scope === 'workspace' && (record.workspacePath === undefined || record.workspacePath !== context.workspacePath)) return { ok: false, kind: 'forbidden' }
   if (context.delegation !== undefined && anchorSessionId !== context.session?.id) {
     return { ok: false, kind: 'rejected', code: 'subagent-restricted', reason: '这条记忆的出处在别的会话，带回主会话查' }
   }
+  return { ok: true }
+}
+
+declare const checkedAnchor: unique symbol
+
+/** 已经过了记忆规则的锚：只能由 checkAnchor 产生，调用方造不出一个随手的放行。 */
+export interface CheckedAnchor {
+  readonly record: Pick<MemoryRecord, 'id'>
+  readonly sessionId: string
+  readonly [checkedAnchor]: true
+}
+
+/** 记忆的锚先过 anchorReadPolicy（项目隔离、子 agent 只读自己的出处），过了才给出 CheckedAnchor。 */
+export function checkAnchor(
+  record: Pick<MemoryRecord, 'id' | 'scope' | 'workspacePath'>,
+  anchorSessionId: string,
+  context: { workspacePath: string | undefined; session?: { id: string }; delegation?: object },
+): { ok: true; anchor: CheckedAnchor } | Exclude<ReturnType<typeof anchorReadPolicy>, { ok: true }> {
+  const policy = anchorReadPolicy(record, anchorSessionId, context)
+  if (!policy.ok) return policy
+  return { ok: true, anchor: { record, sessionId: anchorSessionId } as CheckedAnchor }
+}
+
+/**
+ * 记忆带原话：锚已过记忆规则（全局记忆的锚指到别的项目也算），再看会话事实——会话还在、没标不回看。
+ * 事实取自这次检索现查的会话表，不逐个读会话日志；会话表这次读不全时不放行，也不说会话没了。
+ */
+export function quoteReadPolicy(anchor: CheckedAnchor, table: SessionTable): { ok: true } | { ok: false; kind: 'unavailable' | 'gone' | 'no-review' } {
+  if (!table.isComplete) return { ok: false, kind: 'unavailable' }
+  if (table.get(anchor.sessionId) === undefined) return { ok: false, kind: 'gone' }
+  if (table.isMarkedNoReview(anchor.sessionId)) return { ok: false, kind: 'no-review' }
   return { ok: true }
 }
 

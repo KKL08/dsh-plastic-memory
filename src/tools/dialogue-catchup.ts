@@ -106,7 +106,7 @@ export class DialogueCatchup {
   private readonly warned = new Set<string>()
 
   /** 共享同一个对话记录库，只向读取入口提供查询方法。 */
-  get readStore(): Pick<DialogueRecordStore, 'state' | 'search' | 'segmentsOf' | 'turnsOf' | 'queued'> {
+  get readStore(): Pick<DialogueRecordStore, 'state' | 'search' | 'segmentsOf' | 'turnsOf' | 'queued' | 'session'> {
     return this.deps.store
   }
 

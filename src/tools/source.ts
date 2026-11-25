@@ -3,7 +3,7 @@ import { anchorsOf, anchorSourceMode } from '../record-schema.ts'
 import type { MemoryRecord, SourceAnchor } from '../record-schema.ts'
 import type { DialogueSpeaker, SourceRejectCode } from '../contract-codes.ts'
 import { maskSecretSurface } from '../secrets.ts'
-import { isOwnEvent, messageText, relocateByTime } from '../session-log.ts'
+import { anchorTimeMatches, isOwnEvent, messageText, relocateByTime } from '../session-log.ts'
 import type { RawEvent } from '../session-log.ts'
 import { UNKNOWN_SESSION_ID } from '../session-id.ts'
 import { byPosition } from '../storage/table.ts'
@@ -267,8 +267,7 @@ export async function readSource(target: Extract<SourceTarget, { via: 'anchor' }
     const anchor = target.anchors[target.anchorIndex]!.anchor
     const startTime = events.find(e => e.seq === start)?.event.time
     const nextTime = events.find(e => e.seq > end && typeof e.event.time === 'number')?.event.time
-    const validRange = !loaded.unknown && typeof startTime === 'number' && startTime <= target.anchorTime
-      && (nextTime === undefined || target.anchorTime <= nextTime)
+    const validRange = !loaded.unknown && anchorTimeMatches(target.anchorTime, startTime, nextTime)
     // 旧锚的时间来自记录更新时间，不能拿它重定位原始出处。
     if (anchor.change !== undefined && !validRange) {
       const relocated = relocateByTime({ at: target.anchorTime }, events.map(e => e.event))

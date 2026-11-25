@@ -32,7 +32,8 @@ import { IN_SNAPSHOT_NOTE } from '../src/tools/search.ts'
 import { STALENESS_NOTE } from '../src/record-freshness.ts'
 import { type MemorySnapshot, type PendingDecision, type ScanCacheEntry } from '../src/governance/schema.ts'
 import { INSTRUCTION_MAX_BYTES } from '../src/governance/instructions.ts'
-import { EVIDENCE_GUIDANCE } from '../src/evidence-guidance.ts'
+import { EVIDENCE_GUIDANCE, evidenceGuidance } from '../src/evidence-guidance.ts'
+import { DIALOGUE_QUOTE_TAG } from '../src/search/dialogue-format.ts'
 import { GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_WORKSPACE_MAP_FILE, deletedViewSchema, libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema, workspaceMapViewSchema, type LibraryView, type PendingView } from '../src/gui/contract.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
@@ -1895,6 +1896,31 @@ describe('配置热生效（loader/volatile-update）', () => {
     expect(second).not.toContain('- [mem_k]') // 严格按 1.5 token 的上限：这条装不下
     // 上限是 number（配置就是 number），会话视图原样带出
     await t.sessionView(v => expect(v).toMatchObject({ budget: 1.5, overflowMode: 'strict', injectedIds: [], omittedCount: 1 }))
+  })
+
+  it('改记忆带原话或检索来源后，下一次组装换下钻引导的文案；不改设置时冻结的快照不动', async () => {
+    const t = await setup()
+    await t.putGlobal({ id: 'mem_k', type: 'knowledge', name: '报销截止', content: '报销截止每月 25 日', summary: '报销截止日' })
+    const first = await t.assembleOnce()
+    expect(first).toContain(EVIDENCE_GUIDANCE.strict)
+    expect(await t.assembleOnce()).toBe(first)
+
+    expect(await t.update({ search: { memoryQuotes: true } })).toEqual([['search', 'memoryQuotes']])
+    const quoted = await t.assembleOnce()
+    expect(quoted).toContain(evidenceGuidance('strict', { memoryQuotes: true, searchSource: 'memory' }))
+    expect(quoted).not.toContain(EVIDENCE_GUIDANCE.strict)
+    expect(await t.assembleOnce()).toBe(quoted)
+
+    expect(await t.update({ search: { memoryQuotes: true, source: 'both' } })).toEqual([['search', 'source']])
+    expect(await t.assembleOnce()).toContain(evidenceGuidance('strict', { memoryQuotes: true, searchSource: 'both' }))
+  })
+
+  it('记忆带原话开着：注入快照里不带原话', async () => {
+    const t = await setup({ search: { memoryQuotes: true } })
+    await t.putGlobal({ id: 'mem_k', type: 'knowledge', name: '报销截止', content: '报销截止每月 25 日', summary: '报销截止日', source: { sessionId: 'sess-hot', eventRange: [1, 2], sourceMode: 'user-explicit' } })
+    const text = await t.assembleOnce()
+    expect(text).toContain('mem_k')
+    expect(text).not.toContain(`<${DIALOGUE_QUOTE_TAG}>`)
   })
 
   it('热更新后组装出的文本没变就不发：只在文本变了时恰好多一份', async () => {
