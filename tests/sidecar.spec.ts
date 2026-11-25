@@ -706,6 +706,57 @@ describe('SidecarStore：KV 导入协议', () => {
   })
 })
 
+describe('带完整性的列举（listChecked）', () => {
+  const quietLog = { info() {}, warn() {}, error() {} }
+  const fileOf = (dir: string, key: string) => join(state, dir, `${createHash('sha1').update(key).digest('hex')}.json`)
+
+  it('目录还不存在：空、完整；条目都读得出：完整', async () => {
+    const s = new SidecarStore({ root, schemas })
+    expect(await s.dreams.listChecked()).toEqual({ entries: [], isComplete: true })
+    await s.dreams.put('all', { id: 'all', enabled: true })
+    await s.dreams.put('/proj/a', { id: '/proj/a', enabled: false })
+    const read = await s.dreams.listChecked()
+    expect(read.isComplete).toBe(true)
+    expect(read.entries.map(([key]) => key).sort()).toEqual(['/proj/a', 'all'])
+    expect(await exists(fileOf('dreams', 'all'))).toBe(true)
+  })
+
+  it('有文件解析不了、或形状不对：其余条目照常读出，标成不完整；现有的 list 仍然只是跳过它', async () => {
+    const s = new SidecarStore({ root, schemas, log: quietLog })
+    await s.dreams.put('all', { id: 'all', enabled: true })
+    await s.dreams.put('/proj/a', { id: '/proj/a', enabled: false })
+    await writeFile(fileOf('dreams', '/proj/a'), '{ 坏的', 'utf8')
+    expect(await s.dreams.listChecked()).toEqual({ entries: [['all', { id: 'all', enabled: true }]], isComplete: false })
+    expect((await s.dreams.list()).map(([key]) => key)).toEqual(['all'])
+    await writeFile(fileOf('dreams', '/proj/a'), JSON.stringify({ id: '/proj/a', enabled: 'yes' }), 'utf8')
+    expect((await s.dreams.listChecked()).isComplete).toBe(false)
+  })
+
+  it('目录本身读不了：空、不完整', async () => {
+    const s = new SidecarStore({ root, schemas, log: quietLog })
+    await mkdir(state, { recursive: true })
+    await writeFile(join(state, 'activity'), '不是目录', 'utf8')
+    expect(await s.activity.listChecked()).toEqual({ entries: [], isComplete: false })
+  })
+
+  it('梦境记录表的读改写碰到读不出的条目：抛错、原文件不动；条目不存在时照常新建', async () => {
+    const s = new SidecarStore({ root, schemas, log: quietLog })
+    await s.dreams.put('/proj/a', { id: '/proj/a', enabled: false })
+    const bad = `${await readFile(fileOf('dreams', '/proj/a'), 'utf8')}!`
+    await writeFile(fileOf('dreams', '/proj/a'), bad, 'utf8')
+    await expect(s.dreams.update('/proj/a', cur => ({ ...cur, id: '/proj/a', enabled: true }))).rejects.toThrow('不覆盖')
+    expect(await readFile(fileOf('dreams', '/proj/a'), 'utf8')).toBe(bad)
+    expect(await s.dreams.update('usage', cur => ({ ...cur, id: 'usage', runs: [] }))).toBe(true)
+  })
+
+  it('在途的临时文件不算条目，也不算读不出', async () => {
+    const s = new SidecarStore({ root, schemas })
+    await s.dreamMarks.put('global', { id: 'global', runId: 'r1', takenAt: 1, marks: { mem_a: 'f' } })
+    await writeFile(`${fileOf('dream-marks', 'global')}.tmp-1-abc`, '{', 'utf8')
+    expect(await s.dreamMarks.listChecked()).toEqual({ entries: [['global', { id: 'global', runId: 'r1', takenAt: 1, marks: { mem_a: 'f' } }]], isComplete: true })
+  })
+})
+
 describe('体检记录表的认领（带心跳）', () => {
   const claimPath = (key: string) => join(state, 'checkups', `${createHash('sha1').update(key).digest('hex')}.claim`)
   const readClaim = async (key: string) => JSON.parse(await readFile(claimPath(key), 'utf8')) as { pid: number; at: number; id: string }

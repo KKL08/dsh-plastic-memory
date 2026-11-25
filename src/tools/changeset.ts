@@ -51,13 +51,19 @@ export interface ApplyOptions {
   fingerprint?: (r: MemoryRecord) => string
   /** 软删时哪些算含密钥、软删不了；缺省两级都算。 */
   isSecret?: (current: MemoryRecord) => boolean
+  /**
+   * 每个操作（或每一组）开始之前问一次：为真就停，后面的都不做、各记一条 stopped，已经开始的那一组做完。
+   * 后台运行让路用；整批退的那一批不看它（要么全做要么全退）。
+   */
+  shouldStop?: () => boolean
 }
 
 /**
  * has-secret：要软删的那条含密钥；link-invalid：要挂的 id 不合规（detail 是给模型看的原因）；invalid：拼出来的记录过不了格式校验；
- * changed：落盘那一刻文件被手改了；locked：这个发起方不许改这条（见 writeGate）；group：同组的另一步没过，这一步跟着不做。
+ * changed：落盘那一刻文件被手改了；locked：这个发起方不许改这条（见 writeGate）；group：同组的另一步没过，这一步跟着不做；
+ * stopped：调用方叫停了（shouldStop），这一项没开始。
  */
-export type ApplySkipReason = SkipReason | 'has-secret' | 'link-invalid' | 'invalid' | 'changed' | 'locked' | 'group'
+export type ApplySkipReason = SkipReason | 'has-secret' | 'link-invalid' | 'invalid' | 'changed' | 'locked' | 'group' | 'stopped'
 
 /** 一组的结果。applied：全做成了；skipped：第一步之前的核对没过，什么都没写；rolled-back：做到一半有一步不成，已做的按回执撤回了。 */
 export interface GroupResult {
@@ -88,6 +94,8 @@ export interface ApplyResult {
   unrecorded?: string[]
   /** 整批退是因为某一项写入抛了错：错误原样带回，由调用方决定抛不抛。 */
   thrown?: unknown
+  /** 调用方中途叫停了（shouldStop）：没开始的各项在 outcomes 里是 stopped。 */
+  isStopped?: boolean
 }
 
 function ensureSteps(deps: ChangesetDeps): void {
@@ -108,7 +116,12 @@ export async function applyChangeset(ops: readonly ChangeOp[], opts: ApplyOption
   const outcomes: OpOutcome[] = []
   const groups: GroupResult[] = []
   const done = (): ApplyResult => ({ outcomes, ...(groups.length > 0 ? { groups } : {}) })
-  for (const segment of segmentsOf(ops, opts.isAllOrNothing === true)) {
+  const segments = segmentsOf(ops, opts.isAllOrNothing === true)
+  for (const [i, segment] of segments.entries()) {
+    if (opts.isAllOrNothing !== true && opts.shouldStop?.() === true) {
+      for (const rest of segments.slice(i)) for (const op of rest.ops) outcomes.push({ kind: 'skipped', opId: op.id, memoryId: op.memoryId, reason: 'stopped' })
+      return { ...done(), isStopped: true }
+    }
     if (segment.group !== undefined) {
       const r = await applyGroup(segment.group, segment.ops, segment.isBroken, opts, deps, progress)
       outcomes.push(...r.outcomes)

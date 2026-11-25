@@ -1,7 +1,10 @@
-import type { BatchKvTable, CasKvTable, ClaimKvTable, RefreshableClaimKvTable } from '../../src/kv-table.ts'
+import type { BatchKvTable, CasKvTable, CheckedListKvTable, ClaimKvTable, RefreshableClaimKvTable } from '../../src/kv-table.ts'
 
 /** 内存 KV：侧表与治理各表的测试替身，不进发布包。认领只在本进程内排他。 */
-export class InMemoryKvTable<T> implements ClaimKvTable<T>, CasKvTable<T>, RefreshableClaimKvTable<T> {
+export class InMemoryKvTable<T> implements ClaimKvTable<T>, CasKvTable<T>, RefreshableClaimKvTable<T>, CheckedListKvTable<T> {
+  /** 测试用：置成 false 模拟有条目读不出。 */
+  isComplete = true
+  async listChecked() { return { entries: await this.list(), isComplete: this.isComplete } }
   protected map = new Map<string, T>()
   private claimed = new Map<string, symbol>()
   async get(key: string) { return this.map.get(key) }

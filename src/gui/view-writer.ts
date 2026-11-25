@@ -1,5 +1,5 @@
 import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { isAbsolute, join } from 'node:path'
+import { join } from 'node:path'
 import type { MemoryStore, MemoryLogger } from '../store.ts'
 import type { KvTable } from '../kv-table.ts'
 import type { RootLock } from '../root-lock.ts'
@@ -15,6 +15,7 @@ import { lastCheckupAt, type CheckupRecordStore } from '../governance/checkup-re
 import type { AutoCheckupSettingStore } from '../governance/auto-checkups.ts'
 import type { ModelSelectionStore } from '../governance/background-llm.ts'
 import { checkupWorkspaces, listingNotes, prereadScopes } from '../tools/scope-preread.ts'
+import { scheduledScopes } from '../governance/scope-health.ts'
 import {
   GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, SCOPE_KEYS, checkupKey, sessionViewFile, workspaceMapViewSchema,
   type CheckupView, type GlobalViewName, type ModelSelectionKey, type SessionView, type WorkspaceMapView,
@@ -155,8 +156,7 @@ export async function collectCheckupView(deps: CheckupSourceDeps): Promise<Check
   const listing = await deps.store.listWorkspaceDirs()
   const checkable = new Set(checkupWorkspaces(listing))
   const [settings, records, model] = await Promise.all([deps.autoCheckups.read(), deps.checkups.list(), deps.selections?.get('checkup' satisfies ModelSelectionKey)])
-  const ownSettings = [...settings.keys()].filter(key => isAbsolute(key))
-  const scopes: Scope[] = [{ kind: 'global' }, ...[...new Set([...listing.entries.map(e => e.workspacePath), ...ownSettings])].sort().map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
+  const scopes = scheduledScopes(listing.entries.map(e => e.workspacePath), settings.keys())
   const byKey = new Map(records.map(r => [r.id, r]))
   const last = new Map<Scope, number | null>()
   const inProgress = new Set<Scope>()

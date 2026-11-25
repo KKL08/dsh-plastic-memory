@@ -2,10 +2,11 @@ import { mkdir, readdir, readFile, rm, stat } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import type { ZodType } from 'zod'
-import type { BatchKvTable, CasKvTable, ClaimKvTable, KvTable, RefreshableClaim, RefreshableClaimKvTable } from '../kv-table.ts'
+import type { BatchKvTable, CasKvTable, CheckedListKvTable, ClaimKvTable, KvTable, RefreshableClaim, RefreshableClaimKvTable } from '../kv-table.ts'
 import type { MemoryLogger } from './table.ts'
 import {
-  autoCheckupSettingSchema, checkupRecordSchema, modelSelectionRowSchema, recallStatsSchema, type AutoCheckupSetting, type CheckupRecord, type ModelSelectionRow, type RecallStats,
+  activityEntrySchema, autoCheckupSettingSchema, checkupRecordSchema, dreamMarksSchema, dreamsRecordSchema, modelSelectionRowSchema, recallStatsSchema,
+  type ActivityEntry, type AutoCheckupSetting, type CheckupRecord, type DreamMarks, type DreamsRecord, type ModelSelectionRow, type RecallStats,
 } from './schema.ts'
 import { STATE_DIR } from './paths.ts'
 import { SAFE_KEY_RE, atomicWrite, breakStaleLock, createExclusive, describeError, errnoCode, isStaleLock, lockOwner } from './state-files.ts'
@@ -27,6 +28,9 @@ import { defaultRootLock } from './root-lock.ts'
  *   .state/checkups/<sha1(范围键)>.claim      这个范围体检期间的认领（排他创建，持有者定时刷新，体检完即删）
  *   .state/auto-checkups/<sha1(范围键)>.json  自动体检设置表，每个范围一文件
  *   .state/model-selections/<sha1(选择键)>.json  后台模型的选择表，每个选择键一文件
+ *   .state/dreams/<sha1(范围键)>.json         记忆梦境的开关和运行记录，每个范围一文件（另有 all、usage 两个键）
+ *   .state/dream-marks/<sha1(范围键)>.json    记忆梦境的变化基线，每个范围一文件
+ *   .state/activity/<sha1(进程 id)>.json      各进程里哪些工作目录有会话在跑，每个进程一文件
  *   .state/recall-stats.json        整张表一个文件 { [id]: RecallStats }
  *
  * 写都是 tmp + rename 原子写，进程内经一条 Promise 链串行，轮到了再拿记忆根写锁（排队期间不占写锁）；读不加锁。
@@ -50,6 +54,9 @@ const ADVICE_IGNORES_DIR = 'advice-ignores'
 const CHECKUPS_DIR = 'checkups'
 const AUTO_CHECKUPS_DIR = 'auto-checkups'
 const MODEL_SELECTIONS_DIR = 'model-selections'
+const DREAMS_DIR = 'dreams'
+const DREAM_MARKS_DIR = 'dream-marks'
+const ACTIVITY_DIR = 'activity'
 
 /** 认领超过这么久没刷新按残留处理（持有进程崩溃后 pid 被复用）。待决项的认领不刷新：一次裁决远用不了这么久；
  *  体检的认领由持有者定时刷新（gui/auto-checkup.ts）。 */
@@ -83,17 +90,23 @@ interface TableEnv {
 }
 
 /** 每条一个 JSON 文件的表。键从文件内容的 id 还原，所以 put 要求键等于值的 id。 */
-class EntryFileTable<T extends { id: string }> implements ClaimKvTable<T>, CasKvTable<T>, RefreshableClaimKvTable<T> {
+class EntryFileTable<T extends { id: string }> implements ClaimKvTable<T>, CasKvTable<T>, RefreshableClaimKvTable<T>, CheckedListKvTable<T> {
   private readonly dir: string
   private readonly fileNameOf: (key: string) => string | undefined
   private readonly schema: ZodType<T>
   private readonly env: TableEnv
+  private readonly keepsUnreadable: boolean
 
-  constructor(dir: string, fileNameOf: (key: string) => string | undefined, schema: ZodType<T>, env: TableEnv) {
+  /**
+   * keepsUnreadable：读改写碰到读不出的条目（文件在，读不了或解析不了）时抛错、不覆盖。给「读不出不等于没有」的表用
+   * （记忆梦境的开关和运行记录）；缺省照旧把读不出的当成没有、写一份新的。
+   */
+  constructor(dir: string, fileNameOf: (key: string) => string | undefined, schema: ZodType<T>, env: TableEnv, opts: { keepsUnreadable?: boolean } = {}) {
     this.dir = dir
     this.fileNameOf = fileNameOf
     this.schema = schema
     this.env = env
+    this.keepsUnreadable = opts.keepsUnreadable === true
   }
 
   private pathOf(key: string): string | undefined {
@@ -137,21 +150,30 @@ class EntryFileTable<T extends { id: string }> implements ClaimKvTable<T>, CasKv
   }
 
   async list(): Promise<Array<[string, T]>> {
+    return (await this.listChecked()).entries
+  }
+
+  async listChecked(): Promise<{ entries: Array<[string, T]>; isComplete: boolean }> {
     await this.env.ready()
     let names: string[]
     try {
       names = await readdir(this.dir)
     } catch (err) {
-      if (errnoCode(err) !== 'ENOENT') this.env.log.warn(`[plastic-memory] 侧表目录不可读，按空读：${this.dir}（${describeError(err)}）`)
-      return []
+      if (errnoCode(err) === 'ENOENT') return { entries: [], isComplete: true }
+      this.env.log.warn(`[plastic-memory] 侧表目录不可读，按空读：${this.dir}（${describeError(err)}）`)
+      return { entries: [], isComplete: false }
     }
-    const out: Array<[string, T]> = []
+    const entries: Array<[string, T]> = []
+    let isComplete = true
     // 只认 .json 结尾：在途 tmp（<名>.json.tmp-<pid>-<rand>）不是条目
     for (const name of names.filter(n => n.endsWith('.json')).sort()) {
-      const value = await this.read(join(this.dir, name))
-      if (value !== undefined) out.push([value.id, value])
+      const path = join(this.dir, name)
+      const value = await this.read(path)
+      if (value !== undefined) entries.push([value.id, value])
+      // 读不出的：文件刚好被删掉的不算（列目录之后才删）；还在的、连有没有都查不出的，都是读不出的条目
+      else if (await stat(path).then(() => true, err => errnoCode(err) !== 'ENOENT')) isComplete = false
     }
-    return out
+    return { entries, isComplete }
   }
 
   async put(key: string, value: T): Promise<void> {
@@ -206,7 +228,11 @@ class EntryFileTable<T extends { id: string }> implements ClaimKvTable<T>, CasKv
     if (path === undefined) throw new Error(`侧表键不能当文件名：${key}`)
     await this.env.ready()
     return this.env.locked(async () => {
-      const next = fn(await this.read(path))
+      const current = await this.read(path)
+      if (current === undefined && this.keepsUnreadable && await stat(path).then(() => true, err => errnoCode(err) !== 'ENOENT')) {
+        throw new Error(`侧表条目读不出，不覆盖：${path}`)
+      }
+      const next = fn(current)
       if (next === undefined) return false
       if (next.id !== key) throw new Error(`侧表键必须等于值的 id：key=${key} id=${next.id}`)
       await mkdir(this.dir, { recursive: true })
@@ -388,13 +414,16 @@ class MapFileTable<T> implements BatchKvTable<T> {
 
 export class SidecarStore<S extends { id: string }, P extends { id: string }, C extends { id: string }, I extends { id: string }> {
   readonly snapshots: CasKvTable<S>
-  readonly pending: ClaimKvTable<P> & CasKvTable<P>
+  readonly pending: ClaimKvTable<P> & CasKvTable<P> & CheckedListKvTable<P>
   readonly scanCache: CasKvTable<C>
   readonly recallStats: BatchKvTable<RecallStats>
   readonly adviceIgnores: CasKvTable<I>
   readonly checkups: CasKvTable<CheckupRecord> & RefreshableClaimKvTable<CheckupRecord>
   readonly autoCheckups: KvTable<AutoCheckupSetting>
   readonly modelSelections: KvTable<ModelSelectionRow>
+  readonly dreams: CasKvTable<DreamsRecord> & CheckedListKvTable<DreamsRecord>
+  readonly dreamMarks: CasKvTable<DreamMarks> & CheckedListKvTable<DreamMarks>
+  readonly activity: CasKvTable<ActivityEntry> & CheckedListKvTable<ActivityEntry>
 
   private readonly stateDir: string
   private readonly opts: SidecarOptions<S, P, C, I>
@@ -431,6 +460,9 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
     this.checkups = new EntryFileTable(join(this.stateDir, CHECKUPS_DIR), sha1, checkupRecordSchema, ungated)
     this.autoCheckups = new EntryFileTable(join(this.stateDir, AUTO_CHECKUPS_DIR), sha1, autoCheckupSettingSchema, ungated)
     this.modelSelections = new EntryFileTable(join(this.stateDir, MODEL_SELECTIONS_DIR), sha1, modelSelectionRowSchema, ungated)
+    this.dreams = new EntryFileTable(join(this.stateDir, DREAMS_DIR), sha1, dreamsRecordSchema, ungated, { keepsUnreadable: true })
+    this.dreamMarks = new EntryFileTable(join(this.stateDir, DREAM_MARKS_DIR), sha1, dreamMarksSchema, ungated)
+    this.activity = new EntryFileTable(join(this.stateDir, ACTIVITY_DIR), sha1, activityEntrySchema, ungated)
   }
 
   /** 旧 KV 导入是否已结清（导完且旧行已删）；彻底删除据此拦（续传会把旧快照里的明文放回来）。 */

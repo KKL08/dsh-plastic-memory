@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { CasKvTable, ClaimKvTable } from '../kv-table.ts'
+import type { CasKvTable, CheckedListKvTable, ClaimKvTable } from '../kv-table.ts'
 import type { RootLock } from '../root-lock.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { OverflowLevel } from '../contract-codes.ts'
@@ -188,7 +188,7 @@ function mergeReport(existing: PendingDecision, input: UpsertInput): PendingDeci
  * 同一对（samePair）在账本里只有一条未决条目，跨进程也成立：挂账按冲突身份认领（见 upsert）。
  */
 /** 账本用的表：带排他认领，清理用条件删除。 */
-export type PendingTable = ClaimKvTable<PendingDecision> & Pick<CasKvTable<PendingDecision>, 'deleteIf'>
+export type PendingTable = ClaimKvTable<PendingDecision> & Pick<CasKvTable<PendingDecision>, 'deleteIf'> & Partial<CheckedListKvTable<PendingDecision>>
 
 /** 不跨进程的表（内存表）用：认领段不另拿锁。 */
 const NO_ROOT_LOCK: RootLock = { run: fn => fn() }
@@ -255,6 +255,16 @@ export class PendingDecisionsStore {
   /** 已裁决条目（含删一方留作撤销的），按裁决时间升序。 */
   async listSettled(): Promise<PendingDecision[]> {
     return (await this.table.list()).map(([, e]) => e).filter(e => e.settled).sort((a, b) => a.settled!.at - b.settled!.at)
+  }
+
+  /**
+   * 批次条目里做了操作、还没收尾的（有 changes、没有 receipts）。isComplete 为假：有条目读不出，
+   * 不在 ids 里的不能当成已经收过或已经不在。
+   */
+  async listUnfinishedRuns(): Promise<{ ids: string[]; isComplete: boolean }> {
+    // 表不带完整性读取的（只有测试里包一层的表）按读全了算
+    const { entries, isComplete } = await (this.table.listChecked?.() ?? this.table.list().then(all => ({ entries: all, isComplete: true })))
+    return { ids: entries.filter(([, e]) => e.settled !== undefined && e.changes !== undefined && e.receipts === undefined).map(([id]) => id), isComplete }
   }
 
   /**

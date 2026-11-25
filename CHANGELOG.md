@@ -7,6 +7,17 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Groundwork for Brewing Dreams, an experimental background pass that tidies
+  memories while no chat is running. It is off and has no switch yet. Once on
+  for a scope (all memories, or one project), a pass starts only when enough
+  has changed since the last one and the project folders it covers are idle,
+  and it stops at the next step when a chat starts. For now a pass only does
+  the routine index and history maintenance; the start conditions are in the
+  config file under `brewingDreams`.
+- The plugin records which project folders have a chat running in
+  `.state/activity/` inside the memory folder, so several DeepSeek Harness
+  windows that share a memory folder can tell when a project is idle. A
+  window running an older version of the plugin is not seen by the others.
 - The plugin can keep a searchable local copy of past conversations, built
   from the conversation logs of DeepSeek Harness, for the projects that have
   memories and the project of the current chat. It is only built once the

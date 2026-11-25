@@ -42,6 +42,14 @@ export interface CasKvTable<T> extends KvTable<T> {
   revision?(key: string): Promise<string | undefined>
 }
 
+/**
+ * 带完整性的列举：目录列不出、有条目读不出或解析不了时 isComplete 为假。给「读不全就不下结论」的调用方用
+ * （list 把这些都当成没有）；坏条目不在 entries 里，也不删。
+ */
+export interface CheckedListKvTable<T> extends KvTable<T> {
+  listChecked(): Promise<{ entries: Array<[string, T]>; isComplete: boolean }>
+}
+
 /** 带批量写的 KV：只给召回统计用（单文件表，一次 markRecalled 只该换一次文件）。KvTable 本身不加批量。 */
 export interface BatchKvTable<T> extends KvTable<T> {
   /** 一次写入多条，与已有条目合并（同键覆盖）。 */
