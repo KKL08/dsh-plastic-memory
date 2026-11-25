@@ -470,6 +470,10 @@ All notable changes to this project are documented here. The format follows
   or a move made elsewhere said the memory might have been deleted elsewhere,
   although a copy of it still existed in another scope. It now says the
   memory was just changed or moved elsewhere and deletes nothing.
+- A memory whose summary spanned several lines, for example with a line
+  starting with `###`, added what looked like extra headings to the memory
+  list loaded into a chat. A memory's name, summary and tags are now kept on
+  its one line there, and angle brackets in them no longer read as tags.
 
 ## [0.2.0] - 2026-11-21
 
