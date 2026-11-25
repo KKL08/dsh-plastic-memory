@@ -83,6 +83,13 @@ export interface DreamsStepContext {
   isChanged(memoryId: string): boolean
   /** 这几条记忆这次没处理到（名额用完、没交给模型或模型给的操作因名额跳过）：不进这次的基线，下次仍算变了。 */
   markUnprocessed(memoryIds: Iterable<string>): void
+  /**
+   * 这几条记忆留给下次运行（合并成功落盘的存活那条）：这次运行后面的步骤不再交给模型（合并组还能单撤），
+   * 这次的基线里不留它，下次运行一定算变了。
+   */
+  holdForNextRun(memoryIds: Iterable<string>): void
+  /** 这条记忆这次已留给下次运行（见 holdForNextRun）。 */
+  isHeldForNextRun(memoryId: string): boolean
   /** 记一条跳过的操作，列进这次运行的结果（模型给的值不能用之类，reason 用短代码）。 */
   skip(item: { kind: string; target: string; reason: string }): void
   /** 这次运行用的模型（一次运行只解析一次）。拿不到抛 DreamsModelUnavailable。 */
@@ -238,8 +245,9 @@ export async function runDreams(scope: Scope, opts: DreamsRunOptions, deps: Drea
       return carried + taken.size + fresh.size <= quotaLimit
     }
     const keyOf = (memoryId: string) => copyKey({ scopeKey: scopeKey(scope), memoryId })
-    // 这次没处理到的记忆：写基线时不记这次的值
+    // 这次没处理到的记忆：写基线时不记这次的值；留给下次运行的：基线里不留
     const unprocessed = new Set<string>()
+    const held = new Set<string>()
     // 上一次做完时的基线和这次开始时读到的：判断哪条变了
     let previousMarks: Record<string, string> | undefined
     let initialMarks: Record<string, string> = {}
@@ -361,6 +369,8 @@ export async function runDreams(scope: Scope, opts: DreamsRunOptions, deps: Drea
       canChange: memoryId => used.has(keyOf(memoryId)) || carried + used.size < quotaLimit,
       isChanged: memoryId => !hasBaseline || previousMarks?.[memoryId] !== initialMarks[memoryId],
       markUnprocessed(memoryIds) { for (const id of memoryIds) unprocessed.add(id) },
+      holdForNextRun(memoryIds) { for (const id of memoryIds) held.add(id) },
+      isHeldForNextRun: memoryId => held.has(memoryId),
       skip: item => noteSkipped(item.kind, item.target, item.reason),
       llm() {
         llm ??= deps.resolveLlm().then((resolved) => {
@@ -394,6 +404,8 @@ export async function runDreams(scope: Scope, opts: DreamsRunOptions, deps: Drea
     try {
       // 4 收尾上次的：撤掉中断留下的半个组，把上次没来得及收的批次条目收掉
       await settleOpenGroups(deps, { by: DREAMS_INITIATOR })
+      // 这个范围还有没撤干净的半个组（撤回出错、回执还等着补记）：这次不往下做（同读不全），按出错收，下次运行开头再撤
+      if (await hasOpenGroupsIn(deps.decisions, scope)) throw new Error('上次中断留下的一组改动还没撤干净，这次不运行')
       if (leftover.length > 0) {
         // 已经收过的（收尾之后、记结果之前退出的）不再收：再收一遍会把补好的整条回执清空
         const open = await deps.decisions.listUnfinishedRuns()
@@ -475,7 +487,7 @@ export async function runDreams(scope: Scope, opts: DreamsRunOptions, deps: Drea
     const quotaUsed = carried + used.size
     try {
       const isWritten = result.kind === 'completed' && startMarks !== undefined
-        ? await deps.dreams.complete(scope, { runId, startedAt, endedAt }, processedMarks(startMarks, unprocessed, previousMarks), lastResult)
+        ? await deps.dreams.complete(scope, { runId, startedAt, endedAt }, processedMarks(startMarks, unprocessed, held, previousMarks), lastResult)
         : await deps.dreams.stop(scope, runId, {
           stoppedAt: endedAt, reason: result.kind, entryIds: [...(isLeftoverSettled ? [] : leftover), ...(entryId !== undefined ? [runId] : [])],
           ...(quotaUsed > 0 ? { quotaUsed } : {}),
@@ -492,6 +504,12 @@ export async function runDreams(scope: Scope, opts: DreamsRunOptions, deps: Drea
   }
 }
 
+/** 账本里还有这个范围的条目带着没做完的组（条目没写范围的也算，宁可这次不跑）。 */
+async function hasOpenGroupsIn(decisions: DreamsRunDeps['decisions'], scope: Scope): Promise<boolean> {
+  const label = ledgerLabel(scope)
+  return (await decisions.withOpenGroups()).some(entry => entry.workspaces === undefined || entry.workspaces.length === 0 || entry.workspaces.includes(label))
+}
+
 /** 这个索引操作不做（要挪的成员变了、改动量放不下）：在写第一个文件之前叫停。 */
 class IndexSkip extends Error {
   readonly reason: 'basis-changed' | 'quota'
@@ -501,14 +519,20 @@ class IndexSkip extends Error {
   }
 }
 
-/** 这次的基线：没处理到的记忆不记这次读到的值，留上一次基线里的（上一次也没有就不记），下次它们仍算变了。 */
-function processedMarks(marks: Record<string, string>, unprocessed: ReadonlySet<string>, previous: Readonly<Record<string, string>> | undefined): Record<string, string> {
+/**
+ * 这次的基线：没处理到的记忆不记这次读到的值，留上一次基线里的（上一次也没有就不记），下次它们仍算变了。
+ * 留给下次运行的不记（上一次的值可能和这次读到的一样，留着它下次就判成没变）。
+ */
+function processedMarks(
+  marks: Record<string, string>, unprocessed: ReadonlySet<string>, held: ReadonlySet<string>, previous: Readonly<Record<string, string>> | undefined,
+): Record<string, string> {
   const next = { ...marks }
   for (const id of unprocessed) {
     const before = previous?.[id]
     if (before === undefined) delete next[id]
     else next[id] = before
   }
+  for (const id of held) delete next[id]
   return next
 }
 

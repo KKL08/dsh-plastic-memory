@@ -18,6 +18,7 @@ import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import { baselineFor, type ReadInstructions } from '../governance/instructions.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
 import type { AutoCheckupSettingStore } from '../governance/auto-checkups.ts'
+import type { DreamsStore } from '../governance/dreams-records.ts'
 import { listModelChoices, type ModelSelectionStore } from '../governance/background-llm.ts'
 import { executeConfirm, type ConfirmOptions } from '../tools/confirm.ts'
 import { executeForget } from '../tools/forget.ts'
@@ -94,6 +95,8 @@ export interface MemoryCommandDeps {
   isLegacyImportSettled?: () => Promise<boolean>
   /** 宿主的读事件服务（用时探测，同 memory_source）：生成处理建议时回查两条记忆的出处。缺省或返回 null 时不带出处。 */
   getReadEvent?: () => ReadEventFn | null
+  /** 记忆梦境的侧表：撤销梦境的合并组时记下撤销过的结论。缺省不记。 */
+  dreams?: Pick<DreamsStore, 'noteUndoneMerges'>
   log?: MemoryLogger
   now?: () => number
 }
@@ -461,7 +464,10 @@ async function dispatch(
     return undefined
   }
   // 撤销与最近删除的恢复：时钟现读，恢复收尾要判快照是不是途中刚过期被清扫，用命令开头的时刻判不出来
-  const undoDeps = { store: deps.store, decisions: deps.decisions, snapshots: deps.snapshots, ignores: deps.ignores, now: () => deps.now?.() ?? Date.now() }
+  const undoDeps = {
+    store: deps.store, decisions: deps.decisions, snapshots: deps.snapshots, ignores: deps.ignores, now: () => deps.now?.() ?? Date.now(),
+    ...(deps.dreams !== undefined ? { dreams: deps.dreams } : {}), ...(deps.log !== undefined ? { log: deps.log } : {}),
+  }
   const fromUndo = (r: UndoResult): MemoryCommandResult => (r.kind === 'error'
     ? fail(cmd, r.code, r.message, r.rejected)
     : {

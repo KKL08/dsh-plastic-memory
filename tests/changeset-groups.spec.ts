@@ -140,6 +140,34 @@ describe('合并', () => {
     expect((await run(w, ops, { entryId: 'pd_gui' })).groups).toEqual([{ group: 'g1', state: 'applied' }])
   })
 
+  it('存活方锁着、融合稿和它现在一模一样：没有可写的那一步也过写入许可，整组跳过，被合并方不删', async () => {
+    const w = world()
+    const s = await seed(w, 'mem_s', { ...fused, locked: true })
+    const l = await seed(w, 'mem_l')
+    const r = await run(w, mergePlan({ group: 'g1', keeper: s, merged: [l], fused }), { by: DREAMS_INITIATOR })
+    expect(r.groups).toEqual([{ group: 'g1', state: 'skipped' }])
+    expect(r.outcomes.map(o => (o.kind === 'skipped' ? o.reason : o.kind))).toEqual(['locked', 'group'])
+    expect(stable(await now(w, l))).toEqual(stable(l))
+    expect(await receiptsOfEntry(w.decisions, ENTRY)).toEqual([])
+  })
+
+  it('核对过了之后存活方才上锁、融合稿和它一模一样：没有可写的那一步被锁挡下，被合并方不删', async () => {
+    const w = world()
+    const s = await seed(w, 'mem_s', fused)
+    const l = await seed(w, 'mem_l')
+    // 组开始的那一刻（第一步之前的核对已经过了）用户给存活方上锁
+    const openGroup = w.decisions.openGroup.bind(w.decisions)
+    w.decisions.openGroup = async (id, group) => {
+      await w.store.update(s, cur => ({ ...cur, locked: true }))
+      return openGroup(id, group)
+    }
+    const r = await run(w, mergePlan({ group: 'g1', keeper: s, merged: [l], fused }), { by: DREAMS_INITIATOR })
+    expect(r.groups).toEqual([{ group: 'g1', state: 'rolled-back' }])
+    expect(r.outcomes.map(o => (o.kind === 'skipped' ? o.reason : o.kind))).toEqual(['locked', 'group'])
+    expect(stable(await now(w, l))).toEqual(stable(l))
+    expect(await openGroups(w)).toEqual([])
+  })
+
   it('核对过了之后用户才上的锁：第二步被锁挡下，第一步撤回，后面同一批的操作照常做', async () => {
     const w = world()
     const s = await seed(w, 'mem_s')

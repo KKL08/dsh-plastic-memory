@@ -28,7 +28,7 @@ export interface TidyStepDeps {
 }
 
 /** 问一批：回复读不出时重问一次；还读不出返回 undefined。模型出错原样抛出。用量随回调记进这次运行。 */
-async function ask<T>(llm: SemanticLlm, prompt: { system: string; user: string }, parse: (raw: string) => T | undefined, ctx: DreamsStepContext): Promise<T | undefined> {
+export async function ask<T>(llm: SemanticLlm, prompt: { system: string; user: string }, parse: (raw: string) => T | undefined, ctx: DreamsStepContext): Promise<T | undefined> {
   for (let attempt = 0; attempt < 2; attempt++) {
     const raw = await llm.complete(attempt === 0 ? prompt : { ...prompt, user: prompt.user + JSON_RETRY_HINT }, ctx.signal, (tokens) => { void ctx.addUsage(tokens) })
     const parsed = parse(raw)
@@ -42,7 +42,7 @@ async function ask<T>(llm: SemanticLlm, prompt: { system: string; user: string }
  * 这个范围这一层在用的记忆，一个 id 一份；同一层里同 id 有几份在用的，分不清该动哪一份，不交给模型。
  * 读不全（有文件解析不了、目录读不了或缺标记）抛错：不知道少了哪些，不能当成没有。
  */
-async function activeMembers(store: TidyStepDeps['store'], ctx: DreamsStepContext): Promise<Map<string, MemoryRecord>> {
+export async function activeMembers(store: Pick<MemoryStore, 'readRaw'>, ctx: DreamsStepContext): Promise<Map<string, MemoryRecord>> {
   const read = await store.readRaw(ctx.scope)
   if (!isCompleteRead(read)) throw new Error('这个范围的记忆读不全')
   const byId = new Map<string, MemoryRecord>()
@@ -56,7 +56,7 @@ async function activeMembers(store: TidyStepDeps['store'], ctx: DreamsStepContex
   return byId
 }
 
-const unreadError = (count: number) => new Error(`有 ${count} 批模型的回复读不出，这一批没有整理`)
+export const unreadError = (count: number) => new Error(`有 ${count} 批模型的回复读不出，这一批没有整理`)
 
 /** 整理主题索引：先看主题目录（已有主题时），再按批看成员怎么归。名额用完之后只看这次已经改动过的成员。 */
 export const organizeIndexStep = (deps: TidyStepDeps): DreamsStep => ({
@@ -142,7 +142,8 @@ export const tidyMemoriesStep = (deps: TidyStepDeps): DreamsStep => ({
   needsChanges: true,
   async run(ctx) {
     const files = await deps.store.readIndex(ctx.scope)
-    const changed = new Map([...(await activeMembers(deps.store, ctx))].filter(([id]) => ctx.isChanged(id)))
+    // 前面的步骤留给下次运行的（这次合并过的存活那条）不再交给模型
+    const changed = new Map([...(await activeMembers(deps.store, ctx))].filter(([id]) => ctx.isChanged(id) && !ctx.isHeldForNextRun(id)))
     if (files === undefined || changed.size === 0) return
     const llm = await ctx.llm()
     let unread = 0

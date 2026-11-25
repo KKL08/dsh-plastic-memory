@@ -229,6 +229,7 @@ async function applyGroup(
 
 /**
  * 一组第一步之前的核对：一个写入段里把组内每个操作的目标和依据读齐，过同一个核对（checkOp）、写入许可、软删的密钥检查。
+ * 补丁和现状一样、不用写的那一步也要过写入许可：它锁着时同组别的几步照做，等于绕开了锁。
  * 返回第一个不过的；都过返回 undefined。同一条记忆在组里的第二个操作不在这里查（它要按前一步写完的样子比）。
  */
 async function precheck(ops: readonly ChangeOp[], opts: ApplyOptions, deps: ChangesetDeps, progress: BatchProgress): Promise<OpOutcome | undefined> {
@@ -239,10 +240,7 @@ async function precheck(ops: readonly ChangeOp[], opts: ApplyOptions, deps: Chan
       seen.add(copyKey(op))
       const { target, check } = await readAndCheck(op, opts, deps, cloneProgress(progress))
       const skipped = (reason: ApplySkipReason, memoryId = op.memoryId): OpOutcome => ({ kind: 'skipped', opId: op.id, memoryId, reason })
-      if (check.kind === 'skip') {
-        if (check.reason !== 'no-change') return skipped(check.reason, check.memoryId)
-        continue
-      }
+      if (check.kind === 'skip' && check.reason !== 'no-change') return skipped(check.reason, check.memoryId)
       if (target === undefined) continue
       if (writeGate(opts.by, target, opts.at) !== undefined) return skipped('locked')
       if (check.kind === 'forget' && (opts.isSecret ?? hasSecret)(target)) return skipped('has-secret')
@@ -269,6 +267,8 @@ async function readAndCheck(op: ChangeOp, opts: ApplyOptions, deps: ChangesetDep
 /**
  * 把以前中断留下的半个组撤掉：进写入段（操作日志的补做先跑完，提交了的那一步的回执补齐），带着没做完的组的条目逐条占住
  * （占不到的是别人正在跑，不碰），把组内已做的按回执逆序撤回，撤干净的拿掉标记。own 是调用方自己已经占着的那条。
+ * 组里还有回执等着补记的（文件已提交、补做还没成）不动、标记留着：手里的回执不全，撤了也撤不干净，等补记之后再撤。
+ * 撤回出错的同样留着标记。调用方要知道还剩哪些，之后读 withOpenGroups。
  * 每次应用变更集之前、条目撤销之前、记忆梦境每次运行开头调用。
  */
 export async function settleOpenGroups(deps: ChangesetDeps, opts: { by: string; own?: string }): Promise<void> {
@@ -279,6 +279,7 @@ export async function settleOpenGroups(deps: ChangesetDeps, opts: { by: string; 
       if (release === undefined) continue
       try {
         for (const group of entry.openGroups ?? []) {
+          if (hasPendingReceipts(deps.store, entry.id, group)) continue
           const receipts = (await receiptsOfEntry(deps.decisions, entry.id)).filter(r => r.group === group)
           const left = await rollBack(receipts, { entryId: entry.id, by: opts.by }, deps)
           if (left.kept === undefined) await deps.decisions.closeGroup(entry.id, group)
@@ -292,9 +293,12 @@ export async function settleOpenGroups(deps: ChangesetDeps, opts: { by: string; 
   })
 }
 
-/** 这条条目还有记忆的回执等着补记：操作日志里有记它回执的步骤没做完（文件提交了，记账失败）。 */
-export function hasPendingReceipts(store: Pick<MemoryStore, 'hasPendingStep'>, entryId: string): boolean {
-  return store.hasPendingStep(step => step.kind === CHANGE_RECEIPT_STEP && (step as { entryId?: unknown }).entryId === entryId)
+/** 这条条目（给了 group 就只看这一组）还有记忆的回执等着补记：操作日志里有记它回执的步骤没做完（文件提交了，记账失败）。 */
+export function hasPendingReceipts(store: Pick<MemoryStore, 'hasPendingStep'>, entryId: string, group?: string): boolean {
+  return store.hasPendingStep((step) => {
+    const s = step as { entryId?: unknown; group?: unknown }
+    return step.kind === CHANGE_RECEIPT_STEP && s.entryId === entryId && (group === undefined || s.group === group)
+  })
 }
 
 /** 把一条条目上的回执全部按逆序撤掉（调用方结账没成时用）。分类同整批退。 */
@@ -393,6 +397,8 @@ async function applyInSection(
     ({ kind: 'skipped', opId: op.id, memoryId, reason, ...(detail !== undefined ? { detail } : {}) })
   return store.writeSection(async (): Promise<OpOutcome> => {
     const { scope, target, basis, check } = await readAndCheck(op, opts, deps, progress)
+    // 组里不用写的一步同样按刚读到的这一版过写入许可：第一步之前的核对之后才上的锁，也不能让同组别的几步照做
+    if (check.kind === 'skip' && check.reason === 'no-change' && op.group !== undefined && target !== undefined && writeGate(opts.by, target, opts.at) !== undefined) return skipped('locked')
     if (check.kind === 'skip') return skipped(check.reason, check.memoryId)
     if (check.kind === 'create') return create(op, check.from, opts, deps, skipped, landed)
     if (target === undefined) return { kind: 'checked', opId: op.id, memoryId: op.memoryId }

@@ -14,6 +14,11 @@ export const TURN_CREATE_HINT_AT = 3
 /** 正文超过两千字符时建议检查主题粒度，按字符串长度计。 */
 export const CONTENT_LENGTH_HINT = 2000
 
+/** 正文算不算长：保存时的长度提示和记忆梦境合并稿的跳过用同一个判断。 */
+export function isContentLong(content: string): boolean {
+  return content.length > CONTENT_LENGTH_HINT
+}
+
 /** 截取已遮盖的文字；超长时按码点保留 limit 个字符并加省略号，不把 emoji 截成半个。 */
 export function clipText(text: string, limit: number): string {
   const chars = [...text]

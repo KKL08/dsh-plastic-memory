@@ -112,6 +112,8 @@ export const dreamsRecordSchema = z.object({
     }).optional(),
   }).optional(),
   runs: z.array(z.object({ runId: z.string(), at: z.number(), tokens: z.number() })).optional(),
+  /** 用户撤销过的梦境合并结论（governance/dreams-merge.ts mergeConclusion），按记下的先后，只留最近的若干个。 */
+  undoneMerges: z.array(z.object({ key: z.string(), at: z.number() })).optional(),
 })
 export type DreamsRecord = z.infer<typeof dreamsRecordSchema>
 

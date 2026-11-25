@@ -38,7 +38,7 @@ refresh 里 summary、tags 只写要改的那一项也可以。全部合适时 o
 
 const maskText = (text: string) => maskSecrets(text, { severity: 'suspected' })
 /** 落盘的新文字折成一行：换行和连着的空白换成一个空格。 */
-const oneLine = (text: string) => text.replace(/\s+/g, ' ').trim()
+export const oneLine = (text: string) => text.replace(/\s+/g, ' ').trim()
 
 export interface TidyGroup {
   topic: string
