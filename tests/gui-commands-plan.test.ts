@@ -1186,6 +1186,8 @@ describe('apply-edits（整理所选：应用全部）', () => {
     expect(await after('mem_e')).toMatchObject({ status: 'active', content: 'mem_e 改写后' })
     expect([(await after('mem_p')).status, (await after('mem_b')).status]).toEqual(['deleted', 'deleted'])
     expect([(await after('mem_p')).deletedAt, (await after('mem_p')).content]).toEqual([LATER, '代码格式化统一用 prettier。'])
+    // 删除项的承接记成去向：改写项和只核对的那条都可以承接
+    expect([(await after('mem_p')).mergedInto, (await after('mem_b')).mergedInto]).toEqual([{ id: 'mem_c', scopeKey: SESSION_WS, as: 'merge' }, { id: 'mem_k', scopeKey: SESSION_WS, as: 'merge' }])
     expect(await readFile((await e.store.locate('mem_k', scopeAt(SESSION_WS)))!.filePath, 'utf8')).toBe(keptFile)
     expect(deletedViewSchema.parse(await e.readView('deleted')).items.map(i => i.memory.id).sort()).toEqual(['mem_b', 'mem_p'])
 

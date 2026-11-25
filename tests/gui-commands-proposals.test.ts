@@ -234,6 +234,8 @@ describe('apply-proposal（采纳融合建议：保留方改写成融合稿，�
     const b = (await e.store.get('mem_b'))!
     expect(a).toMatchObject({ ...DRAFT, status: 'active', updatedAt: LATER })
     expect(b).toMatchObject({ status: 'deleted', content: '用 npm' })
+    // 被删的那条记下它并进了保留方：历史版本以后归到保留方名下
+    expect(b.mergedInto).toMatchObject({ id: 'mem_a', as: 'merge' })
 
     const settled = await e.decisions.listSettled()
     expect(settled.map(d => d.id)).toEqual([entry.id])

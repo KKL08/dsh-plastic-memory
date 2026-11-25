@@ -318,7 +318,8 @@ interface BatchWrite { memoryId: string; op: ApplyEditOp['kind']; written: Memor
  */
 interface BatchItem {
   record: MemoryRecord
-  op: { kind: 'edit'; content: string; name: string; summary: string; tags: string[] } | { kind: 'forget' }
+  /** 删除项的 into：这条并进了哪条（融合），历史版本以后归到那条名下。 */
+  op: { kind: 'edit'; content: string; name: string; summary: string; tags: string[] } | { kind: 'forget'; into?: MemoryRecord }
 }
 
 /** 第一项没做成的原因：锁内发现被改过、已不在，软删时刚被写进密钥，或写入抛错。 */
@@ -348,7 +349,7 @@ async function runBatch(
   const ops: ChangeOp[] = items.map(({ record, op }, i) => ({
     id: `o${i + 1}`, memoryId: record.id, scopeKey: scopeKeyOf(record), basis,
     ...(op.kind === 'forget'
-      ? { kind: 'forget' as const }
+      ? { kind: 'forget' as const, ...(op.into !== undefined ? { into: { memoryId: op.into.id, scopeKey: scopeKeyOf(op.into), as: 'merge' as const } } : {}) }
       : {
           kind: 'edit' as const,
           patch: { content: op.content, name: op.name, summary: op.summary, tags: op.tags },
@@ -657,7 +658,7 @@ async function dispatch(
     // 两条都当依据：哪一条的内容在这之后变了，都不往里写、也不按它删另一条
     const ran = await runBatch([
       { record: keeper, op: edit },
-      ...(loser !== undefined && !isRewrite ? [{ record: loser, op: { kind: 'forget' as const } }] : []),
+      ...(loser !== undefined && !isRewrite ? [{ record: loser, op: { kind: 'forget' as const, into: keeper } }] : []),
     // 疑似密钥是用户存下时确认过的，照常软删、可恢复；只有高危软删不了（依据比对已先挡下，这里是锁内兜底）
     ], isRewrite ? [] : records.filter(r => r !== keeper && r !== loser), { summary: `${what}（${entry.id}）`, isSecret: hasCriticalSecret }, deps, now)
     try {
@@ -921,7 +922,7 @@ async function dispatch(
           await deps.snapshots.purge(isPurged)
           // 锁内复核：定位之后被别处恢复成在用的，不删
           let isRestored = false
-          if (!(await deps.store.hardDelete(rec, { at: scopeAt(rec.workspacePath) }, current => (isRestored = current.status !== 'deleted')))) {
+          if (!(await deps.store.hardDelete(rec, { at: scopeAt(rec.workspacePath), isHistoryCarried: true }, current => (isRestored = current.status !== 'deleted')))) {
             return isRestored ? fail(cmd, 'failed', `记忆 ${command.memoryId} 刚被恢复或改过，没有彻底删除`) : notFound(command.memoryId)
           }
           // 账本按 id 记：哪层都没有它了才清，指向它的裁决撤销随之找不到
@@ -1005,7 +1006,11 @@ async function dispatch(
       // 核对之后另一个会话才写进密钥的不删，这次只算改了保留的那条。卡片指纹含标签在内的全部内容字段，写进密钥必然先判成被改过，
       // 这一支在卡片路径上走不到，只留作密钥的防线
       const outcome = removed === undefined ? 'deleted'
-        : await deps.store.softDeleteUnlessSecret(removed.record, { at: scopeAt(removed.record.workspacePath), now, isChanged: cur => cur.status !== 'active' || isStale(cur, removed.base) })
+        : await deps.store.softDeleteUnlessSecret(removed.record, {
+            at: scopeAt(removed.record.workspacePath), now, isChanged: cur => cur.status !== 'active' || isStale(cur, removed.base),
+            // 历史版本以后归到保留的那条名下
+            mergedInto: { id: kept.record.id, scopeKey: scopeKeyOf(kept.record), as: 'merge' },
+          })
       if (outcome === 'changed') {
         const isMine = (cur: MemoryRecord) => cur.status === 'active' && cur.updatedAt === now && editFingerprint(cur) === editFingerprint(mine!)
         await deps.store.update(kept.record, cur => (isMine(cur) ? kept.record : cur), own).catch((error: unknown) => {
@@ -1044,7 +1049,12 @@ async function dispatch(
       if (secretProblem !== undefined) return secretProblem
 
       // 逐项各占一次写入段、各拍各的改前快照；「不动」项和这一批的每一条都当依据，写入段里按刚读到的再核对一次
-      const ran = await runBatch(targets.map(({ op, record }) => ({ record, op })), records.slice(ops.length), { summary: `整理所选 ${ops.length} 条` }, deps, now)
+      // 删除项的承接（into）就是它并进的那条：历史版本以后归到那条名下
+      const absorbed = (op: (typeof ops)[number]) => {
+        const host = op.kind === 'forget' && op.into !== undefined ? records.find(r => r.id === op.into) : undefined
+        return op.kind === 'forget' ? { kind: 'forget' as const, ...(host !== undefined ? { into: host } : {}) } : op
+      }
+      const ran = await runBatch(targets.map(({ op, record }) => ({ record, op: absorbed(op) })), records.slice(ops.length), { summary: `整理所选 ${ops.length} 条` }, deps, now)
       try {
       if (ran.kind === 'done') {
         const entry = await settleBatch(ran.runId, ran.writes, deps)

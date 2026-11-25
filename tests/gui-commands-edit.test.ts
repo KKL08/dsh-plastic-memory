@@ -446,6 +446,8 @@ describe('merge-memories（内容重复的直接合并）', () => {
     const removed = (await e.store.get(removedId, scopeAt(ws(removedId))))!
     // 删除时刻用注入的时钟，最近删除的保留期才算得准
     expect([removed.status, removed.updatedAt, removed.deletedAt]).toEqual(['deleted', LATER, LATER])
+    // 记下它并进了保留的那条：历史版本以后归到那条名下
+    expect(removed.mergedInto).toEqual({ id: keptId, scopeKey: ws(keptId) ?? 'global', as: 'merge' })
     expect(deletedViewSchema.parse(await e.readView('deleted')).items.map(i => i.memory.id)).toEqual([removedId])
     const snaps = await e.snapshots.list()
     expect(snaps).toHaveLength(1)
