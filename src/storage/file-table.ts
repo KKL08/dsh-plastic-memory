@@ -7,7 +7,7 @@ import type { MemoryRecord } from '../record-schema.ts'
 import type { Scope } from '../scope.ts'
 import {
   byPosition, resolveDuplicates, pickLiveFirst, isScopeTarget, scopesOf, newWriteOp, outgoingLinks, sortLinkRefs,
-  type LinkQuery, type LinkRef, type MemoryTable, type WriteOp, type OpStep, type OpStepHandler, type MemoryLogger, type DirectoryNote, type QuarantineEntry, type LocatedFile, type LocatedRecord,
+  type LinkQuery, type LinkRef, type MemoryTable, type WriteOp, type TopicIntent, type OpStep, type OpStepHandler, type MemoryLogger, type DirectoryNote, type QuarantineEntry, type LocatedFile, type LocatedRecord,
   type LocateTarget, type LocateOptions, type ScopeReadOptions, type ScopeReadResult, type WorkspaceDirListing, type KeywordMatch,
 } from './table.ts'
 import type { KvTable } from '../kv-table.ts'
@@ -27,8 +27,8 @@ import { linkExclusive } from './exclusive-link.ts'
 import { FileVersionHistory, carryMergedHistory, layerOf, type VersionHistory } from './history.ts'
 import { maskDiagnostic, maskSecrets } from '../secrets.ts'
 import { isPendingDelegated } from '../record-schema.ts'
-import { UNSORTED_PAGE, UNSORTED_TITLE, maskIndexText, memberKeys, memberLines, placeholderIds, readIndex, reconcileIndex, renderProjection, stampOf, withMemberLinesAppended, withMemberText, withStamp, withoutMember, withoutMemberKeys, withoutMemberText, type IndexFiles, type IndexedMemory } from '../topic-index.ts'
-import { applyPlan, planForReplay, planIndexOp, targetOf, undoPlan, type IndexOp, type IndexPlan } from '../topic-ops.ts'
+import { UNSORTED_PAGE, UNSORTED_TITLE, resolveTopic, scan, MEMBER_RE, memberKey, memberLine, orderedPages, maskIndexText, memberKeys, memberLines, placeholderIds, readIndex, reconcileIndex, renderProjection, stampOf, withMemberLinesAppended, withMemberText, withStamp, withoutMember, withoutMemberKeys, withoutMemberText, type IndexFiles, type IndexedMemory } from '../topic-index.ts'
+import { applyPlan, ensureTopicPage, insertMembers, isAbout, planForReplay, planIndexOp, targetOf, undoPlan, type IndexOp, type IndexPlan } from '../topic-ops.ts'
 import { INDEX_DIR, INDEX_TOPICS_DIR, IndexChangedError, indexFilePath, readIndexFile, readIndexFiles, replaceIndexFile, writeIndexFiles } from './index-store.ts'
 import { RETENTION_MS } from '../retention.ts'
 
@@ -51,6 +51,26 @@ const RECOVERY_ATTEMPTS = 3
 export const HISTORY_MOVE_STEP = 'history-move'
 interface RecentChangeStep extends OpStep, Omit<RecentChangeInput, 'op'> { kind: typeof RECENT_CHANGE_STEP }
 interface HistoryMoveStep extends OpStep { kind: typeof HISTORY_MOVE_STEP; memoryId: string; from: string; to: string }
+
+/**
+ * 文件表自己的提交后步骤：这次写入动到的几个记忆目录里，按记忆文件现在的样子改它在主题索引里的那一行
+ * （补行、去行、同步名称摘要文件名、按 WriteOp.topic 归主题）。重复做结果不变；读不出索引就抛错，行留在日志里下次补。
+ */
+export const INDEX_ROW_STEP = 'index-row'
+
+/**
+ * 索引行这一步记进日志的样子。dirs 是要改索引的记忆目录（顶层目录，不是 .archive）：写入落在的那个排第一，
+ * 换了作用域时原来那个跟在后面；彻底删除给作用域时只有记录所在的目录，按会话定位时再加全局目录（去重）。
+ * topic 原样沿用 WriteOp.topic（调用方已遮过密钥）；没给就不带。
+ * isPurge：彻底删除记的，当场和补做都核对 dirs 里有 _index/ 或 MEMORY.md 的目录，核对不成就抛错。
+ */
+export interface IndexRowStep extends OpStep {
+  kind: typeof INDEX_ROW_STEP
+  memoryId: string
+  dirs: string[]
+  topic?: TopicIntent
+  isPurge?: true
+}
 
 /** 索引操作提交之后的一步：把计划在这个目录的索引上套完（重复做结果不变）。 */
 const INDEX_PLAN_STEP = 'index-plan'
@@ -305,6 +325,7 @@ export class FileTable implements MemoryTable {
       this.journal?.recordChange({ op: ctx.op, ...change })
     })
     this.stepHandlers.set(HISTORY_MOVE_STEP, raw => this.followMove(raw as HistoryMoveStep))
+    this.stepHandlers.set(INDEX_ROW_STEP, raw => this.placeIndexRow(raw as IndexRowStep))
     this.stepHandlers.set(INDEX_PLAN_STEP, raw => this.finishIndexPlan(raw as IndexPlanStep))
     this.stepHandlers.set(INDEX_WRITE_STEP, raw => this.finishIndexWrites(raw as IndexWriteStep))
   }
@@ -1303,10 +1324,14 @@ export class FileTable implements MemoryTable {
     const { scopeDirs } = await this.resolveDirs([dir])
     if (scopeDirs.length === 0) return undefined
     const read = await this.readDirs(scopeDirs, {})
-    return new Set(resolveDuplicates(read.slots.filter(s => s.record.status === 'active')).filter(l => !isPendingDelegated(l.record)).map(l => l.record.id))
+    return new Set(resolveDuplicates(read.slots.filter(s => this.hasIndexRow(s))).map(l => l.record.id))
   }
 
-  readIndex(dir: string): Promise<IndexFiles | undefined> { return readIndexFiles(dir) }
+  /** 读索引；masked 为真时和写入路径共用手写文字的密钥遮盖规则。 */
+  async readIndex(dir: string, masked = false): Promise<IndexFiles | undefined> {
+    const files = await readIndexFiles(dir)
+    return masked && files !== undefined ? this.maskIndex(files) : files
+  }
 
   /**
    * 对一个记忆目录的主题索引做一个操作（归主题、改名、合并、调顺序、改说明）。在写入段里按当下的索引和记忆重新核对：
@@ -1489,6 +1514,115 @@ export class FileTable implements MemoryTable {
     return this.isJournaling() && this.journal!.pending().some(row => Array.isArray(row.steps) && row.steps.some(match))
   }
 
+  /** 带着 op 的那次写入里，自己的 kind 那一步当场没做成（见 MemoryTable.hasUnfinishedOwnStep）。 */
+  hasUnfinishedOwnStep(op: string, kind: string): boolean {
+    return this.unfinishedOwn.get(op)?.some(step => step.kind === kind) ?? false
+  }
+
+  /** 单条写入只读自己的记录；重放按磁盘现状归行，不使用日志中的旧内容。 */
+  private async placeIndexRow(step: IndexRowStep): Promise<void> {
+    let carried: string | undefined
+    if (step.topic?.kind === 'carry' && step.dirs[1] !== undefined) {
+      const source = await readIndexFiles(step.dirs[1])
+      if (source) carried = orderedPages(this.maskIndex(source)).find(t => t.memberIds.includes(step.memoryId))?.name
+    }
+    for (const [position, dir] of step.dirs.entries()) {
+      let raw = await readIndexFiles(dir)
+      const intent = position === 0 ? step.topic : undefined
+      if (step.isPurge && raw === undefined) {
+        try { await stat(join(dir, INDEX_FILE)) } catch (err) { if (errnoCode(err) === 'ENOENT') continue; throw err }
+      }
+      if (!step.isPurge && raw === undefined && !(intent?.kind === 'choose'
+        && resolveTopic({ entry: '# 记忆索引\n', pages: {} }, intent.name, intent.maxTopics).kind === 'new')) continue
+      const { scopeDirs } = await this.resolveDirs([dir])
+      const sd = scopeDirs[0]
+      if (sd === undefined) throw new Error(`记忆目录无法解析：${dir}`)
+      let done = false
+      for (let round = 0; round < INDEX_ROUNDS; round++) {
+        if (round > 0) raw = await readIndexFiles(dir)
+        if (step.isPurge) {
+          const read = await this.readDirs([sd], {})
+          if (!isListed(read.directoryNotes)) throw new Error('记忆目录读不出')
+          const result = await this.syncTopicIndex(
+            dir, read.slots.filter(s => s.record.status === 'active'),
+            this.now(), read.quarantined.length === 0,
+          )
+          if (result !== 'retry') { done = true; break }
+          continue
+        }
+        const scope: Scope = sd.loc.scope === 'global'
+          ? { kind: 'global' } : { kind: 'workspace', workspacePath: sd.loc.workspacePath! }
+        const slot = await this.locateSlot(step.memoryId, scope)
+        const live = slot !== undefined && slot.dir === dir && this.hasIndexRow(slot)
+        let files = raw === undefined ? { entry: '# 记忆索引\n', pages: {} } : this.maskIndex(raw)
+        if (files.entry.trim() === '') files = { ...files, entry: '# 记忆索引\n' }
+        const target = intent?.kind === 'choose' ? resolveTopic(files, intent.name, intent.maxTopics)
+          : carried !== undefined && position === 0 ? resolveTopic(files, carried, Infinity) : undefined
+        if (raw === undefined && !(live && intent?.kind === 'choose' && target?.kind === 'new')) {
+          done = true
+          break
+        }
+        if (!live) files = withoutMember(files, step.memoryId)
+        else if (position === 0) {
+          const line = memberLine({
+            id: step.memoryId, name: maskSecrets(slot.record.name),
+            summary: maskSecrets(slot.record.summary), fileName: basename(slot.filePath),
+          })
+          const key = memberKey(step.memoryId)
+          let placed: IndexFiles | undefined
+          if (target?.kind === 'existing' || (target?.kind === 'new' && intent?.kind === 'choose')) {
+            const proposed = this.insertIndexRow(
+              files, target.fileName, target.name, line, step.memoryId,
+              intent?.kind === 'choose' ? intent.about : undefined,
+            )
+            // 插入候选已去掉其他页的旧行，认得到就说明目标页放得进去。
+            if (memberLines(proposed).has(key)) placed = proposed
+          }
+          if (placed !== undefined) files = placed
+          else {
+            const existing = memberLines(files)
+            if (existing.has(key)) {
+              const pages = { ...files.pages }
+              for (const [page, text] of Object.entries(pages)) {
+                if (!memberKeys(text).includes(key)) continue
+                pages[page] = scan(text).map(row => !row.isCode && MEMBER_RE.exec(row.line)?.[2] === key
+                  ? line + (row.line.endsWith('\r') ? '\r' : '') : row.line).join('\n')
+              }
+              files = { ...files, pages }
+            } else {
+              const proposed = this.insertIndexRow(files, UNSORTED_PAGE, UNSORTED_TITLE, line, step.memoryId)
+              if (memberLines(proposed).has(key)) files = proposed
+            }
+          }
+        }
+        try {
+          const written = await writeIndexFiles(dir, raw, files, (path, text) => this.atomicWrite(path, text))
+          if (written.length > 0) await this.recordTopicPages(dir, files)
+          done = true
+          break
+        } catch (err) { if (!(err instanceof IndexChangedError)) throw err }
+      }
+      if (!done) throw new Error('主题索引持续变化，稍后补做')
+    }
+  }
+
+  /** 去掉旧行后共用建页和入口格式，把现算的成员行放到最前；调用方确认它没有落进代码围栏才采用。 */
+  private insertIndexRow(files: IndexFiles, page: string, name: string, line: string, id: string, about?: string): IndexFiles {
+    const stripped = withoutMember(files, id)
+    const next = ensureTopicPage(stripped, {
+      page, name, about: isAbout(about ?? '') ? about : '',
+      ...(page === UNSORTED_PAGE ? {} : { createdAt: this.now() }),
+    })
+    if (page === UNSORTED_PAGE) next.entry = files.entry
+    next.pages[page] = insertMembers(next.pages[page]!, [line], 0)
+    return next
+  }
+
+  private hasIndexRow(slot: LocatedFile): boolean {
+    const record = byPosition(slot)
+    return dirname(slot.filePath) === slot.dir && record.status === 'active' && !isPendingDelegated(record)
+  }
+
   private async syncTopicIndex(dir: string, active: readonly LocatedRecord[], now: number, isComplete: boolean): Promise<'written' | 'unchanged' | 'retry'> {
     try {
       const listed = resolveDuplicates(active).filter(l => !isPendingDelegated(l.record))
@@ -1653,14 +1787,19 @@ export class FileTable implements MemoryTable {
       // 这次会动到的几层：新文件那层、原文件那层、要清的副本那几层，还有改索引的顶层
       const current = await this.currentLevels([level, dir, ...(prev === undefined ? [] : [dirname(prev.filePath), prev.dir, ...prev.copies.map(c => dirname(c.filePath))])])
       const changes: Array<{ path: string; id?: string }> = []
-      const classified = classifyChange(prev && byPosition(prev), next)
+      const previous = prev && byPosition(prev)
+      const rowBefore = prev && this.hasIndexRow(prev) ? [prev.dir, maskSecrets(previous!.name), maskSecrets(previous!.summary), basename(prev.filePath)] : undefined
+      const rowAfter = next.status === 'active' && !isPendingDelegated(next) ? [dir, maskSecrets(next.name), maskSecrets(next.summary), renamed ? '' : prev ? basename(prev.filePath) : ''] : undefined
+      const indexRow: IndexRowStep | undefined = op.topic !== undefined || JSON.stringify(rowBefore) !== JSON.stringify(rowAfter)
+        ? { kind: INDEX_ROW_STEP, memoryId: key, dirs: moved ? [dir, prev.dir] : [dir], topic: op.topic } : undefined
+      const classified = classifyChange(previous, next)
       const recent: RecentChangeStep | undefined = classified && { kind: RECENT_CHANGE_STEP, ...classified, memoryId: key, session: currentWriteSession(), at: this.now() }
       const historyMove: HistoryMoveStep | undefined = moved ? { kind: HISTORY_MOVE_STEP, memoryId: key, from: prev.dir, to: dir } : undefined
       this.beginOp(op, {
         kind: 'write', memoryId: key, dir: level, fields: changedFields(prev?.record, next),
         ...(prev !== undefined ? { before: fingerprintOf(prev.raw) } : {}), after: fingerprintOf(text),
         ...(prev !== undefined && !isInPlace ? { source: { dir: dirname(prev.filePath), nameHash: fingerprintOf(basename(prev.filePath)) } } : {}),
-      }, [...(historyMove === undefined ? [] : [historyMove]), ...(recent === undefined ? [] : [recent])])
+      }, [...(historyMove === undefined ? [] : [historyMove]), ...(recent === undefined ? [] : [recent]), ...(indexRow === undefined ? [] : [indexRow])])
       let filePath: string
       // 文件已经带着提交标记落在目标目录里、不会再被撤回：在日志行上记一笔。之后文件被不拿锁的写（手改）换掉、标记没了，补做也认这次写成了
       const markCommitted = () => { if (this.isJournaling()) this.journal!.markCommitted(op.id) }
@@ -1697,23 +1836,33 @@ export class FileTable implements MemoryTable {
       const removedFrom = await this.removeOtherCopies(key, filePath, dir, isOwnDirOnly, prev?.copies ?? [], changes)
       // 换了作用域：历史版本跟过去。写入已经提交，这一步没做成不算写入失败：行留在日志里，下一次进写入段补搬；
       // 没有日志时整份核对按 id 找过去
-      let isHistoryPending = false
+      const unfinished: OpStep[] = []
       if (historyMove !== undefined) {
         try {
           await this.followMove(historyMove)
         } catch (err) {
-          isHistoryPending = true
+          unfinished.push(historyMove)
           this.log.warn(`[plastic-memory] 历史版本没跟到新的作用域，稍后补做（${describeError(err)}）`)
         }
       }
-      if (moved) removedFrom.add(prev.dir)
+      if (indexRow !== undefined) {
+        try { await this.placeIndexRow(indexRow) }
+        catch (err) { unfinished.push(indexRow); this.log.warn(`[plastic-memory] 主题索引稍后补做（${describeError(err)}）`) }
+      }
+      if (moved) removedFrom.delete(prev.dir)
       removedFrom.delete(dir)
       for (const other of removedFrom) await this.dropIndexMember(other, key)
       await this.settleHints(current, changes)
       await this.noteLinks(changes, key, next.scope === 'global' ? { scope: 'global' } : { scope: 'workspace', workspacePath: next.workspacePath! })
       // 调用方给的操作还有账要记，由它做完再结（finishOp）；自己建的到这里就做完了
-      if (isHistoryPending && given !== undefined && this.isJournaling()) this.unfinishedOwn.set(op.id, [historyMove!])
-      if (given === undefined && !isHistoryPending) this.endOp(op.id)
+      if (unfinished.length > 0 && given !== undefined) this.unfinishedOwn.set(op.id, unfinished)
+      if (given === undefined && unfinished.length === 0) this.endOp(op.id)
+    } else if (given?.topic !== undefined && prev !== undefined) {
+      const step: IndexRowStep = { kind: INDEX_ROW_STEP, memoryId: key, dirs: [prev.dir], topic: given.topic }
+      this.beginOp(given, { kind: 'write', memoryId: key, dir: dirname(prev.filePath), fields: [], before: fingerprintOf(prev.raw), after: fingerprintOf(prev.raw) }, [step])
+      if (this.isJournaling()) this.journal!.markCommitted(given.id)
+      try { await this.placeIndexRow(step) }
+      catch (err) { this.unfinishedOwn.set(given.id, [step]); this.log.warn(`[plastic-memory] 主题索引稍后补做（${describeError(err)}）`) }
     }
     if (volatileChanged) {
       await this.opts.stats.put(key, { id: key, recallCount: next.recallCount, lastRecalledAt: next.lastRecalledAt })
@@ -1773,7 +1922,8 @@ export class FileTable implements MemoryTable {
       await this.runSteps(op.id, op.steps, written)
       if (own !== undefined) {
         try {
-          await this.runSteps(op.id, own, written)
+          await this.runSteps(op.id, own.filter(step => step.kind !== INDEX_ROW_STEP), written)
+          if (own.some(step => step.kind === INDEX_ROW_STEP)) return
         } catch (err) {
           this.log.warn(`[plastic-memory] 操作 ${op.id} 有一步没做成，留在日志里下次补做（${describeError(err)}）`)
           return
@@ -1944,10 +2094,11 @@ export class FileTable implements MemoryTable {
       const op = given ?? newWriteOp()
       const classified = classifyChange(byPosition(slot), undefined)
       const recent: RecentChangeStep | undefined = classified && { kind: RECENT_CHANGE_STEP, ...classified, memoryId: id, session: currentWriteSession(), at: this.now() }
+      const indexRow: IndexRowStep = { kind: INDEX_ROW_STEP, memoryId: id, dirs: [...new Set(isScopeTarget(at) ? [slot.dir] : [slot.dir, this.globalDir])], isPurge: true }
       this.beginOp(op, {
         kind: 'delete', memoryId: id, dir: dirname(slot.filePath), nameHash: fingerprintOf(basename(slot.filePath)),
         before: fingerprintOf(found.raw), scopeDir: slot.dir, isOwnDirOnly: isScopeTarget(at),
-      }, recent === undefined ? [] : [recent])
+      }, [...(recent === undefined ? [] : [recent]), indexRow])
       // 历史版本先于记忆文件删：中途断掉最多是记忆还在、历史没了，不会留下记忆已删、旧内容（可能带密钥）还在的历史。
       // 要删的是这一层和（按会话定位时）全局里这个 id 的全部副本，这几层的历史直接删；它以前住过的层也删。
       // 有哪一层删不掉或拿不准就在这里报错，记忆文件不动
@@ -1961,7 +2112,7 @@ export class FileTable implements MemoryTable {
       // 彻底删除（密钥硬删、最近删除里的彻底删除）的承诺是「可见集合里再没有它」：global 与该记录目录里同 id 的其余副本
       // （含 .archive/）一并物理删除；给作用域时只删该目录里的，别的作用域里的同 id 副本是另一张卡
       const removed: Array<{ path: string }> = [{ path: slot.filePath }]
-      const removedFrom = await this.removeOtherCopies(id, slot.filePath, slot.dir, isScopeTarget(at), undefined, removed)
+      await this.removeOtherCopies(id, slot.filePath, slot.dir, isScopeTarget(at), undefined, removed)
       // 派生库里不留彻底删掉的文件名
       for (const level of new Set(removed.map(c => dirname(c.path)))) {
         this.index?.forgetNames(level, removed.filter(c => dirname(c.path) === level).map(c => basename(c.path)))
@@ -1970,8 +2121,8 @@ export class FileTable implements MemoryTable {
       if ((await this.locateSlot(id)) === undefined) await this.opts.stats.delete(id)
       // 彻底删除后索引里不留它的名字和摘要：当场整份重写，不等冻结。不按行改：它的摘要带换行时占了几行，
       // 后面几行可以长得像别的记忆的行，按行认不出来
-      await this.maintainDirs([...removedFrom.add(slot.dir)])
-      if (given === undefined) this.endOp(op.id)
+      try { await this.placeIndexRow(indexRow); if (given === undefined) this.endOp(op.id) }
+      catch (err) { if (given !== undefined) this.unfinishedOwn.set(op.id, [indexRow]); this.log.warn(`[plastic-memory] 主题索引稍后补做（${describeError(err)}）`) }
       return true
     })
   }

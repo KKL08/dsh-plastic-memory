@@ -6,6 +6,7 @@ import { toToolOutput } from './output.ts'
 import { VALIDITY_DATE_FORMAT, VALIDITY_FORMAT } from '../validity.ts'
 import { CHANGE_KINDS } from '../record-schema.ts'
 import { LINKS_PER_KIND_MAX } from '../links.ts'
+import { TOPIC_NAME_MAX } from '../topic-index.ts'
 
 /** 整条写入才必填的字段共用的说明：参数表里都是可选，必填项由管线按 action 校验。 */
 const WHOLE_WRITE = 'create 和整条 update 必填；用 edits 时不传就保留原值。'
@@ -16,6 +17,12 @@ const WHOLE_WRITE = 'create 和整条 update 必填；用 edits 时不传就保�
  * 配额写缺省值和配置项名，不写现值：改配额不用重注册工具，超额时拒绝原因里带实际上限。
  */
 const SUBAGENT_RULES = `子 agent 会话里：只能新建 knowledge、project 两类，且要在当前场景里；project 只记观察到的项目状态，不记决定和目标。每个子会话新建有上限（默认 ${SUBAGENT_MAX_SAVES_DEFAULT} 条，可在配置 subagent.maxSavesPerSession 改）。存下的记录是待确认，不进主会话注入；存完在回复里报出 id 和摘要，由委派方决定接受、改写或丢弃。`
+
+/** topic 参数的说明：参数表里登记成可选字符串，不必填。 */
+export const SAVE_TOPIC_DESCRIPTION = `这条记忆归哪个主题，填主题名。和现有主题（含曾用名）同名就归进去，比较时去掉首尾空白、不分大小写；没有就新建这个主题。新建和 update 都能带：update 带它就把这条挪到该主题。只改主题时，action=update 只传 id、sourceMode 和 topic，不用填 change，记忆内容不动。主题名最多 ${TOPIC_NAME_MAX} 个字，不含换行、顿号、逗号，不以 # 开头。主题数到上限或名字不能用时照常保存，结果里说明原因并列出名字最相近的现有主题。`
+
+/** topicAbout 参数的说明：参数表里登记成可选字符串，不必填。 */
+export const SAVE_TOPIC_ABOUT_DESCRIPTION = '新建主题时这个主题的一句说明，和 topic 一起传；topic 是现有主题时不生效，要改现有主题的说明请整理索引。'
 
 /**
  * 把 memory_save 工具接到 dsh 框架上。纯逻辑在 save.ts，不依赖框架包，测试直接测它；
@@ -30,8 +37,10 @@ export function createSaveTool(deps: SaveToolDeps, options: { allowSubagent?: bo
     parameters: {
       // dsh 参数 DSL：漏写 required: true 即为可选。name、type、scope、content、summary 只在整条写入时必填（edits 时可省），由管线按 action 校验
       action: { type: 'string', enum: ['create', 'update'], required: true },
+      topic: { type: 'string', description: SAVE_TOPIC_DESCRIPTION },
+      topicAbout: { type: 'string', description: SAVE_TOPIC_ABOUT_DESCRIPTION },
       id: { type: 'string', description: 'action=update 时必填，目标记忆 id' },
-      change: { type: 'string', enum: [...CHANGE_KINDS], description: 'action=update 时必填（只补挂 related、premises 的除外）：这次改动的性质，决定旧内容怎么处置。corroborate（补证）：同一件事又被提到，内容不用改；只刷新确认时间、记下这次的出处，正文等内容参数不生效，只传 id 和 sourceMode。refine（细化）：旧内容仍全部成立，补上条件、原因、步骤、例外；只增不删。correct（纠错）：旧内容当时就不对，直接改掉，不留历史。state-change（状态变化）：旧内容当时成立、现在变了；旧内容整条留成历史版本，这条记忆换成现在的状态。拿不准旧内容当时成不成立，填 state-change。' },
+      change: { type: 'string', enum: [...CHANGE_KINDS], description: 'action=update 时必填（只补挂 related、premises 或只改 topic 的除外）：这次改动的性质，决定旧内容怎么处置。corroborate（补证）：同一件事又被提到，内容不用改；只刷新确认时间、记下这次的出处，正文等内容参数不生效，只传 id 和 sourceMode。refine（细化）：旧内容仍全部成立，补上条件、原因、步骤、例外；只增不删。correct（纠错）：旧内容当时就不对，直接改掉，不留历史。state-change（状态变化）：旧内容当时成立、现在变了；旧内容整条留成历史版本，这条记忆换成现在的状态。拿不准旧内容当时成不成立，填 state-change。' },
       changeReason: { type: 'string', description: 'change=state-change 时填：一句话说明为什么变了，随历史版本留着。' },
       name: { type: 'string', description: `简短标题（2-16 字）。${WHOLE_WRITE}` },
       type: { type: 'string', enum: typeNames, description: WHOLE_WRITE },

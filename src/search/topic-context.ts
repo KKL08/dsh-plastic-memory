@@ -1,5 +1,5 @@
 import { groupTopics, usableMembers, topicDisplayName } from '../topic-members.ts'
-import { readIndex, keyOf, type IndexFiles } from '../topic-index.ts'
+import { readIndex, topicsNamed, type IndexFiles } from '../topic-index.ts'
 import { resolveLiveFirst } from '../storage/table.ts'
 import { isPendingDelegated } from '../record-schema.ts'
 import { findMemoryCandidates } from './memory-candidates.ts'
@@ -111,7 +111,7 @@ export async function findTopicCandidates(q: TopicCandidateQuery, deps: TopicCan
     const tokenize = await tokenizerForQuery(q.query, deps.tokenizer)
     matched = groups.filter(g => !g.isUnsorted && tokenHitsIn([g.name, ...g.aliases, g.about], base.diagnostics.tokens, tokenize).some(Boolean))
   }
-  const browsed = q.topic === undefined ? undefined : groups.filter(g => [g.name, ...g.aliases, topicDisplayName(g)].some(name => keyOf(name) === keyOf(q.topic!)))
+  const browsed = q.topic === undefined ? undefined : scopes.flatMap(scope => topicsNamed(groups.filter(g => g.scope === scope), q.topic!, g => [g.name, topicDisplayName(g)]))
   const topics: TopicContext = { groups, unreadable, matched, ...(browsed !== undefined ? { browsed } : {}) }
   if (browsed === undefined) return { ...base, topics }
   const members = browsed.flatMap(g => usableMembers(g.members, base.at))

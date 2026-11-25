@@ -290,6 +290,23 @@ All notable changes to this project are documented here. The format follows
   exchange, can likewise get the closest of the last 20 turns before it was
   saved, marked as guessed, instead of only a note that the exchange cannot be
   found.
+- `memory_save` takes a `topic`, plus a one-line `topicAbout` when the topic
+  is new, and lists the memory first on that topic's page in the topic index;
+  names match regardless of case and surrounding spaces, former names
+  included. A new topic's result names the two closest existing topics, and a
+  name that cannot be used or a full topic list still saves the memory to the
+  unsorted page, with the reason in the result.
+- An `update` with `topic` moves the memory to that topic. An `update` that
+  passes only `topic` leaves the memory file untouched and can be undone.
+- The topic index follows a memory as soon as it changes: a new name, summary
+  or file name updates its line, and deleting, restoring, promoting or moving
+  it to a project updates the indexes involved. A memory restored from
+  Recently deleted goes to the unsorted page; one a subagent saves joins a
+  topic only after it is accepted.
+- A new memory saved under an existing topic is also checked for duplicates
+  against the other memories in that topic.
+- Testing: `pnpm host:contract` checks that DeepSeek Harness sees `topic` and
+  `topicAbout` as optional parameters of `memory_save`.
 
 ### Changed
 - The memories loaded at the start of a chat now follow the topic index.

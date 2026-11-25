@@ -1,3 +1,4 @@
+import { newWriteOp } from '../storage/table.ts'
 import { mkdir } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
@@ -878,14 +879,17 @@ async function dispatch(
       try {
         written = await deps.store.writeSection(async () => {
           dropped = await linksOutside(deps.store, rec, { kind: 'workspace', workspacePath })
-          return deps.store.update(rec, (cur) => {
+          const op = newWriteOp({ topic: { kind: 'carry' } })
+          const moved = await deps.store.update(rec, (cur) => {
             if (cur.status !== 'active') throw new RecordNotFoundError(cur.id)
             if (editFingerprint(cur) !== editFingerprint(rec)) {
               isChangedInLock = true
               throw new RecordNotFoundError(cur.id)
             }
             return { ...withoutLinks(cur, dropped), scope: 'workspace', workspacePath }
-          }, { kind: 'global' })
+          }, { kind: 'global' }, op)
+          await deps.store.finishOp(op, moved)
+          return moved
         })
       } catch (error) {
         if (!(error instanceof RecordNotFoundError)) throw error

@@ -29,14 +29,28 @@ export interface WriteOp {
   readonly batch?: string
   /** 提交之后要补做的事，不含字段值和正文。 */
   readonly steps: readonly OpStep[]
+  /** 这次写入之后这条记忆在主题索引里归到哪：随文件表自己的索引行步骤记进操作日志，补做时按那时的索引解析。不给按缺省规则放。 */
+  readonly topic?: TopicIntent
 }
 
-export function newWriteOp(init: { initiator?: string; batch?: string; steps?: readonly OpStep[] } = {}): WriteOp {
+/**
+ * 写入时对主题归属的要求（文件表的索引行步骤按它放这条记忆的行）。
+ *  - choose：模型保存时给的主题。name、about 是调用方遮过密钥的原文（about 只在新建主题时用）；maxTopics 是写入那一刻的主题数上限，
+ *    补做时照用它。按当下的索引解析：现有主题（名字或曾用名，keyOf 判同）就插到那一页最前；没有就新建；到上限、名字不能用就按缺省规则放。
+ *  - carry：换作用域时带上原来的主题：目标作用域里有同名主题（含曾用名）就放进去，没有按缺省规则放；不新建主题。
+ * 缺省规则：已经有行的留在原处、同步行里的文字；还没有行的放进「未整理」最前。
+ */
+export type TopicIntent =
+  | { kind: 'choose'; name: string; about?: string; maxTopics: number }
+  | { kind: 'carry' }
+
+export function newWriteOp(init: { initiator?: string; batch?: string; steps?: readonly OpStep[]; topic?: TopicIntent } = {}): WriteOp {
   return {
     id: `op_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`,
     ...(init.initiator !== undefined ? { initiator: init.initiator } : {}),
     ...(init.batch !== undefined ? { batch: init.batch } : {}),
     steps: init.steps ?? [],
+    ...(init.topic !== undefined ? { topic: init.topic } : {}),
   }
 }
 
@@ -249,8 +263,8 @@ export interface MemoryTable {
   locateWrittenBy?(id: string, target: Scope, opId: string): Promise<LocatedFile | undefined>
   /** 登记提交后某一种步骤的处理器：正常写完和中断后补做走同一个。重复登记以后一次为准。 */
   registerStep?(kind: string, handler: OpStepHandler): void
-  /** 一个记忆目录的主题索引文件，原样读出；还没有索引时为空。没有主题索引的实现可以不提供下面三个。 */
-  readIndex?(dir: string): Promise<IndexFiles | undefined>
+  /** 一个记忆目录的主题索引文件，masked 为真时遮盖手写文字中的密钥；还没有索引时为空。没有主题索引的实现可以不提供下面三个。 */
+  readIndex?(dir: string, masked?: boolean): Promise<IndexFiles | undefined>
   /** 对一个记忆目录的主题索引做一个操作：写入段里按当下的索引和记忆重新核对，对不上的跳过。 */
   applyIndexOp?(dir: string, op: IndexOp, opts: IndexOpOptions): Promise<IndexOpOutcome>
   /** 撤销一个做过的索引操作：这一步写下的效果还在才撤，不在了返回 stale、什么都不动。 */
@@ -259,6 +273,11 @@ export interface MemoryTable {
   isOpPending?(op: string): boolean
   /** 操作日志里还等着补做的步骤有没有一个对得上 match。 */
   hasPendingStep?(match: (step: OpStep) => boolean): boolean
+  /**
+   * 带着 op 的那次写入里，文件表自己的 kind 那一步当场没做成（留给下一次进写入段补做）。按这一步自己的结果判，
+   * 不看整条日志行；没有操作日志时同样记得。调用方在写入返回之后、finishOp 之前问；finishOp 之后不再记得。
+   */
+  hasUnfinishedOwnStep?(op: string, kind: string): boolean
   /**
    * 这几个记忆目录（各含 .archive/）里指向 id 的链接，按 sortLinkRefs 排好。有派生库的实现先按文件签名核对、以文件为准，
    * 手改了还没整份核对的也查得到；代价是逐层列目录、逐个文件取签名。不提供时由调用方逐个读目录算（结果相同）。

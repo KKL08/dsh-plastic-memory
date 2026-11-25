@@ -1,5 +1,6 @@
 import { extractFacts } from './text.ts'
 import type { Fact, FactKind } from './text.ts'
+import { TOPIC_NAME_MAX, type TopicNameProblem } from './topic-index.ts'
 
 /** 清单最多列二十项，避免长更新的提示盖过保存结果。 */
 export const LOST_FACTS_LIMIT = 20
@@ -92,3 +93,35 @@ export function createSaveHints(): SaveHints {
     },
   }
 }
+
+/**
+ * 保存时归主题的结果说明（模型读）。带主题名的几条由调用方拼：主题名先遮盖、折成一行，
+ * 用中文引号「」包起来；最相近主题跟在 NEAREST_TOPICS_LEAD 后面，用顿号连；没有现有主题时不带这一段。
+ */
+export const TOPIC_CREATED_LEAD = '新建了主题'
+export const TOPIC_FULL_LEAD = '主题数已到上限，没有新建主题'
+export const TOPIC_INVALID_LEAD = '主题名不能用'
+export const NEAREST_TOPICS_LEAD = '名字最相近的现有主题：'
+/** 跟在最相近主题后面：要归进现有主题，用只传 id、sourceMode、topic 的 update 改归。 */
+export const NEAREST_TOPICS_HINT = '要归进其中一个，用 action=update 只传 id、sourceMode 和 topic 改归。'
+/** 新建记忆没归进主题时的去处。 */
+export const TOPIC_PLACED_UNSORTED = '这条记忆放进了「未整理」。'
+/** 更新时主题没解析成：这条记忆留在原来的位置。 */
+export const TOPIC_PLACE_KEPT = '这条记忆留在原来的主题里。'
+/** 主题名不能用的原因，按 topicNameProblem 的返回值取。 */
+export const TOPIC_NAME_PROBLEM_TEXT: Record<TopicNameProblem, string> = {
+  'empty': '名字是空的',
+  'too-long': `名字超过 ${TOPIC_NAME_MAX} 个字`,
+  'reserved': '和「未整理」重名',
+  'bad-char': '名字里有换行、顿号或逗号',
+  'heading': '名字以 # 开头',
+}
+export const TOPIC_ABOUT_IGNORED_TEXT = '归进了现有主题，topicAbout 没有生效，主题说明没改；要改说明请整理索引。'
+export const TOPIC_ABOUT_ALONE_TEXT = '只给了 topicAbout、没给 topic，topicAbout 没有生效；新建主题时两个一起传。'
+export const TOPIC_DEFERRED_SUBAGENT_TEXT = '子 agent 会话里 topic 不生效：这条记录接受后再归主题。'
+export const TOPIC_PENDING_TEXT = '记忆已保存；归主题这一步还没做完，插件之后会自动补做。'
+export const TOPIC_UNREADABLE_TEXT = '主题索引现在读不出，主题没有改动；稍后再试。'
+export const TOPIC_SKIPPED_TEXT = '主题索引这时改不了，主题没有改动；稍后再试。'
+export const TOPIC_NOT_INDEXED_TEXT = '这条记忆还不在主题索引里，主题没有改动；等索引补齐后再改归。'
+/** 只改主题的 update 里不生效的参数，按参数名列出，跟在这句后面。 */
+export const TOPIC_ONLY_IGNORED_LEAD = '只改主题时这些参数没有生效：'

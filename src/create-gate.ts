@@ -1,3 +1,4 @@
+import { isExpired } from './record-freshness.ts'
 import type { MemoryStore } from './store.ts'
 import { isPendingDelegated, type MemoryRecord } from './record-schema.ts'
 import { maskSecretSurface } from './secrets.ts'
@@ -44,8 +45,14 @@ export async function runCreateGate(
     excludeIds: ReadonlySet<string>
     /** 子 agent 判重只看主档；相近列表还保留本会话的待确认记录。 */
     subagentSessionId?: string
+    /**
+     * 新记忆要归的现有主题里的成员 id（保存时给了现有主题才有，子 agent 不给）。按新记忆落的那个作用域逐条读，口径同检索候选：
+     * 在用的主档、没过期的才算，excludeIds 里的不算。它们不过罕见词否决：排在检索候选之后、按和新记忆的字符相似度
+     * （比较文字同判重）降序补进相近列表，按 id 去重，合计仍封顶 SIMILAR_LIMIT；接近逐字重复的判定同样对它们做。
+     */
+    topicMemberIds?: readonly string[]
   },
-  deps: { store: Pick<MemoryStore, 'readRaw'>; tokenizer?: QueryTokenizerOptions; now: () => number },
+  deps: { store: Pick<MemoryStore, 'readRaw' | 'get'>; tokenizer?: QueryTokenizerOptions; now: () => number },
 ): Promise<CreateGateOutcome> {
   const { candidates, diagnostics } = await findMemoryCandidates({
     query: `${input.name}\n${input.summary}\n${input.content}`,
@@ -56,11 +63,18 @@ export async function runCreateGate(
   const settled = candidates.filter(c => !isPendingDelegated(c.record))
   const pending = candidates.filter(c => isPendingDelegated(c.record))
   const neighbors = [...settled.slice(0, GATE_CANDIDATE_WINDOW), ...pending.slice(0, GATE_CANDIDATE_WINDOW)].filter(c => !input.excludeIds.has(c.record.id))
+  const members: MemoryRecord[] = []
+  for (const id of input.topicMemberIds ?? []) {
+    if (input.excludeIds.has(id)) continue
+    const record = await deps.store.get(id, { kind: 'workspace', workspacePath: input.workspacePath })
+    if (record && record.status === 'active' && !isPendingDelegated(record) && !isExpired(record, deps.now())) members.push(record)
+  }
+  members.sort((a, b) => charSimilarity(comparison(input), comparison(b)) - charSimilarity(comparison(input), comparison(a)))
   if (!input.skipDuplicate) {
     const text = comparison(input)
     let highest = 0
     let existing: MemoryRecord | undefined
-    for (const { record } of neighbors) {
+    for (const record of [...neighbors.map(c => c.record), ...members]) {
       if (input.subagentSessionId !== undefined && isPendingDelegated(record)) continue
       const similarity = charSimilarity(text, comparison(record), NEAR_DUPLICATE_THRESHOLD)
       if (similarity >= NEAR_DUPLICATE_THRESHOLD && similarity > highest) {
@@ -76,6 +90,7 @@ export async function runCreateGate(
     if (input.subagentSessionId !== undefined && isPendingDelegated(c.record) && c.record.delegation?.sessionId !== input.subagentSessionId) return false
     return c.tokenHits.some((hit, i) => hit && df[i]! < commonAt)
   }).slice(0, SIMILAR_LIMIT).map(c => shown(c.record))
+  for (const record of members) if (similar.length < SIMILAR_LIMIT && !similar.some(s => s.id === record.id)) similar.push(shown(record))
   return { kind: 'pass', similar }
 }
 

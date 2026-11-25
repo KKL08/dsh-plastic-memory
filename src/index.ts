@@ -446,6 +446,7 @@ export async function apply(ctx: Context, config: Config) {
   const allowSubagentSave = () => config.governance.enabled.get()
   const registerSave = () => registerWrite(
     createSaveTool({
+    maxTopics: () => config.index.maxTopics.get(),
       store, registry, host, snapshots, decisions, onSaved, memoryRoot, homeDir: homedir(),
       maxSubagentSaves: () => config.subagent.maxSavesPerSession.get(),
       saveHintsIn, tokenizer: { userDictionaryPath: () => config.search.userDictionaryPath.get(), log: ctx.logger },

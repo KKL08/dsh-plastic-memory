@@ -129,7 +129,7 @@ describe('写入只处理自己动到的文件', () => {
     expect(existsSync(join(globalDir(), ARCHIVE_DIR, 'old.md'))).toBe(false)
   })
 
-  it('同一个目录里的写入不读不写主题索引和 MEMORY.md，换作用域只动来源目录的索引把那一行去掉；之后维护一次索引就跟上磁盘', async () => {
+  it('行状态变化只读写涉及目录的主题索引，过期不碰索引，每步维护前索引已跟上磁盘', async () => {
     for (const [name, id] of [['部署流程', 'mem_1'], ['包管理', 'mem_2'], ['测试约定', 'mem_3']] as const) {
       await seed(globalDir(), `${name}.md`, record({ id, name }))
     }
@@ -153,11 +153,12 @@ describe('写入只处理自己动到的文件', () => {
       reads.tracing = true
       let writes: string[]
       try { writes = await writesDuring(step) } finally { reads.tracing = false }
-      // 搬走的那条当场从来源目录的索引里去掉；目的目录的索引和两边的 MEMORY.md 不碰
-      const inSource = (path: string) => movedFrom !== undefined && path.startsWith(join(movedFrom.dir, INDEX_DIR))
-      expect(writes.map(callPath).filter(p => isIndexPath(p) && !inSource(p)), `${what}：写调用`).toEqual([])
-      expect(reads.paths.filter(p => isIndexPath(p) && !inSource(p)), `${what}：读调用`).toEqual([])
+      const affected = what === '过期' ? [] : movedFrom === undefined ? [globalDir()] : dirs
+      const inAffected = (path: string) => affected.some(dir => path.startsWith(join(dir, INDEX_DIR) + '/'))
+      expect(writes.map(callPath).filter(p => isIndexPath(p) && !inAffected(p)), `${what}：写调用`).toEqual([])
+      expect(reads.paths.filter(p => isIndexPath(p) && !inAffected(p)), `${what}：读调用`).toEqual([])
       if (movedFrom !== undefined) expect(await indexedIds(movedFrom.dir), `${what}：来源目录的索引`).not.toContain(movedFrom.id)
+      for (const dir of dirs) await indexedIdsMatchDisk(t, dir).catch(err => { throw new Error(`${what}：${String(err)}`) })
       await t.maintain(dirs)
       for (const dir of dirs) await indexedIdsMatchDisk(t, dir).catch(err => { throw new Error(`${what}：${String(err)}`) })
     }

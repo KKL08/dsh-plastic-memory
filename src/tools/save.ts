@@ -52,6 +52,8 @@ export interface SaveToolDeps {
   guidedIn?: (sessionId: string) => { has(memoryId: string): boolean; add(memoryId: string): void }
   /** 状态变化的合并窗口，分钟（配置 history.mergeWindowMinutes），每次调用现读；缺省按落盘原语的默认值。 */
   mergeWindowMinutes?: () => number
+  /** 主题数上限（配置 index.maxTopics），每次调用现读；缺省按 INDEX_MAX_TOPICS_DEFAULT。 */
+  maxTopics?: () => number
 }
 
 /** 成功保存、改写时附在第一行末：记录是过程动作，界面已展示写入的记忆，回复里不必再报。 */
@@ -149,6 +151,7 @@ export async function executeSave(
     maxSubagentSaves: deps.maxSubagentSaves?.(),
     guided: deps.guidedIn?.(context.session.id),
     mergeWindowMs: mergeWindowMs(deps.mergeWindowMinutes?.()),
+    maxTopics: deps.maxTopics?.(),
     turn,
   })
   if (result.kind === 'saved') deps.onSaved?.(context.session.id, result.record.id)
