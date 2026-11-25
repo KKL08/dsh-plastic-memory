@@ -59,7 +59,9 @@ All notable changes to this project are documented here. The format follows
   Locked memories are left alone, and a change is skipped when the memory was
   edited after the model read it. One pass changes at most a share of the
   scope's active memories (`brewingDreams.maxChangeRatio`, 20% by default);
-  what is left over is picked up by the next pass. The changes of a pass can
+  what is left over is picked up by the next pass. Filing
+  memories into topics and reorganizing topics change only the topic index,
+  so they do not count toward that share. The changes of a pass can
   be undone together or one at a time, also while governance is turned off.
 - A Brewing Dreams pass also merges memories in the same scope that repeat
   each other or each hold part of the same thing: one memory is rewritten

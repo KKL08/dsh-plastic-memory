@@ -11,9 +11,9 @@ import { DREAMS_APPLY_MAX_OPS, isCompleteRead, type DreamsStep, type DreamsStepC
 /**
  * 记忆梦境的整理步骤：整理主题索引（归主题、改名、合并、调顺序、改说明，和手动「整理一次索引」同一套提示词和操作），
  * 再逐条整理记忆（刷新摘要和标签、建关联、调注入档位）。调模型都在锁外；每个操作经 ctx 落盘，落盘前按当下的数据核对，
- * 对不上、目标锁定、超出改动量上限的跳过，不影响其余。模型给的值不能用的操作丢掉，同样列进结果。一批模型调用失败就停（这一步算没做完）；
+ * 对不上、目标锁定、超出改动量上限（只算改写记忆文件的）的跳过，不影响其余。模型给的值不能用的操作丢掉，同样列进结果。一批模型调用失败就停（这一步算没做完）；
  * 回复读不出的那一批不出操作，其余批照做，做完这一步按没做完收：这次运行不记成做完，下次重来。读记忆读不全也按没做完收。
- * 名额用完之后只再处理这次已经改动过的记忆；没处理到的告诉 ctx，不进这次的基线。
+ * 逐条整理在名额用完之后只再处理这次已经改动过的记忆；没处理到的告诉 ctx，不进这次的基线。整理主题索引不占名额。
  */
 
 /** 模型给的值不能用（不认识的记忆、坏格式、超出限制）：跳过的原因。 */
@@ -58,7 +58,7 @@ export async function activeMembers(store: Pick<MemoryStore, 'readRaw'>, ctx: Dr
 
 export const unreadError = (count: number) => new Error(`有 ${count} 批模型的回复读不出，这一批没有整理`)
 
-/** 整理主题索引：先看主题目录（已有主题时），再按批看成员怎么归。名额用完之后只看这次已经改动过的成员。 */
+/** 整理主题索引：先看主题目录（已有主题时），再按批看成员怎么归。只挪索引行，不受改动量上限约束。 */
 export const organizeIndexStep = (deps: TidyStepDeps): DreamsStep => ({
   name: 'organize-index',
   needsChanges: true,
@@ -103,10 +103,7 @@ export const organizeIndexStep = (deps: TidyStepDeps): DreamsStep => ({
       if (organizeDirectory(first.files, first.members, deps.now()).length > 0 && !(await round(undefined))) return
       const after = await load()
       for (const batch of after === undefined ? [] : organizeBatches(after.files, after.members)) {
-        // 名额用完了：没占名额的成员再问也只会被跳过，留给下次
-        const open = batch.filter(id => ctx.canChange(id))
-        if (open.length === 0) continue
-        if (!(await round(new Set(open)))) return
+        if (!(await round(new Set(batch)))) return
       }
     } finally {
       // 入口投影（MEMORY.md）跟着索引重新生成

@@ -66,15 +66,16 @@ export interface DreamsStepContext {
   apply(ops: readonly ChangeOp[], opts?: Pick<ApplyOptions, 'anchor' | 'fingerprint' | 'isSecret'>): Promise<ApplyResult>
   /**
    * 对这个范围的主题索引做一个操作（见 MemoryStore.applyIndexOp）：回执记到这次运行的条目上，提交点是第一个改写的索引文件。
-   * 落盘前按当下的索引核对，对不上的跳过；超出改动量上限的跳过（reason 'quota'），什么都不写。条目中途被撤销了抛 DreamsEntryGone。
+   * 落盘前按当下的索引核对，对不上的跳过，什么都不写。条目中途被撤销了抛 DreamsEntryGone。
+   * 只挪索引行、不写记忆文件，不占改动量（上限保护的是记忆内容，索引操作能随批次整批撤销）。
    * basis 是交给模型那一刻读到的记忆（id → 扫描指纹）：给了就在写入段里复核要挪动的成员，有一条不在里面、不在用了或内容变了，
    * 跳过（reason 'basis-changed'）。锁不在复核里：锁只管记忆文件，锁定的记忆的索引行照样能挪。
    */
   applyIndex(op: IndexOp, opts: { maxTopics: number; basis?: ReadonlyMap<string, string> }): Promise<IndexOpOutcome>
   /**
    * 这次运行还能再改动几条记忆。上限是本范围在用条数乘 maxChangeRatio（至少 1），各步按操作产生的先后共用；
-   * 同一条记忆做几个操作只算一条；只算写下了、没撤回的。让路、出错之后的续跑接着扣上次用掉的。
-   * apply、applyIndex 自己按它把关，超出的跳过（reason 'quota'）。
+   * 只算改写或软删了记忆文件的（applyIndex 不算），同一条记忆做几个操作只算一条；只算写下了、没撤回的。
+   * 让路、出错之后的续跑接着扣上次用掉的。apply 自己按它把关，超出的跳过（reason 'quota'）。
    */
   quotaLeft(): number
   /** 这条记忆这次还能动：这次已经改动过它（不再占名额），或者还有名额。 */
@@ -279,7 +280,7 @@ export async function runDreams(scope: Scope, opts: DreamsRunOptions, deps: Drea
       }
     }
     /**
-     * 按这次运行的批次条目上现有的回执补记已用的名额：记忆的回执，和已确认（或提交了、等着补做确认）的索引回执挪动的成员。
+     * 按这次运行的批次条目上现有的记忆回执补记已用的名额（索引回执不占名额）。
      * 只往里加：回执没记上的写入（等着补记、撤不回已拿掉回执的）由应用结果记下，同样占着。账本读不出时按已记下的算。
      */
     const syncUsed = async () => {
@@ -287,9 +288,6 @@ export async function runDreams(scope: Scope, opts: DreamsRunOptions, deps: Drea
       try {
         const entry = (await deps.decisions.listSettled()).find(d => d.id === entryId)
         for (const receipt of entry?.changes ?? []) used.add(copyKey(receipt))
-        for (const receipt of entry?.indexRun?.receipts ?? []) {
-          if (receipt.isConfirmed === true || deps.store.isOpPending(receipt.op)) for (const id of indexQuotaIds(receipt.plan)) used.add(keyOf(id))
-        }
       } catch (err) {
         log.warn('[plastic-memory] 记忆梦境读不出批次条目，已用名额按这次记下的算', err)
       }
@@ -342,17 +340,13 @@ export async function runDreams(scope: Scope, opts: DreamsRunOptions, deps: Drea
       },
       async applyIndex(op, indexOpts) {
         if (!deps.store.hasStep(INDEX_RECEIPT_STEP)) deps.store.registerSteps(ledgerSteps(deps.decisions, deps.log))
-        let keys: string[] = []
         let r: IndexOpOutcome
         try {
           r = await withEntry(id => deps.store.applyIndexOp(scope, op, {
             maxTopics: indexOpts.maxTopics,
             // 在写入段里、写第一个文件之前：要挪的成员按模型看到的版本复核，放不下就不做；回执先记下（带撤销要用的改前数据），提交后的步骤确认它
             prepare: async (writeOp, plan) => {
-              const moved = indexQuotaIds(plan)
-              if (indexOpts.basis !== undefined && !(await isSameAsSeen(moved, indexOpts.basis))) throw new IndexSkip('basis-changed')
-              keys = moved.map(keyOf)
-              if (!fits(keys, used)) throw new IndexSkip('quota')
+              if (indexOpts.basis !== undefined && !(await isSameAsSeen(movedIds(plan), indexOpts.basis))) throw new IndexSkip('basis-changed')
               if (!(await deps.decisions.appendIndexReceipt(id, { op: writeOp, plan }))) throw new DreamsEntryGone()
               return [indexReceiptStep(id)]
             },
@@ -361,8 +355,7 @@ export async function runDreams(scope: Scope, opts: DreamsRunOptions, deps: Drea
           if (!(err instanceof IndexSkip)) throw err
           r = { kind: 'skipped', reason: err.reason }
         }
-        if (r.kind === 'applied') for (const key of keys) used.add(key)
-        else noteSkipped(op.kind, indexTarget(op), r.reason)
+        if (r.kind !== 'applied') noteSkipped(op.kind, indexTarget(op), r.reason)
         return r
       },
       quotaLeft: () => Math.max(0, quotaLimit - carried - used.size),
@@ -510,10 +503,10 @@ async function hasOpenGroupsIn(decisions: DreamsRunDeps['decisions'], scope: Sco
   return (await decisions.withOpenGroups()).some(entry => entry.workspaces === undefined || entry.workspaces.length === 0 || entry.workspaces.includes(label))
 }
 
-/** 这个索引操作不做（要挪的成员变了、改动量放不下）：在写第一个文件之前叫停。 */
+/** 这个索引操作不做（要挪的成员变了）：在写第一个文件之前叫停。 */
 class IndexSkip extends Error {
-  readonly reason: 'basis-changed' | 'quota'
-  constructor(reason: 'basis-changed' | 'quota') {
+  readonly reason: 'basis-changed'
+  constructor(reason: 'basis-changed') {
     super(reason)
     this.reason = reason
   }
@@ -536,11 +529,8 @@ function processedMarks(
   return next
 }
 
-/**
- * 一个索引操作改动了哪些记忆（占改动量）：被挪到别的主题的成员。改名、改说明、调顺序不挪成员，不占。
- * 锁定的记忆的成员行同样能挪（锁只管记忆文件），挪了同样占。
- */
-function indexQuotaIds(plan: IndexPlan): string[] {
+/** 一个索引操作挪到别的主题的成员（落盘前按模型看到的版本复核它们）。改名、改说明、调顺序不挪成员。 */
+function movedIds(plan: IndexPlan): string[] {
   return plan.kind === 'assign' || plan.kind === 'merge' ? plan.moved.map(m => m.id) : []
 }
 

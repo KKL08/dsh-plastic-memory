@@ -302,7 +302,7 @@ describe('锁与前台改动', () => {
 })
 
 describe('改动量上限', () => {
-  it('两步共用一份（10 条、0.2 是 2 条）：挪了索引行的也算，同一条做几个操作只算一条，超出的跳过', async () => {
+  it('名额按改了的记忆算（10 条、0.2 是 2 条）：只挪索引行的不算，同一条做几个操作只算一条，超出的跳过', async () => {
     await seed(Array.from({ length: 10 }, (_, i) => [`mem_${i}`, `记忆${i}`] as [string, string]))
     ratio = 0.2
     replies.organize = [[
@@ -311,15 +311,17 @@ describe('改动量上限', () => {
     ]]
     replies.tidy = [[
       { op: 'refresh', id: 'mem_0', summary: '零的新摘要' },
+      { op: 'recall', id: 'mem_0', recall: 'passive' },
       { op: 'refresh', id: 'mem_3', summary: '三的新摘要' },
       { op: 'refresh', id: 'mem_4', summary: '四的新摘要' },
     ]]
     expect((await dream()).kind).toBe('completed')
-    expect(await layout()).toMatchObject({ 甲: ['mem_0'] })
+    expect(await layout()).toMatchObject({ 甲: ['mem_0'], 乙: ['mem_1', 'mem_2'] })
     expect((await get('mem_0')).summary).toBe('零的新摘要')
+    expect((await get('mem_0')).recall).toBe('passive')
     expect((await get('mem_3')).summary).toBe('三的新摘要')
     expect((await get('mem_4')).summary).toBe('记忆4的摘要')
-    expect((await lastResult())?.skipped?.items.map(x => [x.step, x.target, x.reason])).toEqual([['organize-index', '乙', 'quota'], ['tidy-memories', 'mem_4', 'quota']])
+    expect((await lastResult())?.skipped?.items.map(x => [x.step, x.target, x.reason])).toEqual([['tidy-memories', 'mem_4', 'quota']])
   })
 })
 
@@ -351,7 +353,7 @@ describe('改动量上限：没做完的留给下次', () => {
     expect(prompts.tidy[1]!.user).not.toMatch(/"mem_[abd]"/)
   })
 
-  it('只有一条：归主题占了唯一的名额，这一条的摘要照样刷新', async () => {
+  it('只有一条：归主题不占名额，这一条的摘要照样刷新', async () => {
     await seed([['mem_a', '名称']])
     replies.organize = [[{ op: 'assign', memoryIds: ['mem_a'], from: UNSORTED_TITLE, to: '主题', about: '主题的说明。' }]]
     replies.tidy = [[{ op: 'refresh', id: 'mem_a', summary: '按正文刷新' }]]
@@ -360,15 +362,43 @@ describe('改动量上限：没做完的留给下次', () => {
     expect((await get('mem_a')).summary).toBe('按正文刷新')
   })
 
-  it('索引的合并按挪动的成员数占名额：放不下就跳过', async () => {
+  it('索引的合并挪动的成员比名额多：照样合并，不占名额，逐条整理还有名额', async () => {
     await seed(FOUR)
     await store.applyIndexOp(GLOBAL, { kind: 'assign', from: UNSORTED_TITLE, to: '甲', memoryIds: ['mem_a'] }, { maxTopics: 30 })
     await store.applyIndexOp(GLOBAL, { kind: 'assign', from: UNSORTED_TITLE, to: '乙', memoryIds: ['mem_b', 'mem_c'] }, { maxTopics: 30 })
     ratio = 0.25
     replies.organize = [[{ op: 'merge', from: ['乙'], into: '甲' }]]
+    replies.tidy = [[{ op: 'refresh', id: 'mem_d', summary: '丁的新摘要' }]]
     expect((await dream()).kind).toBe('completed')
-    expect(await layout()).toMatchObject({ 甲: ['mem_a'], 乙: ['mem_b', 'mem_c'] })
-    expect((await lastResult())?.skipped?.items).toContainEqual({ step: 'organize-index', kind: 'merge', target: '甲', reason: 'quota' })
+    expect(await layout()).toMatchObject({ 甲: ['mem_a', 'mem_b', 'mem_c'] })
+    expect((await get('mem_d')).summary).toBe('丁的新摘要')
+    expect((await lastResult())?.skipped).toBeUndefined()
+  })
+
+  it('上次没做完已用光名额：续跑照样把未整理的归进主题', async () => {
+    await seed(FOUR)
+    ratio = 0.5
+    failWrite = (path, text) => path.endsWith('.md') && text.includes('id: mem_b') && text.includes('写不进去')
+    replies.tidy = [[{ op: 'refresh', id: 'mem_a', summary: '占掉一个名额' }, { op: 'refresh', id: 'mem_b', summary: '写不进去' }]]
+    expect((await dream()).kind).toBe('failed')
+    expect((await dreams.read()).records.get('global')?.unfinished?.quotaUsed).toBe(1)
+    failWrite = undefined
+    // 续跑时上限是 1 条，上次用掉的 1 条接着扣：名额已用光
+    ratio = 0.25
+    replies.organize = [ASSIGN]
+    expect((await dream()).kind).toBe('completed')
+    expect(await layout()).toEqual({ 发版: ['mem_a', 'mem_b'], 约定: ['mem_c'], [UNSORTED_TITLE]: ['mem_d'] })
+  })
+
+  it('运行没做完时记下的已用名额不含只挪了索引行的记忆', async () => {
+    await seed(FOUR)
+    // 逐条整理的写入都失败：这次运行按出错收，已用名额只按写成的记忆算
+    failWrite = (path, text) => path.endsWith('.md') && text.includes('写不进去')
+    replies.organize = [ASSIGN]
+    replies.tidy = [FOUR.map(([id]) => ({ op: 'refresh', id, summary: '写不进去' }))]
+    expect((await dream()).kind).toBe('failed')
+    expect(await layout()).toEqual({ 发版: ['mem_a', 'mem_b'], 约定: ['mem_c'], [UNSORTED_TITLE]: ['mem_d'] })
+    expect((await dreams.read()).records.get('global')?.unfinished?.quotaUsed).toBeUndefined()
   })
 
   it('一次应用里前面的写成、后面的写盘抛错：前面的照样占名额，续跑接着扣', async () => {
