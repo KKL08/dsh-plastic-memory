@@ -11,15 +11,15 @@
  * 对话记录库（H34，无 key）：从真会话的日志建库，用同一套分词搜到用户本人说的话，定时任务发的不收；按宿主的会话清单把库建完。
  * 宿主接口探针（H22–H30、H32，无 key）：sessionQuery 的会话列举、父子追溯、标题、事件时间与过滤；当轮用户消息的来源标记；本进程的空闲信号；
  * 指令文件的修改时间；会话存档状态（含跨进程，第二趟）；会话卸下后读事件、另一个进程写下的会话（第二趟）；fork 型子会话的快照；经插件自有来源的消息开一轮（含续接冷会话）；各种会话的继承前缀长度（H32）。
- * 有 DEEPSEEK_API_KEY 且宿主能选出默认模型时再跑语义扫描与取消两项、一次真实的自动体检（H17：无会话、宿主默认模型）、
+ * 有 DEEPSEEK_API_KEY（或 test-model.ts 的替代路由可用）且宿主能选出默认模型时再跑语义扫描与取消两项、一次真实的自动体检（H17：无会话、宿主默认模型）、
  * 一次带出处的处理建议（H20：两条记忆的出处从真会话读回，交给真模型）、一次整理索引再整批撤销（H35：真模型给操作，只验结构），否则标 SKIPPED。
  * run.sh 随后用同一个 DSH_HOME 再起一次宿主（HOST_CONTRACT_PHASE=restart）：第一趟把
  * 恢复的记录 id 写进交接文件，第二趟跑 H12，证明恢复结果过了进程重启仍可读。
  * 指令文件按项目现读（H14）：无 key 时装好的插件取到项目的 AGENTS.md，和宿主函数直接取到的一致（agent 工具裁决旧式条目时现算的指纹不用模型，
  * 无 key 也能比）；有 key 时再在真会话里跑一轮，
  * 模型收到的指令文件正文和宿主函数返回的逐字相同。
- * 有 key 时 run.sh 再把凭据换成无效 key 起第三趟（HOST_CONTRACT_PHASE=bad-key）跑 H18：宿主报 AUTH，
- * 扫描结果和体检视图只记 hostCode、不带宿主原话；没有 key 时第一趟把 H18 标 SKIPPED。
+ * 有官方 key 时 run.sh 再把凭据换成无效 key 起第三趟（HOST_CONTRACT_PHASE=bad-key）跑 H18：宿主报 AUTH，
+ * 扫描结果和体检视图只记 hostCode、不带宿主原话；没有 key 或走替代路由时第一趟把 H18 标 SKIPPED。
  *
  * 只用可擦除的 TypeScript 语法（engines 要求的 Node 22.19+/24 原生 strip-types 直接加载，不需要构建）。
  */
@@ -46,6 +46,7 @@ import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCa
 import { readIndexFiles } from '../../src/storage/index-store.ts'
 import { workspaceDirName } from '../../src/storage/paths.ts'
 import { readIndex } from '../../src/topic-index.ts'
+import type { TestModelState } from './test-model.ts'
 
 export const name = 'dsh-plastic-memory-host-contract'
 export const inject = ['tools', 'sessions']
@@ -209,7 +210,11 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
         return dm?.currentSelection?.() ?? {}
       } catch { return {} /* 无默认模型服务 */ }
     }
-    const hasKey = !!process.env.DEEPSEEK_API_KEY
+    // run.sh 经状态文件告诉这次用哪个模型（test-model.ts）；没有状态文件时按官方 key 在不在定
+    const modelState: TestModelState = process.env.HOST_CONTRACT_MODEL_STATE
+      ? JSON.parse(readFileSync(process.env.HOST_CONTRACT_MODEL_STATE, 'utf8')) as TestModelState
+      : { kind: process.env.DEEPSEEK_API_KEY ? 'official' : 'none' }
+    const hasKey = modelState.kind !== 'none'
 
     /** 走界面同一条路执行一行 `/memory …`：宿主 commands 服务按整行执行。返回宿主的执行结果，宿主缺服务或命令没注册时返回原因。 */
     const runMemoryCommand = async (workspacePath: string, line: string, model: ModelOpts = {}): Promise<{ kind: string; text?: string } | string> => {
@@ -1186,6 +1191,15 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
     // 有 key 却选不出默认模型是宿主契约变了（agentDefaultModel 服务改名/消失），必须响亮失败，
     // 不能悄悄 SKIP 让绿色结果少验一段
     const semanticGate = (): { ok: boolean; skipped?: boolean; detail: string } | null => {
+      if (modelState.kind === 'alternate') {
+        const want = `${modelState.provider}/${modelState.model}`
+        if (modelState.unavailable !== undefined) return { ok: true, skipped: true, detail: `SKIPPED: 替代模型 ${want} 不可用（${modelState.unavailable}）` }
+        // 插件自己调模型（体检、建议、梦境）用宿主默认模型：它必须真的落在指定的那个模型上
+        if (sel.provider !== modelState.provider || sel.model !== modelState.model) {
+          return { ok: false, detail: `默认模型没有落到替代模型 ${want} 上（agentDefaultModel.currentSelection → ${JSON.stringify(sel)}）` }
+        }
+        return null
+      }
       if (llmReady) return null
       if (!hasKey) return { ok: true, skipped: true, detail: 'SKIPPED: 无 DEEPSEEK_API_KEY' }
       return { ok: false, detail: `有 DEEPSEEK_API_KEY 但宿主未选出默认模型（agentDefaultModel.currentSelection → ${JSON.stringify(sel)}）` }
@@ -1405,8 +1419,9 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
         await handle.dispose()
       }
     })
-    // H18 在第三趟（凭据换成无效 key）跑；没有 key 时第三趟不起，结果在这里标 SKIPPED
+    // H18 在第三趟（凭据换成无效 key）跑；没有 key 或走替代路由时第三趟不起，结果在这里标 SKIPPED
     if (!hasKey) push({ id: 'H18-AUTH-ERROR-MASKED', ok: true, skipped: true, detail: 'SKIPPED: 无 DEEPSEEK_API_KEY' })
+    if (modelState.kind === 'alternate') push({ id: 'H18-AUTH-ERROR-MASKED', ok: true, skipped: true, detail: 'SKIPPED: 只对官方 provider 有意义（这次走替代路由）' })
     // 交接给第二趟（重启验证）：恢复过的记录 id、它的 workspace、H7 拍的快照 id
     if (handoffPath) writeFileSync(handoffPath, JSON.stringify({ savedId, wsA, snapshotId, cold, archivedSessionId } satisfies Handoff))
   } catch (e) {
