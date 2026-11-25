@@ -913,12 +913,24 @@ async function dispatch(
     case 'forget':
     case 'hard-delete': {
       const isHardDelete = command.cmd === 'hard-delete'
+      // 要删的那一份不在了、别的层却有同 id 的副本：多半是界面还停在旧位置（提升、移到项目先落了盘），
+      // 说「已经不在了」不如实。两种命令都在写入段里，这里的定位和列副本是段内复核，不另加锁。
+      // 没指明哪一层时没有「界面停在哪一层」可比，照原错误回。层按存储的标准键比：末尾分隔符不同的是另一个目录
+      const notFoundOrMoved = async (gone: Err, isMissingInLayer?: boolean): Promise<Err> => {
+        const layer = command.layer
+        if (layer === undefined) return gone
+        const isElsewhere = (isMissingInLayer ?? (await locate(command.memoryId, layer)) === undefined)
+          && (await deps.store.copiesOf(command.memoryId)).some(s => scopeKey(s) !== scopeKey(layer))
+        return isElsewhere
+          ? behind('stale', [command.memoryId], `记忆 ${command.memoryId} 的位置或副本刚变了，界面会换成最新内容。没有删除`)
+          : gone
+      }
       if (isHardDelete) {
         if (deps.isLegacyImportSettled !== undefined && !(await deps.isLegacyImportSettled())) {
           return fail(cmd, 'failed', '旧数据迁移还没收尾（升级前的快照没导完，或宿主里的旧副本还没清掉），彻底删除暂不可用，下次启动会再试。未做任何改动')
         }
         const rec = await locate(command.memoryId, command.layer)
-        if (!rec) return notFound(command.memoryId)
+        if (!rec) return await notFoundOrMoved(notFound(command.memoryId), true)
         if (rec.status === 'deleted') {
           // 最近删除里的一条：不等 14 天到期，现在就清掉。先清账本、再抹快照、最后物理删除归档文件（召回统计行由存储层
           // 按「哪层都没有它了」清）；中途失败时归档文件还在，重试即可，此时恢复就是普通恢复。只认它自己那一层，别层同 id 的副本不碰
@@ -953,7 +965,7 @@ async function dispatch(
       )
       if (r.rejected.length > 0) return fail(cmd, 'cross-workspace', r.message, r.rejected)
       if ((r.skippedSecrets?.length ?? 0) > 0) return fail(cmd, 'has-secret', `记忆 ${command.memoryId} 含密钥，删除后不可恢复，未做任何改动`)
-      if (!r.ok) return fail(cmd, 'not-found', r.message)
+      if (!r.ok) return await notFoundOrMoved(fail(cmd, 'not-found', r.message))
       // 读到之后被别处改过或搬走：没删，不能报成功
       if (r.skipped.length > 0) return { ...fail(cmd, 'stale', `记忆 ${command.memoryId} 刚在别处被改过或移动，没有删除`), memoryIds: [command.memoryId] }
       return { ok: true, cmd, memoryIds: r.forgotten, ...(r.snapshotId !== null ? { snapshotId: r.snapshotId } : {}) }

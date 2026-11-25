@@ -381,12 +381,26 @@ describe('同 id 在两个项目里各有一份', () => {
     expect(await copyIn(e, OTHER_WS)).toMatchObject({ name: '别的项目那份', status: 'active' })
   })
 
-  it('指明的那一层没有这个 id：not-found，不落到别的副本上', async () => {
+  it('指明的那一层没有这个 id、别的层有：stale（位置或副本变了），不落到别的副本上', async () => {
     const e = env()
     await e.store.create(record({ id: 'mem_dup', scope: 'workspace', workspacePath: SESSION_WS }))
-    expect(err(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: other, allowCrossWorkspace: true })).code).toBe('not-found')
-    expect(err(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: { kind: 'global' } })).code).toBe('not-found')
+    expect(err(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: other, allowCrossWorkspace: true })).code).toBe('stale')
+    expect(err(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: { kind: 'global' } })).code).toBe('stale')
     expect((await copyIn(e, SESSION_WS))!.status).toBe('active')
+  })
+
+  it('指明的那一层没有这个 id、只差末尾分隔符的另一个目录有：也是别处的副本，stale，不落到那份上', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_dup', scope: 'workspace', workspacePath: `${SESSION_WS}/` }))
+    expect(err(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: own })).code).toBe('stale')
+    expect(err(await e.run({ cmd: 'hard-delete', memoryId: 'mem_dup', layer: own })).code).toBe('stale')
+    expect((await copyIn(e, `${SESSION_WS}/`))!.status).toBe('active')
+  })
+
+  it('哪一层都没有这个 id：not-found', async () => {
+    const e = env()
+    expect(err(await e.run({ cmd: 'forget', memoryId: 'mem_none', layer: own })).code).toBe('not-found')
+    expect(err(await e.run({ cmd: 'hard-delete', memoryId: 'mem_none', layer: own })).code).toBe('not-found')
   })
 
   it('指明全局：动全局那一份，项目里的同 id 副本不碰；恢复同理', async () => {
@@ -407,6 +421,29 @@ describe('同 id 在两个项目里各有一份', () => {
     expect((await copyIn(e, undefined))!.status).toBe('active')
     expect((await copyIn(e, OTHER_WS))!.status).toBe('active')
     expect(deletedViewSchema.parse(await e.readView('deleted')).items).toEqual([])
+  })
+})
+
+describe('换层先落盘、界面还停在原来那一层时删除', () => {
+  // 另一个宿主或标签页先把这条提升到全局，这边的页面还没换成最新内容，按原来的项目层发删除
+  const own = { kind: 'workspace', workspacePath: SESSION_WS } as const
+
+  it('提升完成后在原项目层删除：回 stale 不说已删掉，全局那份照旧在用', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_pf', name: '己', scope: 'workspace', workspacePath: SESSION_WS }))
+    ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_pf', layer: own }))
+    const body = err(await e.run({ cmd: 'forget', memoryId: 'mem_pf', layer: own }))
+    expect(body).toMatchObject({ code: 'stale', memoryIds: ['mem_pf'] })
+    expect(await e.store.get('mem_pf')).toMatchObject({ scope: 'global', status: 'active' })
+  })
+
+  it('含密钥的记忆提升完成后在原项目层彻底删除：回 stale，全局那份不删', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_ph', name: '部署凭证', content: `token ${FAKE_SECRET.sk}`, scope: 'workspace', workspacePath: SESSION_WS }))
+    ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_ph', layer: own }))
+    const body = err(await e.run({ cmd: 'hard-delete', memoryId: 'mem_ph', layer: own }))
+    expect(body).toMatchObject({ code: 'stale', memoryIds: ['mem_ph'] })
+    expect(await e.store.get('mem_ph')).toMatchObject({ scope: 'global', status: 'active' })
   })
 })
 

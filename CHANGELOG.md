@@ -466,6 +466,10 @@ All notable changes to this project are documented here. The format follows
 - `memory_health` presented how many memories the last checkup covered as if
   it had checked them just now. It now says the figures come from the last
   checkup.
+- Deleting a memory from a page that had not yet caught up with a promotion
+  or a move made elsewhere said the memory might have been deleted elsewhere,
+  although a copy of it still existed in another scope. It now says the
+  memory was just changed or moved elsewhere and deletes nothing.
 
 ## [0.2.0] - 2026-11-21
 
