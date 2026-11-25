@@ -551,7 +551,7 @@ describe('memory_save update：读到目标之后、写入之前目标被别处�
     vi.restoreAllMocks()
     const loc = (await store.locate('mem_race', { workspacePath: '/proj' }))!
     expect(loc.record.content).toBe('这个会话的新状态')
-    const versions = await store.history.list(layerOf(loc), 'mem_race')
+    const { versions } = await store.history.list(layerOf(loc), 'mem_race')
     expect(versions.map(v => v.record.content)).toEqual(['旧正文', '别的会话的新状态'])
     expect(versions.every(v => v.endedAt >= v.startedAt)).toBe(true)
   })

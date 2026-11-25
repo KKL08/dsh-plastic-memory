@@ -1,4 +1,4 @@
-import { byVersionEnd, freeVersionId, type HistoryLayer, type HistoryVersion, type VersionHistory } from '../../src/storage/history.ts'
+import { byVersionEnd, freeVersionId, type HistoryLayer, type HistoryVersion, type VersionHistory, type VersionListing, type VersionRead } from '../../src/storage/history.ts'
 
 /** 没有磁盘的实现（内存表配它）：语义同磁盘上的实现。 */
 export class InMemoryVersionHistory implements VersionHistory {
@@ -8,9 +8,20 @@ export class InMemoryVersionHistory implements VersionHistory {
     return `${layer.dir}\n${memoryId}`
   }
 
-  async list(layer: HistoryLayer, memoryId: string): Promise<HistoryVersion[]> {
-    return structuredClone(this.versions.get(this.key(layer, memoryId)) ?? []).sort(byVersionEnd)
+  /** 内存里没有读不出的版本：总是读全。 */
+  async list(layer: HistoryLayer, memoryId: string): Promise<VersionListing> {
+    const versions = structuredClone(this.versions.get(this.key(layer, memoryId)) ?? []).sort(byVersionEnd)
       .map(v => (v.mergedFrom !== undefined || v.record.id === memoryId ? v : { ...v, mergedFrom: v.record.id }))
+    return { versions, isComplete: true }
+  }
+
+  async read(layer: HistoryLayer, memoryId: string, versionId: string): Promise<VersionRead> {
+    const version = (await this.list(layer, memoryId)).versions.find(v => v.versionId === versionId)
+    return version === undefined ? { kind: 'missing' } : { kind: 'found', version }
+  }
+
+  async countVersions(dir: string, memoryId: string): Promise<number | undefined> {
+    return (this.versions.get(this.key({ dir }, memoryId)) ?? []).length
   }
 
   async write(layer: HistoryLayer, version: HistoryVersion): Promise<void> {

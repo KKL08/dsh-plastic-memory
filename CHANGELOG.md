@@ -9,6 +9,14 @@ All notable changes to this project are documented here. The format follows
 ### Added
 - `memory_save` can record when a fact happened or held true, preserving the
   precision and time zone supplied by the user.
+- `memory_search` can show a memory's past versions: give its `id` with
+  `history: true` to list them, newest first, with when each ended and why it
+  changed, or with `version` to read one in full, secrets masked as in other
+  results. Search results say how many past versions a memory has, when it has
+  any. `query` is no longer required; a search gives `query`, `types` or `id`,
+  and a combination that does not fit says which parameters conflict. When
+  some past versions cannot be read, the list says so and shows the ones it
+  could read.
 - `memory_search` can search past conversations in the current project, including
   content never saved as a memory, and return quoted messages with nearby context.
   Each message includes a reference for `memory_source` to expand it with the

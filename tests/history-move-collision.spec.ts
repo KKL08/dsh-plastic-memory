@@ -45,6 +45,6 @@ it('并进目标层时另一个写者正好写下同一个版本 id：三版都�
   race.write = () => history.write(b, version(`${VERSION}-02`, '另一个写者刚写的'))
   await history.move(a.dir, b.dir, 'mem_x')
   expect(race.write).toBeUndefined()
-  expect((await history.list(b, 'mem_x')).map(v => v.record.content).sort()).toEqual(['另一个写者刚写的', '源头那版', '目标层原有的'].sort())
+  expect((await history.list(b, 'mem_x')).versions.map(v => v.record.content).sort()).toEqual(['另一个写者刚写的', '源头那版', '目标层原有的'].sort())
   expect(await history.memoryIds(a.dir)).toEqual([])
 })

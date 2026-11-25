@@ -362,7 +362,7 @@ async function restoreOwnWrites(entry: UndoableEntry, rule: UndoRule, allow: boo
       inFlight = rec
       // 主条的历史版本和记忆文件在同一个写入段里动：别的写入插不进两步中间
       const r = await deps.store.writeSection(async () => {
-        if (rec === main) putVersionBack = await withdrawVersion(deps.store, rec, snapshot.id)
+        if (rec === main) putVersionBack = await withdrawVersion(deps.store, rec, snapshot.id, deps.log)
         const restored = await deps.snapshots.restore(snapshot, [rec.id], deps.store, { target: 'exact', overwrite: isOwn(rec), now })
         // 没恢复成：版本在同一段里放回去，别的写入看不到缺了它的那一刻
         if (rec === main && restored.restored.length === 0) {

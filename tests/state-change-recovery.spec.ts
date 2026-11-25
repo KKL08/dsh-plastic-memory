@@ -93,7 +93,7 @@ async function settled(snapshotTable: InMemoryKvTable<MemorySnapshot>) {
   // 新实例进一次写入段（改一条不相干的记忆），触发补做
   await next.store.update({ id: 'mem_other', workspacePath: undefined }, r => ({ ...r, summary: `${r.summary}。` }), global)
   const found = (await next.store.locate('mem_a', global))!
-  return { content: found.record.content, versions: (await next.store.history.list(layerOf(found), 'mem_a')).map(v => v.record.content) }
+  return { content: found.record.content, versions: (await next.store.history.list(layerOf(found), 'mem_a')).versions.map(v => v.record.content) }
 }
 
 describe('状态变化中途进程退出', () => {
@@ -145,7 +145,7 @@ describe('状态变化中途进程退出', () => {
     const next = open(snapshotTable)
     await next.store.update({ id: 'mem_other', workspacePath: undefined }, r => ({ ...r, summary: `${r.summary}。` }), global)
     const found = (await next.store.locate('mem_a', global))!
-    expect((await next.store.history.list(layerOf(found), 'mem_a')).map(v => [v.record.content, v.writes.map(w => w.reason)])).toEqual([['第一版', [marker]]])
+    expect((await next.store.history.list(layerOf(found), 'mem_a')).versions.map(v => [v.record.content, v.writes.map(w => w.reason)])).toEqual([['第一版', [marker]]])
   })
 
   it('补做重复执行不会多留一版', async () => {
@@ -174,7 +174,7 @@ describe('历史版本跟着记忆走，中途进程退出', () => {
     const [globalLayer, wsLayer] = layers()
     return Promise.all([[globalLayer!, global], [wsLayer!, inWs]] as const).then(pairs => Promise.all(pairs.map(async ([dir, scope]) => [
       (await w.store.locate('mem_a', scope)) !== undefined,
-      (await w.store.history.list({ dir, loc: { scope: 'global' } }, 'mem_a')).map(v => v.record.content),
+      (await w.store.history.list({ dir, loc: { scope: 'global' } }, 'mem_a')).versions.map(v => v.record.content),
     ] as const)))
   }
   async function fresh() {
@@ -284,8 +284,8 @@ describe('历史版本跟着记忆走，中途进程退出', () => {
     alive()
     const next = open(snapshotTable)
     await touchOther(next)
-    expect((await next.store.history.list({ dir: globalLayer, loc: { scope: 'global' } }, 'mem_a')).map(v => v.record.content)).toContain('全局另一条的旧版')
-    expect(await next.store.history.list({ dir: wsLayer, loc: { scope: 'global' } }, 'mem_a')).toEqual([])
+    expect((await next.store.history.list({ dir: globalLayer, loc: { scope: 'global' } }, 'mem_a')).versions.map(v => v.record.content)).toContain('全局另一条的旧版')
+    expect((await next.store.history.list({ dir: wsLayer, loc: { scope: 'global' } }, 'mem_a')).versions).toEqual([])
   })
 
   it('彻底删除时在哪一次写调用之前退出，恢复后只要记忆已经不在，历史目录也不在', async () => {

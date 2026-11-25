@@ -217,7 +217,10 @@ export class MemoryStore {
 
   /** scope → 目录，外加找项目目录时读不出的目录说明（见 MemoryTable.workspaceDirs）。缺省读全部目录（global + 全部有标记的 workspace 目录）。 */
   private async dirsOf(scope: QueryScope | undefined): Promise<{ dirs: string[]; directoryNotes: DirectoryNote[] }> {
-    if (scope === undefined) return { dirs: [this.table.globalDir, ...(await this.table.listWorkspaceDirs()).entries.map(e => e.dir)], directoryNotes: [] }
+    if (scope === undefined) {
+      const listing = await this.table.listWorkspaceDirs()
+      return { dirs: [this.table.globalDir, ...listing.entries.map(e => e.dir)], directoryNotes: listing.directoryNotes }
+    }
     if (scope.kind === 'global') return { dirs: [this.table.globalDir], directoryNotes: [] }
     if (scope.kind === 'workspace') return this.table.workspaceDirs(scope.workspacePath)
     const own = scope.workspacePath === undefined ? { dirs: [], directoryNotes: [] } : await this.table.workspaceDirs(scope.workspacePath)

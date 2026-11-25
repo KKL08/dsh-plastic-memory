@@ -341,7 +341,7 @@ async function runScale(selected: string): Promise<void> {
       if (visible.records.length !== count + GLOBAL_COUNT) throw new Error('在用记忆数量不符')
       const historyIds = await history.memoryIds(dir)
       let versions = 0
-      for (const id of historyIds) versions += (await history.list(layer, id)).length
+      for (const id of historyIds) versions += (await history.list(layer, id)).versions.length
       const related = visible.records.filter(r => r.record.related?.length).length
       const premises = visible.records.filter(r => r.record.premises?.length).length
       if (historyIds.length !== count * HISTORY_SHARE || versions !== count * HISTORY_SHARE * VERSIONS_PER_MEMORY
@@ -388,7 +388,7 @@ async function runScale(selected: string): Promise<void> {
       item = '核验状态变化留档'
       // 预热轮改的是 records[0]，计时轮从 records[1] 起：两边各查一条
       for (const target of [records[0], records[1]]) {
-        if ((await history.list(layer, target.id)).length <= VERSIONS_PER_MEMORY) {
+        if ((await history.list(layer, target.id)).versions.length <= VERSIONS_PER_MEMORY) {
           throw new Error(`状态变化没有给 ${target.id} 留下新历史版本`)
         }
       }

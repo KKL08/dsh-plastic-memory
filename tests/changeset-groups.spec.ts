@@ -348,7 +348,7 @@ describe('并成版本', () => {
     expect(r.outcomes.map(o => o.kind)).toEqual(['applied'])
     return { current, old }
   }
-  const shape = (versions: Awaited<ReturnType<typeof historyWithMerged>>) => versions.map(v => [v.kind, v.mergedFrom ?? null, v.record.content, v.endedAt])
+  const shape = ({ versions }: Awaited<ReturnType<typeof historyWithMerged>>) => versions.map(v => [v.kind, v.mergedFrom ?? null, v.record.content, v.endedAt])
 
   it('旧状态那条软删并记下去向，当前页不写；读当前页的历史能看到它和它自己的历史，标着并入自它', async () => {
     const w = world()
@@ -391,7 +391,7 @@ describe('并成版本', () => {
     const { current, old } = await versioned(w)
     expect(await w.store.restoreArchived(old, { at: at(old), now: T0 + 6000 })).toBe(true)
     expect((await now(w, old)).mergedInto).toBeUndefined()
-    expect(await historyWithMerged(w.store, (await w.store.locate(current.id, at(current)))!)).toEqual([])
+    expect((await historyWithMerged(w.store, (await w.store.locate(current.id, at(current)))!)).versions).toEqual([])
   })
 
   it('当前页在判断之后变了：不并', async () => {

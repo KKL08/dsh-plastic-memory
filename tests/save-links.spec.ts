@@ -96,7 +96,7 @@ const linkOnly = (e: Env, id: string, partial: object, opts?: Parameters<Env['sa
 const linkEntries = async (e: Env) => (await e.decisions.listSettled()).filter(d => d.kind === 'link')
 async function versionsOf(e: Env, id: string): Promise<HistoryVersion[]> {
   const found = (await e.store.locate(id, scopeAt(WS)))!
-  return e.store.history.list(layerOf(found), id)
+  return (await e.store.history.list(layerOf(found), id)).versions
 }
 /** 下一次落盘之前，别的程序先把这条记忆的文件改成 edit 后的样子（写入段挡不住的手改）。 */
 function handEditBeforeNextPut(e: Env, id: string, edit: (r: MemoryRecord) => MemoryRecord) {
@@ -535,7 +535,7 @@ describe('被前提引用的版本', () => {
     await create(e, { type: 'decision', premises: [page.id] })
     updated(await change('第三版'))
     const found = (await e.store.locate(page.id, { kind: 'global' }))!
-    expect((await e.store.history.list(layerOf(found), page.id)).map(v => v.record.content)).toEqual(['第一版', '第二版'])
+    expect((await e.store.history.list(layerOf(found), page.id)).versions.map(v => v.record.content)).toEqual(['第一版', '第二版'])
   })
 
   it('引用它的决定已被取代、留在归档里：照样算', async () => {

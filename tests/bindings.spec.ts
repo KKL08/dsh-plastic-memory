@@ -258,10 +258,12 @@ describe('memory_search 绑定', () => {
     expect(section).toContain('- match 缺省为 any，返回按档位排好的全部命中；设为 all 只返回同时含全部关键词的记忆')
   })
 
-  it('(a) 合法参数过、缺必填（query）拒', async () => {
+  it('(a) 合法参数过、类型不对拒；query 不必填，什么都没给由执行器回参数错误', async () => {
     const tool = await seededTool()
     expect(validateJsonSchemaValue(schemaOf(tool), { query: 'auth' })).toEqual([])
-    expect(validateJsonSchemaValue(schemaOf(tool), {}).length).toBeGreaterThan(0)
+    expect(validateJsonSchemaValue(schemaOf(tool), { query: 1 }).length).toBeGreaterThan(0)
+    expect(validateJsonSchemaValue(schemaOf(tool), {})).toEqual([])
+    expect((await tool.execute({}, exec) as { noteCode?: string }).noteCode).toBe('invalid-args')
   })
 
   it('(b) 命中结果无损 JSON', async () => {

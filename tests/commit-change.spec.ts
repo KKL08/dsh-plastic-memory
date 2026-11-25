@@ -25,7 +25,7 @@ async function seeded(w: ReturnType<typeof world>, partial: Partial<MemoryRecord
   return (await w.store.get(rec.id, { workspacePath: rec.workspacePath }))!
 }
 const versionsOf = async (w: ReturnType<typeof world>, rec: MemoryRecord) =>
-  w.store.history.list(layerOf((await w.store.locate(rec.id, { workspacePath: rec.workspacePath }))!), rec.id)
+  (await w.store.history.list(layerOf((await w.store.locate(rec.id, { workspacePath: rec.workspacePath }))!), rec.id)).versions
 
 describe('落盘原语', () => {
   it('没有会话也能改全局记忆：不要确认码，出处原样不动，记下是谁改的', async () => {

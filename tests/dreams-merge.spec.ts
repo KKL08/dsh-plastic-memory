@@ -196,7 +196,7 @@ describe('合并', () => {
     await store.history.write(layerOf(located), { versionId: 'v-early', record: { ...b, content: '更早的说法' }, extras: {}, startedAt: NOW - 20_000, endedAt: NOW - 9_000, kind: STATE_CHANGE_VERSION, writes: [] })
     replies = [[MERGE_AB]]
     expect((await dream()).kind).toBe('completed')
-    const shape = (versions: Awaited<ReturnType<typeof historyWithMerged>>) => versions.map(v => [v.mergedFrom ?? null, v.record.content])
+    const shape = ({ versions }: Awaited<ReturnType<typeof historyWithMerged>>) => versions.map(v => [v.mergedFrom ?? null, v.record.content])
     const before = shape(await historyWithMerged(store, (await store.locate('mem_a', GLOBAL))!))
     expect(before).toEqual([['mem_b', '更早的说法']])
     clock = NOW + RETENTION_MS + 60_000

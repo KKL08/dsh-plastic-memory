@@ -149,7 +149,7 @@ describe('新旧版本共用一个记忆根（0.2.0 发布包）', () => {
     expect(await exists(join(wsDir, HISTORY_DIR, rec.id))).toBe(true)
     await current().maintain([wsDir])
     expect(await exists(join(wsDir, HISTORY_DIR, rec.id))).toBe(false)
-    expect((await current().history.list({ dir: globalDir, loc: { scope: 'global' } }, rec.id)).map(v => v.record.content)).toEqual([rec.content])
+    expect((await current().history.list({ dir: globalDir, loc: { scope: 'global' } }, rec.id)).versions.map(v => v.record.content)).toEqual([rec.content])
   })
 
   it('0.2.0 丢掉 source 里它不认识的子字段，所以锚的新字段放在出处清单里', async () => {

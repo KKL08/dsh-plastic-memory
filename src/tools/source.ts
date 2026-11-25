@@ -158,7 +158,7 @@ async function locateAnchor(args: SourceArgs & { memoryId: string }, context: So
   const anchors: ListedAnchor[] = anchorsOf(record).map(anchor => ({ anchor }))
   try {
     if (found) {
-      const versions = await deps.store.history.list(layerOf(found), args.memoryId)
+      const { versions } = await deps.store.history.list(layerOf(found), args.memoryId)
       for (const version of versions.sort(byVersionEnd).reverse()) {
         anchors.push(...anchorsOf(version.record).map(anchor => ({ anchor, fromVersion: version.versionId })))
       }

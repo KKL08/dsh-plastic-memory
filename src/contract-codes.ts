@@ -182,6 +182,14 @@ export type SearchNoteCode =
                           // 首次搜索有候选（经类型过滤、副本取舍、状态与有效期过滤）就算类型存在，不出此码。
                           // 结果只带一个码，互斥、按此顺序取第一个成立的：no-workspace → types-no-records → all-no-hit → or-fallback / low-coverage / substring-fallback；
                           // 不带码的空结果只在类型有记忆、关键词没对上时出现（all 一条都没滤掉时同样不带码）
+  | 'invalid-args'        // 参数组合不合法：一个都没给（query、types、id）、互斥的两个同时给了、history 或 version 缺 id、id 没配 history 或 version、
+                          // version 不合版本标识的写法。说明里写明是哪两个参数冲突或哪个参数不对；不读任何文件
+  | 'memory-not-found'    // 按 id 列历史或读一版时，在范围里找不到这条记忆，或它在最近删除里（软删期间历史模式读不到）
+  | 'no-history'          // 按 id 列历史：这条记忆的历史读全了，一版都没有
+  | 'history-incomplete'  // 按 id 列历史：有读不出的部分（历史目录列不出、版本文件读不出或解析不了、找并进来的记忆时有记忆文件解析不了），
+                          // 结果给出读到的几版，不说没有；按版本读时没找到这一版、而历史又读不全，也用这个码
+  | 'version-not-found'   // 按版本读：历史读全了，没有这一版（含列出之后被疏化、撤销删掉的）
+  | 'version-unreadable'  // 按版本读：这一版的文件在，但读不出或解析不了
 
 /** 表示命中弱的检索说明码：说明里带换词再搜的建议与逐词命中条数。 */
 export const WEAK_SEARCH_NOTE_CODES = ['low-coverage', 'substring-fallback'] as const satisfies readonly SearchNoteCode[]

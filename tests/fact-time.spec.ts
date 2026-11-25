@@ -85,7 +85,7 @@ describe('事实时间与有效期', () => {
     for (const key of ['name', 'content', 'summary', 'tags', 'type', 'createdAt'] as const) expect(result.record[key]).toEqual(created.record[key])
     expect(result.record.lastChange?.kind).toBe('state-change')
     const located = await d.store.locate(result.record.id, { workspacePath: '/proj' })
-    const versions = await d.store.history.list(layerOf(located!), result.record.id)
+    const { versions } = await d.store.history.list(layerOf(located!), result.record.id)
     expect(versions[0]!.record.factTime).toBe('2024')
   })
   it('更新省略事实时间保留原值，空字符串清除，快照恢复原值', async () => {
