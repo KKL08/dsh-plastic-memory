@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DatabaseSync } from 'node:sqlite'
 import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
@@ -327,6 +327,105 @@ describe('待建队列和覆盖情况', () => {
     store.startSession(gen, 's2', { cwd: '/w/app', isSubagent: false })
     store.enqueue(gen, ['s2', 's9'])
     expect(store.coverage(gen)).toEqual({ sessions: 1, queued: 2, coveredUntil: 7000 })
+  })
+})
+
+describe('没变就不写', () => {
+  /** 一段操作里开了几次写事务，连同它的返回值。 */
+  function counted<T>(action: () => T): { result: T; transactions: number } {
+    const exec = vi.spyOn(DatabaseSync.prototype, 'exec')
+    try {
+      const result = action()
+      return { result, transactions: exec.mock.calls.filter(([sql]) => sql === 'BEGIN IMMEDIATE').length }
+    } finally {
+      exec.mockRestore()
+    }
+  }
+  /** 用另一个连接直接看会话那一行。 */
+  function sessionRow(gen: number, sessionId: string) {
+    const raw = new DatabaseSync(storePath())
+    try {
+      return raw.prepare('SELECT revision, cwd, is_subagent, is_open, is_removed FROM sessions WHERE gen = ? AND session_id = ?').get(gen, sessionId)
+    } finally {
+      raw.close()
+    }
+  }
+
+  it('准备：记的会话日志位置和正在写的那一代规则都没变，不开写事务，返回当前状态', () => {
+    const { store } = open()
+    const { gen } = begin(store)
+    const { result, transactions } = counted(() => store.prepare(V1, 'dict-1', HOME))
+    expect(transactions).toBe(0)
+    expect(result).toEqual(store.state())
+    expect(result).toMatchObject({ write: { gen } })
+  })
+
+  it('准备：库在但还没有任何一代、规则变了、会话日志位置变了，都照常在写事务里建', () => {
+    const { store } = open()
+    // 先让库文件和表建出来，只数准备这一步
+    expect(store.sessionIds(1)).toEqual([])
+    const fresh = counted(() => store.prepare(V1, 'dict-1', HOME))
+    expect(fresh.transactions).toBe(1)
+    expect(fresh.result).toMatchObject({ status: 'building', write: { gen: 1 } })
+    store.completeBuild(1)
+    const changed = counted(() => store.prepare({ ...V1, intake: 2 }, 'dict-1', HOME))
+    expect(changed.transactions).toBe(1)
+    expect(changed.result).toMatchObject({ status: 'rebuilding', read: { gen: 1 }, write: { gen: 2 } })
+    const moved = counted(() => store.prepare({ ...V1, intake: 2 }, 'dict-1', '/sessions/other'))
+    expect(moved.transactions).toBe(1)
+    expect(moved.result).toMatchObject({ status: 'building', read: { gen: 3 }, write: { gen: 3 } })
+  })
+
+  it('开始收会话：已有这个会话、工作目录和是不是子代理、开没开都没变，不开写事务，返回已有进度', () => {
+    const { store } = open()
+    const { gen, revision, commit } = begin(store)
+    commit([seg(1, 'alpha')], 1)
+    store.startSession(gen, 's1', { cwd: '/w/app', isSubagent: false, isOpen: true })
+    const { result, transactions } = counted(() => store.startSession(gen, 's1', { cwd: '/w/app', isSubagent: false, isOpen: true }))
+    expect(transactions).toBe(0)
+    expect(result).toEqual({ watermark: 1, revision, isRemoved: false })
+  })
+
+  it('别的连接正拿着写锁：没变的会话照常返回进度，不报忙', () => {
+    const { store } = open()
+    const { gen, revision } = begin(store)
+    const other = new DatabaseSync(storePath())
+    other.exec('BEGIN IMMEDIATE')
+    try {
+      expect(store.prepare(V1, 'dict-1', HOME)).toMatchObject({ write: { gen } })
+      expect(store.startSession(gen, 's1', { cwd: '/w/app', isSubagent: false })).toEqual({ watermark: -1, revision, isRemoved: false })
+    } finally {
+      other.exec('ROLLBACK')
+      other.close()
+    }
+  })
+
+  it.each([
+    ['工作目录', { cwd: '/w/other', isSubagent: false }, { cwd: '/w/other', is_subagent: 0, is_open: 0 }],
+    ['是不是子代理', { cwd: '/w/app', isSubagent: true }, { cwd: '/w/app', is_subagent: 1, is_open: 0 }],
+    ['开没开', { cwd: '/w/app', isSubagent: false, isOpen: true }, { cwd: '/w/app', is_subagent: 0, is_open: 1 }],
+  ] as const)('开始收会话：%s变了，照常写一次，进度不变', (_what, info, row) => {
+    const { store } = open()
+    const { gen, revision, commit } = begin(store)
+    commit([seg(1, 'alpha')], 1)
+    const { result, transactions } = counted(() => store.startSession(gen, 's1', info))
+    expect(transactions).toBe(1)
+    expect(result).toEqual({ watermark: 1, revision, isRemoved: false })
+    expect(sessionRow(gen, 's1')).toMatchObject({ ...row, revision, is_removed: 0 })
+  })
+
+  it('开始收会话：没收过的、移出过的，照常在写事务里从头收', () => {
+    const { store } = open()
+    const { gen, revision } = begin(store)
+    const added = counted(() => store.startSession(gen, 's2', { cwd: '/w/app', isSubagent: false }))
+    expect(added.transactions).toBe(1)
+    expect(added.result).toMatchObject({ watermark: -1, isRemoved: false })
+    store.removeSession('s1')
+    const back = counted(() => store.startSession(gen, 's1', { cwd: '/w/app', isSubagent: false }))
+    expect(back.transactions).toBe(1)
+    expect(back.result).toMatchObject({ watermark: -1, isRemoved: false })
+    expect(back.result!.revision).not.toBe(revision)
+    expect(sessionRow(gen, 's1')).toMatchObject({ is_removed: 0 })
   })
 })
 

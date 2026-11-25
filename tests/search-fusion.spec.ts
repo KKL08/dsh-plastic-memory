@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { existsSync } from 'node:fs'
+import { DatabaseSync } from 'node:sqlite'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -126,6 +127,16 @@ const run = async (deps: SearchToolDeps, query = '写锁') => {
 const memoryOnly = (deps: SearchToolDeps, query = '写锁') =>
   executeSearch({ query }, fakeExec(), { ...deps, searchSource: () => 'memory', memoryQuotes: undefined, dialogue: undefined })
 const occurrences = (text: string, needle: string) => text.split(needle).length - 1
+/** 一段操作里开了几次写事务。 */
+async function writeTransactions(action: () => Promise<unknown>): Promise<number> {
+  const exec = vi.spyOn(DatabaseSync.prototype, 'exec')
+  try {
+    await action()
+    return exec.mock.calls.filter(([sql]) => sql === 'BEGIN IMMEDIATE').length
+  } finally {
+    exec.mockRestore()
+  }
+}
 
 /** 一段渲染好的原话里每条消息的正文：去掉时间、说话人、引用和节选说明、续行缩进，缺段标记处拆开。 */
 function bodiesOf(text: string | undefined): string[] {
@@ -221,6 +232,26 @@ describe('每次检索前的追库', () => {
     expect(host.readSessionLog.mock.calls.map(c => c[0])).toContain('a')
     expect(commits).not.toHaveBeenCalled()
     expect(dequeues).not.toHaveBeenCalled()
+  })
+
+  it('当前会话已收录、日志没变：再检索一次不开写事务', async () => {
+    const { deps, host } = await setup([])
+    host.contextOf.mockResolvedValue({ workspacePath: '/proj', session: { id: 'a', lastSeq: 42 } })
+    await run(deps)
+    expect(await writeTransactions(() => run(deps))).toBe(0)
+  })
+
+  it('当前会话上次收的时候没开着：这次照常写一次记下开着，之后再检索不再写', async () => {
+    const { deps, host } = await setup([])
+    // 先检索一次进入稳态：后台建库时会话 a 没开着
+    await run(deps)
+    const state = db.state()
+    if (state.status === 'none') throw new Error('应当已有库')
+    expect(db.openSessionIds(state.write.gen)).not.toContain('a')
+    host.contextOf.mockResolvedValue({ workspacePath: '/proj', session: { id: 'a', lastSeq: 42 } })
+    expect(await writeTransactions(() => run(deps))).toBe(1)
+    expect(db.openSessionIds(state.write.gen)).toContain('a')
+    expect(await writeTransactions(() => run(deps))).toBe(0)
   })
 
   it('这次要对账时，对账和原话放行共用同一次会话清单', async () => {
