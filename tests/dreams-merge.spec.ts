@@ -418,6 +418,32 @@ describe('撤销过的结论', () => {
     expect((await get('mem_d')).status).toBe('active')
   })
 
+  it('组里有一步的回执还没记进账本：整批撤销只撤得到记上的那几步，这一组不记成撤销过的结论', async () => {
+    // 账本里一记被合并方的回执就失败；那一刻起撤回存活方、恢复被合并方也写盘失败（回执补不上、组撤不回）
+    const table = new InMemoryKvTable<PendingDecision>()
+    const put = table.put.bind(table)
+    decisions = new PendingDecisionsStore(table, lock)
+    store.registerSteps(ledgerSteps(decisions, quiet))
+    const [a] = await seed(THREE)
+    table.put = async (id, entry) => {
+      if (entry.changes?.some(c => c.memoryId === 'mem_b') === true) {
+        fsFault.failWrite = (_path, text) => (text.includes('id: mem_a') && text.includes(a!.content)) || (text.includes('id: mem_b') && text.includes('status: active'))
+        throw new Error('账本写不进去')
+      }
+      return put(id, entry)
+    }
+    replies = [[MERGE_AB]]
+    expect((await dream()).kind).toBe('failed')
+    expect((await entryOf('run_1'))?.changes?.map(c => c.memoryId)).toEqual(['mem_a'])
+    expect((await get('mem_b')).status).toBe('deleted')
+    // 记忆文件写得进去了，账本仍记不上被合并方的回执
+    fsFault.failWrite = undefined
+    expect(await undo('run_1')).toMatchObject({ kind: 'undone' })
+    expect(stable(await get('mem_a'))).toEqual(stable(a!))
+    expect((await get('mem_b')).status).toBe('deleted')
+    expect([...(await dreams.undoneMerges(GLOBAL))!]).toEqual([])
+  })
+
   it('单撤合并组里的一条：整组撤回，同样记下撤销过的结论', async () => {
     const [a, b] = await seed(THREE)
     replies = [[MERGE_AB]]
@@ -584,6 +610,75 @@ describe('中断', () => {
     expect((await decisions.withOpenGroups()).map(e => e.id)).toEqual(['run_1'])
     expect((await entryOf('run_1'))?.changes?.map(c => c.memoryId)).toEqual(['mem_a'])
     fsFault.failWrite = undefined
+    replies = []
+    expect((await dream()).kind).toBe('completed')
+    expect(stable(await get('mem_a'))).toEqual(stable(a!))
+    expect(stable(await get('mem_b'))).toEqual(stable(b!))
+    expect(await decisions.withOpenGroups()).toEqual([])
+  })
+
+  it('下次运行开头仍撤不干净：组的标记留着，这次按出错收，不问模型、不做新的合并；撤得动之后再撤干净', async () => {
+    const [a, b, c] = await seed(THREE)
+    // 撤回存活方（写回原来的正文）一直写盘失败
+    fsFault.failWrite = (_path, text) => isForgetWrite(text) || (text.includes('id: mem_a') && text.includes(a!.content))
+    replies = [[MERGE_AB]]
+    expect((await dream()).kind).toBe('failed')
+    fsFault.failWrite = (_path, text) => text.includes('id: mem_a') && text.includes(a!.content)
+    replies = [[{ ...MERGE_AB, merge: ['mem_c'], content: '另一份合并稿' }]]
+    expect((await dream()).kind).toBe('failed')
+    expect(prompts).toHaveLength(1)
+    expect(stable(await get('mem_c'))).toEqual(stable(c!))
+    expect((await get('mem_a')).content).toBe(FUSED.content)
+    expect((await decisions.withOpenGroups()).map(e => e.id)).toEqual(['run_1'])
+    fsFault.failWrite = undefined
+    replies = []
+    expect((await dream()).kind).toBe('completed')
+    expect(stable(await get('mem_a'))).toEqual(stable(a!))
+    expect(stable(await get('mem_b'))).toEqual(stable(b!))
+    expect(await decisions.withOpenGroups()).toEqual([])
+  })
+
+  it('另一个范围里有撤不干净的半个组：不挡这个范围的运行', async () => {
+    const [a] = await seed(THREE)
+    await seed([['mem_p', '项目的发版'], ['mem_q', '项目的打 tag']], { scope: 'workspace', workspacePath: WS })
+    fsFault.failWrite = (_path, text) => isForgetWrite(text) || (text.includes('id: mem_a') && text.includes(a!.content))
+    replies = [[MERGE_AB]]
+    expect((await dream()).kind).toBe('failed')
+    replies = [[{ ...MERGE_AB, keep: 'mem_p', merge: ['mem_q'] }]]
+    expect((await dream(PROJECT)).kind).toBe('completed')
+    expect((await get('mem_q', PROJECT)).status).toBe('deleted')
+    expect((await decisions.withOpenGroups()).map(e => e.id)).toEqual(['run_1'])
+  })
+
+  it('组里已提交那一步的回执还没记进账本：收尾不按空回执关组，这次按出错收；回执补记之后撤干净', async () => {
+    // 账本里带回执的写入一律失败（回执记不上，等操作日志补做）
+    const table = new InMemoryKvTable<PendingDecision>()
+    const put = table.put.bind(table)
+    let isLedgerDown = true
+    table.put = async (id, entry) => {
+      if (isLedgerDown && (entry.changes?.length ?? 0) > 0) throw new Error('账本写不进去')
+      return put(id, entry)
+    }
+    decisions = new PendingDecisionsStore(table, lock)
+    store.registerSteps(ledgerSteps(decisions, quiet))
+    const [a, b] = await seed(THREE)
+    // 存活方写成了、回执没记上；撤回它也写盘失败
+    fsFault.failWrite = (_path, text) => text.includes('id: mem_a') && text.includes(a!.content)
+    replies = [[MERGE_AB]]
+    expect((await dream()).kind).toBe('failed')
+    expect((await get('mem_a')).content).toBe(FUSED.content)
+    expect(journal.pending().length).toBeGreaterThan(0)
+    // 撤得动了，但回执还没补记：手里的回执是空的，不能当撤干净了
+    fsFault.failWrite = undefined
+    replies = [[MERGE_AB]]
+    expect((await dream()).kind).toBe('failed')
+    expect(prompts).toHaveLength(1)
+    expect((await decisions.withOpenGroups()).map(e => e.id)).toEqual(['run_1'])
+    expect((await get('mem_a')).content).toBe(FUSED.content)
+    // 账本恢复、操作日志补记回执之后（重启进程），下次运行开头撤干净
+    isLedgerDown = false
+    store = new MemoryStore(new FileTable({ root, stats: new InMemoryBatchKvTable(), log: quiet, lock, journal, now: () => clock }), quiet, new InMemoryBatchKvTable())
+    store.registerSteps(ledgerSteps(decisions, quiet))
     replies = []
     expect((await dream()).kind).toBe('completed')
     expect(stable(await get('mem_a'))).toEqual(stable(a!))

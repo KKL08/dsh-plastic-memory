@@ -267,6 +267,8 @@ async function readAndCheck(op: ChangeOp, opts: ApplyOptions, deps: ChangesetDep
 /**
  * 把以前中断留下的半个组撤掉：进写入段（操作日志的补做先跑完，提交了的那一步的回执补齐），带着没做完的组的条目逐条占住
  * （占不到的是别人正在跑，不碰），把组内已做的按回执逆序撤回，撤干净的拿掉标记。own 是调用方自己已经占着的那条。
+ * 组里还有回执等着补记的（文件已提交、补做还没成）不动、标记留着：手里的回执不全，撤了也撤不干净，等补记之后再撤。
+ * 撤回出错的同样留着标记。调用方要知道还剩哪些，之后读 withOpenGroups。
  * 每次应用变更集之前、条目撤销之前、记忆梦境每次运行开头调用。
  */
 export async function settleOpenGroups(deps: ChangesetDeps, opts: { by: string; own?: string }): Promise<void> {
@@ -277,6 +279,7 @@ export async function settleOpenGroups(deps: ChangesetDeps, opts: { by: string; 
       if (release === undefined) continue
       try {
         for (const group of entry.openGroups ?? []) {
+          if (hasPendingReceipts(deps.store, entry.id, group)) continue
           const receipts = (await receiptsOfEntry(deps.decisions, entry.id)).filter(r => r.group === group)
           const left = await rollBack(receipts, { entryId: entry.id, by: opts.by }, deps)
           if (left.kept === undefined) await deps.decisions.closeGroup(entry.id, group)
@@ -290,9 +293,12 @@ export async function settleOpenGroups(deps: ChangesetDeps, opts: { by: string; 
   })
 }
 
-/** 这条条目还有记忆的回执等着补记：操作日志里有记它回执的步骤没做完（文件提交了，记账失败）。 */
-export function hasPendingReceipts(store: Pick<MemoryStore, 'hasPendingStep'>, entryId: string): boolean {
-  return store.hasPendingStep(step => step.kind === CHANGE_RECEIPT_STEP && (step as { entryId?: unknown }).entryId === entryId)
+/** 这条条目（给了 group 就只看这一组）还有记忆的回执等着补记：操作日志里有记它回执的步骤没做完（文件提交了，记账失败）。 */
+export function hasPendingReceipts(store: Pick<MemoryStore, 'hasPendingStep'>, entryId: string, group?: string): boolean {
+  return store.hasPendingStep((step) => {
+    const s = step as { entryId?: unknown; group?: unknown }
+    return step.kind === CHANGE_RECEIPT_STEP && s.entryId === entryId && (group === undefined || s.group === group)
+  })
 }
 
 /** 把一条条目上的回执全部按逆序撤掉（调用方结账没成时用）。分类同整批退。 */

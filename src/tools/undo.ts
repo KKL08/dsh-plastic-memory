@@ -169,8 +169,11 @@ async function undoDreamsRun(entry: UndoableEntry, op: string | undefined, allow
   const label = entry.workspaces?.[0]
   const restored: string[] = []
   if (changes.length > 0) {
-    // 每一组撤完就记它的结论：后面的回执撤不成时，已撤完的组照样记下（它们的回执已拿掉，重试时补不回来）
-    const r = await revertReceipts(entry, changes, allow, context, deps, groupReceipts => noteUndoneMerges(groupReceipts, deps))
+    // 每一组撤完就记它的结论：后面的回执撤不成时，已撤完的组照样记下（它们的回执已拿掉，重试时补不回来）。
+    // 这一组还有回执等着补记的，手里的回执不全、组没撤完，不记
+    const r = await revertReceipts(entry, changes, allow, context, deps, async (groupReceipts) => {
+      if (!hasPendingReceipts(deps.store, entry.id, groupReceipts[0]!.group)) await noteUndoneMerges(groupReceipts, deps)
+    })
     if (!Array.isArray(r)) return r
     restored.push(...r)
   }

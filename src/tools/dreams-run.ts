@@ -404,6 +404,8 @@ export async function runDreams(scope: Scope, opts: DreamsRunOptions, deps: Drea
     try {
       // 4 收尾上次的：撤掉中断留下的半个组，把上次没来得及收的批次条目收掉
       await settleOpenGroups(deps, { by: DREAMS_INITIATOR })
+      // 这个范围还有没撤干净的半个组（撤回出错、回执还等着补记）：这次不往下做（同读不全），按出错收，下次运行开头再撤
+      if (await hasOpenGroupsIn(deps.decisions, scope)) throw new Error('上次中断留下的一组改动还没撤干净，这次不运行')
       if (leftover.length > 0) {
         // 已经收过的（收尾之后、记结果之前退出的）不再收：再收一遍会把补好的整条回执清空
         const open = await deps.decisions.listUnfinishedRuns()
@@ -500,6 +502,12 @@ export async function runDreams(scope: Scope, opts: DreamsRunOptions, deps: Drea
     // 8 放认领
     await claim.release()
   }
+}
+
+/** 账本里还有这个范围的条目带着没做完的组（条目没写范围的也算，宁可这次不跑）。 */
+async function hasOpenGroupsIn(decisions: DreamsRunDeps['decisions'], scope: Scope): Promise<boolean> {
+  const label = ledgerLabel(scope)
+  return (await decisions.withOpenGroups()).some(entry => entry.workspaces === undefined || entry.workspaces.length === 0 || entry.workspaces.includes(label))
 }
 
 /** 这个索引操作不做（要挪的成员变了、改动量放不下）：在写第一个文件之前叫停。 */
