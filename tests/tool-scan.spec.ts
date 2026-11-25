@@ -1056,6 +1056,23 @@ describe('executeScan 垂直冲突按记忆所在项目取指令文件', () => {
     expect(r.notes.map(n => n.code)).not.toContain('baseline-missing')
   })
 
+  it('「全部」体检：发给模型的提示词写明这次检查的是哪个项目，每个项目只拿到自己的指令文件，会话不在的项目也一样', async () => {
+    const calls: string[] = []
+    const llm = verticalWhen({}, calls)
+    const deps = makeDeps({ host: { contextOf: async () => ({ workspacePath: '/proj-a' }), llmOf: () => llm }, instructions: files })
+    await seed(deps)
+    await executeScan({ scope: 'all' }, deps, fakeExec())
+    const forProject = (ws: string) => calls.filter(c => c.includes(`这次检查的是项目 ${ws} 的记忆`))
+    for (const [ws, own, other] of [['/proj-a', 'A：用 pnpm', 'B：用 yarn'], ['/proj-b', 'B：用 yarn', 'A：用 pnpm']] as const) {
+      expect(forProject(ws)).toHaveLength(1)
+      expect(forProject(ws)[0]).toContain(`下面的基线是项目 ${ws} 的指令文件`)
+      expect(forProject(ws)[0]).toContain(own)
+      expect(forProject(ws)[0]).not.toContain(other)
+    }
+    // 全局这一轮不写项目说明
+    expect(calls.filter(c => !c.includes('这次检查的是项目'))).toHaveLength(1)
+  })
+
   it('单个项目体检：对照这个项目的指令文件，和会话在哪个项目无关；全局记忆的垂直冲突不在这里报', async () => {
     const llm = verticalWhen({ mem_b: 'B：用 yarn', mem_g2: '注释用英文' })
     const deps = makeDeps({ host: { contextOf: async () => ({ workspacePath: '/proj-a' }), llmOf: () => llm }, instructions: files })

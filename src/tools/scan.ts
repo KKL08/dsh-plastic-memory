@@ -306,6 +306,11 @@ interface RoundLedger {
   settled: number
 }
 
+/** 提示词里写明的检查对象：项目这一轮写它的路径，全局不写。 */
+function projectOf(scope: Scope): string | undefined {
+  return scope.kind === 'workspace' ? scope.workspacePath : undefined
+}
+
 /** 一轮的输入：过了准入的可见记忆，按治理优先级 + 新近度排（一批装得下时就按这个顺序发；分批时由 planSemanticBatches 按稳定键重排）。 */
 function orderForPrompt(records: readonly MemoryRecord[], registry: TypeRegistry): MemoryRecord[] {
   const priorityOrder = { high: 0, medium: 1, low: 2 } as const
@@ -338,7 +343,7 @@ async function prepareRound(input: {
   const batches = planSemanticBatches(orderForPrompt(input.records, input.registry)).map((records): RoundBatch => {
     const members = batchMembers(records)
     const key = batchKey(ctx, members)
-    const prompt = buildSemanticPrompt(records, baseline)
+    const prompt = buildSemanticPrompt(records, baseline, projectOf(scope))
     const row = rows.get(key)
     return {
       records, members, key,
@@ -705,7 +710,7 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
     signal?.throwIfAborted()
     const round = roundByKey.get(step.round)!
     const batch = round.batches[step.index]!
-    const found = await scanBatch(batch.records, round.baseline, semanticLlm, signal, onUsage)
+    const found = await scanBatch(batch.records, round.baseline, semanticLlm, signal, onUsage, projectOf(round.scope))
     // 刷新是顺带做的：这一批的旧结论照常有效，没做成（不管什么原因）只记日志，不算这次体检停下；
     // 模型用不了时剩下的刷新也做不成，不再试，别的原因接着试下一批
     if (!Array.isArray(found) && step.isRefresh) {

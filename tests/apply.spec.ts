@@ -1810,7 +1810,7 @@ describe('指令文件：体检按项目读宿主的指令文件', () => {
     expect(direct?.text).toContain('不要 mock 数据库')
     expect(direct?.text).toContain('注释用英文')
     expect(llmRequests).toHaveLength(1)
-    expect(promptOf(llmRequests[0])).toBe(instructionPart(buildSemanticPrompt([], [direct!.text]).user))
+    expect(promptOf(llmRequests[0])).toBe(instructionPart(buildSemanticPrompt([], [direct!.text], project).user))
     expect(out.notes?.map(n => n.code) ?? []).not.toContain('baseline-missing')
   })
 

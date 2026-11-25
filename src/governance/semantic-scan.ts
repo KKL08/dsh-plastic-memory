@@ -48,7 +48,7 @@ export function isAbort(err: unknown, signal?: AbortSignal): boolean {
  * 体检提示词的版本：改系统提示词、记忆行格式（semanticMemoryLine）或基线段落的写法时加一。
  * 体检结果按它区分，换了版本，按旧提示词查出的结论不再沿用。
  */
-export const SEMANTIC_PROMPT_VERSION = 2
+export const SEMANTIC_PROMPT_VERSION = 3
 
 /** 一次调用里记忆列表的 token 预算（snapshot.estimateTokens 估算）。整库塞进一条消息会撑爆上下文窗口，超了就分批。 */
 export const SEMANTIC_BATCH_TOKEN_BUDGET = 30_000
@@ -68,9 +68,14 @@ summary、suggestedAction 是给用户看的：提到记忆时写它的 name，i
 {"findings":[{"type":"conflict","memoryIds":["mem_x","mem_y"],"summary":"一句话描述","suggestedAction":"建议动作","baselineRef":"仅垂直冲突填，如 AGENTS.md：某规则"}]}
 没有问题输出 {"findings":[]}`
 
+/**
+ * 一批的提示词。project：这次检查的项目（检查全局时不给）。给了就在基线前写明检查的是哪个项目、基线是它的指令文件：
+ * 「全部」体检时各项目依次检查，不点明的话，指令文件里的「本项目」归属只能靠模型从记忆行的路径去猜。
+ */
 export function buildSemanticPrompt(
   records: MemoryRecord[],
   baseline: readonly string[] | null,
+  project?: string,
 ): { system: string; user: string } {
   // 判断冲突用不到密钥原值，明确密钥不发给模型（与注入同口径）。指令文件整份原样给：长度由读取时的上限管，超了另有截断说明
   const baselineSection = baseline
@@ -78,8 +83,17 @@ export function buildSemanticPrompt(
     : '## 权威配置基线\n（无权威配置基线，跳过垂直冲突检测）'
   return {
     system: SYSTEM_PROMPT,
-    user: `${baselineSection}\n\n## 记忆列表（共 ${records.length} 条）\n${records.map(semanticMemoryLine).join('\n')}`,
+    user: `${project !== undefined ? `${projectSection(maskSecrets(project), baseline !== null)}\n\n` : ''}${baselineSection}\n\n## 记忆列表（共 ${records.length} 条）\n${records.map(semanticMemoryLine).join('\n')}`,
   }
+}
+
+/** 检查项目时放在基线前的一段：检查的是哪个项目；有基线时说明基线是这个项目的指令文件、怎么用它。 */
+function projectSection(project: string, hasBaseline: boolean): string {
+  const lines = [`## 这次检查的项目\n这次检查的是项目 ${project} 的记忆，列表里也会带上全局记忆供跨层对照。`]
+  if (hasBaseline) {
+    lines.push(`下面的基线是项目 ${project} 的指令文件（含全局层），基线里说的「本项目」「这个项目」都指 ${project}。对照基线检查项目记忆与它有没有冲突、冗余。`)
+  }
+  return lines.join('\n')
 }
 
 /**
@@ -290,9 +304,11 @@ export async function scanBatch(
   llm: SemanticLlm,
   signal: AbortSignal | undefined,
   onUsage: ((tokens: number) => void) | undefined,
+  /** 这次检查的项目（见 buildSemanticPrompt）；检查全局时不给。 */
+  project?: string,
 ): Promise<Finding[] | SemanticFailure> {
   const knownIds = new Set(records.map(r => r.id))
-  const prompt = buildSemanticPrompt(records, baseline)
+  const prompt = buildSemanticPrompt(records, baseline, project)
   const named = idsToNames(records.map(r => maskSecretSurface(r, { severity: 'suspected' })))
   const withNames = (findings: Finding[]) => findings.map(f => ({ ...f, summary: named(f.summary), suggestedAction: named(f.suggestedAction) }))
 

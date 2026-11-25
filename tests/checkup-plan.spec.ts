@@ -79,8 +79,10 @@ describe('键与上下文', () => {
     const sample = record({ id: 'mem_sample', type: 'knowledge', name: '样例', content: '正文', summary: '摘要', factTime: '2026-11', validFrom: new Date(2030, 0, 1, 0, 0).getTime(), validTo: new Date(2030, 0, 2, 0, 0).getTime() })
     // 有效期按本地时间构造：发给模型的那一行按本地时间写，换时区跑摘要也不变
     const prompt = buildSemanticPrompt([sample], ['基线'])
-    const digest = createHash('sha1').update(`${prompt.system}\n${prompt.user}`).digest('hex')
-    expect({ version: SEMANTIC_PROMPT_VERSION, digest }).toEqual({ version: 2, digest: '00685c3a2ccf234fab697db0cb1a1fadc7d9c274' })
+    // 检查项目时多出的那一段也在护栏里
+    const projectPrompt = buildSemanticPrompt([sample], ['基线'], '/work/sample')
+    const digest = createHash('sha1').update(`${prompt.system}\n${prompt.user}\n${projectPrompt.user}`).digest('hex')
+    expect({ version: SEMANTIC_PROMPT_VERSION, digest }).toEqual({ version: 3, digest: 'ff9f5030012f6c147dbf2dee8331bbcdf6aec6ff' })
   })
 
   it('宿主接线的模型调用透出提供方、模型和推理强度；借会话的模型没有推理强度', () => {

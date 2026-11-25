@@ -333,6 +333,10 @@ All notable changes to this project are documented here. The format follows
   rechecks the whole batch.
 - Expired memories are no longer sent to the content check. The rule check
   still points them out.
+- When a checkup looks at a project, the content check now names that project
+  and says the instruction files it is compared against belong to it, so the
+  model knows which project those files describe. Earlier results are checked
+  again once after the update.
 
 ### Fixed
 - A memory write that was cut short and whose file was then edited by hand
