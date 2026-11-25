@@ -16,12 +16,19 @@
 #                     they are reported as SKIPPED. With a key, a third boot
 #                     swaps in an invalid key to check that AUTH errors leave
 #                     no raw host text in plugin output.
+# Model-backed checks can also run on another provider route the host ships
+# (scripts/host-contract/test-model.ts): set TEST_LLM_PROVIDER, TEST_LLM_MODEL
+# and TEST_LLM_API_KEY together. That route then takes precedence over
+# DEEPSEEK_API_KEY, the default model points at it, and checks that only mean
+# something for the official provider (the invalid-key boot) are SKIPPED.
 # Never touches ~/.dsh.
 #
 #   scripts/host-contract/run.sh              run (temp dir removed on exit)
 #   HOST_SMOKE_KEEP=1 ...                     keep the temp dir (logs, DSH_HOME) — with a key set,
 #                                             the kept dir holds an owner-only .credentials.yaml
 #   DEEPSEEK_API_KEY=... ...                  enable the semantic-layer and auto-checkup cases
+#   TEST_LLM_PROVIDER=... TEST_LLM_MODEL=... TEST_LLM_API_KEY=... ...
+#                                             same cases on another provider route
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 # Schema version of $DSH_HOME/.credentials.yaml understood by the pinned host
@@ -33,18 +40,41 @@ HOST_TAG="host-contract"
 host_init host-contract
 trap host_cleanup EXIT
 SECONDS=0
+# A half-set alternate route fails here, before the slow build, instead of
+# silently falling back to the official key.
+STEP=model-config
+node "$REPO/scripts/host-contract/test-model.ts" check | sed "s/^/$HOST_TAG: /"
 echo "$HOST_TAG: pinned dsh host = @deepseek-ai/dsh@$PINNED"
 echo "$HOST_TAG: temp root       = $TMP"
 
 host_stage_and_pack
 host_ensure
 MARKER="$TMP/.marker"; : > "$MARKER"
-host_install_plugin host
+# Which model the model-backed checks use: the state file tells the verify
+# plugin; on the alternate route a second overlay adds that route and points
+# the default model at it. The alternate route's key stays in the environment
+# the host inherits; the overlay names only the variable.
+MODEL_STATE="$TMP/model.json"
+MODEL_PATCH="$TMP/model.cordis.patch.yml"
+host_run model node "$REPO/scripts/host-contract/test-model.ts" prepare "$HOST" "$MODEL_STATE" "$MODEL_PATCH"
+sed "s/^/$HOST_TAG: /" "$LOGS/model.log"
+MODEL_KIND="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).kind)' "$MODEL_STATE")"
+# On the alternate route the official key never reaches the host (plugin
+# install included), so nothing can quietly fall back to it through the
+# inherited environment; the default command line stays as it was.
+HOST_ENV=(env)
+MODEL_ARGS=()
+if [ "$MODEL_KIND" = alternate ]; then
+  HOST_ENV=(env -u DEEPSEEK_API_KEY)
+  MODEL_ARGS=(--patch "$MODEL_PATCH")
+fi
+# host_install_plugin with the same environment as the boots below
+host_run plugin-add "${HOST_ENV[@]}" DSH_HOME="$HOMEDIR" "$DSH" plugin --profile host add "$TGZ"
 host_verify_client
 
 PATCH="$TMP/verify.cordis.patch.yml"
 sed "s#__VERIFY_URL__#file://$REPO/scripts/host-contract/verify-plugin.ts#" "$REPO/scripts/host-contract/verify.cordis.patch.yml" > "$PATCH"
-if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
+if [ "$MODEL_KIND" = official ]; then
   # rc.2's credentials service does not fall back to the environment; give the
   # isolated home its own credentials file (never copied from the real ~/.dsh).
   ( umask 077; printf 'version: %s\nrefs:\n  DEEPSEEK_API_KEY: "%s"\nrecords: {}\n' "$CREDENTIALS_SCHEMA_VERSION" "$DEEPSEEK_API_KEY" > "$HOMEDIR/.credentials.yaml" )
@@ -56,7 +86,7 @@ AGENTS_HOME="$TMP/agents"
 RESULTS="$TMP/results.json"
 HANDOFF="$TMP/handoff.json"
 set +e
-env DSH_HOME="$HOMEDIR" DSH_AGENTS_HOME="$AGENTS_HOME" HOST_CONTRACT_OUT="$RESULTS" HOST_CONTRACT_HANDOFF="$HANDOFF" "$DSH" --profile host --patch "$PATCH" >"$LOGS/boot.log" 2>&1
+"${HOST_ENV[@]}" DSH_HOME="$HOMEDIR" DSH_AGENTS_HOME="$AGENTS_HOME" HOST_CONTRACT_OUT="$RESULTS" HOST_CONTRACT_HANDOFF="$HANDOFF" HOST_CONTRACT_MODEL_STATE="$MODEL_STATE" "$DSH" --profile host --patch "$PATCH" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} >"$LOGS/boot.log" 2>&1
 code=$?
 set -e
 STEP=boot
@@ -75,7 +105,7 @@ if [ ! -f "$HANDOFF" ]; then
 fi
 STEP=restart
 set +e
-env DSH_HOME="$HOMEDIR" DSH_AGENTS_HOME="$AGENTS_HOME" HOST_CONTRACT_OUT="$RESULTS2" HOST_CONTRACT_HANDOFF="$HANDOFF" HOST_CONTRACT_PHASE=restart "$DSH" --profile host --patch "$PATCH" >"$LOGS/restart.log" 2>&1
+"${HOST_ENV[@]}" DSH_HOME="$HOMEDIR" DSH_AGENTS_HOME="$AGENTS_HOME" HOST_CONTRACT_OUT="$RESULTS2" HOST_CONTRACT_HANDOFF="$HANDOFF" HOST_CONTRACT_MODEL_STATE="$MODEL_STATE" HOST_CONTRACT_PHASE=restart "$DSH" --profile host --patch "$PATCH" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} >"$LOGS/restart.log" 2>&1
 code2=$?
 set -e
 if [ ! -f "$RESULTS2" ]; then
@@ -83,16 +113,16 @@ if [ ! -f "$RESULTS2" ]; then
   grep -iE "error|fatal" "$LOGS/restart.log" | head -n 10 >&2 || true
   exit 1
 fi
-# Third boot (H18, only with a key): same isolated home, credentials swapped for a
+# Third boot (H18, only with the official key): same isolated home, credentials swapped for a
 # well-formed key the provider rejects (401 → AUTH). Generated here, never a real key.
 RESULTS3="$TMP/results-bad-key.json"
 code3=0
-if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
+if [ "$MODEL_KIND" = official ]; then
   STEP=bad-key
   ( umask 077; printf 'version: %s\nrefs:\n  DEEPSEEK_API_KEY: "%s"\nrecords: {}\n' "$CREDENTIALS_SCHEMA_VERSION" "host-contract-invalid-key-$RANDOM$RANDOM" > "$HOMEDIR/.credentials.yaml" )
   chmod 600 "$HOMEDIR/.credentials.yaml"
   set +e
-  env DSH_HOME="$HOMEDIR" DSH_AGENTS_HOME="$AGENTS_HOME" HOST_CONTRACT_OUT="$RESULTS3" HOST_CONTRACT_PHASE=bad-key "$DSH" --profile host --patch "$PATCH" >"$LOGS/bad-key.log" 2>&1
+  env DSH_HOME="$HOMEDIR" DSH_AGENTS_HOME="$AGENTS_HOME" HOST_CONTRACT_OUT="$RESULTS3" HOST_CONTRACT_MODEL_STATE="$MODEL_STATE" HOST_CONTRACT_PHASE=bad-key "$DSH" --profile host --patch "$PATCH" >"$LOGS/bad-key.log" 2>&1
   code3=$?
   set -e
   if [ ! -f "$RESULTS3" ]; then

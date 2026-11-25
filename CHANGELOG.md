@@ -163,6 +163,11 @@ All notable changes to this project are documented here. The format follows
   static analysis for backtracking that grows faster than the input, and the
   private key block cases run under a time limit, so a regression fails the
   test instead of hanging the run.
+- Testing: the model-backed checks in `pnpm host:contract` can run on another
+  provider route DeepSeek Harness ships with, set with `TEST_LLM_PROVIDER`,
+  `TEST_LLM_MODEL` and `TEST_LLM_API_KEY`. Setting only some of them stops the
+  run, and checks that only apply to the official provider are reported as
+  skipped.
 
 ### Changed
 - Refining a memory, recording a state change and other single-memory
