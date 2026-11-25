@@ -183,13 +183,13 @@ it('工具开关同时过滤命中和邻居，切换不改代数', async () => {
   expect(await search(deps, 'dialogue')).toContain('工具：部署')
   const state = db.state(); expect(state.status !== 'none' && state.read.gen).toBe(gen)
 })
-it('索引在建时查已建部分，零命中不声称没有找到', async () => {
+it('对话记录库在建时查已建部分，零命中不声称没有找到', async () => {
   const { deps } = await setup(false)
   const partial = await search(deps, 'dialogue')
-  expect(partial).toContain('索引还在建，已覆盖 1 个会话')
+  expect(partial).toContain('对话记录库还在建，已覆盖 1 个会话')
   expect(partial).toContain('s#1'); expect(partial).toContain('部署')
   const text = await search(deps, 'dialogue', '不存在词')
-  expect(text).toContain('索引还在建'); expect(text).not.toContain('没有找到')
+  expect(text).toContain('对话记录库还在建'); expect(text).not.toContain('没有找到')
 })
 it('追赶没完成时只给覆盖说明，完整覆盖零命中才说没有找到', async () => {
   const { deps, host, noReview, tokenizer } = await setup()

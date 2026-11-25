@@ -95,7 +95,7 @@ describe('标注的固定写法', () => {
   it('每个说明码都有文案', () => {
     expect(dialogueNote('dialogue-source-off')).toBe('当前设置是只查记忆，这次没有查过往对话的原话。')
     expect(dialogueNote('dialogue-unavailable')).toBe('过往对话的原话暂时查不了，这次只查了记忆。')
-    expect(dialogueNote('dialogue-index-building', 12)).toBe('索引还在建，已覆盖 12 个会话。')
+    expect(dialogueNote('dialogue-index-building', 12)).toBe('对话记录库还在建，已覆盖 12 个会话。')
     expect(dialogueNote('dialogue-tokenizer-basic')).toBe('分词组件没装上，原话按相邻两字匹配，长词可能匹配得偏宽。')
     expect(dialogueNote('dialogue-search-limit')).toBe('连续检索次数已用完，请根据已有结果回答，或先做别的再搜。')
     for (const code of DIALOGUE_NOTE_CODES) expect(dialogueNote(code)).not.toBe('')

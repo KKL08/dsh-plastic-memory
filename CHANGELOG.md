@@ -45,6 +45,11 @@ All notable changes to this project are documented here. The format follows
 - Searching past conversations finds an identifier however it is written:
   `getUserName`, `get_user_name` and `GetUserName` find each other,
   and `user name` finds `getUserName`.
+- The assistant can search past conversations up to three times in a row.
+  From the fourth search on, conversations are not searched again and the
+  result says the limit is reached; a search that also covers memories still
+  returns them. The count starts over when a new turn begins or the assistant
+  uses a tool other than `memory_search` and `memory_source`.
 - Groundwork for Brewing Dreams, an experimental background pass that tidies
   memories while no chat is running. It is off and has no switch yet. Once on
   for a scope (all memories, or one project), a pass starts only when enough

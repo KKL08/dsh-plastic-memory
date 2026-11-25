@@ -26,6 +26,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import { SUBAGENT_MAX_SAVES_DEFAULT } from './pipeline.ts'
 import { createSaveTool } from './tools/save-tool.ts'
 import { createSearchTool } from './tools/search-tool.ts'
+import { DialogueCallCap } from './tools/dialogue-call-cap.ts'
 import { createForgetTool } from './tools/forget-tool.ts'
 import { createConfirmTool } from './tools/confirm-tool.ts'
 import { createScanTool } from './tools/scan-tool.ts'
@@ -452,9 +453,10 @@ export async function apply(ctx: Context, config: Config) {
     allowSubagentSave,
   )
   let disposeSave = registerSave()
+  const callCap = new DialogueCallCap()
   // memory_search 的 types 说明同样从类型表生成，类型配置热更新时随 memory_save 一起重注册；执行时仍经转发对象现读类型表
   const registerSearch = () => ctx.tools.register(createSearchTool({
-    store, registry, host, sessionRecall: snapshotCache,
+    store, registry, host, sessionRecall: snapshotCache, callCap,
     searchSource: () => config.search.source.get(),
     memoryQuotes: () => config.search.memoryQuotes.get(),
     dialogue: {
@@ -738,7 +740,8 @@ export async function apply(ctx: Context, config: Config) {
     }
   })
   lifecycle.on('session/event', (session, event) => {
-    // 本监听只留 compaction 过期标记——快照按 session 冻结，压缩结束后由下一个发送点重建。
+    callCap.observe(session, event)
+    // 快照按 session 冻结，压缩结束后由下一个发送点重建。
     // 带 error 的结束是失败的压缩（如摘要不比被遮蔽内容小），什么都没遮蔽：旧快照还在可见面上，
     // 这时重建会让下一个发送点再发一份；阈值附近它几乎每步失败一次，所以只在成功时标过期。
     // error 在事件的 data 里（compaction-basic 以 `{ ...lifecycle, error }` 作为 payload append）。
