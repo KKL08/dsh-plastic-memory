@@ -9,13 +9,13 @@ import type { ScanCacheEntry } from '../governance/schema.ts'
 import { FINDING_TYPES } from '../governance/schema.ts'
 import type { HealthThresholds } from '../governance/health-presets.ts'
 import { runRuleScan } from '../governance/rule-scan.ts'
-import { scoreScope, listWorkspaces, validateScopePaths, crossScopeConflicts, checkupRowBase, coverageAdvice, coverageText, ignoredNote, TIER_LABEL } from '../governance/scope-health.ts'
+import { scoreScope, validateScopePaths, crossScopeConflicts, checkupRowBase, coverageAdvice, coverageText, ignoredNote, TIER_LABEL } from '../governance/scope-health.ts'
 import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
 import type { AutoCheckupSettingStore } from '../governance/auto-checkups.ts'
 import { isCoverageClear, resolveAutoCheckup, type CheckupCoverage } from '../gui/contract.ts'
 import type { DirectoryNote } from '../storage/table.ts'
-import { prereadScopes, listingNotes, checkupWorkspaces, renderDirectoryNotes } from './scope-preread.ts'
+import { prereadScopes, listingNotes, checkupWorkspaces, checkupScanWorkspaces, isScopeUnread, renderDirectoryNotes } from './scope-preread.ts'
 import { decisionWorkspaces, decisionWorkspacesNote } from './workspace-gate.ts'
 import { ledgerLabel, type Scope } from '../scope.ts'
 
@@ -102,6 +102,8 @@ export interface CheckupRow {
   ignoredCount: number
   /** 上次体检的内容检查覆盖；上一个发布版写的完成记录、从没体检过的没有。 */
   coverage?: CheckupCoverage
+  /** 这次没读全这个范围（读取出错、目录读不了或列不出）：分数和问题只按读到的算，不能当成健康。读全了没有这个字段。 */
+  isReadComplete?: false
 }
 
 export interface CheckupHealthResult {
@@ -133,12 +135,18 @@ export function renderHealthResult(result: HealthToolResult): string {
       const name = row.layer === 'global' ? 'global' : row.workspacePath!
       const gateNote = row.gate.secret ? '｜⚠️ 检出密钥' : ''
       const coverage = row.coverage !== undefined ? `｜${coverageText(row.coverage)}` : ''
-      lines.push(`- ${name}：${Math.floor(row.score)}/100（${TIER_LABEL[row.tier]}）｜${row.totalMemories} 条｜${row.issueSummary}${gateNote}${coverage}`)
+      // 没读全的范围不给档位：分数只按读到的算，标成绿色会让人以为它健康
+      const score = row.isReadComplete === false
+        ? `这次没读全，只按读到的算 ${Math.floor(row.score)}/100`
+        : `${Math.floor(row.score)}/100（${TIER_LABEL[row.tier]}）`
+      lines.push(`- ${name}：${score}｜${row.totalMemories} 条｜${row.issueSummary}${gateNote}${coverage}`)
     }
     const ignored = ignoredNote(result.rows.reduce((n, row) => n + row.ignoredCount, 0))
     if (ignored !== undefined) lines.push(ignored)
     const partial = result.rows.filter(row => !isCoverageClear(row.coverage)).length
     if (partial > 0) lines.push(`${partial} 个范围上次体检的内容检查没覆盖全（见各行），建议再运行一次 memory_scan`)
+    const unread = result.rows.filter(row => row.isReadComplete === false).length
+    if (unread > 0) lines.push(`${unread} 个范围这次没读全（${result.directoryNotes.length > 0 ? '见各行和目录说明' : '见各行'}），处理后再运行一次 memory_health`)
     for (const c of result.crossLayerConflicts) {
       lines.push(`⚠️ 跨层冲突：global ${c.globalId} 与 ${c.workspaces.length} 个项目存在待决冲突（${c.workspaces.join('、')}）——被多数项目反对的全局规则建议优先裁定（memory_confirm resolve：${c.decisionIds.join('、')}）`)
     }
@@ -188,15 +196,19 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
   const listing = await deps.store.listWorkspaceDirs()
 
   if (args.scope === 'all') {
-    // 全库：global + 体检清单里的全部 workspace 目录
-    const data = await prereadScopes(deps, [{ kind: 'global' }, ...checkupWorkspaces(listing).map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))])
-    const scopes: Scope[] = [{ kind: 'global' }, ...listWorkspaces(data.byId.values()).map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
-    const scored = scopes.map(scope => scoreScope(deps, data, scope, now))
-    const rows: CheckupRow[] = scored.map(r => ({
-      ...checkupRowBase(r),
-      semanticCachedAt: r.lastCheckupAt,
-      promoteCandidates: r.promoteCandidates,
-    }))
+    // 全库：global + 全库体检要查的全部项目（和 memory_scan 全库同一份清单）。报告行就是这份清单，不按读到的记录反推：
+    // 读取出错、只有坏文件的项目读不到在用的记录，反推会漏掉它们。一个范围读取出错记成没读全，别的范围照常计分
+    const scopes: Scope[] = [{ kind: 'global' }, ...checkupScanWorkspaces(listing).map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
+    const data = await prereadScopes(deps, scopes, undefined, { isReadErrorTolerated: true })
+    const rows: CheckupRow[] = scopes.map((scope) => {
+      const r = scoreScope(deps, data, scope, now)
+      return {
+        ...checkupRowBase(r),
+        semanticCachedAt: r.lastCheckupAt,
+        promoteCandidates: r.promoteCandidates,
+        ...(isScopeUnread(data, listing, scope) ? { isReadComplete: false as const } : {}),
+      }
+    })
 
     const byWorkspace = rows
       .filter(r => r.layer === 'workspace' && r.promoteCandidates > 0)

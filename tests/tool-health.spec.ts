@@ -650,3 +650,96 @@ describe('还没有自己记忆的项目', () => {
     expect(r.recommendationKinds).not.toContain('semantic-never-scanned')
   })
 })
+
+/** 全库健康报告的项目清单和读不全的判定，和 memory_scan 全库同口径。真实记忆根加侧表。 */
+describe('memory_health 全库：读不出或只有坏文件的项目', () => {
+  const NOW = 100 * DAY
+  const A = '/work/a'
+  const B = '/work/b'
+  async function allEnv() {
+    const root = await mkdtemp(join(tmpdir(), 'pm-health-all-'))
+    roots.push(root)
+    const sidecar = new SidecarStore({ root, schemas: sidecarSchemas })
+    const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats }), undefined, sidecar.recallStats)
+    const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
+    const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
+    const checkups = new CheckupRecordStore(sidecar.checkups)
+    const host = { contextOf: async () => ({ workspacePath: undefined }), llmOf: () => ({ complete: async () => '{"findings":[]}' }) }
+    const now = () => NOW
+    const healthDeps: HealthToolDeps = { store, registry, decisions, cache: sidecar.scanCache, checkups, thresholds: resolveHealthThresholds('normal'), host, now }
+    const health = async (scope: string) => executeHealth({ scope }, healthDeps, fakeExec())
+    const healthAll = async () => {
+      const r = await health('all')
+      if (r.kind !== 'checkup') throw new Error(r.kind)
+      return r
+    }
+    const scanAll = async () => {
+      const r = await executeScan({ scope: 'all', layers: 'rule' }, { store, registry, decisions, cache: sidecar.scanCache, checkups, instructions: noInstructions, host, now }, fakeExec())
+      if (r.kind !== 'checkup') throw new Error(r.kind)
+      return r
+    }
+    const brokenProject = async (ws: string) => {
+      const dir = join(root, workspaceDirName(ws))
+      await mkdir(dir, { recursive: true })
+      await writeFile(join(dir, WORKSPACE_MARKER), ws + '\n')
+      await writeFile(join(dir, 'broken.md'), '没有 frontmatter\n')
+    }
+    return { store, health, healthAll, scanAll, brokenProject }
+  }
+  const nameOf = (row: { layer: string; workspacePath?: string }) => (row.layer === 'global' ? 'global' : row.workspacePath)
+
+  it('项目只有坏文件：全库报告有这一行，坏文件计数和单个项目的 memory_health 一致', async () => {
+    const e = await allEnv()
+    await e.store.create(record({ id: 'mem_g1' }))
+    await e.store.create(record({ id: 'mem_a1', scope: 'workspace', workspacePath: A }))
+    await e.brokenProject(B)
+    const all = await e.healthAll()
+    expect(all.rows.map(nameOf)).toEqual(['global', A, B])
+    const single = await e.health(B)
+    if (single.kind !== 'single') throw new Error(single.kind)
+    expect(single.breakdown.ruleLayer.malformed).toBe(1)
+    const row = all.rows.find(r => r.workspacePath === B)!
+    expect(row.issueSummary).toContain('malformed 1')
+    expect(row.score).toBe(single.score)
+  })
+
+  it('一个项目读取抛错：调用不报错，这一行照出、标明这次没读全，不显示健康；别的项目的分数和没出错时相同', async () => {
+    const e = await allEnv()
+    await e.store.create(record({ id: 'mem_g1' }))
+    await e.store.create(record({ id: 'mem_a1', scope: 'workspace', workspacePath: A }))
+    await e.store.create(record({ id: 'mem_b1', scope: 'workspace', workspacePath: B }))
+    const before = await e.healthAll()
+    // 存储边界：读 B 这一层时抛错
+    const readRaw = e.store.readRaw.bind(e.store)
+    e.store.readRaw = async (scope, opts) => {
+      if (scope?.kind === 'workspace' && scope.workspacePath === B) throw new Error('读盘失败')
+      return readRaw(scope, opts)
+    }
+    const after = await e.healthAll()
+    expect(after.rows.map(nameOf)).toEqual(['global', A, B])
+    const rowB = after.rows.find(r => r.workspacePath === B)!
+    expect(rowB.isReadComplete).toBe(false)
+    expect(after.rows.filter(r => r.workspacePath !== B).every(r => r.isReadComplete === undefined)).toBe(true)
+    for (const name of ['global', A]) {
+      const [was, now] = [before.rows.find(r => nameOf(r) === name)!, after.rows.find(r => nameOf(r) === name)!]
+      expect([now.score, now.tier]).toEqual([was.score, was.tier])
+    }
+    const text = renderHealthResult(after)
+    const line = text.split('\n').find(l => l.startsWith(`- ${B}：`))!
+    expect(line).toContain('这次没读全')
+    expect(line).not.toContain(TIER_LABEL.green)
+    // 没有目录说明时只叫人看各行；有目录说明时一并指过去
+    expect(after.directoryNotes).toEqual([])
+    expect(text).toContain('1 个范围这次没读全（见各行），处理后再运行一次 memory_health')
+    const withNote = renderHealthResult({ ...after, directoryNotes: [{ code: 'dir-unreadable', level: 'info', text: '读不出这个目录', path: `${B}/.memory` }] })
+    expect(withNote).toContain('1 个范围这次没读全（见各行和目录说明），处理后再运行一次 memory_health')
+  })
+
+  it('同一份库：memory_health 全库和 memory_scan 全库列出的项目相同', async () => {
+    const e = await allEnv()
+    await e.store.create(record({ id: 'mem_g1' }))
+    await e.store.create(record({ id: 'mem_a1', scope: 'workspace', workspacePath: A }))
+    await e.brokenProject(B)
+    expect((await e.healthAll()).rows.map(nameOf)).toEqual((await e.scanAll()).rows.map(nameOf))
+  })
+})

@@ -453,6 +453,12 @@ All notable changes to this project are documented here. The format follows
 - A checkup of all memories left out a project whose memory folder could not
   be listed, and cleared earlier results as if everything had been read. The
   project now stays in the checkup and is reported as not fully read.
+- `memory_health` for all memories failed as a whole when one project could
+  not be read, and left out a project that held only files it could not
+  parse, so their problems went unreported. It now lists the same projects
+  as a checkup of all memories, counts unparseable files against their
+  project, and marks a project it could not read in full instead of scoring
+  it as healthy.
 
 ## [0.2.0] - 2026-11-21
 

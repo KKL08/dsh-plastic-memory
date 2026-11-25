@@ -28,7 +28,7 @@ import { checkupKey, isCoverageClear, isFullyCovered, uncheckedCount, type Check
 import { scoreScope, validateScopePaths, crossScopeConflicts, checkupRowBase, coverageText, ignoredNote, findingFingerprints, GLOBAL_CACHE_KEY, TIER_LABEL } from '../governance/scope-health.ts'
 import { applyIgnores, type AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
-import { prereadScopes, listingNotes, checkupScanWorkspaces, renderDirectoryNotes } from './scope-preread.ts'
+import { prereadScopes, listingNotes, checkupScanWorkspaces, isScopeUnread as isScopeUnreadIn, renderDirectoryNotes } from './scope-preread.ts'
 import type { DirectoryNote } from '../storage/table.ts'
 import { isWorkspaceGone } from '../storage/project-folder.ts'
 import { buildCrossWsPrompt, runCrossWsScan, findEntityDuplicates, summaryLine, CROSS_WS_PROMPT_VERSION, type CrossWsDuplicate } from '../governance/cross-ws.ts'
@@ -619,8 +619,7 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
   // malformed 按扫描的作用域归属（与 memory_health 的 scoreScope 同口径）：隔离文件按读到它的目录归作用域
   const quarantinedIn = (scope: Scope) => data.quarantined.get(scopeCacheKey(scope)) ?? []
   /** 这个作用域自己这次没读全（项目不算带进来的全局）。 */
-  const isScopeUnread = (scope: Scope): boolean => (data.unreadScopes?.has(scopeCacheKey(scope)) ?? false)
-    || (scope.kind === 'workspace' && unlistedWs.has(scope.workspacePath))
+  const isScopeUnread = (scope: Scope): boolean => isScopeUnreadIn(data, listing, scope)
   // 项目这一轮的可见集合含全局记忆：全局没读全，项目这一轮也没读全
   const isReadCompleteFor = (scope: Scope): boolean => !isScopeUnread(scope)
     && (scope.kind === 'global' || isReadCompleteFor({ kind: 'global' }))

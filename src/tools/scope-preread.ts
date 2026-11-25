@@ -122,6 +122,15 @@ export function checkupScanWorkspaces(listing: WorkspaceDirListing): string[] {
   return [...new Set([...checkupWorkspaces(listing), ...(listing.unreadable ?? []).map(e => e.workspacePath)])].sort()
 }
 
+/**
+ * 这个作用域自己这次没读全（项目不算带进来的全局）：预读记下它没读全（读取抛错、目录读不了），
+ * 或目录清单里它标记读得到、记忆目录列不出。memory_scan、memory_health 全库共用这一个判定。
+ */
+export function isScopeUnread(data: Pick<ScopePreread, 'unreadScopes'>, listing: WorkspaceDirListing, scope: Scope): boolean {
+  return (data.unreadScopes?.has(scopeCacheKey(scope)) ?? false)
+    || (scope.kind === 'workspace' && (listing.unreadable ?? []).some(e => e.workspacePath === scope.workspacePath))
+}
+
 /** 目录级说明的渲染：health / scan 共用。 */
 export function renderDirectoryNotes(notes: readonly DirectoryNote[]): string[] {
   if (notes.length === 0) return []
