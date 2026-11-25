@@ -598,6 +598,36 @@ describe('收集与记录出错不挡体检', () => {
     expect(l.warn).toHaveBeenCalledTimes(1)
   })
 
+  /** 自动体检碰上模型用不了：记「模型用不了」时认领是否还在（放掉认领会重写视图，得在它之前记下）。 */
+  async function heldWhenModelUnavailable(e: Env) {
+    let isHeld: boolean | undefined
+    const recordModelUnavailable = e.checkups.recordModelUnavailable.bind(e.checkups)
+    vi.spyOn(e.checkups, 'recordModelUnavailable').mockImplementation(async (...args) => {
+      isHeld = await e.otherProcess().isClaimed(checkupKey(SESSION))
+      return recordModelUnavailable(...args)
+    })
+    const r = await e.run({ target: SESSION, llm: hostError('ACCOUNT_SIGN_IN_REQUIRED'), by: 'auto' })
+    expect(r).toMatchObject({ kind: 'model-unavailable', cause: { hostCode: 'ACCOUNT_SIGN_IN_REQUIRED' } })
+    expect(isHeld).toBe(true)
+    expect((await e.recordOf(checkupKey(SESSION)))?.modelUnavailable).toMatchObject({ kind: 'model-error', hostCode: 'ACCOUNT_SIGN_IN_REQUIRED' })
+  }
+
+  it('自动体检模型用不了、体检前收集视图出错（写不成最近一次结果）：放掉认领之前照样记下「模型用不了」', async () => {
+    const e = env({ views: w => ({ rewriteAll: () => w.rewriteAll(), collectViews: () => Promise.reject(new Error('读不出')) }) })
+    await seedScopes(e)
+    await heldWhenModelUnavailable(e)
+    expect((await e.recordOf(checkupKey(SESSION)))?.lastResult).toBeUndefined()
+  })
+
+  it('自动体检模型用不了、记最近一次结果出错：放掉认领之前照样记下「模型用不了」', async () => {
+    const l = log()
+    const e = env({ log: l })
+    await seedScopes(e)
+    vi.spyOn(e.checkups, 'recordResults').mockRejectedValue(new Error('写不进'))
+    await heldWhenModelUnavailable(e)
+    expect(l.warn).toHaveBeenCalledTimes(1)
+  })
+
   it('体检后视图没写成、补收集也出错：体检不算失败，不比新增，记一条日志', async () => {
     const l = log()
     let collects = 0
