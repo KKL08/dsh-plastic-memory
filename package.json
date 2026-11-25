@@ -113,6 +113,7 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p client",
     "lint": "oxlint src tests scripts client",
     "host:contract": "bash scripts/host-contract/run.sh",
+    "bench:scale": "node scripts/bench-storage.ts --tier 5k --rounds 3",
     "bench:storage": "node scripts/bench-storage.ts",
     "prepublishOnly": "pnpm typecheck && pnpm test && pnpm build",
     "build:client": "node scripts/build-client.ts",

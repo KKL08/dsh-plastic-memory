@@ -58,9 +58,15 @@ export async function locateCopy(store: Pick<MemoryStore, 'get'>, id: string, ta
   return record !== undefined && isCopyOf(record, target) ? record : undefined
 }
 
+/** 一次复核的记录不超过这么多条时，先逐条按 id 在自己的作用域里查；再多就按作用域批读。 */
+const LOCATE_EACH_LIMIT = 8
+
 /**
- * records 里此刻在各自作用域里已经不在了（任何状态都没有，即被彻底删除）的那些副本。每个作用域整读一次（含归档），
- * 不逐条定位：按 id 定位要扫整个作用域，一份快照几百条时成了平方级；缺 workspacePath 的按 id 两级定位。
+ * records 里此刻在各自作用域里已经不在了（任何状态都没有，即被彻底删除）的那些副本。两条路径：
+ * - 不超过 LOCATE_EACH_LIMIT 条时，每条先按 id 在它自己的作用域里定位（locateCopy，含归档）：找到就是在盘上的正面证据，判还在。
+ *   整条更新、状态变化这类单条改动的复核因此不再整读作用域（定位赶上竞态窗口时仍要重列目录里的文件名）。没找到的照下面的批读路径判。
+ * - 超过时直接走批读：每个作用域整读一次（含归档），不逐条定位——按 id 定位赶上竞态窗口要重列整个目录，一份快照几百条时成了平方级。
+ * 缺 workspacePath 的按 id 两级定位。
  * 换了作用域的（提升、移到项目）不算：别的作用域里有内容一样的这一条，就是它搬过去了。含密钥的不认这条豁免（见 isMovedElsewhere）。
  * 接线层把它交给 SnapshotStore，拍完快照落盘后复核（见 SnapshotStore.capture）。
  */
@@ -68,12 +74,15 @@ export const goneCopies = (store: Pick<MemoryStore, 'get' | 'readRaw' | 'copiesO
   // 作用域标签 → 盘上读得出的 id，和这个作用域里有没有读不出的文件或目录（项目标记读不出时目录整个不在清单里，看不出来，是残留）
   const present = new Map<string, { ids: Set<string>; isPartial: boolean }>()
   const gone = new Set<T>()
+  const isLocatedEach = records.length <= LOCATE_EACH_LIMIT
   for (const r of records) {
     const scope = scopeOfMemory(r)
     if (scope === undefined) {
       if ((await store.get(r.id, {}, RECHECKED)) === undefined) gone.add(r)
       continue
     }
+    // 只认自己作用域的那一份：别的作用域里同 id 的副本不让这一份免于脱敏。找到不用锁内确认（RECHECKED 只管没找到）
+    if (isLocatedEach && (await locateCopy(store, r.id, scope)) !== undefined) continue
     const label = workspaceLabel(r)
     let read = present.get(label)
     if (read === undefined) {

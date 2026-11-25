@@ -1,11 +1,18 @@
 /**
  * 存储规模基准：在临时目录生成一棵记忆根，用插件自己的存储层与工具执行器计时常见操作，
- * 输出 markdown 表格（各操作的中位数耗时）。手动运行，不进 CI；跑完删除临时目录。
+ * 输出 markdown 表格（各操作的中位数耗时）。默认模式手动运行；规模模式也用于 CI，跑完删除临时目录。
  *
  * 用法：
  *   pnpm bench:storage                                   默认 10 个项目 × 1000 条 + 200 条 global，每项 10 轮
  *   pnpm bench:storage --projects 3 --per-project 100 --rounds 5
  *   node scripts/bench-storage.ts --projects 3 ...       同上（Node ≥23.6 原生执行 .ts）
+ *
+ *   node scripts/bench-storage.ts --tier all             同一项目的 1 千、5 千、2 万条在用记忆
+ *   node scripts/bench-storage.ts --tier 5k --rounds 3    CI：1 千与 5 千同机比较
+ * 规模模式：选大档时自动先跑 1 千参照；各项报中位数和 p95。整条更新、补证、状态变化三种写入各自按同机比值判定，
+ * 任何一项超门槛退出码非 0；新建照常计时、算比值，只报告不判定：新建的判重要读整个作用域给候选打分，
+ * 随规模增长是已知的，等判重有了索引再加断言。
+ * 历史、关联和侧表按固定比例生成；索引与日志放在临时目录中、记忆根之外，避免污染用户状态。
  *
  * 计时口径（每项先空跑一轮预热，不计入；之后跑 --rounds 轮取中位数）：
  *   - 构造：新建 SidecarStore + FileTable，零 I/O（应接近 0 ms）。
@@ -51,6 +58,16 @@ import { executeHealth } from '../src/tools/health.ts'
 import { resetJieba, tokenizerForQuery, type JiebaLoader } from '../src/search/jieba-segmenter.ts'
 import { rankRecords, RANKING_FIELDS } from '../src/search/ranking.ts'
 import { expandQueryTerms, matchScore } from '../src/text.ts'
+import { DerivedIndex } from '../src/storage/derived-index.ts'
+import { OpJournal } from '../src/storage/op-journal.ts'
+import { createRootLock } from '../src/storage/root-lock.ts'
+import { FileVersionHistory, newVersionId } from '../src/storage/history.ts'
+import { computeDigest } from '../src/storage/frontmatter.ts'
+import { DERIVED_INDEX_FILE, OP_JOURNAL_FILE } from '../src/storage/paths.ts'
+import { historySteps } from '../src/commit-change.ts'
+import { ledgerSteps } from '../src/governance/op-steps.ts'
+import { goneCopies } from '../src/tools/workspace-gate.ts'
+import { stalenessNote } from '../src/record-freshness.ts'
 import { withinValidity } from '../src/record-freshness.ts'
 
 const GLOBAL_COUNT = 200
@@ -60,6 +77,7 @@ const DAY = 86_400_000
 
 const { values: opts } = parseArgs({
   options: {
+    tier: { type: 'string' },
     projects: { type: 'string', default: '10' },
     'per-project': { type: 'string', default: '1000' },
     rounds: { type: 'string', default: '10' },
@@ -73,6 +91,15 @@ function positiveInt(name: string, raw: string): number {
 const projects = positiveInt('projects', opts.projects)
 const perProject = positiveInt('per-project', opts['per-project'])
 const rounds = positiveInt('rounds', opts.rounds)
+
+const TIERS = { '1k': 1000, '5k': 5000, '20k': 20000 } as const
+const tier = opts.tier
+if (tier !== undefined) {
+  if (tier !== 'all' && !(Object.hasOwn(TIERS, tier))) throw new Error('--tier 只接受 1k、5k、20k、all')
+  if (process.argv.slice(2).some(arg => /^--(?:projects|per-project)(?:=|$)/u.test(arg))) {
+    throw new Error('--tier 不能与 --projects 或 --per-project 同传')
+  }
+}
 
 // —— 确定性数据生成 ——
 
@@ -200,8 +227,8 @@ const gc = exposeGc()
 let warnings = 0
 const quietLog: MemoryLogger = { info() {}, warn() { warnings++ }, error() { warnings++ } }
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
-const newSidecar = (root: string) => new SidecarStore({
-  root,
+const newSidecar = (root: string, lock?: ReturnType<typeof createRootLock>) => new SidecarStore({
+  root, lock,
   schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema },
   log: quietLog,
 })
@@ -210,7 +237,184 @@ const newSidecar = (root: string) => new SidecarStore({
 const segmenterWarnings: string[] = []
 const searchTokenizer = { log: { warn(message: string) { segmenterWarnings.push(message) } } }
 
-const root = await mkdtemp(join(tmpdir(), 'plastic-bench-'))
+/** 大档每种判定的写入，中位数至多是同次运行中 1 千档的三倍。 */
+const WRITE_RATIO_LIMIT = 3
+const HISTORY_SHARE = 0.2
+const LINK_SHARE = 0.1
+const STATS_SHARE = 0.3
+const VERSIONS_PER_MEMORY = 2
+const WRITE_LABELS = ['新建', '整条更新（refine）', '补证（corroborate）', '状态变化（state-change）'] as const
+/** 只报比值、不进退出码的写入（理由见头注释）。 */
+const REPORT_ONLY_LABELS: ReadonlySet<string> = new Set([WRITE_LABELS[0]])
+interface ScaleRow { tier: string; label: string; ms: number; p95: number }
+
+async function runScale(selected: string): Promise<void> {
+  const names = selected === 'all' ? ['1k', '5k', '20k'] : selected === '1k' ? ['1k'] : ['1k', selected]
+  const rows: ScaleRow[] = []
+  for (const name of names) {
+    const initialWarnings = warnings
+    let item = '创建临时目录'
+    let temp: string | undefined
+    let index: DerivedIndex | undefined
+    let journal: OpJournal | undefined
+    try {
+      temp = await mkdtemp(join(tmpdir(), 'plastic-scale-'))
+      const root = join(temp, 'memories')
+      const workspacePath = '/bench/project-00'
+      const dir = join(root, workspaceDirName(workspacePath))
+      const count = TIERS[name as keyof typeof TIERS]
+      const now = Date.now()
+      item = '生成数据'
+      const records = Array.from({ length: count }, (_, i) => ({
+        ...makeRecord(`mem_scale_${i}`, `scale-${i}`, { scope: 'workspace', workspacePath }, now),
+        status: 'active' as const, deletedAt: undefined,
+      }))
+      for (let i = 0; i < count * LINK_SHARE; i++) {
+        const target = records[(i + 1) % count]
+        records[i].related = [target.id]
+        records[i].premises = [{ id: target.id, digest: computeDigest(target.name, target.summary, target.content) }]
+      }
+      // 分批写文件，避免大档同时打开数万文件耗尽文件描述符。
+      for (let i = 0; i < records.length; i += 100) await writeDir(dir, records.slice(i, i + 100))
+      await writeFile(join(dir, WORKSPACE_MARKER), `${workspacePath}\n`, 'utf8')
+      const globals = Array.from({ length: GLOBAL_COUNT }, (_, i) => ({
+        ...makeRecord(`mem_scale_g_${i}`, `scale-global-${i}`, { scope: 'global' }, now),
+        status: 'active' as const, deletedAt: undefined,
+      }))
+      await writeDir(join(root, GLOBAL_DIR), globals)
+      const history = new FileVersionHistory()
+      const layer = { dir, loc: { scope: 'workspace' as const, workspacePath } }
+      for (const record of records.slice(0, count * HISTORY_SHARE)) {
+        for (let v = 0; v < VERSIONS_PER_MEMORY; v++) {
+          const endedAt = now - (VERSIONS_PER_MEMORY - v) * DAY
+          await history.write(layer, {
+            versionId: newVersionId(endedAt, []), record: { ...record, content: `${record.content} 旧状态 ${v}` },
+            extras: {}, startedAt: endedAt - DAY, endedAt, kind: 'state-change',
+            writes: [{ op: `seed-${record.id}-${v}`, at: endedAt }],
+          })
+        }
+      }
+      const lock = createRootLock({ root, log: quietLog })
+      const sidecar = newSidecar(root, lock)
+      index = new DerivedIndex({ path: join(temp, DERIVED_INDEX_FILE), log: quietLog })
+      journal = new OpJournal({ path: join(temp, OP_JOURNAL_FILE), log: quietLog })
+      const table = new FileTable({ root, lock, index, journal, stats: sidecar.recallStats, log: quietLog,
+        isStale: (r, at) => stalenessNote(r, registry.get(r.type).decayDays, at) !== '' })
+      const store = new MemoryStore(table, quietLog, sidecar.recallStats)
+      const decisions = new PendingDecisionsStore(sidecar.pending, lock)
+      const snapshots = new SnapshotStore(sidecar.snapshots, { findGone: goneCopies(store) })
+      store.registerSteps(ledgerSteps(decisions, quietLog))
+      store.registerSteps(historySteps(store, snapshots, quietLog))
+      await sidecar.recallStats.putMany(records.slice(0, count * STATS_SHARE).map(r =>
+        [r.id, { id: r.id, recallCount: 3, lastRecalledAt: now - DAY }]))
+      // 改前快照也按库规模增长，避免在空侧表上测整表读取。
+      const seedSnapshots = new SnapshotStore(sidecar.snapshots)
+      for (const r of records.slice(0, count * HISTORY_SHARE)) {
+        await seedSnapshots.capture({ operation: 'pre-update', description: '历史状态的改前快照', records: [r] }, now - DAY)
+      }
+      item = '核验生成数据'
+      const visible = await table.readScope([dir, join(root, GLOBAL_DIR)])
+      if (visible.records.length !== count + GLOBAL_COUNT) throw new Error('在用记忆数量不符')
+      const historyIds = await history.memoryIds(dir)
+      let versions = 0
+      for (const id of historyIds) versions += (await history.list(layer, id)).length
+      const related = visible.records.filter(r => r.record.related?.length).length
+      const premises = visible.records.filter(r => r.record.premises?.length).length
+      if (historyIds.length !== count * HISTORY_SHARE || versions !== count * HISTORY_SHARE * VERSIONS_PER_MEMORY
+        || related !== count * LINK_SHARE || premises !== count * LINK_SHARE) throw new Error('历史或关联数量不符')
+      if (warnings !== initialWarnings) throw new Error('生成或装配出现存储告警，不能作为正常路径计时')
+      console.log(`${name} 数据核验：项目在用 ${count}，global ${GLOBAL_COUNT}，带历史 ${historyIds.length}，版本文件 ${versions}，related ${related}，premises ${premises}`)
+      await new Promise(resolve => setTimeout(resolve, SETTLE_WAIT_MS))
+      await tokenizerForQuery('预热', searchTokenizer)
+      const exec = { signal: new AbortController().signal } as ToolRunContext
+      const contextOf = async () => ({ workspacePath, session: { id: 'scale-session', lastSeq: 10, turnStartSeq: 5 } })
+      const readSessionLog = async () => ({ header: { isSeeded: false }, inheritedEventCount: 0,
+        events: [{ type: 'turn/start', seq: 5, time: 1 }, { type: 'user/message', seq: 6,
+          data: { role: 'user', content: [{ type: 'text', text: '记一下' }], source: { kind: 'user' } } }] })
+      const deps = { store, registry, snapshots, decisions, host: { saveContextOf: contextOf, readSessionLog } }
+      const measure = async (label: string, fn: (round: number) => Promise<unknown>) => {
+        item = label
+        await fn(-1)
+        const samples: number[] = []
+        for (let r = 0; r < rounds; r++) {
+          const start = performance.now()
+          await fn(r)
+          samples.push(performance.now() - start)
+        }
+        samples.sort((a, b) => a - b)
+        if (warnings !== initialWarnings) throw new Error('计时出现存储告警，不能作为正常路径计时')
+        rows.push({ tier: name, label, ms: median(samples), p95: samples[Math.ceil(samples.length * 0.95) - 1] })
+      }
+      await measure(WRITE_LABELS[0], async round => {
+        const words = Array.from({ length: 6 }, () => Math.random().toString(36).slice(2, 10))
+        const r = await executeSave({ action: 'create', name: `scale-save-${round + 1}`, type: 'knowledge',
+          scope: 'workspace', content: words.join(' '), summary: words.slice(0, 2).join(' '), sourceMode: 'user-explicit' }, exec, deps)
+        if (r.kind !== 'saved') throw new Error(`未落盘：${r.kind}`)
+      })
+      for (const [i, change] of (['refine', 'corroborate', 'state-change'] as const).entries()) {
+        await measure(WRITE_LABELS[i + 1], async round => {
+          const target = records[(round + 1) % Math.floor(count * HISTORY_SHARE)]
+          const r = await executeSave(change === 'corroborate'
+            ? { action: 'update', id: target.id, change, sourceMode: 'user-explicit' }
+            : { action: 'update', id: target.id, change, name: target.name, type: target.type, scope: 'workspace',
+                content: `${target.content} ${change} 第 ${round + 2} 次变化`, summary: target.summary, sourceMode: 'user-explicit' }, exec, deps)
+          if (r.kind !== 'updated') throw new Error(`未更新：${r.kind}`)
+        })
+      }
+      item = '核验状态变化留档'
+      // 预热轮改的是 records[0]，计时轮从 records[1] 起：两边各查一条
+      for (const target of [records[0], records[1]]) {
+        if ((await history.list(layer, target.id)).length <= VERSIONS_PER_MEMORY) {
+          throw new Error(`状态变化没有给 ${target.id} 留下新历史版本`)
+        }
+      }
+      const cache = new SnapshotCache({ store, registry, budget: 4000, memoryRoot: root, evidenceLookup: 'strict', log: quietLog, snapshots })
+      await measure('快照冻结（当前项目 + global）', async () => {
+        const session = {}
+        cache.setWorkspacePath(session, workspacePath)
+        if (!(await cache.assemble(session))?.startsWith('# 长期记忆')) throw new Error('快照未组装')
+      })
+      await measure('memory_search', async () => {
+        const r = await executeSearch({ query: `${WORDS[0]} 部署流程` }, exec, { store, registry, host: { contextOf } })
+        if (!r.hits.length) throw new Error('检索没有命中')
+      })
+      // 每轮新建侧表：同一个侧表反复读会命中按文件签名缓存的解析结果，量不出整表读随条数的增长
+      await measure('扫描整张召回统计表 冷读（stats.list，每轮新侧表）', () => newSidecar(root, lock).recallStats.list())
+      await measure('冻结时整份改前快照清单（SnapshotStore.list）', () => snapshots.list())
+    } catch (error) {
+      console.error(`FAIL：${name} / ${item}：${error instanceof Error ? error.message : String(error)}`)
+      process.exitCode = 1
+      return
+    } finally {
+      index?.close()
+      journal?.close()
+      if (temp !== undefined) await rm(temp, { recursive: true, force: true })
+    }
+  }
+  console.log(`每项预热 1 轮，计时 ${rounds} 轮；p95 取排序后的第 ceil(轮数 × 0.95) 项`)
+  console.log('| 规模 | 操作 | 中位数 ms | p95 ms |')
+  console.log('| --- | --- | ---: | ---: |')
+  for (const row of rows) console.log(`| ${row.tier} | ${row.label} | ${row.ms.toFixed(2)} | ${row.p95.toFixed(2)} |`)
+  for (const name of names.slice(1)) for (const label of WRITE_LABELS) {
+    const baseline = rows.find(r => r.tier === '1k' && r.label === label)!.ms
+    const ratio = rows.find(r => r.tier === name && r.label === label)!.ms / baseline
+    if (REPORT_ONLY_LABELS.has(label)) {
+      console.log(`仅报告：${name} / 1k ${label} = ${ratio.toFixed(3)}，不判定`)
+      continue
+    }
+    const pass = Number.isFinite(ratio) && ratio <= WRITE_RATIO_LIMIT
+    console.log(`${pass ? 'PASS' : 'FAIL'}：${name} / 1k ${label} = ${ratio.toFixed(3)}，门槛 ≤ ${WRITE_RATIO_LIMIT}`)
+    if (!pass) process.exitCode = 1
+  }
+}
+
+if (tier !== undefined) {
+  await runScale(tier)
+} else {
+const temp = await mkdtemp(join(tmpdir(), 'plastic-bench-'))
+const root = join(temp, 'memories')
+const index = new DerivedIndex({ path: join(temp, DERIVED_INDEX_FILE), log: quietLog })
+const journal = new OpJournal({ path: join(temp, OP_JOURNAL_FILE), log: quietLog })
 try {
   const now = Date.now()
   // 虚构的 workspace 路径：只写进 .workspace 标记，不需要在本机存在
@@ -228,7 +432,7 @@ try {
   // 工具共用的一份运行时（对应插件加载后的接线对象；记忆本身不常驻内存）
   const sidecar = newSidecar(root)
   const newTable = (parseCache?: ParseCache<never>) =>
-    new FileTable({ root, stats: sidecar.recallStats, log: quietLog, parseCache })
+    new FileTable({ root, index, journal, stats: sidecar.recallStats, log: quietLog, parseCache })
   const fileTable = newTable()
   const uncached = newTable(new ParseCache({ maxEntries: 0 }))
   const visibleDirs = [join(root, workspaceDirName(currentWs)), join(root, GLOBAL_DIR)]
@@ -266,7 +470,7 @@ try {
 
   const results = [
     await bench('构造（零 I/O）', async () => {
-      new FileTable({ root, stats: newSidecar(root).recallStats, log: quietLog })
+      new FileTable({ root, index, journal, stats: newSidecar(root).recallStats, log: quietLog })
     }),
     await bench('readScope（当前项目 + global）', () => readVisible(fileTable)),
     await bench('readScope 冷读（每轮新缓存）', () => readVisible(newTable())),
@@ -427,5 +631,9 @@ try {
     console.log(`| ${r.tier} | ${r.label}「${r.query}」 | ${r.ms.toFixed(1)} | ${reference.toFixed(1)}（${r.reference === 'legacy' ? '旧路径' : 'readScope'}） | ${increase >= 0 ? '+' : ''}${increase.toFixed(1)} | ${(r.passRate * 100).toFixed(1)}%（${r.parsed} / ${r.listed}） | ${r.heapMb.toFixed(2)} | ${verdict} |`)
   }
 } finally {
-  await rm(root, { recursive: true, force: true })
+  index.close()
+  journal.close()
+  await rm(temp, { recursive: true, force: true })
+}
+
 }
