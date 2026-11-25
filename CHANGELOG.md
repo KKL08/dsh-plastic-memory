@@ -42,6 +42,9 @@ All notable changes to this project are documented here. The format follows
   from, but that is not quoted under it, ranks higher and names that memory.
   Conversation results keep their own limit of about 1,500 tokens
   (`search.dialogueTokenBudget`), separate from the quotes under memories.
+- Searching past conversations finds an identifier however it is written:
+  `getUserName`, `get_user_name` and `GetUserName` find each other,
+  and `user name` finds `getUserName`.
 - Groundwork for Brewing Dreams, an experimental background pass that tidies
   memories while no chat is running. It is off and has no switch yet. Once on
   for a scope (all memories, or one project), a pass starts only when enough

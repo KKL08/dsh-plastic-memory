@@ -42,13 +42,21 @@ const phraseIn = (column: string, phrase: string) => ` ${words(column).join(' ')
 export function dialogueTerms(query: string, tokenizer: DialogueTokenizer): string[] {
   return (tokenizer.match(query)?.all.split(' AND ') ?? []).map(group => group.match(/"([^"]+)"/)?.[1] ?? '').filter(Boolean)
 }
+// 与 dialogueTerms 按同样的 AND 边界切组，保留短语所属列，避免把二元组短语当作整词命中。
+function dialogueTermForms(query: string, tokenizer: DialogueTokenizer) {
+  return (tokenizer.match(query)?.all.split(' AND ') ?? []).map(group =>
+    [...group.matchAll(/([wbc]) : "([^"]+)"/g)].map(match => ({ column: match[1]!, phrase: match[2]! })))
+}
+
 /** 给一组原文段分档；库命中用 bm25，同档的独立段用覆盖词数及短段优先。 */
 export function rankSegments<T extends { text: string }>(segments: readonly T[], query: string, tokenizer: DialogueTokenizer): Array<{ segment: T; tier: SearchTier; matched: string[] }> {
   const terms = dialogueTerms(query, tokenizer)
+  const groups = dialogueTermForms(query, tokenizer)
   return segments.map(segment => {
     const columns = tokenizer.columns(segment.text)
-    const whole = terms.map(term => phraseIn(columns.w, term))
-    const present = terms.map((term, i) => whole[i] || phraseIn(columns.b, tokenizer.columns(term).b || term) || (words(term).length === 1 && [...term].length === 1 && phraseIn(columns.c, term)))
+    // 单字组只有 c 列一项，它在 w 列里单独成词同样算整词命中；b 列的二元组短语不拿来比 w 列
+    const whole = groups.map(forms => forms.some(({ column, phrase }) => column !== 'b' && phraseIn(columns.w, phrase)))
+    const present = groups.map((forms, i) => whole[i] || forms.some(({ column, phrase }) => (column === 'b' && phraseIn(columns.b, phrase)) || (column === 'c' && words(phrase).length === 1 && [...phrase].length === 1 && phraseIn(columns.c, phrase))))
     const tier: SearchTier = terms.length > 0 && present.every(Boolean) ? (tokenizer.degraded || whole.every(Boolean) ? 'all' : 'substring') : 'partial'
     const matched = terms.filter((_, i) => present[i])
     const score = 'score' in segment && typeof segment.score === 'number' ? segment.score : -matched.length + estimateTokens(segment.text) / (estimateTokens(segment.text) + 1)

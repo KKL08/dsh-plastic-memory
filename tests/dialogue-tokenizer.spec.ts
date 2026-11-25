@@ -142,14 +142,14 @@ it('空白和标点没有查询，停用词全被去掉时保留原词', async (
 it.each([
   ['写锁', { w: '写锁', b: '写锁', c: '写 锁' }],
   ['抄写锁定', { w: '抄写 锁定', b: '抄写 写锁 锁定', c: '抄 写 锁 定' }],
-  ['ＡＢＣ１２３', { w: 'abc123', b: 'abc123', c: '' }],
-  ['snake_case_name', { w: 'snake_case_name', b: 'snake_case_name', c: '' }],
+  ['ＡＢＣ１２３', { w: 'abc123 abc123 abc 123', b: 'abc123 abc123 abc 123', c: '' }],
+  ['snake_case_name', { w: 'snake_case_name snakecasename snake case name', b: 'snake_case_name snakecasename snake case name', c: '' }],
   ['Ａ"写！', { w: 'a 写', b: 'a 写', c: '写' }],
   ['a\u0000b', { w: 'a b', b: 'a b', c: '' }],
   ['カタカナ', { w: 'カタ タカ カナ', b: 'カタ タカ カナ', c: '' }],
   ['テーブル', { w: 'テー ーブ ブル', b: 'テー ーブ ブル', c: '' }],
   ['中文の写锁', { w: '中文 の 写锁', b: '中文 の 写锁', c: '中 文 写 锁' }],
-  ['my4s店', { w: 'my4s 店', b: 'my4s 店', c: '店' }],
+  ['my4s店', { w: 'my4s my4s my 4 s 店', b: 'my4s my4s my 4 s 店', c: '店' }],
 ])('固定输入%s的三列与版本保持一致', async (text, columns) => {
   const tokenizer = await dialogueTokenizer()
   expect(tokenizer.tokenizerVersion).toBe(DIALOGUE_TOKENIZER_VERSION)
@@ -195,7 +195,7 @@ it.skipIf(!hasRealJieba)('混排的词典词按各段分别命中，w 列为空�
   resetJieba()
   const tokenizer = await dialogueTokenizer()
   const match = tokenizer.match('4s店')!.all
-  expect(match).toBe('(w : "4s" OR b : "4s") AND c : "店"')
+  expect(match).toBe('(w : "4 s" OR w : "4s" OR b : "4 s" OR b : "4s") AND c : "店"')
   expect(index(tokenizer, ['4s店在哪'])(match)).toEqual(['4s店在哪'])
   expect(index(tokenizer, ['4s店在哪'], { withoutW: true })(match)).toEqual(['4s店在哪'])
 })
