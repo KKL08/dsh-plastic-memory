@@ -50,6 +50,15 @@ All notable changes to this project are documented here. The format follows
   scope's active memories (`brewingDreams.maxChangeRatio`, 20% by default);
   what is left over is picked up by the next pass. The changes of a pass can
   be undone together or one at a time, also while governance is turned off.
+- A Brewing Dreams pass also merges memories in the same scope that repeat
+  each other or each hold part of the same thing: one memory is rewritten
+  into the combined text, and the others move to Recently deleted and point
+  to it, with their earlier versions listed in its history. A merge is
+  skipped as a whole when one of the memories is locked, contains something
+  that looks like a secret, or was edited after the model read it, and when
+  the combined text would be longer than 2,000 characters. Undoing a merge
+  restores every memory in it, and later passes do not propose the same
+  merge again unless the type, name or text of one of those memories changes.
 - The plugin records which project folders have a chat running in
   `.state/activity/` inside the memory folder, so several DeepSeek Harness
   windows that share a memory folder can tell when a project is idle. A

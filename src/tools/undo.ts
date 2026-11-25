@@ -1,4 +1,6 @@
-import type { MemoryStore } from '../store.ts'
+import type { MemoryLogger, MemoryStore } from '../store.ts'
+import type { DreamsStore } from '../governance/dreams-records.ts'
+import { conclusionOfGroup } from '../governance/dreams-merge.ts'
 import type { PendingDecisionsStore } from '../governance/decisions.ts'
 import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import { editFingerprint, isConflicting, type SnapshotStore } from '../governance/snapshots.ts'
@@ -22,6 +24,9 @@ export interface UndoDeps {
   ignores: Pick<AdviceIgnoreStore, 'unignoreIfSame'>
   /** 每次现读：恢复收尾要判快照是不是途中刚过期被清扫，用开头的时刻判不出来。 */
   now?: () => number
+  /** 撤销记忆梦境的合并组时记下撤销过的结论，梦境以后不再提；缺省不记（没接记忆梦境）。 */
+  dreams?: Pick<DreamsStore, 'noteUndoneMerges'>
+  log?: MemoryLogger
 }
 
 /**
@@ -164,7 +169,8 @@ async function undoDreamsRun(entry: UndoableEntry, op: string | undefined, allow
   const label = entry.workspaces?.[0]
   const restored: string[] = []
   if (changes.length > 0) {
-    const r = await revertReceipts(entry, changes, allow, context, deps)
+    // 每一组撤完就记它的结论：后面的回执撤不成时，已撤完的组照样记下（它们的回执已拿掉，重试时补不回来）
+    const r = await revertReceipts(entry, changes, allow, context, deps, groupReceipts => noteUndoneMerges(groupReceipts, deps))
     if (!Array.isArray(r)) return r
     restored.push(...r)
   }
@@ -193,6 +199,27 @@ async function undoDreamsRun(entry: UndoableEntry, op: string | undefined, allow
 }
 
 /**
+ * 撤掉的回执里有记忆梦境发起的合并组（组号里编着结论身份）：记下这些结论，梦境以后不再提同样的合并。
+ * 只在一组的回执全部撤成之后调用；同一个结论再记一次不多一条。记不下（侧表写不进）只记日志，撤销照样算成，那个结论以后可能再被提一次。
+ */
+async function noteUndoneMerges(receipts: readonly ChangeReceipt[], deps: UndoDeps): Promise<void> {
+  if (deps.dreams === undefined) return
+  const byScope = new Map<string, Set<string>>()
+  for (const receipt of receipts) {
+    const conclusion = receipt.group === undefined ? undefined : conclusionOfGroup(receipt.group)
+    if (conclusion !== undefined) byScope.set(receipt.scopeKey, (byScope.get(receipt.scopeKey) ?? new Set()).add(conclusion))
+  }
+  const log = deps.log ?? console
+  for (const [key, conclusions] of byScope) {
+    try {
+      await deps.dreams.noteUndoneMerges(scopeOfLedger(key), [...conclusions], deps.now?.() ?? Date.now())
+    } catch (err) {
+      log.warn('[plastic-memory] 撤销过的梦境合并没记上，以后可能再提一次', err)
+    }
+  }
+}
+
+/**
  * 按变更集应用的条目：按回执逆序逐个还原（只把那次改的字段改回去，期间别处改的档位、锁、关联留着）。先整批推演一遍，
  * 有一条撤不了就整批不动；动手时每条在自己的写入段里再核对一次，中途被别处抢先改了就停在那里，撤掉的回执已拿掉、剩下的留着可再撤。
  */
@@ -209,9 +236,13 @@ async function revertChanges(entry: UndoableEntry, rule: UndoRule, allow: boolea
   return Array.isArray(r) ? settleUndo(entry, rule, deps, r) : r
 }
 
-/** 按这几条回执逆序还原（见 revertChanges）。成了返回还原过的记忆 id，撤不了返回错误。 */
+/**
+ * 按这几条回执逆序还原（见 revertChanges）。成了返回还原过的记忆 id，撤不了返回错误。
+ * onGroupReverted：这几条里属于同一组的回执全部还原了（还原已落盘、收尾出错的也算），交回这一组的回执；在后面的回执动手之前调用。
+ */
 async function revertReceipts(
   entry: UndoableEntry, receipts: readonly ChangeReceipt[], allow: boolean | undefined, context: GovernanceContext, deps: UndoDeps,
+  onGroupReverted?: (groupReceipts: readonly ChangeReceipt[]) => Promise<void>,
 ): Promise<string[] | UndoError> {
   await deps.snapshots.sweep(deps.now?.() ?? Date.now())
   const keyOf = (r: ChangeReceipt) => JSON.stringify([r.scopeKey, r.memoryId])
@@ -231,9 +262,13 @@ async function revertReceipts(
     return blocked.block === 'expired' ? notFound(`${entry.id} 改前的快照（可能已超过 14 天）`, 'expired') : changed(blocked.receipt.memoryId)
   }
   const restored: string[] = []
+  const reverted = new Set<ChangeReceipt>()
   for (const receipt of [...receipts].reverse()) {
     const r = await revertChange(entry.id, receipt, {}, deps)
     if (r.kind !== 'reverted') return changed(receipt.memoryId, restored.length > 0 ? 'kept-third-party' : 'changed')
+    reverted.add(receipt)
+    const group = receipts.filter(other => receipt.group !== undefined && other.group === receipt.group)
+    if (onGroupReverted !== undefined && group.length > 0 && group.every(other => reverted.has(other))) await onGroupReverted(group)
     // 这一条已经还原、回执也拿掉了，只是收尾出了错：照实报出去，剩下的回执留着，修好后再撤
     if (r.error !== undefined) throw r.error
     if (!restored.includes(receipt.memoryId)) restored.push(receipt.memoryId)

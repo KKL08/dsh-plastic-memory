@@ -10,17 +10,21 @@ const ref = (r: MemoryRecord) => ({ memoryId: r.id, scopeKey: scopeKeyOf(r) })
 const sameCopy = (a: MemoryRecord, b: MemoryRecord) => a.id === b.id && scopeKeyOf(a) === scopeKeyOf(b)
 type Fused = Pick<FieldPatch, 'name' | 'summary' | 'content' | 'tags'>
 
-/** 合并：存活的那条改成融合稿，其余的软删并记下并进了它。一组，全做成才算。 */
-export function mergePlan(input: { group: string; keeper: MemoryRecord; merged: readonly MemoryRecord[]; fused: Fused; reason?: string }): ChangeOp[] {
-  const { group, keeper, merged, fused } = input
+/**
+ * 合并：存活的那条改成融合稿，其余的软删并记下并进了它。一组，全做成才算。
+ * fingerprint：依据按什么指纹算，缺省扫描指纹；给了的话应用时要传同一个（ApplyOptions.fingerprint）。
+ */
+export function mergePlan(input: { group: string; keeper: MemoryRecord; merged: readonly MemoryRecord[]; fused: Fused; reason?: string; fingerprint?: (r: MemoryRecord) => string }): ChangeOp[] {
+  const { group, keeper, merged, fused, fingerprint } = input
   if (merged.length === 0) throw new Error('合并至少要有一条被合并的记忆')
   if (merged.some(m => sameCopy(m, keeper)) || merged.some((m, i) => merged.findIndex(o => sameCopy(o, m)) !== i)) throw new Error('合并的各条不能重复')
-  const all = [keeper, ...merged].map(basisOf)
+  const basis = (r: MemoryRecord) => (fingerprint === undefined ? basisOf(r) : { ...basisOf(r), fingerprint: fingerprint(r) })
+  const all = [keeper, ...merged].map(basis)
   const expect = Object.fromEntries(Object.keys(fused).map(field => [field, keeper[field as keyof Fused]])) as Fused
   return [
     { id: `${group}-keep`, kind: 'edit', ...ref(keeper), patch: fused, expect, basis: all, group, ...(input.reason !== undefined ? { reason: input.reason } : {}) },
     ...merged.map((m, i): ChangeOp => ({
-      id: `${group}-merge-${i + 1}`, kind: 'forget', ...ref(m), basis: [basisOf(m), basisOf(keeper)], into: { ...ref(keeper), as: 'merge' }, group,
+      id: `${group}-merge-${i + 1}`, kind: 'forget', ...ref(m), basis: [basis(m), basis(keeper)], into: { ...ref(keeper), as: 'merge' }, group,
     })),
   ]
 }

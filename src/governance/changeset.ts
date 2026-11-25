@@ -87,7 +87,8 @@ export const changeOpSchema = z.object({
 })
 export type ChangeOp = z.infer<typeof changeOpSchema>
 
-const sha1 = (value: unknown) => createHash('sha1').update(JSON.stringify(value) ?? 'null').digest('hex')
+/** 值的摘要（按 JSON 序列化后取 sha1）。 */
+export const sha1 = (value: unknown) => createHash('sha1').update(JSON.stringify(value) ?? 'null').digest('hex')
 const lf = (text: string) => text.replace(/\r\n/g, '\n')
 
 /** 开放取值里的对象按键名排序：只换了键的顺序不算改过。 */

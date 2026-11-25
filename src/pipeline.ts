@@ -20,7 +20,7 @@ import { detectSecrets, maskSecretSurface } from './secrets.ts'
 import { RecordNotFoundError } from './errors.ts'
 import { runCreateGate, type SimilarMemory } from './create-gate.ts'
 import type { QueryTokenizerOptions } from './search/jieba-segmenter.ts'
-import { lostFacts, refineRemoval, factsDroppedText, refineShrankText, turnThirdSaveText, contentLongText, TURN_CREATE_HINT_AT, CONTENT_LENGTH_HINT, type SaveHints } from './save-signals.ts'
+import { lostFacts, refineRemoval, factsDroppedText, refineShrankText, turnThirdSaveText, contentLongText, TURN_CREATE_HINT_AT, isContentLong, type SaveHints } from './save-signals.ts'
 import { toToolOutput } from './output.ts'
 import { VALIDITY_DATE_FORMAT, VALIDITY_FORMAT, formatValidity, parseValidityInput, roundValidity } from './validity.ts'
 
@@ -966,7 +966,7 @@ export async function runSavePipeline(
         && deps.hints.noteCreate(session.turnStartSeq) === TURN_CREATE_HINT_AT) {
         scopeWarnings.push({ code: 'turn-third-save', text: turnThirdSaveText() })
       }
-      if (!isCorroboration && clean.content.length > CONTENT_LENGTH_HINT && deps.hints.claimLengthHint(clean.id)) {
+      if (!isCorroboration && isContentLong(clean.content) && deps.hints.claimLengthHint(clean.id)) {
         scopeWarnings.push({ code: 'content-long', text: contentLongText(clean.content.length) })
       }
     }

@@ -55,6 +55,7 @@ import { DREAMS_DEFAULTS, resolveDreamsConfig } from './governance/dreams-gate.t
 import { DreamsStore } from './governance/dreams-records.ts'
 import { maintainStep } from './tools/dreams-run.ts'
 import { organizeIndexStep, tidyMemoriesStep } from './tools/dreams-tidy.ts'
+import { mergeFragmentsStep } from './tools/dreams-merge.ts'
 import { DreamsScheduler } from './tools/dreams-scheduler.ts'
 import { ActivityBoard } from './governance/session-activity.ts'
 import { adviceIgnoreSchema, genId, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from './governance/schema.ts'
@@ -545,7 +546,7 @@ export async function apply(ctx: Context, config: Config) {
     // 卸载时取消手动体检之后还在跑的后续段（不等在途的模型调用）
     const unload = new AbortController()
     const command = createMemoryCommand({
-      memoryRoot, store, decisions, snapshots, cache: scanCache, checkups, autoCheckups, selections, ignores, registry, agentsMd, views: writer, instructions,
+      memoryRoot, store, decisions, snapshots, cache: scanCache, checkups, autoCheckups, selections, ignores, registry, agentsMd, views: writer, instructions, dreams,
       onAutoCheckupChanged: () => void scheduler?.recheck(),
       deleteDialogueRecords: () => dialogueCatchup.destroy(),
       suggestions: checkupSuggestions, signal: unload.signal,
@@ -610,7 +611,7 @@ export async function apply(ctx: Context, config: Config) {
       },
     })
     void board.start().catch((err: unknown) => { ctx.logger.warn('[plastic-memory] 活动表启动失败，记忆梦境不会自动运行', err) })
-    // 记忆梦境：接在自动体检每一轮之后查门槛；运行计划：维护 → 整理主题索引 → 逐条整理记忆
+    // 记忆梦境：接在自动体检每一轮之后查门槛；运行计划：维护 → 整理主题索引 → 合并零碎记忆 → 逐条整理记忆
     const dreamsCreated = new DreamsScheduler({
       run: {
         store, snapshots, decisions, dreams, log: ctx.logger,
@@ -621,9 +622,10 @@ export async function apply(ctx: Context, config: Config) {
         resolveLlm: () => resolveBackgroundLlm('dreams'),
         config: () => dreamsConfig().config,
         isGovernanceEnabled: () => config.governance.enabled.get(),
-        plan: [maintainStep(store), ...[organizeIndexStep, tidyMemoriesStep].map(step => step({
-          store, maxTopics: () => config.index.maxTopics.get(), now: () => Date.now(), typeRecall: type => registry.get(type).recall,
-        }))],
+        plan: (() => {
+          const tidyDeps = { store, maxTopics: () => config.index.maxTopics.get(), now: () => Date.now(), typeRecall: (type: string) => registry.get(type).recall }
+          return [maintainStep(store), organizeIndexStep(tidyDeps), mergeFragmentsStep({ store, dreams }), tidyMemoriesStep(tidyDeps)]
+        })(),
         interval: (callback, delayMs) => timer.interval(callback, delayMs),
         now: () => Date.now(),
         // 运行 id 同时是这次运行在账本里的条目 id，和别的条目同一种写法

@@ -4,7 +4,7 @@ import { scopeKey, type Scope } from '../scope.ts'
 import { DREAMS_ALL_KEY, type UsageRun } from './dreams-gate.ts'
 
 /**
- * 记忆梦境的侧表读写：范围开关、每个范围的运行记录、变化基线、用量。表由接线层注入（storage/sidecar.ts 的 dreams、dreamMarks）。
+ * 记忆梦境的侧表读写：范围开关、每个范围的运行记录（含用户撤销过的合并结论）、变化基线、用量。表由接线层注入（storage/sidecar.ts 的 dreams、dreamMarks）。
  *
  * 读一律带完整性（listChecked）：有条目读不出时不知道它是不是单独关掉的开关、是不是别的进程刚写的运行记录，
  * 调用方这一轮不跑。写都是单条的读改写（update），收尾的写入核对运行 id，认领过期后被别的进程接着跑时旧的那次不改记录。
@@ -12,6 +12,8 @@ import { DREAMS_ALL_KEY, type UsageRun } from './dreams-gate.ts'
 
 /** 用量记在这个键下（不是范围）。 */
 export const DREAMS_USAGE_KEY = 'usage'
+/** 每个范围最多记这么多个撤销过的合并结论，多了丢最早的（丢掉的那个结论以后可能再被提一次）。 */
+export const UNDONE_MERGES_MAX = 500
 const DAY_MS = 86_400_000
 
 export type DreamsUnfinished = NonNullable<DreamsRecord['unfinished']>
@@ -111,6 +113,26 @@ export class DreamsStore {
     if (completedRunId === undefined) return { kind: 'none' }
     const stored = await this.marks.get(scopeKey(scope))
     return stored?.runId === completedRunId ? { kind: 'ok', marks: stored.marks } : { kind: 'unavailable' }
+  }
+
+  /**
+   * 这个范围里用户撤销过的合并结论。侧表有条目读不出时返回 undefined：不知道撤销过哪些，这一轮不合并。
+   */
+  async undoneMerges(scope: Scope): Promise<ReadonlySet<string> | undefined> {
+    const { entries, isComplete } = await this.records.listChecked()
+    if (!isComplete) return undefined
+    const record = entries.find(([key]) => key === scopeKey(scope))?.[1]
+    return new Set((record?.undoneMerges ?? []).map(m => m.key))
+  }
+
+  /** 记下用户撤销了这几个梦境合并结论（同一个记过的挪到最后），只留最近的 UNDONE_MERGES_MAX 个。记录里的其他内容不动。 */
+  async noteUndoneMerges(scope: Scope, keys: readonly string[], at: number): Promise<void> {
+    if (keys.length === 0) return
+    const key = scopeKey(scope)
+    await this.records.update(key, (cur) => {
+      const kept = (cur?.undoneMerges ?? []).filter(m => !keys.includes(m.key))
+      return { ...cur, id: key, undoneMerges: [...kept, ...[...new Set(keys)].map(k => ({ key: k, at }))].slice(-UNDONE_MERGES_MAX) }
+    })
   }
 
   /** 这次运行又用了这么多：累加到它那一行，顺手丢掉七天前的。 */
