@@ -24,7 +24,7 @@ beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'dialogue-search-'))
 afterEach(async () => { db.close(); await rm(dir, { recursive: true, force: true }) })
 async function setup(complete = true) {
   const tokenizer = await dialogueTokenizer({ log: { warn() {} } })
-  const state = db.prepare({ segmentRule: 1, tokenizer: 1, intake: 1 }, tokenizer.dictionaryVersion ?? '', '/sessions')
+  const state = db.prepare({ segmentRule: 1, tokenizer: tokenizer.tokenizerVersion, intake: 1 }, tokenizer.dictionaryVersion ?? '', '/sessions')
   if (state.status === 'none') throw new Error('未建库')
   const gen = state.write.gen
   const add = (id: string, texts: string[], cwd = '/proj', speaker = 'user') => {

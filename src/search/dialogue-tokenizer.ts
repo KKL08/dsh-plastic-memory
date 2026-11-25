@@ -3,7 +3,40 @@ import type { QueryTokenizerOptions } from './jieba-segmenter.ts'
 import { bigramSegmenter, CJK } from './tokenizer.ts'
 
 /** 分词器版本：切法加归一化规则。三列的内容会变的改动都要加一。 */
-export const DIALOGUE_TOKENIZER_VERSION = 1
+export const DIALOGUE_TOKENIZER_VERSION = 2
+
+/** 一段最多拆成几段才追加；再多的多半是哈希、编码串，拆开只会撑大索引。 */
+export const IDENTIFIER_MAX_PARTS = 8
+/** 一段（NFKC 之后，按码点计）最长多少才追加；更长的是哈希、base64、长 URL 一类，只按原样进。 */
+export const IDENTIFIER_MAX_LENGTH = 64
+
+/** 一个标识符类的段在原样之外追加进 w、b 两列的内容。 */
+export interface IdentifierForms {
+  /** 拆开的各段，已转小写，按原顺序；至少两段、至多 IDENTIFIER_MAX_PARTS 段。 */
+  parts: string[]
+  /** 各段直接连成的一个词，如 get_user_name、getUserName 都得到 getusername。 */
+  joined: string
+}
+
+/**
+ * 判定一个非 CJK 段要不要追加拆分形式，要就给出拆开的各段和拼合形式；不追加返回 undefined。
+ * 入参是 NFKC 之后、转小写之前的一段（不含空白、不含 CJK），大小写边界要靠原来的大小写判断。
+ * 追加要同时满足：含字母，拆出 2 到 IDENTIFIER_MAX_PARTS 段，码点数不超过 IDENTIFIER_MAX_LENGTH。
+ * 索引侧和查询侧都只经这一个函数判定和拆分，两边切法不能分叉。
+ */
+export function identifierForms(segment: string): IdentifierForms | undefined {
+  if (!/\p{L}/u.test(segment) || [...segment].length > IDENTIFIER_MAX_LENGTH) return undefined
+  const parts = segment
+    .replace(/(\p{Ll})(\p{Lu})/gu, '$1 $2')
+    .replace(/(\p{Lu})(\p{Lu}\p{Ll})/gu, '$1 $2')
+    .replace(/(\p{L})(\p{N})/gu, '$1 $2')
+    .replace(/(\p{N})(\p{L})/gu, '$1 $2')
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean)
+    .map(part => part.toLowerCase())
+  if (parts.length < 2 || parts.length > IDENTIFIER_MAX_PARTS) return undefined
+  return { parts, joined: parts.join('') }
+}
 
 /** bm25 的列权重，顺序 w、b、c。先用保守值，评测后再调。 */
 export const DIALOGUE_BM25_WEIGHTS = [4, 2, 1] as const
@@ -54,7 +87,7 @@ interface Segment {
 
 // 控制字符（含 NUL）会截断传给 SQLite 的字符串，双引号会打断短语；两侧都先换成空格，不依赖分词器碰巧切开它们。
 function normalize(text: string): string {
-  return text.normalize('NFKC').toLowerCase().replace(/[\p{Cc}"]/gu, ' ')
+  return text.normalize('NFKC').replace(/[\p{Cc}"]/gu, ' ')
 }
 
 /**
@@ -99,10 +132,19 @@ export async function dialogueTokenizer(opts?: QueryTokenizerOptions): Promise<D
       const w: string[] = []
       const b: string[] = []
       // 每段各自切，不跨文字连成二元组；整词和子词都是单个 unicode61 token，不会首尾相接造出假短语
-      for (const { text: seg, kind } of segments(normalized)) {
+      for (const { text: original, kind } of segments(normalized)) {
+        const forms = kind === 'other' ? identifierForms(original) : undefined
+        const seg = original.toLowerCase()
         if (kind === 'other') {
           w.push(seg)
           b.push(seg)
+          if (forms !== undefined) {
+            // 拼合词隔开原样和拆分词，避免两组词在接缝处命中倒序短语。
+            w.push(forms.joined)
+            b.push(forms.joined)
+            append(w, forms.parts)
+            append(b, forms.parts)
+          }
           continue
         }
         const bigrams = bigramSegmenter.segment(seg)
@@ -118,7 +160,18 @@ export async function dialogueTokenizer(opts?: QueryTokenizerOptions): Promise<D
     match(query) {
       // 每项是「查询词, 表达式」，查询词只用来去停用词
       const terms: [string, string][] = []
-      for (const { text: seg, kind } of segments(normalize(query))) {
+      for (const { text: original, kind } of segments(normalize(query))) {
+        const forms = kind === 'other' ? identifierForms(original) : undefined
+        const seg = original.toLowerCase()
+        if (forms !== undefined) {
+          // 分档从第一个引号取查询词，所以拆分短语必须排在拼合词前面。
+          const phrases = [quote(forms.parts.join(' ')), quote(forms.joined)]
+          // 原样与拼合相同时只计一次，避免重复短语额外累加 bm25。
+          if (seg !== forms.joined) phrases.push(quote(seg))
+          const columns = jieba === undefined ? ['b'] : ['w', 'b']
+          terms.push([seg, `(${columns.flatMap(column => phrases.map(phrase => `${column} : ${phrase}`)).join(' OR ')})`])
+          continue
+        }
         if (kind !== 'han') {
           // 假名谚文段在 w、b 两列都是同样的二元组，查 w 不改变命中集合，只让正常写入的行多得 w 列权重，和其他段一致
           const phrase = quote(kind === 'other' ? seg : bigramSegmenter.segment(seg).join(' '))

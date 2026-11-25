@@ -11,7 +11,7 @@ export interface EvalMemory {
   sessionId: string
   eventRange: [number, number]
 }
-/** 每类五题；换说法题只用于观察基线，不参与参数选择。 */
+/** 每类五题，标识符一类另有换写法的题；换说法题只用于观察基线，不参与参数选择。 */
 export const DIALOGUE_EVAL_CATEGORIES = [
   'bigram', 'single-char', 'mixed', 'identifier', 'fullwidth', 'cross-word',
   'before-anchor', 'near-verbatim', 'long-message', 'tool-result', 'paraphrase', 'no-answer',
@@ -351,9 +351,21 @@ for (const [index, scene] of scenes.entries()) {
   }
 }
 
+// 同一个标识符换一种写法来问，答案就是原写法那道题的答案：驼峰问蛇形答、蛇形问驼峰答、全小写问驼峰答、拆开的英文词问驼峰答。
+const CROSS_WRITING: readonly { base: string; query: string }[] = [
+  { base: 'identifier-2', query: 'cacheTtl' },
+  { base: 'identifier-1', query: 'retry_delay_ms' },
+  { base: 'identifier-1', query: 'retrydelayms' },
+  { base: 'identifier-1', query: 'retry delay ms' },
+]
+for (const [n, { base, query }] of CROSS_WRITING.entries()) {
+  const source = queries.find(item => item.id === base)!
+  queries.push({ ...source, id: `${base}-cross-${n + 1}`, query })
+}
+
 /** 十五份十二轮会话，办公占六成；不收录材料与真实候选放在同一日志里。 */
 export const DIALOGUE_EVAL_SESSIONS: readonly EvalSession[] = sessions
 /** 五个补找锚和五条近原文记忆，出处均落在对应会话自己的事件内。 */
 export const DIALOGUE_EVAL_MEMORIES: readonly EvalMemory[] = memories
-/** 六十道人工指定答案的题；空答案只表示该库无依据，不生成否定事实。 */
+/** 六十道人工指定答案的题，另加四道标识符换写法的题；空答案只表示该库无依据，不生成否定事实。 */
 export const DIALOGUE_EVAL_QUERIES: readonly DialogueEvalQuery[] = queries
