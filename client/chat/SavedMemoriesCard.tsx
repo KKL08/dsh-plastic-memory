@@ -92,7 +92,6 @@ function SavedRow({ session, item, scope, promotion, rewrite, superseded, expire
     setSeenHow(how)
     if (how === 'soft') runner.cancel(ROW)
   }
-  const isBusy = runner.stateOf(ROW).kind === 'busy'
   const changes = (
     <>
       {rewrite !== undefined
@@ -120,7 +119,8 @@ function SavedRow({ session, item, scope, promotion, rewrite, superseded, expire
       </div>
     )
   }
-  if (how === 'soft' && !isBusy) {
+  // 撤销在途时仍是已删除：文件要等恢复回执回来才确实回到原位，撤销按钮的忙碌提示就是在途的样子
+  if (how === 'soft') {
     return (
       <div className="pm-saved-row pm-saved-row--deleted" data-memory-id={id}>
         <div className="pm-saved-main">

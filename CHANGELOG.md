@@ -474,6 +474,10 @@ All notable changes to this project are documented here. The format follows
   starting with `###`, added what looked like extra headings to the memory
   list loaded into a chat. A memory's name, summary and tags are now kept on
   its one line there, and angle brackets in them no longer read as tags.
+- After Undo on a deleted memory in a chat's saved-memories card, the card
+  showed the memory and its delete button again before the restore had
+  finished. The card now stays deleted, with Undo shown as busy, until the
+  memory is back.
 
 ## [0.2.0] - 2026-11-21
 

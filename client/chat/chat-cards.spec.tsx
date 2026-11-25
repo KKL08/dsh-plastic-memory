@@ -668,6 +668,54 @@ describe('交付卡', () => {
     expect(gateway.executed.at(-1)).toEqual({ sessionId: 's1', command: { cmd: 'restore', memoryId: 'mem_1', layer: { kind: 'workspace', workspacePath: '/w/app' } } })
   })
 
+  it('撤销还没返回时卡片仍是已删除、不提前显示正文和删除按钮；恢复返回后才回到正文', async () => {
+    let release: (result: MemoryCommandResult) => void = () => {}
+    const gateway = createFakeGateway({
+      respond: command => command.cmd === 'restore'
+        ? new Promise<MemoryCommandResult>((resolve) => { release = resolve })
+        : { ok: true, cmd: command.cmd },
+    })
+    renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '测试不 mock 数据库')]} now={NOW} openDetail={() => {}} />, gateway)
+    expand()
+    await remove(screen.getByRole('button', { name: '删除这条记忆' }))
+    await screen.findByText('已删除。14 天内也能在最近删除里找回。')
+
+    fireEvent.click(screen.getByRole('button', { name: '撤销' }))
+    await waitFor(() => { expect(gateway.executed.at(-1)?.command.cmd).toBe('restore') })
+    expect(screen.getByText('已删除。14 天内也能在最近删除里找回。')).toBeInTheDocument()
+    expect(screen.queryByText('测试不 mock 数据库')).toBeNull()
+    expect(screen.queryByRole('button', { name: '删除这条记忆' })).toBeNull()
+    // 在途时撤销按钮是忙碌态，再点也不再发一次恢复
+    expect(screen.getByRole('button', { name: '撤销' })).toHaveAttribute('aria-disabled', 'true')
+    fireEvent.click(screen.getByRole('button', { name: '撤销' }))
+    expect(gateway.executed.filter(e => e.command.cmd === 'restore')).toHaveLength(1)
+
+    await act(async () => { release({ ok: true, cmd: 'restore', memoryIds: ['mem_1'] }) })
+    expect(await screen.findByText('测试不 mock 数据库')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
+  })
+
+  it('撤销失败：仍停在已删除，不显示正文和删除按钮，撤销按钮可以再点', async () => {
+    let release: (result: MemoryCommandResult) => void = () => {}
+    const gateway = createFakeGateway({
+      respond: command => command.cmd === 'restore'
+        ? new Promise<MemoryCommandResult>((resolve) => { release = resolve })
+        : { ok: true, cmd: command.cmd },
+    })
+    renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '测试不 mock 数据库')]} now={NOW} openDetail={() => {}} />, gateway)
+    expand()
+    await remove(screen.getByRole('button', { name: '删除这条记忆' }))
+    await screen.findByText('已删除。14 天内也能在最近删除里找回。')
+
+    fireEvent.click(screen.getByRole('button', { name: '撤销' }))
+    await waitFor(() => { expect(gateway.executed.at(-1)?.command.cmd).toBe('restore') })
+    await act(async () => { release({ ok: false, cmd: 'restore', code: 'failed', detail: 'EACCES: permission denied' }) })
+    expect(screen.getByText('已删除。14 天内也能在最近删除里找回。')).toBeInTheDocument()
+    expect(screen.queryByText('测试不 mock 数据库')).toBeNull()
+    expect(screen.queryByRole('button', { name: '删除这条记忆' })).toBeNull()
+    expect(screen.getByRole('button', { name: '撤销' })).not.toHaveAttribute('aria-disabled')
+  })
+
   it('本项目记忆：删除与撤销都带上会话所属项目的层（取会话视图里的项目，不用原始 cwd）', async () => {
     const session: SessionView = {
       version: GUI_VIEW_VERSION, sessionId: 's1', workspacePath: '/w/app', frozenAt: 2, origin: 'start', budget: 4000, overflowMode: 'relax',
