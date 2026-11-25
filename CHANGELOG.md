@@ -345,6 +345,9 @@ All notable changes to this project are documented here. The format follows
   dismissed over-budget reminders came back. The chat is now told the
   memories could not be read, nothing is rewritten, and the next message
   reads the folder again.
+- If a memory folder could not be listed during routine upkeep, a memory in
+  it that also had a deleted copy could be looked up as the deleted copy
+  until the folder changed. The folder now keeps what was known about it.
 - Submitting a memory card on the memory page could undo tags edited in the
   file while the card was open. A card now asks for a refresh when the
   memory's name, type, tags, summary or content changed after it opened.

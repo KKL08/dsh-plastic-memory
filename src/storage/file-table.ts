@@ -927,7 +927,8 @@ export class FileTable implements MemoryTable {
       const staying = new Set(slots.filter(s => !isExpired(s)).map(s => s.record.id))
       for (const [i, level] of [sd.dir, archive].entries()) {
         const at = levelStats[i]
-        if (at === undefined) continue
+        // 列不出目录的那一层没读到文件，不能记成「这一层没有文件」：原有的提示不动
+        if (at === undefined || directoryNotes.some(n => isIncompleteNote(n) && n.path === level)) continue
         const rows = slots.filter(s => dirname(s.filePath) === level).map(s => [basename(s.filePath), s.record.id, s.statSig] as const)
         // 文件名列表的摘要不知道（读目录时不留名单）：记空串，下次目录有变时逐个核对一遍再补上
         this.index?.replaceLevel(level, { ...at, scannedAt, listing: '' }, rows, priorRevs[i])
