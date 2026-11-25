@@ -55,7 +55,7 @@ export type DialogueReadiness =
 export interface SessionCoverage {
   /** 读的那一代。 */
   gen: number
-  /** 已经收到的最后一条事件的序号；一条都没收是 -1。 */
+  /** 已经收到的最后一条事件的序号；一条都没收是 -1，整个不收是 SKIPPED_WATERMARK。 */
   watermark: number
   /** 规则变了正在重建：这一代是按旧规则收的，新消息不再进来。 */
   isRebuilding: boolean
@@ -106,7 +106,7 @@ export class DialogueCatchup {
   private readonly warned = new Set<string>()
 
   /** 共享同一个对话记录库，只向读取入口提供查询方法。 */
-  get readStore(): Pick<DialogueRecordStore, 'state' | 'search' | 'segmentsOf' | 'turnsOf' | 'queued' | 'session'> {
+  get readStore(): Pick<DialogueRecordStore, 'state' | 'search' | 'segmentsOf' | 'turnsOf' | 'queued' | 'isQueued' | 'session'> {
     return this.deps.store
   }
 
@@ -205,6 +205,11 @@ export class DialogueCatchup {
       if (err instanceof DialogueStoreUnavailable) return undefined
       throw err
     }
+  }
+
+  /** 上次对账时这个会话在宿主的会话清单里，但不属于收录范围里的项目。没对过账、清单里没有它（比如新开的会话）都不算。 */
+  isOutOfScope(sessionId: string): boolean {
+    return this.present.has(sessionId) && !this.eligible.has(sessionId)
   }
 
   /** 用户把一个会话标成不回看之后调：在途的批次作废，已收的行清掉。 */
@@ -396,7 +401,9 @@ export class DialogueCatchup {
     if (log === null) return 'unreadable'
     const intake = intakeOf(log, session.watermark)
     if (intake.kind === 'skipped') {
-      // 分不清哪些消息是它自己的：整个会话不收，也不再排队
+      // 分不清哪些消息是它自己的：整个会话不收，记下来（检索据此说没有收录），也不再排队
+      if (!alive()) return 'stopped'
+      store.markSkipped(gen, entry.id, session.revision)
       store.dequeue(gen, entry.id)
       return 'done'
     }

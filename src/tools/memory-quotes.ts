@@ -22,10 +22,12 @@ import { checkAnchor, quoteReadPolicy, type SessionTable } from './session-acces
 
 /** 取原话要用的边界。 */
 export interface MemoryQuoteDeps {
-  store: Pick<DialogueRecordStore, 'state' | 'session' | 'segmentsOf' | 'turnsOf'>
+  store: Pick<DialogueRecordStore, 'state' | 'session' | 'segmentsOf' | 'turnsOf' | 'isQueued'>
   /** 这次检索的会话表，和原话检索共用。 */
   sessionTable(): Promise<SessionTable>
   tokenizer(): Promise<DialogueTokenizer>
+  /** 上次对账时这个会话在会话清单里、但不在收录范围。 */
+  isOutOfScope(sessionId: string): boolean
 }
 
 /** 附在一条记忆下面的内容，渲染前还能并进原话检索命中的段。turns 里每轮带去重用的键（会话 + 这一轮的开始序号）。 */
@@ -180,8 +182,9 @@ function quoteAnchor(record: MemoryRecord, isExcerpt: boolean, anchor: SourceAnc
   const { read } = reader
   const sessionId = anchor.sessionId
   const end = anchor.eventRange[1]
-  const coverage = read === undefined ? 'pending'
-    : quoteCoverage(deps.store.session(read.gen, sessionId), { isRebuilding: read.isRebuilding }, end)
+  const coverage = read === undefined ? 'pending' : quoteCoverage(deps.store.session(read.gen, sessionId), {
+    isRebuilding: read.isRebuilding, isQueued: deps.store.isQueued(read.gen, sessionId), isOutOfScope: deps.isOutOfScope(sessionId),
+  }, end)
   if (coverage === 'pending') return status(QUOTE_PENDING)
   if (coverage === 'not-collected') return status(QUOTE_NOT_COLLECTED)
   const { located, segmentsUntilNextTurn } = locateTurns(anchor, deps.store, read!.gen)

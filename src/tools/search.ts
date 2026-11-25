@@ -374,7 +374,7 @@ function shownOf(top: readonly MemoryCandidate[], hits: readonly SearchHit[]): A
 /** 取原话要用的边界：会话表和原话检索共用这次检索查到的那一份。 */
 function quoteDepsOf(dialogue: DialogueSearchDeps) {
   const sessionTable = async () => (await (dialogue.sessions?.() ?? listSessionTable(dialogue))).table
-  return { store: dialogue.store, tokenizer: dialogue.tokenizer, sessionTable }
+  return { store: dialogue.store, tokenizer: dialogue.tokenizer, sessionTable, isOutOfScope: (id: string) => dialogue.catchup.isOutOfScope(id) }
 }
 
 /** 给记忆条目接上附的原话：原话检索装进来、落在已附那几轮里的段先并进去，再渲染。 */

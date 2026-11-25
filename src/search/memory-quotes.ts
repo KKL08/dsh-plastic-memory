@@ -1,7 +1,7 @@
 import type { MemoryRecord, SourceAnchor } from '../record-schema.ts'
 import { anchorTimeMatches, relocateByTime, turnOf } from '../session-log.ts'
 import { maskSecretSurface } from '../secrets.ts'
-import type { DialogueSessionState } from '../storage/dialogue-records.ts'
+import { SKIPPED_WATERMARK, type DialogueSessionState } from '../storage/dialogue-records.ts'
 import { rankSegments, type DialogueSegment } from './dialogue-rank.ts'
 import type { DialogueTokenizer } from './dialogue-tokenizer.ts'
 import type { DialogueSpeaker } from '../contract-codes.ts'
@@ -134,14 +134,20 @@ export function isSameAsMemory(message: string, memory: string | undefined): boo
   return memory !== undefined && a !== '' && a === comparable(memory)
 }
 
+/** 判断收没收录时，库和对账给的事实。isQueued：这个会话在待建队列里；isOutOfScope：上次对账时它在会话清单里、但不在收录范围。 */
+export interface QuoteLibraryFacts { isRebuilding: boolean; isQueued: boolean; isOutOfScope: boolean }
+
 /**
- * 锚所在的会话在库里收到没有。covered：水位过了要的位置；pending：还在整理（水位没到，或库里还没有这个会话的行）；
- * not-collected：这个会话的行标了移出库。库里没有行不算证据，按还在整理；库在重建时不下没有收录的结论。
+ * 锚所在的会话在库里收到没有。covered：水位过了要的位置；pending：还在整理；not-collected：不收这个会话。
+ * 没有收录只认三种证据：行标了移出库、也不在待建队列里；记了整个不收（分不清哪些消息是它自己的）；
+ * 库里没有它的行、上次对账时它就不在收录范围、也没在队里。新开的会话在下次对账前两样都不沾，按还在整理。
+ * 其余还一条没收到的（这次没读到日志、还没有自己的事件）都按还在整理。库在重建时，读的那一代下不了没有收录的结论（移出、跳过两种），按还在整理。
  */
-export function quoteCoverage(session: DialogueSessionState | undefined, library: { isRebuilding: boolean }, needSeq: number): 'covered' | 'pending' | 'not-collected' {
-  if (session === undefined) return 'pending'
-  if (!session.isRemoved) return session.watermark >= needSeq ? 'covered' : 'pending'
-  return library.isRebuilding ? 'pending' : 'not-collected'
+export function quoteCoverage(session: DialogueSessionState | undefined, library: QuoteLibraryFacts, needSeq: number): 'covered' | 'pending' | 'not-collected' {
+  if (session === undefined) return library.isOutOfScope && !library.isQueued ? 'not-collected' : 'pending'
+  if (session.isRemoved) return library.isRebuilding || library.isQueued ? 'pending' : 'not-collected'
+  if (session.watermark >= needSeq) return 'covered'
+  return session.watermark === SKIPPED_WATERMARK && !library.isRebuilding ? 'not-collected' : 'pending'
 }
 
 /** 去重按轮：会话 + 这一轮 turn/start 的序号。 */

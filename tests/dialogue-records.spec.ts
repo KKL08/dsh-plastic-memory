@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  DialogueRecordStore, DialogueStoreUnavailable,
+  DialogueRecordStore, DialogueStoreUnavailable, SKIPPED_WATERMARK,
   type DialogueBatch, type DialogueRecordStoreOptions, type DialogueSegmentInput, type DialogueVersions,
 } from '../src/storage/dialogue-records.ts'
 
@@ -231,6 +231,18 @@ describe('把会话移出库', () => {
     expect(again.revision).not.toBe(revision)
     expect(store.commitBatch({ gen, sessionId: 's1', revision: again.revision, dictionary: 'dict-1', fromWatermark: -1, watermark: 1, segments: [seg(1, 'alpha')], turns: [] })).toBe(true)
     expect(texts(store, gen, 'alpha')).toEqual(['alpha'])
+  })
+
+  it('记整个不收：只在还一条没收到、修订号对得上时记；记了之后照旧能从头收', () => {
+    const { store } = open()
+    const { gen, revision } = begin(store)
+    store.markSkipped(gen, 's1', revision + 1)
+    expect(store.session(gen, 's1')).toMatchObject({ watermark: -1 })
+    store.markSkipped(gen, 's1', revision)
+    expect(store.session(gen, 's1')).toMatchObject({ watermark: SKIPPED_WATERMARK, isRemoved: false })
+    expect(store.commitBatch({ gen, sessionId: 's1', revision, dictionary: 'dict-1', fromWatermark: SKIPPED_WATERMARK, watermark: 1, segments: [seg(1, 'alpha')], turns: [] })).toBe(true)
+    store.markSkipped(gen, 's1', revision)
+    expect(store.session(gen, 's1')).toMatchObject({ watermark: 1 })
   })
 
   it('删掉的对话不留在库文件和它旁边的日志文件里', async () => {

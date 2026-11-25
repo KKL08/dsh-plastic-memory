@@ -18,8 +18,8 @@ import type { DialogueCatchup, DialogueReadiness } from './dialogue-catchup.ts'
 export const DIALOGUE_PATH_BUDGET_MS = 2000
 /** 原话执行器的边界，配置均在每次请求时读取。 */
 export interface DialogueSearchDeps {
-  store: Pick<DialogueRecordStore, 'state' | 'search' | 'segmentsOf' | 'turnsOf' | 'session'>
-  catchup: Pick<DialogueCatchup, 'beforeSearch'>
+  store: Pick<DialogueRecordStore, 'state' | 'search' | 'segmentsOf' | 'turnsOf' | 'session' | 'isQueued'>
+  catchup: Pick<DialogueCatchup, 'beforeSearch' | 'isOutOfScope'>
   host: Pick<HostSession, 'listSessions' | 'sessionTitleOf'>
   noReview: { sessionIds(): Promise<Set<string>> }
   workspaceOf(cwd: string | undefined): Promise<string | undefined>
@@ -85,7 +85,7 @@ export function shareDialogueReads(deps: DialogueSearchDeps): DialogueSearchDeps
   let sessions: Promise<ListedSessions> | undefined
   return {
     ...deps,
-    catchup: { beforeSearch: (...args) => readiness ??= deps.catchup.beforeSearch(...args) },
+    catchup: { beforeSearch: (...args) => readiness ??= deps.catchup.beforeSearch(...args), isOutOfScope: id => deps.catchup.isOutOfScope(id) },
     sessions: () => sessions ??= deps.sessions?.() ?? listSessionTable(deps),
   }
 }

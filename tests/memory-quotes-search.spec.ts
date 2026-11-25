@@ -59,6 +59,8 @@ function logs(): Record<string, SessionLog> {
     gone: logOf('gone', [turn(10), user(11, '写锁删掉的会话'), assistant(12, '好')]),
     late: logOf('late', [turn(10), user(11, '写锁晚到的会话'), assistant(12, '好')]),
     outside: logOf('outside', [turn(10), user(11, '写锁范围外'), assistant(12, '好')]),
+    // 拿不到继承边界的会话：分不清哪些消息是它自己的，整个不收
+    seeded: { header: { id: 'seeded', isSeeded: true }, inheritedEventCount: undefined, events: [turn(10), user(11, '写锁接着说'), assistant(12, '好')] },
     // 每轮一问一答合计约 400 token：三轮合起来超过附原话的预算
     big: logOf('big', [10, 20, 30].flatMap(n => [turn(n), user(n + 1, `写锁${'甲'.repeat(450)}`), assistant(n + 2, `写锁${'乙'.repeat(200)}`)])),
   }
@@ -74,20 +76,21 @@ async function setup(records: MemoryRecord[], opts: { context?: Partial<SearchCo
   const all = logs()
   const cwdOf: Record<string, string> = { foreign: '/other', outside: '/elsewhere' }
   const entry = (id: string) => ({ id, cwd: cwdOf[id] ?? '/proj', isSubagent: false, isLive: false })
-  const listed = ['s1', 'foreign', 'hidden', 'gone', 'late', 'outside', 'big']
+  const listed = ['s1', 'foreign', 'hidden', 'gone', 'late', 'outside', 'big', 'seeded']
   const host = {
-    readSessionLog: vi.fn(async (id: string) => all[id] ?? null),
+    readSessionLog: vi.fn(async (id: string): Promise<SessionLog | null> => all[id] ?? null),
     sessionTitleOf: vi.fn(async () => undefined),
     listSessions: vi.fn(async () => listed.map(entry)),
     contextOf: vi.fn(async (): Promise<SearchContext> => ({ workspacePath: '/proj', session: { id: 's1', lastSeq: 100 }, ...opts.context })),
   }
   const noReview = new NoReviewList(dir)
   const workspaceOf = async (cwd: string | undefined) => cwd
+  const clock = { t: 1000 }
   // 库打不开：拿不到 node:sqlite
   const library = opts.isBroken ? new DialogueRecordStore({ path: join(dir, 'broken'), log: LOG, loadSqlite: () => undefined }) : db
   const catchup = new DialogueCatchup({
     store: library, host, noReview, workspaceOf, tokenizer: async () => tokenizer, knownWorkspaces: async () => ['/proj', '/other'],
-    isEnabled: () => true, sessionStore: '/sessions', log: LOG, now: () => 1000,
+    isEnabled: () => true, sessionStore: '/sessions', log: LOG, now: () => clock.t,
   })
   // 建库：late 不在会话清单里，第一次建库时没收；outside 在清单里但不在收录范围
   if (opts.isBuilt !== false && !opts.isBroken) {
@@ -102,7 +105,7 @@ async function setup(records: MemoryRecord[], opts: { context?: Partial<SearchCo
     dialogue: { store: library, catchup, host, noReview, workspaceOf, hasBackgroundTimer: () => opts.hasTimer ?? true, tokenizer: async () => tokenizer },
   }
   host.readSessionLog.mockClear(); host.listSessions.mockClear()
-  return { deps, host, noReview, catchup, store }
+  return { deps, host, noReview, catchup, store, clock }
 }
 const run = async (deps: SearchToolDeps, query = '写锁') => {
   const result = await executeSearch({ query }, fakeExec(), deps)
@@ -320,7 +323,7 @@ describe('取不到', () => {
     expect(segments).not.toHaveBeenCalled(); expect(session).not.toHaveBeenCalled()
   })
 
-  it('会话已删、标了不回看各写各的说明；库里还没有这个会话的行时按还在整理，不下没有收录的结论；取原话都不读会话日志', async () => {
+  it('会话已删、标了不回看各写各的说明；新开、还没对过账的会话按还在整理，不在收录范围的写没有收录；取原话都不读会话日志', async () => {
     const records = [
       withAnchors([anchor('gone', [10, 12])], { id: 'mem_gone', content: '写锁一' }),
       withAnchors([anchor('hidden', [10, 12])], { id: 'mem_hidden', content: '写锁二' }),
@@ -337,15 +340,53 @@ describe('取不到', () => {
 
     const outside = withAnchors([anchor('outside', [10, 12])], { id: 'mem_out', content: '写锁四' })
     await deps.store.put(outside)
-    expect(quoteOf((await run(deps, '写锁四')).result, 'mem_out')).toContain(QUOTE_PENDING)
+    expect(quoteOf((await run(deps, '写锁四')).result, 'mem_out')).toContain(QUOTE_NOT_COLLECTED)
   })
 
-  it('会话的行标了移出库（标过不回看、后来取消）：写这个会话的原话没有收录，取原话不读会话日志', async () => {
+  it('分不清哪些消息是它自己的会话（建库时整个跳过）：写这个会话的原话没有收录；之后对账不再重读它的日志', async () => {
+    const r = withAnchors([anchor('seeded', [10, 12])], { id: 'mem_sd', content: '写锁' })
+    const { deps, host, catchup, clock } = await setup([r], { context: CURRENT })
+    expect(quoteOf((await run(deps)).result, 'mem_sd')).toContain(QUOTE_NOT_COLLECTED)
+    clock.t += 10 * 60_000
+    host.readSessionLog.mockClear()
+    await catchup.advance(60_000)
+    expect(host.listSessions).toHaveBeenCalled()
+    expect(host.readSessionLog.mock.calls.map(c => c[0])).not.toContain('seeded')
+  })
+
+  it('会话的行标了移出库、对账又把它排回待建队列（标过不回看、后来取消）：写还在整理，取原话不读会话日志', async () => {
     const r = withAnchors([anchor('gone', [10, 12])], { id: 'mem_x', content: '写锁' })
     const { deps, host, catchup } = await setup([r], { context: CURRENT })
     catchup.dropSession('gone')
-    expect(quoteOf((await run(deps)).result, 'mem_x')).toContain(QUOTE_NOT_COLLECTED)
+    expect(quoteOf((await run(deps)).result, 'mem_x')).toContain(QUOTE_PENDING)
     expect(logReadsBesides(host, 'cur')).toEqual([])
+  })
+
+  it('稳态下新开的当前会话这次读不到日志：库里只有它还没收到东西的行，写还在整理', async () => {
+    const r = withAnchors([anchor('cur2', [10, 12])], { id: 'mem_c2', content: '写锁' })
+    const { deps, host } = await setup([r], { context: CURRENT })
+    // 先检索一次进入稳态：当前项目已在范围里，下次对账还没到
+    await run(deps)
+    host.listSessions.mockResolvedValue(['s1', 'cur2'].map(id => ({ id, cwd: '/proj', isSubagent: false, isLive: true })))
+    host.contextOf.mockResolvedValue({ workspacePath: '/proj', session: { id: 'cur2', lastSeq: 100 } })
+    expect(quoteOf((await run(deps)).result, 'mem_c2')).toContain(QUOTE_PENDING)
+  })
+
+  it('开着的空会话收过一次、出了队，后来有了新消息，这次检索没来得及追它：写还在整理', async () => {
+    const r = withAnchors([anchor('fresh', [10, 12])], { id: 'mem_f', content: '写锁' })
+    const { deps, host, catchup, clock } = await setup([r], { context: CURRENT })
+    await run(deps)
+    host.listSessions.mockResolvedValue([{ id: 'fresh', cwd: '/proj', isSubagent: false, isLive: true }])
+    host.readSessionLog.mockImplementation(async (id: string) => id === 'fresh' ? logOf('fresh', []) : null)
+    // 下次对账：空会话排进队、收了一次（还没有自己的事件），出队
+    clock.t += 10 * 60_000
+    await catchup.advance(60_000)
+    host.readSessionLog.mockImplementation(async (id: string) => {
+      // 追当前会话就用完了这次的时限
+      if (id === 'cur') { clock.t += 10_000; return null }
+      return id === 'fresh' ? logOf('fresh', [turn(10), user(11, '写锁新话'), assistant(12, '好')]) : null
+    })
+    expect(quoteOf((await run(deps)).result, 'mem_f')).toContain(QUOTE_PENDING)
   })
 
   it('库还在追这个会话：写原话还在整理，取原话不读会话日志', async () => {

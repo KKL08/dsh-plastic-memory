@@ -9,6 +9,7 @@ import type { DialogueSegment } from '../src/search/dialogue-rank.ts'
 import { dialogueTokenizer } from '../src/search/dialogue-tokenizer.ts'
 import { DIALOGUE_QUOTE_TAG, foldToLine } from '../src/search/dialogue-format.ts'
 import { record } from './helpers/record.ts'
+import { SKIPPED_WATERMARK } from '../src/storage/dialogue-records.ts'
 
 const seg = (seq: number, speaker: string, text: string, segment = 0, turnSeq = 10, at: number | undefined = 1000 + seq): DialogueSegment =>
   ({ sessionId: 's', turnSeq, seq, segment, at, speaker, text })
@@ -142,16 +143,35 @@ describe('和记忆正文相同', () => {
 })
 
 describe('库里有没有这一轮', () => {
+  const library = (over: Partial<{ isRebuilding: boolean; isQueued: boolean; isOutOfScope: boolean }> = {}) => ({ isRebuilding: false, isQueued: false, isOutOfScope: false, ...over })
+
   it('收过且水位过了锚终点：有；水位没到、库里没有这个会话的行：还在整理', () => {
-    expect(quoteCoverage({ watermark: 30, revision: 1, isRemoved: false }, { isRebuilding: false }, 25)).toBe('covered')
-    expect(quoteCoverage({ watermark: 20, revision: 1, isRemoved: false }, { isRebuilding: false }, 25)).toBe('pending')
-    expect(quoteCoverage(undefined, { isRebuilding: false }, 25)).toBe('pending')
-    expect(quoteCoverage(undefined, { isRebuilding: true }, 25)).toBe('pending')
+    expect(quoteCoverage({ watermark: 30, revision: 1, isRemoved: false }, library(), 25)).toBe('covered')
+    expect(quoteCoverage({ watermark: 20, revision: 1, isRemoved: false }, library(), 25)).toBe('pending')
+    expect(quoteCoverage(undefined, library(), 25)).toBe('pending')
+    expect(quoteCoverage(undefined, library({ isRebuilding: true }), 25)).toBe('pending')
   })
 
-  it('会话的行标了移出库：没有收录；库在重建时不下这个结论', () => {
-    expect(quoteCoverage({ watermark: -1, revision: 2, isRemoved: true }, { isRebuilding: false }, 25)).toBe('not-collected')
-    expect(quoteCoverage({ watermark: -1, revision: 2, isRemoved: true }, { isRebuilding: true }, 25)).toBe('pending')
+  it('会话的行标了移出库、也不在待建队列里：没有收录；已重新排进队（取消了不回看）、库在重建：还在整理', () => {
+    expect(quoteCoverage({ watermark: -1, revision: 2, isRemoved: true }, library(), 25)).toBe('not-collected')
+    expect(quoteCoverage({ watermark: -1, revision: 2, isRemoved: true }, library({ isQueued: true }), 25)).toBe('pending')
+    expect(quoteCoverage({ watermark: -1, revision: 2, isRemoved: true }, library({ isRebuilding: true }), 25)).toBe('pending')
+  })
+
+  it('记了整个跳过的会话：没有收录；库在重建时不下这个结论', () => {
+    const skipped = { watermark: SKIPPED_WATERMARK, revision: 1, isRemoved: false }
+    expect(quoteCoverage(skipped, library(), 25)).toBe('not-collected')
+    expect(quoteCoverage(skipped, library({ isRebuilding: true }), 25)).toBe('pending')
+  })
+
+  it('还一条没收到（没读到日志、还没有自己的事件）：还在整理，在不在队里都一样', () => {
+    expect(quoteCoverage({ watermark: -1, revision: 1, isRemoved: false }, library(), 25)).toBe('pending')
+    expect(quoteCoverage({ watermark: -1, revision: 1, isRemoved: false }, library({ isQueued: true }), 25)).toBe('pending')
+  })
+
+  it('库里没有这个会话的行：上次对账时它就不在收录范围、也没人排它进队，才算没有收录', () => {
+    expect(quoteCoverage(undefined, library({ isOutOfScope: true }), 25)).toBe('not-collected')
+    expect(quoteCoverage(undefined, library({ isOutOfScope: true, isQueued: true }), 25)).toBe('pending')
   })
 })
 

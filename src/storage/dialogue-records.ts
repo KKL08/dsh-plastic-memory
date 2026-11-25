@@ -79,7 +79,13 @@ export interface DialogueBatch {
   turns: ReadonlyArray<{ turnSeq: number; at?: number }>
 }
 
-/** 会话在库里的进度。isRemoved：已移出库（会话没了或不让回看），要重新收得先 startSession。 */
+/** 整个会话不收（分不清哪些消息是它自己的）时记下的水位，和「还一条没收到」的 -1 分开。 */
+export const SKIPPED_WATERMARK = -2
+
+/**
+ * 会话在库里的进度。watermark：收到的最后一条事件的序号，还一条没收到是 -1，整个不收是 SKIPPED_WATERMARK。
+ * isRemoved：已移出库（会话没了或不让回看），要重新收得先 startSession。
+ */
 export interface DialogueSessionState {
   watermark: number
   revision: number
@@ -275,6 +281,17 @@ export class DialogueRecordStore {
     }))
   }
 
+  /**
+   * 记下这个会话整个不收：只在还一条没收到时记，修订号对不上（期间被移出、重收过）就不记。
+   * 记了之后照旧可以再收：起算水位是 SKIPPED_WATERMARK，之后的事件都算新的。
+   */
+  markSkipped(gen: number, sessionId: string, revision: number): void {
+    this.run(db => {
+      db.prepare('UPDATE sessions SET watermark = ? WHERE gen = ? AND session_id = ? AND revision = ? AND is_removed = 0 AND watermark = -1')
+        .run(SKIPPED_WATERMARK, gen, sessionId, revision)
+    })
+  }
+
   /** 这一代里收过、没被移出的会话 id。对账时拿它和现有的会话比。 */
   sessionIds(gen: number): string[] {
     return this.run(db => (db.prepare('SELECT session_id FROM sessions WHERE gen = ? AND is_removed = 0 ORDER BY session_id').all(gen) as Array<{ session_id: string }>).map(r => r.session_id))
@@ -335,6 +352,11 @@ export class DialogueRecordStore {
   queuedAfter(gen: number, afterPosition: number, limit: number): Array<{ position: number; sessionId: string }> {
     return this.run(db => (db.prepare('SELECT position, session_id FROM queue WHERE gen = ? AND position > ? ORDER BY position LIMIT ?').all(gen, afterPosition, limit) as Array<{ position: number; session_id: string }>)
       .map(r => ({ position: r.position, sessionId: r.session_id })))
+  }
+
+  /** 这个会话在不在这一代的待建队列里。 */
+  isQueued(gen: number, sessionId: string): boolean {
+    return this.run(db => db.prepare('SELECT 1 FROM queue WHERE gen = ? AND session_id = ?').get(gen, sessionId) !== undefined)
   }
 
   /** 这个会话建完了（或不用建了），从待建队列里拿掉。 */
