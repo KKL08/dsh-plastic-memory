@@ -429,6 +429,17 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       return { ok: isShaped && !['query', 'id', 'history', 'version'].some(k => required.includes(k)), detail: JSON.stringify(parameters) }
     })
 
+    // 主题检索的参数：topic、offset 都是可选参数，由执行器校验组合。
+    await attempt('SEARCH-TOPIC-SCHEMA', async () => {
+      const schema = tools.schemas().find(s => s.name === 'memory_search') as
+        { parameters?: { properties?: Record<string, { type?: string }>; required?: string[] } } | undefined
+      const parameters = schema?.parameters
+      const properties = parameters?.properties ?? {}
+      const required = parameters?.required ?? []
+      const isShaped = properties.topic?.type === 'string' && properties.offset?.type === 'number'
+      return { ok: isShaped && !['topic', 'offset'].some(k => required.includes(k)), detail: JSON.stringify(parameters) }
+    })
+
     // H2 无 cwd 会话 create 拒存（Ungrouped 会话不落 global）
     await attempt('H2-NO-CWD-REJECTED', async () => {
       const r = await call('memory_save', { action: 'create', name: 'no-cwd', summary: 's', content: 'c', ...MEMORY_BASE }, mkExec(undefined)) as { kind: string; code?: string }

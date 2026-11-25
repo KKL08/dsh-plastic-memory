@@ -411,6 +411,15 @@ async function runScale(selected: string): Promise<void> {
         const r = await executeSearch({ query: `${WORDS[0]} 部署流程` }, exec, { store, registry, host: { contextOf } })
         if (!r.hits.length) throw new Error('检索没有命中')
       })
+      // 主题路径只报告耗时，沿用当前档位和数据，不另设门槛。
+      await measure('按主题列出', async () => {
+        const r = await executeSearch({ topic: '规模主题 0' }, exec, { store, registry, host: { contextOf } })
+        if (!r.browse?.total) throw new Error('主题没有成员')
+      })
+      await measure('主题内检索', async () => {
+        const r = await executeSearch({ topic: '规模主题 0', query: `${WORDS[0]} 部署流程` }, exec, { store, registry, host: { contextOf } })
+        if (!r.hits.length) throw new Error('主题内检索没有命中')
+      })
       // 每轮新建侧表：同一个侧表反复读会命中按文件签名缓存的解析结果，量不出整表读随条数的增长
       await measure('扫描整张召回统计表 冷读（stats.list，每轮新侧表）', () => newSidecar(root, lock).recallStats.list())
       await measure('冻结时整份改前快照清单（SnapshotStore.list）', () => snapshots.list())
@@ -566,7 +575,11 @@ try {
   // 包一层 store 截下执行器自己那次按范围读取的结果：预筛词、候选、listedCount 都是执行器实际用的，bench 不重算
   let lastRead: ScopeReadResult | undefined
   const probeStore: MemoryStore = Object.create(store)
-  probeStore.readRaw = async (scope, opts) => (lastRead = await store.readRaw(scope, opts))
+  probeStore.readRaw = async (scope, opts) => {
+    const read = await store.readRaw(scope, opts)
+    if (opts?.prefilterTerms !== undefined) lastRead = read
+    return read
+  }
   const searchDeps = { store: probeStore, registry, host: { contextOf }, tokenizer: searchTokenizer }
 
   /**

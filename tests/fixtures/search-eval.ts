@@ -960,3 +960,41 @@ export const EVAL_QUERIES: readonly EvalQuery[] = [
   { query: '线上日志要保留多少天', category: 'long-no-answer', relevant: [] },
   { query: '接口文档放在哪个平台上维护', category: 'long-no-answer', relevant: [] },
 ]
+
+/**
+ * 评估集的主题索引：把一部分语料归进几个主题（都在全局）。主题名、曾用名、说明里有意放进语料里一个字都没出现过的词，
+ * 「查询词只出现在主题名或主题说明里」的题靠它们出：记忆一条都命中不了，只能靠「匹配的主题」和主题目录找到方向。
+ */
+export interface EvalTopic {
+  name: string
+  about: string
+  aliases: readonly string[]
+  /** 成员 id，按主题页里的先后。 */
+  members: readonly string[]
+}
+
+export const EVAL_TOPICS: readonly EvalTopic[] = [
+  { name: '灯塔', about: '注入、快照与预算相关的约定', aliases: [], members: ['mem_k7q2a1', 'mem_z3b7g9', 'mem_t6y2h4'] },
+  { name: '检索与排序', about: '罗盘组整理的检索规则：分词、分档、次级排序', aliases: [], members: ['mem_y4j3u8', 'mem_l8e2b6', 'mem_a5r7c9', 'mem_c2w9d1'] },
+  { name: '发版流程', about: '发版、钉版与发布说明', aliases: ['驿站'], members: ['mem_f7o3m5', 'mem_g2p8n1', 'mem_h1p4k9'] },
+  { name: 'Kestrel 工具链', about: 'lantern 小组维护的构建与依赖约定', aliases: [], members: ['mem_p3n8j4', 'mem_y1z8a3', 'mem_w2g6r3'] },
+  { name: '锦囊', about: '排查问题时先翻的几条：渡口那边留下的经验', aliases: [], members: ['mem_h9c1l3', 'mem_z7a4k1', 'mem_a8w4e1'] },
+]
+
+/** 主题题：查询词在语料里一个都对不上，只出现在主题名、曾用名或主题说明里。topics 是预期匹配到的主题名。 */
+export interface EvalTopicQuery {
+  query: string
+  /** 查询词出现在主题的哪一处。 */
+  where: 'name' | 'alias' | 'about'
+  topics: readonly string[]
+}
+
+export const EVAL_TOPIC_QUERIES: readonly EvalTopicQuery[] = [
+  { query: '灯塔', where: 'name', topics: ['灯塔'] },
+  { query: '锦囊', where: 'name', topics: ['锦囊'] },
+  { query: 'kestrel', where: 'name', topics: ['Kestrel 工具链'] },
+  { query: '驿站', where: 'alias', topics: ['发版流程'] },
+  { query: '罗盘', where: 'about', topics: ['检索与排序'] },
+  { query: 'lantern', where: 'about', topics: ['Kestrel 工具链'] },
+  { query: '渡口', where: 'about', topics: ['锦囊'] },
+]

@@ -1,11 +1,13 @@
 import { effectiveRecall, isPendingDelegated, type MemoryRecord, type RecallTier } from './record-schema.ts'
 import type { TypeRegistry } from './type-registry.ts'
-import { sourceNote, formatIndexLine, injectionText, unattendedNote } from './index-line.ts'
+import { sourceNote, formatIndexLine, unattendedNote } from './index-line.ts'
 import { workspaceDirName, GLOBAL_DIR, INDEX_FILE, ARCHIVE_DIR } from './storage/paths.ts'
 import { evidenceGuidance, type EvidenceLookupLevel } from './evidence-guidance.ts'
 import { stalenessNote, withinValidity } from './record-freshness.ts'
-import { exposedPath, maskSecrets, maskSecretSurface } from './secrets.ts'
-import { readIndex, UNSORTED_TITLE, type IndexFiles } from './topic-index.ts'
+import { exposedPath, maskSecretSurface } from './secrets.ts'
+import type { IndexFiles } from './topic-index.ts'
+import { groupTopics, usableMembers, topicDisplayName, topicDisplayAbout } from './topic-members.ts'
+export { SAME_NAME_TOPIC_MARK } from './topic-members.ts'
 import { INDEX_AREA_TOKEN_CAP, TOPIC_MEMBER_LIMIT, estimateTokens, indexAreaLimit, planIndexArea, type PlanScope } from './snapshot-index.ts'
 import type { OverflowLevel, OverflowMode, SearchSource } from './contract-codes.ts'
 import { relaxedTier } from './gui/contract.ts'
@@ -94,12 +96,10 @@ export type IndexRead = { kind: 'read'; files: IndexFiles | undefined } | { kind
 export const INDEX_UNREADABLE_TEXT = '这一层的主题索引这次读不出，记忆没按主题分组'
 /** 使用优先级：和别的信息说法不一样时先看谁。 */
 export const USAGE_PRIORITY_NOTE = '信息有出入时依次以这些为准：用户当前的要求、指令文件、现读到的文件和工具结果、记忆里的做法和决定、记忆里的偏好；历史版本和事件只作背景，仓库和看板里现读得到的状态优先于记忆里记的状态。'
-/** 尾部导航：找具体内容、「另有 N 条」里没列出的，都用关键词检索。 */
-export const INDEX_NAV_NOTE = '要找具体内容或主题里没列出的记忆，用 memory_search 按关键词查。'
+/** 尾部导航：按主题列出全部成员，或按关键词查具体内容。 */
+export const INDEX_NAV_NOTE = '要看某个主题下的全部记忆，用 memory_search 的 topic 参数传主题名。要找具体内容，用 memory_search 按关键词查。'
 /** 使用指引一句。 */
 export const INDEX_USAGE_NOTE = '摘要够回答就直接用；细节会改变做法时，再读相关那几条的全文。'
-/** 手改的主题页名字和固定在最后的「未整理」撞上时，注入里加在主题名后面的区分。 */
-export const SAME_NAME_TOPIC_MARK = '（同名主题）'
 /** 有解析不了的记忆文件时，索引区开头的说明：主题里的条数是按解析得出的记忆数的。 */
 export const unparseableIndexNote = (n: number) => `有 ${n} 个记忆文件这次解析不了，下面的条数可能偏少。`
 /** 宿主的会话搜索工具启用时补的一句。 */
@@ -108,12 +108,11 @@ export const SESSION_SEARCH_NOTE = '记忆里没有、要找过去会话里说�
 const SCOPE_HEADING = { workspace: '\n## 本项目记忆 · 主题目录', global: '\n## 全局记忆 · 主题目录' } as const
 const moreMembersLine = (n: number) => `- 另有 ${n} 条`
 const moreTopicsLine = (n: number) => `另有 ${n} 个主题没列出。`
-const byText = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
 const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 } as const
 
 type ScopeKey = keyof typeof SCOPE_HEADING
 /** 一个作用域里的一组：索引里的一个主题、「未整理」，或索引读不出时平铺的那一组。members 是索引行对上的记录，含已过期、还没生效的。 */
-interface TopicGroup { name: string; about: string; members: MemoryRecord[]; isPinned: boolean }
+interface TopicGroup { name: string; about: string; members: readonly MemoryRecord[]; isPinned: boolean }
 
 /**
  * 一个作用域按索引分组。索引行按「作用域 + id」对上这次读到的记录才算：别的作用域里同 id 的那份、这次没读到的，跳过这一行。
@@ -125,23 +124,9 @@ function groupsOf(read: IndexRead, records: readonly MemoryRecord[], registry: T
     const priority = (r: MemoryRecord) => PRIORITY_ORDER[registry.get(r.type).governancePriority]
     return [{ name: INDEX_UNREADABLE_TEXT, about: '', members: [...records].sort((a, b) => priority(a) - priority(b) || byConfidenceThenConfirmed(a, b)), isPinned: true }]
   }
-  const { topics, unsorted } = readIndex(read.files ?? { entry: '', pages: {} })
-  const byId = new Map(records.map(r => [r.id, r]))
-  const placed = new Set<string>()
-  const take = (ids: readonly string[]) => ids.flatMap((id) => {
-    const r = byId.get(id)
-    if (r === undefined || placed.has(id)) return []
-    placed.add(id)
-    return [r]
-  })
-  const groups = topics.map((t) => {
-    const name = injectionText(maskSecrets(t.name))
-    // 手改的主题页也叫「未整理」：加区分，免得和固定在最后的那组看成一组
-    return { name: name === UNSORTED_TITLE ? `${name}${SAME_NAME_TOPIC_MARK}` : name, about: injectionText(maskSecrets(t.about)), members: take(t.memberIds), isPinned: false }
-  })
-  const listed = take(unsorted)
-  const missing = records.filter(r => !placed.has(r.id)).sort((a, b) => byText(a.name, b.name) || byText(a.id, b.id))
-  return [...groups, { name: UNSORTED_TITLE, about: '', members: [...listed, ...missing], isPinned: true }]
+  return groupTopics(read.files ?? { entry: '', pages: {} }, records).map(g => ({
+    name: topicDisplayName(g), about: topicDisplayAbout(g.about), members: g.members, isPinned: g.isUnsorted,
+  }))
 }
 
 /** 纯函数：吃调用方预读的可见记录（global + 当前 workspace 的 active 记录）和两个作用域的主题索引，不读存储。 */
@@ -245,7 +230,7 @@ export function assembleSnapshot(deps: {
     const layout = scopeKeys.map((key) => {
       const groups = groupsOf(deps.indexes?.[key] ?? { kind: 'read', files: undefined }, visible.filter(r => scopeOf(r) === key), registry)
       return groups.map((g) => {
-        const available = g.members.filter(r => withinValidity(r, now))
+        const available = usableMembers(g.members, now)
         const stale = available.filter(r => stalenessNote(r, registry.get(r.type).decayDays, now) !== '').length
         // 成员行：不列入的不出；必读全文给过全文的不重复（全文档没放进必读全文的照常出成员行）
         const listed = available.filter(r => tierOf(r) !== 'unlisted' && !fullIds.has(r.id))

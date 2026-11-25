@@ -8,7 +8,7 @@ import type { MemoryStore, QueryScope } from '../store.ts'
 import type { SearchNoteCode } from '../contract-codes.ts'
 import type { QueryTokenizerOptions } from '../search/jieba-segmenter.ts'
 import type { SearchTier } from '../search/ranking.ts'
-import { findMemoryCandidates, type MemoryCandidate } from '../search/memory-candidates.ts'
+import type { MemoryCandidate } from '../search/memory-candidates.ts'
 import { memoryLane, quoteMemories, renderQuoteBlock, withDialogueSegments, type MemoryQuotes } from './memory-quotes.ts'
 import { segmentKey } from '../search/dialogue-rank.ts'
 import { memoryLabelOf } from '../search/memory-quotes.ts'
@@ -17,10 +17,13 @@ import { judgeTopHit, matchedTerms, type TermHitCount } from '../search/coverage
 import type { TypeRegistry } from '../type-registry.ts'
 import type { ContextHost } from './host-session.ts'
 import type { DialogueCallCap } from './dialogue-call-cap.ts'
-import { sourceNote } from '../index-line.ts'
+import { sourceNote, formatIndexLine, injectionText } from '../index-line.ts'
 import { stalenessNote } from '../record-freshness.ts'
-import { exposedPath, maskSecretSurface } from '../secrets.ts'
+import { exposedPath, maskSecretSurface, maskSecrets } from '../secrets.ts'
 import { executeHistorySearch, type HistoryListing, type HistoryVersionInfo } from './search-history.ts'
+import { findTopicCandidates, type TopicScope } from '../search/topic-context.ts'
+import { usableMembers, topicDisplayName, topicDisplayAbout } from '../topic-members.ts'
+import { WEAK_SEARCH_NOTE_CODES } from '../contract-codes.ts'
 
 /** memory_search 运行时需要的会话上下文，由宿主会话适配器的 contextOf 提供。 */
 export interface SearchContext {
@@ -60,8 +63,8 @@ export interface SearchToolDeps {
 }
 
 /**
- * memory_search 的参数。query、types、id 至少给一个；合法组合见 searchArgsError。
- * 「给了」的口径：query 不是 undefined（空串也算给了，空串加 types 是列出某几类的用法）；types 是非空数组；id 不是 undefined。
+ * memory_search 的参数。query、types、id、topic 至少给一个；合法组合见 searchArgsError。
+ * 「给了」的口径：query 不是 undefined（空串也算给了，空串加 types 是列出某几类的用法）；types 是非空数组；id、topic 不是 undefined。
  */
 export interface SearchArgs {
   source?: SearchSource
@@ -78,6 +81,50 @@ export interface SearchArgs {
   history?: boolean
   /** 配 id：按版本标识读那一版的全文。只收合 VERSION_ID_PATTERN 整段的写法。 */
   version?: string
+  /** 主题名（曾用名也算）：只给它时按索引顺序列出这个主题的成员行；配 query 时在这个主题的成员里按关键词查。只查记忆。 */
+  topic?: string
+  /** 配 topic 翻页：跳过前面多少条，缺省 0。只收不小于 0 的整数。 */
+  offset?: number
+}
+
+/** 命中依据：这条结果是怎么找到的。开放取值，首版只有这两种；读的一侧遇到不认识的值照常显示结果。 */
+export const MATCH_BASIS = { keyword: 'keyword', topic: 'topic' } as const
+
+/** 结果里主题前面的作用域标注。 */
+export const TOPIC_SCOPE_LABEL = { workspace: '本项目', global: '全局' } as const satisfies Record<TopicScope, string>
+
+/** 一条命中所属的主题。name 已遮盖密钥、折成一行（topicDisplayName）。 */
+export interface HitTopic {
+  scope: TopicScope
+  name: string
+  /** 同主题里除这条以外还有几条可用成员（口径同注入的主题条数，见 usableMembers）。 */
+  others: number
+}
+
+/** 结果里提到的一个主题（匹配的主题、主题目录、按主题列出的分段标题）。name、about 已遮盖密钥、折成一行。 */
+export interface TopicRef {
+  scope: TopicScope
+  name: string
+  about: string
+  /** 可用成员数，口径同注入的主题条数（usableMembers）。 */
+  count: number
+}
+
+/** 按主题列出的一行：成员行的写法同注入（formatIndexLine）。 */
+export interface TopicBrowseRow {
+  id: string
+  line: string
+  /** 命中依据，按主题列出的恒为 MATCH_BASIS.topic。 */
+  basis: string
+}
+
+/** 只给主题时的结果：对上的每个主题一段（项目在前、全局在后），翻页按各段连起来的先后算。 */
+export interface TopicBrowse {
+  sections: Array<{ topic: TopicRef; rows: TopicBrowseRow[] }>
+  /** 各段可列出的成员总数（按类型过滤之后）。 */
+  total: number
+  /** 这一页从第几条开始（0 起）。 */
+  offset: number
 }
 
 export interface SearchHit {
@@ -104,6 +151,10 @@ export interface SearchHit {
    * 只给实际输出的命中数；软删窗口里并进来、还没搬过来的版本不计，按 id 列历史时可能多几版。
    */
   versionCount?: number
+  /** 所属主题：范围内有主题信息、且这条在某个主题或「未整理」里时才有。 */
+  topic?: HitTopic
+  /** 命中依据（MATCH_BASIS 的取值，开放）：范围内有主题信息时才有。 */
+  basis?: string
 }
 
 /** 命中头行里标历史版本数的那一段，接在陈旧和命中说明之后、节选说明之前。 */
@@ -125,11 +176,19 @@ export function searchArgsError(args: SearchArgs): string | undefined {
   if (args.id !== undefined) {
     if (args.query !== undefined) return 'id 和 query 对应历史与当前内容两种查询，请选择其中一种。'
     if (args.types?.length) return 'id 已指定记忆，请去掉 types 后查询历史。'
+    if (args.topic !== undefined) return 'id 和 topic 对应历史与按主题浏览两种查询，请选择其中一种。'
+    if (args.offset !== undefined) return 'id 和 offset 不能一起用：offset 只用于配 topic 翻页。'
     if (args.match !== undefined) return 'id 已指定记忆，请去掉 match 后查询历史。'
     if (args.source !== undefined && args.source !== 'memory') return '按 id 查历史时，source 请设为 memory 或不传。'
     if (args.version !== undefined && args.limit !== undefined) return 'version 每次读取一版全文，请去掉 limit；limit 用于 history 列表。'
     if (args.history !== true && args.version === undefined) return '给 id 后，列历史请配 history: true，读一版请配 version；要这条当前的内容，请把 id 填进 query。'
-  } else if (args.query === undefined && !args.types?.length) return '请填写 query、非空 types，或用 id 配 history: true 或 version 查历史。'
+  } else {
+    if (args.topic !== undefined && args.topic.trim() === '') return '请在 topic 中填写主题名。'
+    if (args.offset !== undefined && args.topic === undefined) return '使用 offset 翻页时请同时填写 topic；关键词检索用 limit 控制条数。'
+    if (args.offset !== undefined && !(Number.isInteger(args.offset) && args.offset >= 0)) return 'offset 请填写不小于 0 的整数。'
+    if (args.topic !== undefined && args.source !== undefined && args.source !== 'memory') return 'topic 只查记忆，source 请设为 memory 或不传。'
+    if (args.query === undefined && !args.types?.length && args.topic === undefined) return '请填写 query、非空 types 或 topic，或用 id 配 history: true 或 version 查历史。'
+  }
   return undefined
 }
 
@@ -246,7 +305,7 @@ export function truncationNote(total: number, shown: number, atCap: boolean): st
  * 把命中结果渲染成给模型看的一段文本：有说明先写说明，再列命中（头行末尾带文件绝对路径）。纯函数。
  * 节选条目在头行路径前标字数，路径保持在行末；有节选条目时开头说明最后接节选说明。
  */
-export function renderSearchResult(result: { hits: SearchHit[]; note?: string; moreNote?: string; quoteNote?: string; dialogueText?: string; onlyDialogue?: boolean; pathNote?: string; history?: HistoryListing; version?: HistoryVersionInfo }): string {
+export function renderSearchResult(result: { hits: SearchHit[]; note?: string; moreNote?: string; quoteNote?: string; dialogueText?: string; onlyDialogue?: boolean; pathNote?: string; history?: HistoryListing; version?: HistoryVersionInfo; matchedTopics?: TopicRef[]; catalog?: TopicRef[]; topicNote?: string; browse?: TopicBrowse }): string {
   if (result.history !== undefined) {
     const h = result.history
     return [
@@ -260,15 +319,23 @@ export function renderSearchResult(result: { hits: SearchHit[]; note?: string; m
     return `记忆 ${v.memoryId} 的版本 ${v.versionId} · 起始 ${v.startedAt} · 结束 ${v.endedAt}${v.reason !== '' ? ` · 原因：${v.reason}` : ''}${v.mergedFrom !== undefined ? ` · 并入自 ${v.mergedFrom}` : ''}\n\n${renderSearchResult({ hits: result.hits })}`
   }
   if (result.dialogueText !== undefined) {
-    const memories = result.onlyDialogue ? undefined : renderSearchResult({ hits: result.hits, note: result.note, moreNote: result.moreNote, quoteNote: result.quoteNote })
+    const memories = result.onlyDialogue ? undefined : renderSearchResult({ hits: result.hits, note: result.note, moreNote: result.moreNote, quoteNote: result.quoteNote, matchedTopics: result.matchedTopics, catalog: result.catalog, topicNote: result.topicNote })
     return result.onlyDialogue ? result.dialogueText : renderSearchSections({ memories, dialogue: result.dialogueText })
   }
-  if (result.pathNote) return result.pathNote + '\n' + renderSearchResult({ hits: result.hits, note: result.note, moreNote: result.moreNote, quoteNote: result.quoteNote })
-  const blocks = result.hits.map(h => `[${h.id}] ${h.type}｜${h.summary}${h.sourceNote}${h.stalenessNote}${h.matchNote}${h.versionCount !== undefined ? versionCountNote(h.versionCount) : ''}${h.isExcerpt ? ` · 节选，正文共 ${h.contentChars} 字符` : ''}${h.path !== undefined ? ` · ${h.path}` : ''}\n${h.content}${h.quote !== undefined ? `\n${h.quote}` : ''}`)
+  if (result.pathNote) return result.pathNote + '\n' + renderSearchResult({ hits: result.hits, note: result.note, moreNote: result.moreNote, quoteNote: result.quoteNote, matchedTopics: result.matchedTopics, catalog: result.catalog, topicNote: result.topicNote })
+  const refLine = (r: TopicRef) => `${TOPIC_SCOPE_LABEL[r.scope]}「${r.name}」（${r.count} 条）${r.about !== '' ? `：${r.about}` : ''}`
+  if (result.browse !== undefined) {
+    const head = [result.note, result.topicNote, result.moreNote].filter(Boolean).join('\n')
+    return [head, ...result.browse.sections.map(s => [refLine(s.topic), ...s.rows.map(r => r.line)].join('\n'))].filter(Boolean).join('\n\n')
+  }
+  const blocks = result.hits.map(h => `[${h.id}] ${h.type}｜${h.summary}${h.sourceNote}${h.stalenessNote}${h.matchNote}${h.versionCount !== undefined ? versionCountNote(h.versionCount) : ''}${h.topic !== undefined ? ` · 主题：${TOPIC_SCOPE_LABEL[h.topic.scope]}「${h.topic.name}」，同主题还有 ${h.topic.others} 条` : ''}${h.isExcerpt ? ` · 节选，正文共 ${h.contentChars} 字符` : ''}${h.path !== undefined ? ` · ${h.path}` : ''}\n${h.content}${h.quote !== undefined ? `\n${h.quote}` : ''}`)
   const excerptNote = result.hits.some(h => h.isExcerpt) ? EXCERPT_NOTE : undefined
-  const head = [result.note, result.moreNote, excerptNote, result.quoteNote].filter((x): x is string => x !== undefined).join('\n')
+  const matched = result.matchedTopics?.length ? `匹配的主题：${result.matchedTopics.map(r => `${TOPIC_SCOPE_LABEL[r.scope]}「${r.name}」（${r.count} 条）`).join('、')}。` : undefined
+  const head = [matched, result.note, result.moreNote, excerptNote, result.quoteNote, result.topicNote].filter(Boolean).join('\n')
+  if (blocks.length === 0 && ![result.note, result.moreNote, excerptNote, result.quoteNote].some(Boolean)) blocks.push('没有匹配的记忆。')
   if (head !== '') blocks.unshift(head)
-  return blocks.length === 0 ? '没有匹配的记忆。' : blocks.join('\n\n')
+  if (result.catalog !== undefined) blocks.push(['当下的主题目录（用 topic 参数传主题名可以列出某个主题下的全部记忆）：', ...result.catalog.map(r => `- ${refLine(r)}`)].join('\n'))
+  return blocks.join('\n\n')
 }
 
 /** 类型缺失说明：条数降序，同数按类型名；类型名来自读盘，旧场景的类型也会出现，类型表给得出标签才附。只有条数，不带任何记录字段。 */
@@ -278,6 +345,18 @@ function missingTypesNote(types: readonly string[], counts: ReadonlyArray<{ type
     return { type, count, ...(label !== type ? { label } : {}) }
   }).sort((x, y) => y.count - x.count || (x.type < y.type ? -1 : x.type > y.type ? 1 : 0))
   return typesNoRecordsNote(types, table)
+}
+
+function pageNote(total: number, offset: number, shown: number): string {
+  if (total === 0) return '共 0 条。'
+  const range = shown === 0 ? `offset ${offset} 之后没有了。` : shown === 1 ? `这次列出第 ${offset + 1} 条。` : `这次列出第 ${offset + 1}–${offset + shown} 条。`
+  return `共 ${total} 条，${range}${offset + shown < total ? `下一页用 offset: ${offset + shown}。` : ''}`
+}
+
+/** 输出和版本数定好后再附目录，保持检索判定与导航互不影响。 */
+function attachTopicCatalog(outcome: SearchOutcome, catalog: TopicRef[]): SearchOutcome {
+  return catalog.length > 0 && (outcome.hits.length === 0 || (outcome.noteCode !== undefined && WEAK_SEARCH_NOTE_CODES.some(code => code === outcome.noteCode)))
+    ? { ...outcome, catalog } : outcome
 }
 
 /**
@@ -290,7 +369,7 @@ async function executeMemorySearch(
   exec: ToolRunContext,
   deps: SearchToolDeps,
   onListed?: (listed: MemoryListing) => void,
-): Promise<{ hits: SearchHit[]; note?: string; noteCode?: SearchNoteCode; moreNote?: string }> {
+): Promise<{ hits: SearchHit[]; note?: string; noteCode?: SearchNoteCode; moreNote?: string; matchedTopics?: TopicRef[]; catalog?: TopicRef[]; topicNote?: string; browse?: TopicBrowse }> {
   const a = args
   const context = await deps.host.contextOf(exec)
   const { workspacePath, session } = context
@@ -305,8 +384,49 @@ async function executeMemorySearch(
     : a.scope === 'workspace' && workspacePath
       ? { kind: 'workspace', workspacePath }
       : { kind: 'visible', workspacePath }
-  const found = await findMemoryCandidates({ query: a.query ?? '', types: a.types, scope: scopeFilter }, deps)
+  const found = await findTopicCandidates({ query: a.query ?? '', types: a.types, scope: scopeFilter, topic: a.topic }, deps)
   const now = found.at
+  const { topics } = found
+  // 主题信息按组算一次；关键词预筛与整范围读取可能选中同 id 的不同副本。
+  const groupInfo = new Map(topics.groups.map(g => {
+    const usable = usableMembers(g.members, now)
+    const ref: TopicRef = { scope: g.scope, name: topicDisplayName(g), about: topicDisplayAbout(g.about), count: usable.length }
+    return [g, { ref, usableIds: new Set(usable.map(r => r.id)) }] as const
+  }))
+  const memberInfo = new Map(topics.groups.flatMap(g => g.members.map(r => [`${g.scope}\0${r.id}`, groupInfo.get(g)!] as const)))
+  const infoOf = (r: MemoryCandidate['record']) => memberInfo.get(`${r.scope === 'global' ? 'global' : 'workspace'}\0${r.id}`)
+  const catalog = [...groupInfo.values()].map(info => info.ref)
+  const hasTopics = topics.groups.length > 0 || topics.unreadable.length > 0
+  const isTopic = a.topic !== undefined
+  const offset = a.offset ?? 0
+  const labels = topics.unreadable.map(scope => TOPIC_SCOPE_LABEL[scope]).join('、')
+  const unreadableNote = labels === '' ? undefined : `这次读不到${labels}的主题索引，这部分记忆不带主题信息。`
+  if (isTopic && topics.browsed!.length === 0) {
+    const name = injectionText(maskSecrets(a.topic!.trim()))
+    return topics.unreadable.length > 0
+      ? { hits: [], noteCode: 'topic-index-unreadable', note: `这次读不到${labels}的主题索引，没法确定有没有叫「${name}」的主题。可以改用关键词检索。` }
+      : { hits: [], noteCode: 'topic-not-found', note: `范围内没有叫「${name}」的主题（主题名和曾用名都比过）。`, ...(topics.groups.length > 0 ? { catalog } : {}) }
+  }
+  const unreadableRows = isTopic ? topics.browsed!.reduce((n, g) => n + g.unreadableRows, 0) : 0
+  const topicNote = [unreadableNote, unreadableRows > 0 ? `有 ${unreadableRows} 行读不到，已跳过。` : undefined].filter(Boolean).join('\n')
+  if (isTopic && (a.query ?? '').trim() === '') {
+    const page = found.candidates.slice(offset, offset + limit)
+    return {
+      hits: [],
+      browse: {
+        total: found.candidates.length, offset,
+        sections: topics.browsed!.map(g => ({
+          topic: groupInfo.get(g)!.ref,
+          rows: page.filter(c => infoOf(c.record) === groupInfo.get(g)).map(({ record: r, filePath }) => ({
+            id: r.id, basis: MATCH_BASIS.topic,
+            line: formatIndexLine(maskSecretSurface(r), { passive: false, file: exposedPath(r, filePath), note: stalenessNote(r, deps.registry.get(r.type).decayDays, now) }),
+          })),
+        })),
+      },
+      moreNote: pageNote(found.candidates.length, offset, page.length),
+      ...(topicNote !== '' ? { topicNote } : {}),
+    }
+  }
   const ranked = found.candidates
   const isDirect = found.isDirectHit
   const { tokens, legacyTerms, groups } = found.diagnostics
@@ -317,7 +437,8 @@ async function executeMemorySearch(
   const matchAll = a.match === 'all' && tokens.length > 0
   // 过滤放在排序之后：逐词命中条数仍按全部候选（ranked）算
   const listed = matchAll ? allOnly : ranked
-  const top = listed.slice(0, limit)
+  const firstPage = listed.slice(0, limit)
+  const top = listed.slice(offset, offset + limit)
   const { sessionRecall } = deps
   const handle = session.handle
   // 快照带入时的正文与现在一致才省略：冻结后改过的、同 id 取到别层副本的，快照里那份不是这一版
@@ -327,16 +448,16 @@ async function executeMemorySearch(
   // 连部分命中也没有、只剩第三档 → substring-fallback（三者互斥、substring 优先）。判弱的两种、以及首条缺关键词的 or-fallback
   // 附逐词命中条数（范围内全部候选）；缺的是哪些词由逐条命中说明给出。
   // 查询恰是某条记忆的 id：它已置顶，就是要找的那条，不出说明码
-  const hasTier = (tier: SearchTier) => top.some(e => e.tier === tier)
+  const hasTier = (tier: SearchTier) => firstPage.some(e => e.tier === tier)
   // match: all 搜空 → all-no-hit（返回列表为空，与上面三码互斥）；all 有结果时列表只剩全命中档，三码自然不出。
   // 范围内没有任何命中时换 any 也是空，不出此码，和 any 一样是不带码的空结果
-  const allNoHit = matchAll && top.length === 0 && ranked.length > 0
+  const allNoHit = matchAll && listed.length === 0 && ranked.length > 0
   // 优先级（结果只带一个码）：no-workspace（上面已返回）→ types-no-records → all-no-hit → 三码；类型缺失时候选为空，后面几码本就不成立
   let note: { noteCode: SearchNoteCode; note: string } | undefined =
     typesNote === undefined ? undefined : { noteCode: 'types-no-records', note: typesNote }
-  if (note === undefined && (allNoHit || (top.length > 0 && !hasTier('all') && !isDirect))) {
+  if (note === undefined && (allNoHit || (firstPage.length > 0 && !hasTier('all') && !isDirect))) {
     const withCounts = (text: string) => [text, termHitNote(found.diagnostics.termHits)].filter(x => x !== undefined).join('\n')
-    const first = top.find(e => e.tier === 'partial')
+    const first = firstPage.find(e => e.tier === 'partial')
     const verdict = first === undefined ? undefined : judgeTopHit(groups, tokens, first.tokenHits)
     if (allNoHit) note = { noteCode: 'all-no-hit', note: [withCounts(ALL_NO_HIT_NOTE), ANY_MATCH_HINT].join('\n') }
     else if (verdict === undefined) note = { noteCode: 'substring-fallback', note: withCounts(SUBSTRING_FALLBACK_NOTE) }
@@ -349,7 +470,9 @@ async function executeMemorySearch(
   let cascading = false
   const result = {
     ...note,
-    ...(listed.length > top.length
+    ...(hasTopics && !isTopic && tokens.length > 0 ? { matchedTopics: topics.matched.map(g => groupInfo.get(g)!.ref) } : {}),
+    ...(topicNote !== '' ? { topicNote } : {}),
+    ...(isTopic ? (listed.length > 0 ? { moreNote: pageNote(listed.length, offset, top.length) } : {}) : listed.length > top.length
       ? { moreNote: truncationNote(listed.length, top.length, limit === MAX_SEARCH_LIMIT) + (listed.length > allOnly.length && allOnly.some(e => e.tier === 'all') ? MATCH_ALL_HINT : '') }
       : {}),
     // 与注入同口径：只遮明确密钥（疑似级写入时用户已确认）；文件路径同注入，name 被遮的不给，其余遮一遍
@@ -357,7 +480,7 @@ async function executeMemorySearch(
       const masked = maskSecretSurface(h)
       const path = exposedPath(h, filePath)
       // id 直达置顶的那条就是模型按 id 要的，不标命中情况（同它不出说明码）
-      const tier = isDirect && i === 0 ? 'all' : rankedTier
+      const tier = isDirect && offset + i === 0 ? 'all' : rankedTier
       const terms = tier === 'partial' ? matchedTerms(groups, tokens, tokenHits) : []
       // 形态：全文已在注入快照里的仍给说明句，计 0；按 id 要的那条全文；单条超门槛的节选、不计入；
       // 保底范围内全文；之后按预算累计，某条放不下就开始级联，它和之后走到这一步的都给节选
@@ -366,7 +489,7 @@ async function executeMemorySearch(
       if (injected?.get(h.id) === h.content) content = IN_SNAPSHOT_NOTE
       else {
         const chars = masked.content.length
-        if (isDirect && i === 0) fullChars += chars
+        if (isDirect && offset + i === 0) fullChars += chars
         else if (chars > EXCERPT_ABOVE_CHARS) isExcerpt = true
         else if (i < FULL_TEXT_GUARANTEED_HITS) fullChars += chars
         else if (!cascading && fullChars + chars <= FULL_TEXT_BUDGET_CHARS) fullChars += chars
@@ -382,7 +505,10 @@ async function executeMemorySearch(
           content = excerptOf(masked.content, words)
         }
       }
+      const topic = infoOf(h)
       return {
+        ...(hasTopics ? { basis: MATCH_BASIS.keyword } : {}),
+        ...(topic !== undefined ? { topic: { scope: topic.ref.scope, name: topic.ref.name, others: topic.ref.count - Number(topic.usableIds.has(h.id)) } } : {}),
         id: h.id, type: h.type, summary: masked.summary,
         content,
         sourceNote: sourceNote(h),
@@ -398,12 +524,13 @@ async function executeMemorySearch(
     const count = await deps.store.history.countVersions(dirname(candidate.filePath), candidate.record.id)
     if (count !== undefined && count >= 1) result.hits[i]!.versionCount = count
   }
+  const outcome = !isTopic && (a.query ?? '').trim() !== '' ? attachTopicCatalog(result, catalog) : result
   // 输出定了才记召回：拿得到会话时同一会话每条只计一次，拿不到时每次都计
   const topIds = top.map(e => e.record.id)
   if (sessionRecall && handle) await sessionRecall.markRecalled(handle, topIds)
   else await deps.store.markRecalled(topIds, now)
   onListed?.({ top, context })
-  return result
+  return outcome
 }
 
 /** 记忆一路这次返回的候选（和 hits 逐条对应）和会话上下文：记忆带原话从这里取锚，不再按 id 读记忆。 */
@@ -460,13 +587,13 @@ function withQuoteBlocks(outcome: SearchOutcome, quotes: MemoryQuotes, merged: F
  */
 export async function executeSearch(args: SearchArgs, exec: ToolRunContext, deps: SearchToolDeps): Promise<SearchOutcome> {
   // 不合法的组合都落在这几种参数上：只给 query（以及 source、types、scope、limit、match）的老用法不经校验
-  if (args.query === undefined || args.id !== undefined || args.history !== undefined || args.version !== undefined) {
+  if (args.query === undefined || args.id !== undefined || args.history !== undefined || args.version !== undefined || args.topic !== undefined || args.offset !== undefined) {
     const reason = searchArgsError(args)
     if (reason !== undefined) return { hits: [], noteCode: 'invalid-args', note: reason }
     if (args.id !== undefined) return executeHistorySearch({ ...args, id: args.id }, exec, deps)
   }
   const deadline = (deps.now ?? Date.now)() + DIALOGUE_PATH_BUDGET_MS
-  return searchSources(args, exec, deps.dialogue === undefined ? deps : { ...deps, dialogue: shareDialogueReads(deps.dialogue) }, deadline)
+  return searchSources(args.topic === undefined ? args : { ...args, source: 'memory' }, exec, deps.dialogue === undefined ? deps : { ...deps, dialogue: shareDialogueReads(deps.dialogue) }, deadline)
 }
 
 /**

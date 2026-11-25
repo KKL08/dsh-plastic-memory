@@ -7,6 +7,7 @@ import { tokenizerForQuery, type QueryTokenizerOptions } from './jieba-segmenter
 import { CJK } from './tokenizer.ts'
 import { anchorTerms, compareRanked, pendingLast, rankRecords, type RankedRecord, type SearchTier } from './ranking.ts'
 import { groupQueryTerms, termHitCounts, type TermGroup, type TermHitCount } from './coverage.ts'
+import type { TopicContext } from './topic-context.ts'
 
 /**
  * 记忆检索的取候选：范围读取、同 id 取舍、有效期过滤、分档打分、排序、id 直达置顶。
@@ -51,6 +52,8 @@ export interface MemoryCandidateSet {
   /** 这次检索判有效期用的时刻：分词完成后、读盘前取的。调用方算陈旧提示、记召回都用它，不另取一次。 */
   at: number
   diagnostics: MemorySearchDiagnostics
+  /** 主题信息：只有带主题的取候选（search/topic-context 的 findTopicCandidates）才有，findMemoryCandidates 不给。 */
+  topics?: TopicContext
 }
 
 export interface MemoryCandidateQuery {
