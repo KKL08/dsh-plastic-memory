@@ -2,7 +2,7 @@ import type { MemoryRecord } from '../record-schema.ts'
 import type { MemoryStore, QueryScope } from '../store.ts'
 import { expandQueryTerms } from '../text.ts'
 import { resolveLiveFirst, type LocatedRecord } from '../storage/table.ts'
-import { withinValidity } from '../record-freshness.ts'
+import { isExpired, withinValidity } from '../record-freshness.ts'
 import { tokenizerForQuery, type QueryTokenizerOptions } from './jieba-segmenter.ts'
 import { CJK } from './tokenizer.ts'
 import { anchorTerms, compareRanked, pendingLast, rankRecords, type RankedRecord, type SearchTier } from './ranking.ts'
@@ -58,6 +58,8 @@ export interface MemoryCandidateQuery {
   /** 空数组当没填：模型传 [] 表达的是不筛，按字面过滤会把全部记忆滤掉。 */
   types?: readonly string[]
   scope: QueryScope
+  /** 新建判重包含尚未生效的记忆，仍排除已过期的。 */
+  includesNotYetInEffect?: boolean
 }
 
 export interface MemoryCandidateDeps {
@@ -111,12 +113,12 @@ export async function findMemoryCandidates(q: MemoryCandidateQuery, deps: Memory
     : {}
   // 分词可能要等词典加载，时刻在它之后取：加载期间到期的记忆不进候选
   const now = deps.now?.() ?? Date.now()
-  // 与快照预读同一条路：按范围读取 → 同 id 取舍 → active → validTo（过期的不进检索，治理扫描仍可见）
+  // 与快照预读同一条路：按范围读取 → 同 id 取舍 → active → 有效期过滤（新建判重还包含尚未生效的）
   const hasTypes = q.types !== undefined && q.types.length > 0
   const typeFilter = hasTypes ? { types: [...q.types!] } : {}
   const read = await deps.store.readRaw(q.scope, { ...typeFilter, ...prefilter })
   const liveOf = (records: readonly LocatedRecord[]) => resolveLiveFirst(records, { workspacePath: hint })
-    .filter(l => l.record.status === 'active' && withinValidity(l.record, now))
+    .filter(l => l.record.status === 'active' && (q.includesNotYetInEffect ? !isExpired(l.record, now) : withinValidity(l.record, now)))
   const located = liveOf(read.records)
   const records = located.map(l => l.record)
   // 类型缺失：填了 types 而候选为空，才按同一范围再读一次（不带预筛、不带类型过滤）分辨是这几类没有、还是关键词没对上。

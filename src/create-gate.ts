@@ -50,6 +50,7 @@ export async function runCreateGate(
   const { candidates, diagnostics } = await findMemoryCandidates({
     query: `${input.name}\n${input.summary}\n${input.content}`,
     scope: { kind: 'visible', workspacePath: input.workspacePath },
+    includesNotYetInEffect: true,
   }, deps)
   // 检索把待确认记录排在全部主档之后，两段各取前十，免得主档一多待确认记录就进不了窗口
   const settled = candidates.filter(c => !isPendingDelegated(c.record))

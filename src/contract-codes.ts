@@ -13,7 +13,7 @@ export type RejectCode =
   | 'schema-invalid'    // 字段校验失败
   | 'secret-critical'   // 明确厂商特征的密钥，拒存不落盘
   | 'secret-suspected'  // 疑似密钥（无厂商特征），未带 allowSecret 时拒存；用户确认后带 allowSecret: true 重发
-  | 'validity-format'      // validFrom / validTo 不是 YYYY-MM-DD HH:mm 或 YYYY-MM-DD（validity.ts）
+  | 'validity-format'      // validFrom / validTo 格式不对；factTime 格式不对或日期不存在
   | 'validity-nonexistent' // validFrom / validTo 的日期或时刻不存在（2 月 30 日、25:00）
   | 'validity-past'        // validTo 不晚于当前时间，存下即过期
   | 'validity-reversed'    // validTo 不晚于 validFrom，有效期为空

@@ -1,3 +1,5 @@
+import { isInEffect } from '../record-freshness.ts'
+import { formatValidity } from '../validity.ts'
 import { similarGuide } from '../create-gate.ts'
 import type { SaveHints } from '../save-signals.ts'
 import type { QueryTokenizerOptions } from '../search/jieba-segmenter.ts'
@@ -56,7 +58,7 @@ export interface SaveToolDeps {
 const QUIET_NOTE = '回复里不用提这次保存。'
 
 /**
- * 把管线结果渲染成给模型看的一段文本。纯函数。开头的「已保存记忆 <id>（<类型>，<作用域>）」「已更新记忆 <id>（<名称>）」
+ * 把管线结果渲染成给模型看的一段文本，按当前时刻说明是否已生效。开头的「已保存记忆 <id>（<类型>，<作用域>）」「已更新记忆 <id>（<名称>）」
  * 是对话卡解析的格式（client/chat/tool-summary.ts），改了要同步那边；更新带名称，是因为只传 edits 的参数里没有名称。
  */
 /** 摘要嵌进句子里：去掉摘要自带的句末句号，免得拼出「。。」 */
@@ -67,6 +69,9 @@ const shownName = (record: MemoryRecord): string => maskSecretSurface(record, { 
 
 export function renderSaveResult(result: PipelineResult): string {
   let text: string
+  const futureValidityNote = (result.kind === 'saved' || result.kind === 'updated') && !isInEffect(result.record, Date.now())
+    ? `从 ${formatValidity(result.record.validFrom!)} 起才带入对话并可检索。`
+    : ''
   switch (result.kind) {
     case 'saved':
       // 子 agent 存下的是待确认记录：没有通知通道，委派方只能从子 agent 的回复里知道，所以要它报出来
@@ -74,13 +79,13 @@ export function renderSaveResult(result: PipelineResult): string {
         text = `已保存记忆 ${result.record.id}（${result.record.type}，${result.record.scope}），已存为待确认：${summaryClause(result.record.summary)}。不进主会话注入；在回复里报给委派方（id 和摘要），由它决定接受、改写或丢弃。`
         break
       }
-      text = `已保存记忆 ${result.record.id}（${result.record.type}，${result.record.scope}）。下个会话注入；本会话若触发上下文压缩，压缩后即生效。${QUIET_NOTE}`
+      text = `已保存记忆 ${result.record.id}（${result.record.type}，${result.record.scope}）。${futureValidityNote || '下个会话注入；本会话若触发上下文压缩，压缩后即生效。'}${QUIET_NOTE}`
       break
     case 'updated':
       // 子 agent 改写自己的待确认记录：仍待确认，同新建一样要它报给委派方
       text = isPendingDelegated(result.record)
         ? `已更新记忆 ${result.record.id}（${shownName(result.record)}）。仍待确认：${summaryClause(result.record.summary)}。不进主会话注入；在回复里报给委派方（id 和摘要），由它决定接受、改写或丢弃。`
-        : `已更新记忆 ${result.record.id}（${shownName(result.record)}）。${QUIET_NOTE}`
+        : `已更新记忆 ${result.record.id}（${shownName(result.record)}）。${futureValidityNote}${QUIET_NOTE}`
       break
     case 'duplicate-suspected': {
       const e = result.existing

@@ -388,6 +388,13 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       return { ok: names.length === 9, detail: `memory_* ${names.length}: ${names.join(',')}` }
     })
 
+    await attempt('SAVE-FACT-TIME-SCHEMA', async () => {
+      const schema = tools.schemas().find(s => s.name === 'memory_save') as
+        { parameters?: { properties?: { factTime?: { type?: string } }; required?: string[] } } | undefined
+      const parameters = schema?.parameters
+      return { ok: parameters?.properties?.factTime?.type === 'string' && !(parameters?.required ?? []).includes('factTime'), detail: JSON.stringify(parameters) }
+    })
+
     // 引用入口需要两个可选标识，由执行器校验二选一。
     await attempt('SOURCE-MESSAGE-REF-SCHEMA', async () => {
       const schema = tools.schemas().find(s => s.name === 'memory_source') as
