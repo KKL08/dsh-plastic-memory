@@ -134,7 +134,8 @@ export function renderHealthResult(result: HealthToolResult): string {
     for (const row of result.rows) {
       const name = row.layer === 'global' ? 'global' : row.workspacePath!
       const gateNote = row.gate.secret ? '｜⚠️ 检出密钥' : ''
-      const coverage = row.coverage !== undefined ? `｜${coverageText(row.coverage)}` : ''
+      // memory_health 不跑体检，覆盖总是上次体检的
+      const coverage = row.coverage !== undefined ? `｜${coverageText(row.coverage, { isLastCheckup: true })}` : ''
       // 没读全的范围不给档位：分数只按读到的算，标成绿色会让人以为它健康
       const score = row.isReadComplete === false
         ? `这次没读全，只按读到的算 ${Math.floor(row.score)}/100`
@@ -160,7 +161,7 @@ export function renderHealthResult(result: HealthToolResult): string {
 
   const { breakdown } = result
   const lines = [result.message]
-  if (result.coverage !== undefined) lines.push(coverageText(result.coverage))
+  if (result.coverage !== undefined) lines.push(coverageText(result.coverage, { isLastCheckup: true }))
   lines.push(
     `规则层扣分 ${breakdown.ruleLayer.penalty}（secret ${breakdown.ruleLayer.secret} / expired ${breakdown.ruleLayer.expired} / bloat ${breakdown.ruleLayer.bloat} / orphan ${breakdown.ruleLayer.orphan} / malformed ${breakdown.ruleLayer.malformed}）；`
     + `语义层扣分 ${breakdown.semanticLayer.penalty}（conflict ${breakdown.semanticLayer.conflict} / redundancy ${breakdown.semanticLayer.redundancy} / misplaced ${breakdown.semanticLayer.misplaced} / unclear ${breakdown.semanticLayer.unclear}）；`

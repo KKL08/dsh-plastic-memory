@@ -459,6 +459,9 @@ All notable changes to this project are documented here. The format follows
   as a checkup of all memories, counts unparseable files against their
   project, and marks a project it could not read in full instead of scoring
   it as healthy.
+- `memory_health` presented how many memories the last checkup covered as if
+  it had checked them just now. It now says the figures come from the last
+  checkup.
 
 ## [0.2.0] - 2026-11-21
 
