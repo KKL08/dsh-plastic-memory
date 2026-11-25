@@ -105,7 +105,8 @@ it('工具声明含三个可选来源及引用能力', async () => {
   expect((tool.parameters.properties as Record<string, unknown>).source).toMatchObject({ enum: ['memory', 'dialogue', 'both'] })
   expect((tool.parameters as { required?: string[] }).required ?? []).not.toContain('source')
   expect(tool.description).toContain('能查本项目过往对话的原话，能找到没记成记忆的内容。')
-  expect(tool.description).toContain('原话结果里每条消息带引用，可以用 memory_source 看完整内容。')
+  expect(tool.description).toContain('原话结果里每条消息带引用，可以用 memory_source 看这条消息的更多内容；展开的内容有长度上限，超出会标明截断。')
+  expect(tool.description).not.toContain('完整内容')
 })
 it('无参数跟随两路配置，记忆筛选不限制原话', async () => {
   const { deps } = await setup()

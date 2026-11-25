@@ -148,7 +148,8 @@ it('工具声明允许引用且记忆编号不再必填', async () => {
   const schema = tool.parameters as { properties: Record<string, unknown>; required?: string[] }
   expect(schema.properties.messageRef).toBeDefined()
   expect(schema.required ?? []).not.toContain('memoryId')
-  expect(tool.description).toContain('也能按原话检索结果里给的消息引用看那条消息的完整内容和前后各一轮。')
+  expect(tool.description).toContain('也能按原话检索结果里给的消息引用看那条消息的更多内容和前后各一轮；这条消息最多给 8000 字符，超出会标明截断。')
+  expect(tool.description).not.toContain('完整内容')
 })
 
 it('重建期间读取旧代且不把新代的缺失当作整理中', async () => {

@@ -1,6 +1,6 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
-import { executeSource, renderSourceResult, type SourceToolDeps, type SourceResult } from './source.ts'
+import { MESSAGE_REF_TEXT_CAP, executeSource, renderSourceResult, type SourceToolDeps, type SourceResult } from './source.ts'
 import { toToolOutput } from './output.ts'
 import type { ContextHost } from './host-session.ts'
 
@@ -19,7 +19,7 @@ export function createSourceTool(deps: SourceToolBindingDeps): ToolDefinition {
     description: [
       '回查一条长期记忆的全部出处，可选择出处、前后翻页、按关键词找、带上工具调用和结果、追溯父子会话。',
       '只读，只能回查当前项目和全局记忆；原始会话已不可读时会明确告知。',
-      '也能按原话检索结果里给的消息引用看那条消息的完整内容和前后各一轮。',
+      `也能按原话检索结果里给的消息引用看那条消息的更多内容和前后各一轮；这条消息最多给 ${MESSAGE_REF_TEXT_CAP} 字符，超出会标明截断。`,
     ].join(''),
     parameters: {
       messageRef: { type: 'string', description: '原话检索结果里给的消息引用' },
