@@ -28,7 +28,7 @@ import { checkupKey, isCoverageClear, isFullyCovered, uncheckedCount, type Check
 import { scoreScope, validateScopePaths, crossScopeConflicts, checkupRowBase, coverageText, ignoredNote, findingFingerprints, GLOBAL_CACHE_KEY, TIER_LABEL } from '../governance/scope-health.ts'
 import { applyIgnores, type AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
-import { prereadScopes, listingNotes, checkupWorkspaces, renderDirectoryNotes } from './scope-preread.ts'
+import { prereadScopes, listingNotes, checkupScanWorkspaces, renderDirectoryNotes } from './scope-preread.ts'
 import type { DirectoryNote } from '../storage/table.ts'
 import { isWorkspaceGone } from '../storage/project-folder.ts'
 import { buildCrossWsPrompt, runCrossWsScan, findEntityDuplicates, summaryLine, CROSS_WS_PROMPT_VERSION, type CrossWsDuplicate } from '../governance/cross-ws.ts'
@@ -488,6 +488,11 @@ async function syncPromoteCandidates(
   for (const ws of workspaces) {
     try {
       const fresh = await deps.store.readRaw({ kind: 'workspace', workspacePath: ws })
+      // 目录读不了：读到的不全，不能据它移除候选，下次体检再同步
+      if (fresh.directoryNotes.some(n => n.code === 'dir-unreadable')) {
+        log.warn(`[plastic-memory] ${ws} 的记忆目录读不全，这次不同步它的提升候选`)
+        continue
+      }
       const own = new Map<string, MemoryRecord>()
       for (const { record: r } of fresh.records) {
         if (r.status === 'active' && r.scope === 'workspace' && r.workspacePath === ws && !own.has(r.id)) own.set(r.id, r)
@@ -591,14 +596,17 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
   {
     // 当前项目本来就算认得，所以单个作用域落到它时校验总能过
     const requested = checkup ? requestedWs ?? [] : wsPath !== undefined ? [wsPath] : []
-    const invalid = validateScopePaths(checkupWorkspaces(listing), currentWs, requested)
+    const invalid = validateScopePaths(checkupScanWorkspaces(listing), currentWs, requested)
     if (invalid !== null) return { kind: 'error', message: invalid }
   }
   // 预读范围：与 memory_health 共用 prereadScopes——目标作用域（含 .archive/）的全部状态记录、作用域外引用按 id 定位、
   // 待决账本、语义缓存、按作用域归档的隔离文件。体检读 global + 所选 workspace；单个作用域读可见集合（global + 本项目）。
   // 一个作用域读取抛错时记成没读全，照常查读得到的
-  // 全库体检的项目清单：指定的，或目录清单里顶层有记忆文件的（含读取抛错、只有坏文件的项目，和界面的全库体检同一份）
-  const checkupWs = checkup ? requestedWs ?? checkupWorkspaces(listing) : []
+  // 全库体检的项目清单：指定的，或目录清单里顶层有记忆文件的（含读取抛错、只有坏文件的项目），加上标记读得到、记忆目录列不出的项目
+  // （和界面的全库体检同一份）
+  const checkupWs = checkup ? requestedWs ?? checkupScanWorkspaces(listing) : []
+  /** 标记读得到、记忆目录列不出的项目：这次没读全，有没有自己的记忆不知道（按有算）。 */
+  const unlistedWs = new Set((listing.unreadable ?? []).map(e => e.workspacePath))
   const readScopes: Scope[] = checkup
     ? [{ kind: 'global' }, ...checkupWs.map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
     : wsPath !== undefined ? [target, { kind: 'global' }] : [target]
@@ -611,7 +619,8 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
   // malformed 按扫描的作用域归属（与 memory_health 的 scoreScope 同口径）：隔离文件按读到它的目录归作用域
   const quarantinedIn = (scope: Scope) => data.quarantined.get(scopeCacheKey(scope)) ?? []
   /** 这个作用域自己这次没读全（项目不算带进来的全局）。 */
-  const isScopeUnread = (scope: Scope): boolean => data.unreadScopes?.has(scopeCacheKey(scope)) ?? false
+  const isScopeUnread = (scope: Scope): boolean => (data.unreadScopes?.has(scopeCacheKey(scope)) ?? false)
+    || (scope.kind === 'workspace' && unlistedWs.has(scope.workspacePath))
   // 项目这一轮的可见集合含全局记忆：全局没读全，项目这一轮也没读全
   const isReadCompleteFor = (scope: Scope): boolean => !isScopeUnread(scope)
     && (scope.kind === 'global' || isReadCompleteFor({ kind: 'global' }))
@@ -633,6 +642,7 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
     || [...data.byId.values()].some(r => r.status === 'active' && r.scope === 'workspace' && r.workspacePath === scope.workspacePath)
     || quarantinedIn(scope).length > 0
     || listing.entries.some(e => e.workspacePath === scope.workspacePath && e.hasActiveTopLevel)
+    || unlistedWs.has(scope.workspacePath)
 
   // 这次要查的范围：全库是各项目再全局（读不出的项目照样在，按没读全处理），单个作用域是它自己
   const wsList = checkupWs
@@ -901,7 +911,7 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
     // 不受本次 scopes 子集影响。项目键按「真正删掉」判断（同体检记录、自动体检设置的清理口径）：在这次目录清单里、或项目文件夹判为还在，就留——
     // 记忆全在最近删除、还没有自己记忆、列完目录才建的项目都留着；不是项目路径的历史遗留键照旧清
     signal?.throwIfAborted()
-    const listed = new Set(listing.entries.map(e => e.workspacePath))
+    const listed = new Set([...listing.entries.map(e => e.workspacePath), ...unlistedWs])
     for (const key of scored.cache.keys()) {
       if (key === GLOBAL_CACHE_KEY) continue
       const workspacePath = key.slice(scopeCacheKey({ kind: 'workspace', workspacePath: '' }).length)
@@ -922,7 +932,7 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
       promoteCandidates, duplicates, notes,
       ...(isCrossWsSkipped ? { isCrossWsSkipped: true as const } : {}),
       ...(results.size > 0 ? { rounds: [...results.values()] } : {}),
-      directoryNotes: [...listingNotes(listing, { includeEmpty: true }), ...data.directoryNotes],
+      directoryNotes: uniqueNotes([...listingNotes(listing, { includeEmpty: true }), ...data.directoryNotes]),
       message: `全库体检完成：global + ${wsList.length} 个 workspace 各自独立扫描计分${created > 0 ? `，新增 ${created} 个待决冲突` : ''}${partialNote(results.values())}。清理需用户确认后执行：删除用 memory_forget，冲突裁决用 memory_confirm，提升全局用 memory_promote。`,
       ...extras(semanticBatches),
     }
@@ -968,7 +978,7 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
     stats, ignoredCount: ignored.length, promoteCandidates,
     semanticCachedAt,
     notes,
-    directoryNotes: [...listingNotes(listing, { includeEmpty: false }), ...data.directoryNotes],
+    directoryNotes: uniqueNotes([...listingNotes(listing, { includeEmpty: false }), ...data.directoryNotes]),
     message: `扫描${scopeLabel} ${stats.scanned} 条，${issuesText(stats.issues, results.get(scopeKey(target))?.coverage)}${ledger.created > 0 ? `，新增 ${ledger.created} 个待决冲突` : ''}${promoteCandidates.items.length > 0 ? `，${allCandidates.length} 条建议提升全局` : ''}${noteSuffix}。清理需用户确认后执行：删除用 memory_forget，冲突裁决用 memory_confirm，提升全局用 memory_promote。`,
     ...(results.size > 0 ? { rounds: [...results.values()] } : {}),
     ...extras(semanticBatches),
@@ -987,6 +997,17 @@ function issuesText(issues: number, coverage: CheckupCoverage | undefined): stri
 function partialNote(results: Iterable<ScanRoundResult>): string {
   const partial = [...results].filter(r => !isFullyCovered(r.coverage)).length
   return partial > 0 ? `，其中 ${partial} 个范围的内容检查没覆盖全（见各行）` : ''
+}
+
+/** 目录说明去重：同一个目录在枚举和读取时各报一次的，只留一条。 */
+function uniqueNotes(notes: readonly DirectoryNote[]): DirectoryNote[] {
+  const seen = new Set<string>()
+  return notes.filter((n) => {
+    const key = `${n.code}\n${n.path}\n${n.text}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
 }
 
 /** 这份副本这次读到了（任何状态）：同 id 读到的是别的作用域里的那份，不算。 */

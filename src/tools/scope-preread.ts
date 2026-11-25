@@ -114,6 +114,14 @@ export function checkupWorkspaces(listing: WorkspaceDirListing): string[] {
   return [...new Set(listing.entries.filter(e => e.hasActiveTopLevel).map(e => e.workspacePath))].sort()
 }
 
+/**
+ * 体检要查的项目（memory_scan、界面和自动的全库体检）：体检清单，再加上标记读得到、记忆目录列不出的项目——
+ * 列不出不等于没有记忆，这些项目照样进清单、这一轮按没读全查。按路径排序。memory_health 和视图仍用 checkupWorkspaces。
+ */
+export function checkupScanWorkspaces(listing: WorkspaceDirListing): string[] {
+  return [...new Set([...checkupWorkspaces(listing), ...(listing.unreadable ?? []).map(e => e.workspacePath)])].sort()
+}
+
 /** 目录级说明的渲染：health / scan 共用。 */
 export function renderDirectoryNotes(notes: readonly DirectoryNote[]): string[] {
   if (notes.length === 0) return []

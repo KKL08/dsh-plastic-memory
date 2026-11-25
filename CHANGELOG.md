@@ -401,6 +401,9 @@ All notable changes to this project are documented here. The format follows
   on its own to include the text.
 - A conflict you kept or dismissed was not reported again when only the fact
   time or validity of one of its memories changed.
+- A checkup of all memories left out a project whose memory folder could not
+  be listed, and cleared earlier results as if everything had been read. The
+  project now stays in the checkup and is reported as not fully read.
 
 ## [0.2.0] - 2026-11-21
 

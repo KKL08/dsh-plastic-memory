@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, rm, writeFile } from 'node:fs/promises'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -469,6 +469,47 @@ describe('库', () => {
     // 没读全：不写这次的完成记录，上次的留着
     expect(await completedOf(p2)).toBe(p2Completed)
     expect(await completedOf(p1)).toBeGreaterThan(p2Completed!)
+  })
+
+  it('不指定项目的全库体检、一个项目的标记读得到但记忆目录列不出：它在报告里、记没读全；跨项目比较的旧行、它那一轮的旧行和视图、提升候选都不清，完成记录不写', async () => {
+    const e = await env()
+    const [p1, p2, p3] = ['/work/p1', '/work/p2', '/work/p3']
+    const locked: Scope = { kind: 'workspace', workspacePath: p3 }
+    await e.store.put(record({ id: 'mem_g' }))
+    for (const [id, ws] of [['mem_p1', p1], ['mem_p2', p2], ['mem_p3', p3]] as const) {
+      await e.store.put(record({ id, scope: 'workspace', workspacePath: ws, globalCandidate: ws === p3 }))
+    }
+    const all = { kind: 'checkup' as const }
+    const m = stubModel({ findings: [{ type: 'unclear', ids: ['mem_p3'] }] })
+    await e.scan({ llm: m, target: all })
+    const crossKeys = e.db.readRound(CROSS_WS_ROUND)!.rows.map(row => row.key)
+    const lockedKeys = e.db.readRound(p3)!.rows.map(row => row.key)
+    expect(findingKeys(await e.view(locked))).toEqual(['unclear:mem_p3'])
+    const completedOf = async (ws: string) => (await e.checkups.list()).find(c => c.id === ws)?.completed?.completedAt
+    const lockedCompleted = await completedOf(p3)
+    const candidates = async () => (await e.decisions.list()).filter(d => d.kind === 'promote-candidate').map(d => d.memoryIds)
+    expect(await candidates()).toEqual([['mem_p3']])
+    // 只留执行权限：标记文件按名字读得到，目录里有什么列不出来
+    const dir = join(e.memoryRoot, workspaceDirName(p3))
+    await chmod(dir, 0o111)
+    try {
+      e.clock.now += 1000
+      const r = checkup(await e.scan({ llm: m, target: all }))
+      expect(r.rows.map(row => row.workspacePath ?? row.layer)).toEqual(['global', p1, p2, p3])
+      expect(coverageOf(r, locked).isReadComplete).toBe(false)
+      expect(r.rounds!.find(x => checkupKey(x.scope) === p3)!.closing).toBe('read-incomplete')
+      expect(renderScanResult(r).split('\n').find(l => l.startsWith(`- ${p3}：`))).toContain('这个范围没读全')
+      // 同一个目录的说明只列一次
+      expect(r.directoryNotes.filter(n => n.code === 'dir-unreadable')).toHaveLength(1)
+      expect(e.db.readRound(CROSS_WS_ROUND)!.rows.map(row => row.key)).toEqual(expect.arrayContaining(crossKeys))
+      expect(e.db.readRound(p3)!.rows.map(row => row.key)).toEqual(expect.arrayContaining(lockedKeys))
+      expect(findingKeys(await e.view(locked))).toEqual(['unclear:mem_p3'])
+      expect(await completedOf(p3)).toBe(lockedCompleted)
+      expect(await completedOf(p1)).toBeGreaterThan(lockedCompleted!)
+      expect(await candidates()).toEqual([['mem_p3']])
+    } finally {
+      await chmod(dir, 0o700)
+    }
   })
 
   it('同步提升候选时排在前面的项目读取抛错：后面项目的候选照常入账，记一条日志', async () => {

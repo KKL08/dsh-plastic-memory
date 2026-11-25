@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { sidecarSchemas, createPluginEnv } from './helpers/plugin-env.ts'
@@ -8,7 +8,7 @@ import { instructionsOf, noInstructions } from './helpers/instructions.ts'
 import { record } from './helpers/record.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { CheckupCache } from '../src/storage/checkup-cache.ts'
-import { ARCHIVE_DIR, CHECKUP_CACHE_FILE, GLOBAL_DIR } from '../src/storage/paths.ts'
+import { ARCHIVE_DIR, CHECKUP_CACHE_FILE, GLOBAL_DIR, workspaceDirName } from '../src/storage/paths.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { RETENTION_MS } from '../src/retention.ts'
 import { ViewWriter, collectCheckupView, collectGlobalViews } from '../src/gui/view-writer.ts'
@@ -512,5 +512,28 @@ describe('全部重查经界面体检', () => {
     expect(memoryCommandSchema.safeParse({ cmd: 'scan', isFullRecheck: true }).success).toBe(true)
     expect(memoryCommandSchema.safeParse({ cmd: 'scan', workspacePath: PROJECT, isFullRecheck: false }).success).toBe(true)
     expect(memoryCommandSchema.safeParse({ cmd: 'scan', isFullRecheck: 'yes' }).success).toBe(false)
+  })
+})
+
+describe('记忆目录列不出的项目', () => {
+  it('界面「全部」体检：标记读得到、记忆目录列不出的项目照样认领和检查，最近结果记没读全，不写它的完成记录', async () => {
+    const e = env()
+    await e.store.put(record({ id: 'mem_g', lastConfirmedAt: NOW }))
+    await e.store.put(record({ id: 'mem_p', scope: 'workspace', workspacePath: PROJECT, lastConfirmedAt: NOW }))
+    expect((await e.run({ target: { kind: 'all' }, llm: stubModel() })).kind).toBe('done')
+    const completed = (await e.recordOf(PROJ))?.completed
+    expect(completed).toBeDefined()
+    // 只留执行权限：标记文件按名字读得到，目录里有什么列不出来
+    const dir = join(root, workspaceDirName(PROJECT))
+    await chmod(dir, 0o111)
+    try {
+      e.clock.now += 10_000
+      expect((await e.run({ target: { kind: 'all' }, llm: stubModel() })).kind).toBe('done')
+      const rec = await e.recordOf(PROJ)
+      expect(rec?.completed).toEqual(completed)
+      expect(rec?.lastResult?.coverage?.isReadComplete).toBe(false)
+    } finally {
+      await chmod(dir, 0o700)
+    }
   })
 })

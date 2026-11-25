@@ -485,6 +485,7 @@ export class FileTable implements MemoryTable {
   async listWorkspaceDirs(): Promise<WorkspaceDirListing> {
     const entries: WorkspaceDirListing['entries'] = []
     const directoryNotes: DirectoryNote[] = []
+    const unreadable: NonNullable<WorkspaceDirListing['unreadable']> = []
     let names: string[]
     try {
       names = (await readdir(this.opts.root, { withFileTypes: true })).filter(e => e.isDirectory()).map(e => e.name)
@@ -503,14 +504,19 @@ export class FileTable implements MemoryTable {
       }
       if (loc.loc.scope !== 'workspace') continue   // 只有 global 目录会落到这支，已被 isWorkspaceDirName 排除
       const listed = await this.listMemoryFiles(dir)
-      if ('note' in listed) { directoryNotes.push(listed.note); continue }
+      if ('note' in listed) {
+        // 标记读得到、目录列不出：是项目，只是不知道顶层有没有记忆，单列给体检按没读全查
+        directoryNotes.push(listed.note)
+        unreadable.push({ workspacePath: loc.loc.workspacePath, dir })
+        continue
+      }
       // 只看文件名；只剩伴生文件形态的名字时才逐个解析，解析成记忆的才算
       const hasActiveTopLevel = listed.names.some(n => !isCompanionLikeFileName(n))
         || (await Promise.all(listed.names.map(n => this.readMemoryFile(join(dir, n), dir, loc.loc, NO_PREFILTER, new Map())))).some(isSlot)
       if (!hasActiveTopLevel) directoryNotes.push(this.note('dir-empty', dir, `workspace 目录顶层没有记忆文件（只剩归档或全空），不进体检清单：${dir}`))
       entries.push({ workspacePath: loc.loc.workspacePath, dir, hasActiveTopLevel })
     }
-    return { entries, directoryNotes }
+    return { entries, directoryNotes, ...(unreadable.length > 0 ? { unreadable } : {}) }
   }
 
   /** 提示 workspace 的目录：先算确定性目录名并校验标记；算不出或标记不符时经清单找（覆盖手工改名的目录）。

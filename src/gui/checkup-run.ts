@@ -5,7 +5,7 @@ import type { RefreshableClaim } from '../kv-table.ts'
 import { genId } from '../governance/schema.ts'
 import { maskDiagnostic } from '../secrets.ts'
 import { runScan, type ScanCoreDeps, type ScanInput, type ScanNote, type ScanToolResult } from '../tools/scan.ts'
-import { checkupWorkspaces } from '../tools/scope-preread.ts'
+import { checkupScanWorkspaces } from '../tools/scope-preread.ts'
 import type { Scope } from '../scope.ts'
 import { checkupKey, type CheckupCause, type CheckupResult, type PendingView } from './contract.ts'
 import { checkupResults, type CheckupTarget, type GlobalViews } from './views.ts'
@@ -138,7 +138,7 @@ export async function runCheckup(input: CheckupRunInput, deps: CheckupRunDeps): 
   const { by, target } = input
   // 「全部」只查认领到的项目：核心自己再枚举会把认领之后才建的项目也查了
   const scopes: Scope[] = target.kind === 'all'
-    ? [{ kind: 'global' }, ...checkupWorkspaces(await deps.scan.store.listWorkspaceDirs()).map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
+    ? [{ kind: 'global' }, ...checkupScanWorkspaces(await deps.scan.store.listWorkspaceDirs()).map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
     : [target]
   const controller = new AbortController()
   const signal = input.signal !== undefined ? AbortSignal.any([input.signal, controller.signal]) : controller.signal

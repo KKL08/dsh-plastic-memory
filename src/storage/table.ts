@@ -191,6 +191,11 @@ export interface WorkspaceDirListing {
   entries: WorkspaceDirEntry[]
   /** 缺标记 / 不可读 / 空目录。 */
   directoryNotes: DirectoryNote[]
+  /**
+   * 标记读得到、记忆目录列不出文件的项目目录（同时有一条 dir-unreadable 说明）：顶层有没有记忆不知道，不进 entries；
+   * 体检把它们算进清单、按没读全查（见 tools/scope-preread.ts checkupScanWorkspaces）。缺省没有。
+   */
+  unreadable?: Array<{ workspacePath: string; dir: string }>
 }
 
 /**
