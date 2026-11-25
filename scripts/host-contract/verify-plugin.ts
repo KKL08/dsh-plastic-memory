@@ -694,6 +694,49 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       }
     })
 
+    // 真宿主发送点：先冻结、再接收别的会话的改动，随后空发送点不重复通知。
+    await attempt('H37-CHANGE-NOTICE', async () => {
+      const agents = ctx.get('agents') as Agents | undefined
+      if (!agents) return { ok: false, detail: 'agents service unavailable' }
+      const ws = mkWs('h37')
+      const otherExec = mkExec(ws)
+      const created = await call('memory_save', { action: 'create', ...MEMORY_BASE, type: 'preference', name: 'h37-preference', summary: '通知探针', content: '输出使用中文' }, otherExec) as { kind: string; record?: { id: string } }
+      if (created.kind !== 'saved' || created.record === undefined) return { ok: false, detail: `create=${created.kind}` }
+      const id = created.record.id
+      const handle = await agents.create({ sessionId: `h37-${Math.random().toString(36).slice(2, 8)}`, meta: { cwd: ws } })
+      try {
+        const { agent } = handle
+        const session = agent.session
+        const bus = ctx as unknown as { waterfall(name: string, ...args: unknown[]): Promise<unknown> }
+        const preStep = (step: number, messages: unknown[]) => bus.waterfall('agent/pre-step', {
+          agent, messages, turn: 1, step, signal: new AbortController().signal,
+        }, async () => ({ kind: 'enter', messages })) as Promise<DecisionLike>
+        const said = createUserMessage({ content: [{ type: 'text', text: '开始' }], source: { kind: 'user' } })
+        const first = await preStep(1, [said])
+        const sourceOf = (message: { source: unknown }) => message.source as { kind: string; form?: string; notice?: string }
+        const snapshot = first.messages?.find(m => sourceOf(m).kind === 'plastic-memory' && sourceOf(m).form === 'snapshot')
+        const hasMemory = snapshot?.content.some(b => b.text?.includes(id)) ?? false
+        session.append('system/message', { turn: 1, step: 1, message: createSystemMessage('通知检查') }, { surfaceOp: 'append' })
+        for (const message of first.messages ?? []) session.append('user/message', message, { surfaceOp: 'append' })
+        const changed = await call('memory_save', { action: 'update', ...MEMORY_BASE, type: 'preference', id, change: 'refine', name: 'h37-preference', summary: '新的通知摘要', content: '输出使用中文' }, otherExec) as { kind: string; record?: { id: string } }
+        const followUp = createUserMessage({ content: [{ type: 'text', text: '继续' }], source: { kind: 'user' } })
+        const second = await preStep(2, [followUp])
+        const notice = second.messages?.[0]
+        const hasNotice = notice !== undefined && sourceOf(notice).kind === 'plastic-memory' && sourceOf(notice).form === 'notice' && sourceOf(notice).notice === 'change' && notice.content.some(b => b.text?.includes(id))
+        const isOrdered = second.messages?.length === 2 && second.messages[1] === followUp
+        for (const message of second.messages ?? []) session.append('user/message', message, { surfaceOp: 'append' })
+        const snapshots = session.deriveMessages().filter(m => sourceOf(m).kind === 'plastic-memory' && sourceOf(m).form === 'snapshot').length
+        await preStep(3, [])
+        const notices = session.deriveMessages().filter(m => sourceOf(m).kind === 'plastic-memory' && sourceOf(m).form === 'notice' && sourceOf(m).notice === 'change').length
+        return {
+          ok: first.kind === 'enter' && hasMemory && changed.kind === 'updated' && second.kind === 'enter' && hasNotice && isOrdered && snapshots === 1 && notices === 1,
+          detail: `hasMemory=${hasMemory} changed=${changed.kind} hasNotice=${hasNotice} ordered=${isOrdered} snapshots=${snapshots} notices=${notices}`,
+        }
+      } finally {
+        await handle.dispose()
+      }
+    })
+
     // H16 宿主 grep 工具搜记忆根目录：.archive/ 是隐藏目录，宿主 grep 基于 ripgrep 且不传 --hidden，所以顶层文件命中、
     // 归档文件不命中——归档不可见靠的是宿主 grep 工具不搜隐藏目录，这里在真机复核。grep 工具不在 ctx.tools 里则 SKIPPED。
     await attempt('H16-GREP-SKIPS-ARCHIVE', async () => {

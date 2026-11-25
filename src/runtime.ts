@@ -10,7 +10,9 @@ import type { EvidenceLookupLevel } from './evidence-guidance.ts'
 import { assembleSnapshot, overflowLevel, type IndexRead, type OverflowMode, type SnapshotUsage } from './snapshot.ts'
 import type { OverflowLevel, SearchSource } from './contract-codes.ts'
 import { relaxedCap, type SessionView, type SnapshotOrigin } from './gui/contract.ts'
-import { ledgerLabel, scopeOfLedger, type Scope } from './scope.ts'
+import { ledgerLabel, scopeOfLedger, scopeKey, scopeOfMemory, sameScope, scopeAt, type Scope } from './scope.ts'
+import type { RecentChangeLog, RecentChangeRow } from './storage/recent-changes.ts'
+import { formatChangeNotice, NOTICE_ITEM_LIMIT, type ChangeNotice, type ChangeNoticeItem } from './snapshot-message.ts'
 
 /** 每次冻结最多清这么多条过期的改前快照：平时过期的没几条，积了很多时分几次清完，不让一次冻结等太久。 */
 const SNAPSHOT_SWEEP_BATCH = 50
@@ -112,6 +114,11 @@ export interface SnapshotCacheDeps {
   log?: MemoryLogger
   /** 组装（有效期判定）、超限同步、计召回用的时钟，缺省取当前时间。 */
   now?: () => number
+  /**
+   * 最近改动记录（操作日志库）：冻结时记下起点序号，发送点按它查之后别处改了哪几条（changeNotice）。
+   * 缺省（纯测试场景）时不记起点，changeNotice 恒为 undefined。
+   */
+  recentChanges?: RecentChangeLog
 }
 
 /** 冻结快照的来历（会话视图的 origin、compactedAt）。 */
@@ -141,6 +148,8 @@ export class SnapshotCache {
   /** 会话 → 这个冻结点（首次、压缩后、配置变化之间）的那次维护：代次和它的 Promise。同代次的组装共用它，进行中的等它做完；
    *  做完了就算维护过，有目录读不出、文本没冻结时后面的发送点重读重组但不再维护。失败的清掉，下一次构建再试；代次一变就又可以维护。 */
   private maintenance = new WeakMap<object, { generation: number; run: Promise<void> }>()
+
+  private notices = new WeakMap<object, { after: number | undefined; injected: Map<string, number>; scopes: string[]; departed: Map<string, RecentChangeRow> }>()
 
   private deps: SnapshotCacheDeps
   private readonly log: MemoryLogger
@@ -221,6 +230,7 @@ export class SnapshotCache {
     // （目录读不出没冻结、下一个发送点重建）时不再维护。作废重建不另起维护，但等这一代已经在跑的那次做完再读
     if (isResolved) await (isRebuild ? this.maintenanceOf(session, generation) : this.maintainOnce(session, generation, workspacePath))
     // 预读范围：只读 active，global + 当前 workspace（未解析时 global-only）；同一次读取的隔离文件数给冷启动文案用
+    const changeStart = isResolved ? deps.recentChanges?.latestChangeSeq() : undefined
     const preread = await prereadSnapshot(deps.store, workspacePath)
     this.reportUnreadable(workspacePath, preread.unreadableNotes)
     this.reportIndexErrors(preread.indexErrors)
@@ -242,6 +252,15 @@ export class SnapshotCache {
         : landed.text === text ? landed.origin : { origin: 'refreshed' }
     this.compactions.delete(session)
     this.cache.set(session, { text, generation, core: new Map(coreIds.map(id => [id, contentOf.get(id)!])), origin })
+    const records = new Map(preread.records.map(record => [record.id, record]))
+    const injected = new Map<string, number>()
+    const scopes = new Set<string>()
+    for (const [order, id] of usage.injectedIds.entries()) {
+      const scope = scopeKey(scopeOfMemory(records.get(id)!)!)
+      scopes.add(scope)
+      injected.set(JSON.stringify([scope, id]), order)
+    }
+    this.notices.set(session, { after: changeStart, injected, scopes: [...scopes], departed: new Map() })
     await this.markRecalled(session, coreIds)
     // 冻结之后清一批过期的改前快照；失败只记日志，不拖垮注入
     try {
@@ -344,6 +363,86 @@ export class SnapshotCache {
   /** 该会话当前冻结快照（过期的也算，下一次组装前它仍是模型最后看到的那份）里带入全文的 core 记忆；没有冻结快照回 undefined。 */
   injectedCore(session: object): ReadonlyMap<string, string> | undefined {
     return this.cache.get(session)?.core
+  }
+
+  /**
+   * 发送点的变化通知：这个会话最近一次冻结（过期的也算，直到下一次冻结覆盖它）注入过的记忆里，起点序号之后被别的会话或后台改过的，
+   * 拼成一条通知；没有要说的、没有冻结过、最近改动记录读不出时回 undefined。
+   * sessionId 是这个会话的 id（宿主 header.id）：最近一行是它自己写的记忆跳过；缺省时不跳过任何行。
+   * 只读：读最近改动记录、按「作用域 + id」读当下的记忆，不写盘。读成了就把本会话的起点推到这次读到的位置，
+   * 读不出不推进（下个发送点再试）。规则：
+   *  - 注入过的 = 冻结时必读全文和成员行带入的记忆，按「作用域 + id」认，全文的排前，其余按注入顺序；最多列 NOTICE_ITEM_LIMIT 条。
+   *    注入清单为空时不发；只查注入清单里出现过的作用域。
+   *  - 每条记忆按它在本作用域里最新的那一行定说法；最新一行是本会话写的跳过。
+   *  - 内容改动读当下的记忆给名称和摘要；读不出、找不到、已不在用时说读不到，不说已删除。
+   *  - 起点早于这些作用域挤掉的最大序号、库里最大序号小于起点（库换了新的）、冻结时没读到起点、注入过的记忆碰上读不出的行
+   *    （不认识的改动、缺去向的移走）：末尾说另有改动未列出。
+   *  - 库换了新的：起点直接改成新库的最大序号（可以变小）；其余情形起点只往大推。
+   */
+  async changeNotice(session: object, sessionId: string | undefined): Promise<ChangeNotice | undefined> {
+    const state = this.notices.get(session)
+    const log = this.deps.recentChanges
+    if (state === undefined || state.injected.size === 0 || log === undefined) return undefined
+    const after = state.after
+    let read = log.changesSince(state.scopes, after ?? 0)
+    if (read === undefined) return undefined
+    const replaced = after !== undefined && read.latestSeq < after
+    if (replaced) {
+      read = log.changesSince(state.scopes, 0)
+      if (read === undefined) return undefined
+    }
+    // 在读取记忆让出执行权之前认领本批序号，旧库的慢读取不能覆盖新库起点。
+    if (this.notices.get(session) === state) {
+      state.after = replaced ? read.latestSeq : Math.max(state.after ?? 0, read.latestSeq)
+    }
+    let hasUnlisted = after === undefined || replaced || state.scopes.some(scope => read!.prunedThrough[scope]! > after)
+    const latest = new Map<string, RecentChangeRow>()
+    if (after !== undefined) {
+      for (const row of read.rows) {
+        const key = JSON.stringify([row.scope, row.memoryId])
+        if (state.injected.has(key)) latest.set(key, row)
+      }
+    }
+    // 恢复不新增改动行；已通知离开在用的条目要继续核对，才能更正旧通知。
+    const departed = state.departed
+    if (replaced) departed.clear()
+    for (const key of latest.keys()) departed.delete(key)
+    const selected: Array<{ row: RecentChangeRow; order: number }> = []
+    for (const [key, row] of latest) {
+      if (sessionId !== undefined && row.session === sessionId) continue
+      if (!['content', 'deleted', 'superseded', 'moved'].includes(row.change) || (row.change === 'moved' && row.movedTo === undefined)) {
+        hasUnlisted = true
+        continue
+      }
+      selected.push({ row, order: state.injected.get(key)! })
+    }
+    selected.sort((a, b) => a.order - b.order)
+    const freshCount = selected.length
+    for (const [key, row] of departed) selected.push({ row, order: state.injected.get(key)! })
+    const items: ChangeNoticeItem[] = []
+    for (const { row } of selected.slice(0, NOTICE_ITEM_LIMIT)) {
+      const id = row.memoryId
+      const key = JSON.stringify([row.scope, id])
+      const isPreviouslyNotified = departed.has(key)
+      let record: MemoryRecord | undefined
+      let isUnreadable = false
+      try { record = await this.deps.store.get(id, scopeOfLedger(row.scope)) } catch { isUnreadable = true }
+      departed.delete(key)
+      if (row.change !== 'content' && record?.status !== 'active') departed.set(key, row)
+      if (record?.status === 'active') {
+        items.push({ kind: 'content', record })
+      } else if (isPreviouslyNotified) {
+        continue
+      } else if (isUnreadable || row.change === 'content') {
+        items.push({ kind: 'unreadable', id })
+      } else if (row.change === 'moved') {
+        const target = scopeOfLedger(row.movedTo!)
+        items.push({ kind: 'moved', id, to: target.kind === 'global' ? 'global' : sameScope(target, scopeAt(this.workspacePaths.get(session))) ? 'this-project' : 'other-project' })
+      } else {
+        items.push({ kind: row.change as 'deleted' | 'superseded', id })
+      }
+    }
+    return formatChangeNotice(items, { more: Math.max(0, freshCount - NOTICE_ITEM_LIMIT), hasUnlisted })
   }
 
   /** 计召回：同一 session 里已计过的 id 跳过，其余先记下再写侧表（并发调用也不重复计）。 */

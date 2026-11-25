@@ -311,11 +311,11 @@ function applyOpsProblem(ops: readonly ApplyEditOp[], keep: readonly { memoryId:
 }
 
 /** 用户在界面里定下的四个面写进去（直接改、直接合并、整理所选的改写项、冲突采纳）：updatedAt、lastConfirmedAt 记为现在；出处、类型、作用域等不动。 */
-function withUserEdits(cur: MemoryRecord, fields: { content: string; name: string; summary: string; tags: string[] }, now: number): MemoryRecord {
+function withUserEdits(cur: MemoryRecord, fields: { content: string; name: string; summary: string; tags: string[] }, now: number, op: string): MemoryRecord {
   // 子 agent 写的待确认记录：用户亲手改过就算升档；已升档的不改写升档来源
   const delegation = isPendingDelegated(cur) ? { delegation: { ...cur.delegation!, reviewed: { by: 'user' as const, at: now } } } : {}
   const { content, name, summary, tags } = fields
-  return { ...cur, content, name, summary, tags, updatedAt: now, lastConfirmedAt: now, ...delegation }
+  return { ...cur, content, name, summary, tags, updatedAt: now, lastConfirmedAt: now, lastChange: { kind: 'refine', at: now, op, by: 'gui' }, ...delegation }
 }
 
 /** 一批里写成的一项：written 是这一项实际提交的那份，之后的回执、结账都按它。 */
@@ -1012,6 +1012,7 @@ async function dispatch(
       }, now)
       // 出处、类型、作用域、有效期、置信度、取代关系不动：这是用户亲手改的内容，不是借来的会话说的
       const own = scopeAt(kept.record.workspacePath)
+      const op = deps.store.newOp({ initiator: 'gui' })
       let mine: MemoryRecord | undefined
       let committed: MemoryRecord | undefined
       try {
@@ -1020,12 +1021,13 @@ async function dispatch(
           mine = undefined
           // 锁内按磁盘上的现状再核对一次：读过之后被改过就原样不写
           if (cur.status !== 'active' || isStale(cur, kept.base)) return cur
-          return (mine = withUserEdits(cur, command, now))
-        }, own)
+          return (mine = withUserEdits(cur, command, now, op.id))
+        }, own, op)
       } catch (error) {
         if (!(error instanceof RecordNotFoundError)) throw error
       }
       if (mine === undefined) return stale()
+      await deps.store.finishOp(op, committed)
       // 另一条走删除的老路：软删进最近删除，账本里指向它的条目一并清掉（同 forget）；快照上面已经拍过。
       // 锁内再按卡片版本核对一次：核对之后被改过的不删，保留的那条退回改前（之间没被别处再改的话），整体回 stale；
       // 核对之后另一个会话才写进密钥的不删，这次只算改了保留的那条。卡片指纹含标签在内的全部内容字段，写进密钥必然先判成被改过，

@@ -230,6 +230,19 @@ All notable changes to this project are documented here. The format follows
   `TEST_LLM_MODEL` and `TEST_LLM_API_KEY`. Setting only some of them stops the
   run, and checks that only apply to the official provider are reported as
   skipped.
+- In a long chat, when another chat, the memory page or a background task
+  changes a memory this chat has already loaded, the assistant gets a short
+  notice before its next step: changed memories with their current name and
+  summary, and one line for each that was deleted, replaced or moved. Changes
+  made by the chat itself and edits made by hand to memory files are not
+  announced. A memory that comes back after a deletion or move notice is
+  announced again with its current name and summary.
+- The notice does not resend the loaded memories. After a compaction or a
+  settings change the memories are loaded again as before, and earlier
+  changes are not announced.
+- Testing: `pnpm host:contract` checks that a change made in another chat
+  reaches the next step of a running chat as one notice ahead of the user's
+  message, and is not repeated on the step after.
 
 ### Changed
 - The memories loaded at the start of a chat now follow the topic index.
