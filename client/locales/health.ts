@@ -3,6 +3,7 @@
 export const healthZh = {
   'health.score': '{score} 分',
   'health.tier.green': '良好',
+  'health.tier.green.partial': '查过的部分良好',
   'health.tier.amber': '需要留意',
   'health.tier.red': '有问题',
   'health.unscored': '还没体检过，体检后打分',
@@ -13,6 +14,7 @@ export type HealthLocaleKey = keyof typeof healthZh
 export const healthEn: Record<HealthLocaleKey, string> = {
   'health.score': 'Score {score}',
   'health.tier.green': 'Good',
+  'health.tier.green.partial': 'Good in the part checked',
   'health.tier.amber': 'Needs attention',
   'health.tier.red': 'Has problems',
   'health.unscored': 'Not checked yet; scored after a checkup',

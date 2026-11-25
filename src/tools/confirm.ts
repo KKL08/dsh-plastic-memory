@@ -9,6 +9,7 @@ import { RecordNotFoundError } from '../errors.ts'
 import { crossWorkspaceNote, gateRecords, locateCopy, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark } from './workspace-gate.ts'
 import type { Scope } from '../scope.ts'
 import { executeForget } from './forget.ts'
+import { memberScanFingerprints } from '../governance/checkup-plan.ts'
 import { hasCriticalSecret } from '../secrets.ts'
 
 export interface ConfirmToolDeps {
@@ -305,7 +306,10 @@ async function resolveEntry(
     // 败方早已删除的删一方裁决同样记下（没有快照可恢复）。
     // 升级前导入的条目没有指纹：按双方此刻的内容现算（同体检），垂直冲突拿不到这条记忆对应的指令文件时算不出，只能移出账本
     const fingerprint = entry.fingerprint !== undefined || loserId !== undefined ? undefined : currentFingerprint(entry, members, baseline)
-    if (await deps.decisions.settle(entry.id, args.verdict, now, { ...(fingerprint !== undefined ? { fingerprint } : {}), ...proposal })) {
+    // 两边都留：再记下双方此刻的扫描指纹，之后任一方改了事实时间、有效期这类冲突指纹不含的内容，体检也会重新报
+    const live = entry.memoryIds.map(id => members.get(id))
+    const scanned = loserId === undefined && live.every(r => r !== undefined) ? { memberScanFingerprints: memberScanFingerprints(live as MemoryRecord[]) } : {}
+    if (await deps.decisions.settle(entry.id, args.verdict, now, { ...(fingerprint !== undefined ? { fingerprint } : {}), ...scanned, ...proposal })) {
       if (loserId === undefined) actions.push('以后体检不再报这一对，除非其中一条（或基线）被改写')
     } else isUnrecorded = true
   }

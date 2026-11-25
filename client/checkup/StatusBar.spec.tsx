@@ -15,6 +15,8 @@ import { PanelShell } from '../ui/PanelShell.tsx'
 import { FLASH_MS } from '../library/shared.tsx'
 import { useCheckupRuns } from './runs.ts'
 import { StatusBar } from './StatusBar.tsx'
+import { summarize } from '../settings/StatusCard.tsx'
+import { coverageParts } from './coverage.ts'
 
 const GLOBAL: Scope = { kind: 'global' }
 const APP: Scope = { kind: 'workspace', workspacePath: '/w/app' }
@@ -671,5 +673,153 @@ describe('结果行：手动体检什么都没执行（真网关，只假宿主�
     const line = await lineOf(gatewayViaChannel(PING_OK, async () => ({ ok: false, error: { code: 'plastic-memory/no-session', message: 'session s1 cannot run commands' } })), zh)
     expect(line.textContent).toBe('体检没有完成：plastic-memory/no-session: session s1 cannot run commands')
     expect(line).toHaveAttribute('title', 'plastic-memory/no-session: session s1 cannot run commands')
+  })
+})
+
+describe('内容检查覆盖', () => {
+  const partial = { isReadComplete: true, baseline: 'none', total: 9, globalTotal: 2, checkedNow: 3, never: 4, changed: 1, awaiting: 1, oldestCheckedAt: NOW - 3 * DAY, stopped: 'cap' } as const
+  const full = { ...partial, never: 0, changed: 0, awaiting: 0, stopped: 'done' } as const
+  const empty: PendingView = { ...pending, items: [], levelCounts: levelCountsOf([]) }
+
+  it('部分覆盖：状态条首行不说「良好」，第二行下面另起一行写覆盖；结果行只说查过的部分', () => {
+    open(APP, { views: { health: health({ app: { coverage: partial } }), checkups: checkups({ scopes: { '/w/app': { lastResult: result({ coverage: partial }) } } }) } })
+    expect(bar().querySelector('.pm-status-line')).toHaveTextContent(/^90 分\s*·\s*查过的部分良好$/)
+    expect(bar().querySelector('.pm-status-coverage')).toHaveTextContent(/^内容检查共 9 条（含全局 2 条）\s*·\s*这次查了 3 条\s*·\s*4 条从没查过\s*·\s*1 条改过还没重查\s*·\s*1 条等着重查\s*·\s*最久一次检查：10 月 14 日$/)
+    expect(live()).toHaveTextContent(/^体检完成：查过的部分没有发现新问题$/)
+  })
+
+  it('全覆盖、上一个发布版写的没有覆盖的记录：不写覆盖那一行，照常说「良好」「没有发现新问题」', () => {
+    for (const coverage of [full, undefined]) {
+      open(APP, { views: { health: health({ app: coverage !== undefined ? { coverage } : {} }), checkups: checkups({ scopes: { '/w/app': { lastResult: result(coverage !== undefined ? { coverage } : {}) } } }) } })
+      expect(bar().querySelector('.pm-status-coverage')).toBeNull()
+      expect(bar().querySelector('.pm-status-line')).toHaveTextContent(/^90 分\s*·\s*良好$/)
+      expect(live()).toHaveTextContent(/^体检完成：没有发现新问题$/)
+      // 处理视图里显示过的结果记为看过：下一轮从头来
+      cleanup()
+      localStorage.clear()
+    }
+  })
+
+  it('指令文件取不到、范围没读全、库读不了：覆盖一行写出来，统称「还没查」', () => {
+    const odd = { ...partial, baseline: 'unavailable', isReadComplete: false, never: 6, changed: 0, awaiting: 0, isHistoryUnknown: true, oldestCheckedAt: null } as const
+    open(APP, { views: { health: health({ app: { coverage: odd } }) } })
+    expect(bar().querySelector('.pm-status-coverage')).toHaveTextContent(/^内容检查共 9 条（含全局 2 条）\s*·\s*这次查了 3 条\s*·\s*6 条还没查\s*·\s*指令文件取不到，没对照\s*·\s*有记忆没读出来$/)
+  })
+
+  it('从没体检过且没轮到：不显示分数和上次体检，结果行「这次没轮到」；体检过且没轮到：上次体检照旧，结果行同样', () => {
+    const notReached = { ...partial, checkedNow: 0, stopped: 'not-reached' } as const
+    open(APP, { views: {
+      health: health({ app: { lastCheckupAt: null } }),
+      checkups: checkups({ scopes: { '/w/app': { lastCheckupAt: null, lastResult: result({ coverage: notReached }) } } }),
+    } })
+    expect(bar().querySelector('.pm-status-line')).toHaveTextContent('还没体检')
+    expect(second()).not.toHaveTextContent('上次体检')
+    expect(live()).toHaveTextContent(/^体检完成：这次没轮到，下次接着查$/)
+    cleanup()
+    localStorage.clear()
+    open(APP, { views: { checkups: checkups({ scopes: { '/w/app': { lastResult: result({ coverage: notReached }) } } }) } })
+    expect(second()).toHaveTextContent('上次体检')
+    expect(live()).toHaveTextContent(/^体检完成：这次没轮到，下次接着查$/)
+  })
+
+  it('这次没写完成记录（读不全、批失败、模型用不了）：结果行带上原因和没查到的条数；写了完成记录的由覆盖一行说，结果行不重复', () => {
+    const unread = { ...partial, isReadComplete: false, never: 0, changed: 0, awaiting: 0, stopped: 'done' } as const
+    open(APP, { views: { checkups: checkups({ scopes: { '/w/app': { lastResult: result({ coverage: unread }) } } }) } })
+    expect(live()).toHaveTextContent(/^体检完成：查过的部分没有发现新问题有记忆这次没读出来，这次的结果只覆盖读到的部分。$/)
+    cleanup()
+    localStorage.clear()
+    open(APP, { views: { checkups: checkups({ scopes: { '/w/app': { lastResult: result({ coverage: { ...partial, stopped: 'batch-failed' }, notes: [{ code: 'semantic-failed' }] }) } } }) } })
+    expect(live()).toHaveTextContent('这次还有 6 条没查到。')
+    cleanup()
+    localStorage.clear()
+    // 到上限停下：写了完成记录，覆盖一行已经写了还有几条没查
+    open(APP, { views: { health: health({ app: { coverage: partial } }), checkups: checkups({ scopes: { '/w/app': { lastResult: result({ coverage: partial }) } } }) } })
+    expect(live()).toHaveTextContent(/^体检完成：查过的部分没有发现新问题$/)
+  })
+
+  it('没轮到、规则检查有新增：新增照写，「内容检查这次没轮到」另起一行，不被吞', () => {
+    const notReached = { ...partial, checkedNow: 0, stopped: 'not-reached' } as const
+    open(APP, { views: { checkups: checkups({ scopes: { '/w/app': { lastResult: result({ coverage: notReached, added: { keys: ['k'], pending: 1, advice: 0 } }) } } }) } })
+    expect(live()).toHaveTextContent('新增 1 条等你决定')
+    expect(live()).toHaveTextContent('内容检查这次没轮到，下次接着查。')
+  })
+
+  it('「全部」体检里有范围没读全：结果行写出有记忆这次没读出来', () => {
+    const all = result({ checkupId: 'ck-all' })
+    const unread = { ...full, isReadComplete: false } as const
+    open({ view: 'todo', scope: { kind: 'all' } }, { views: { checkups: checkups({ allResult: all, scopes: { '/w/blog': { lastResult: result({ checkupId: 'ck-all', coverage: unread }) } } }) } })
+    expect(live()).toHaveTextContent(/^体检完成：查过的部分没有发现新问题有记忆这次没读出来，这次的结果只覆盖读到的部分。$/)
+  })
+
+  it('「全部」体检的结果拼不全（有范围的最近结果已换成之后那次体检的）：不说「没有发现新问题」，只说查过的部分', () => {
+    const all = result({ checkupId: 'ck-all' })
+    const mine = { lastResult: result({ checkupId: 'ck-all', coverage: full }) }
+    open({ view: 'todo', scope: { kind: 'all' } }, { views: { checkups: checkups({ allResult: all, scopes: { 'global': mine, '/w/app': mine, '/w/blog': mine } }) } })
+    expect(live()).toHaveTextContent(/^体检完成：没有发现新问题$/)
+    cleanup()
+    localStorage.clear()
+    const later = { lastResult: result({ checkupId: 'ck-later', by: 'auto', completedAt: NOW, coverage: full }) }
+    open({ view: 'todo', scope: { kind: 'all' } }, { views: { checkups: checkups({ allResult: all, scopes: { 'global': mine, '/w/app': later, '/w/blog': mine } }) } })
+    expect(live()).toHaveTextContent(/^体检完成：查过的部分没有发现新问题$/)
+  })
+
+  it('「全部」体检里有范围没覆盖全：结果行只说查过的部分', () => {
+    const all = result({ checkupId: 'ck-all' })
+    open({ view: 'todo', scope: { kind: 'all' } }, { views: { checkups: checkups({ allResult: all, scopes: { '/w/blog': { lastResult: result({ checkupId: 'ck-all', coverage: partial }) } } }) } })
+    expect(live()).toHaveTextContent(/^体检完成：查过的部分没有发现新问题$/)
+  })
+
+  it('左栏：没覆盖全的范围写还有几条没查；只有指令文件没对照全时写「没查全」', () => {
+    open(APP, { views: { health: { ...health({ app: { coverage: partial } }), layers: [healthScope(GLOBAL, 2, { coverage: { ...full, baseline: 'truncated' } }), healthScope(APP, 2, { coverage: partial }), healthScope(BLOG, 1, { coverage: full })] } } })
+    expect(rail().getByRole('button', { name: /^app/ })).toHaveTextContent('6 条没查')
+    expect(rail().getByRole('button', { name: /^全局/ })).toHaveTextContent('没查全')
+    expect(rail().getByRole('button', { name: /^blog/ })).not.toHaveTextContent('没查')
+  })
+
+  it('待处理空态：没覆盖全时说明里写还有几条没查到；全覆盖照旧', () => {
+    open(APP, { views: { pending: empty, health: health({ app: { coverage: partial } }) } })
+    expect(panel()).toHaveTextContent('上次体检 10 月 16 日，还有 6 条没查到，下次体检接着查。新的冲突和建议会出现在这里。')
+    cleanup()
+    open(APP, { views: { pending: empty, health: health({ app: { coverage: full } }) } })
+    expect(panel()).toHaveTextContent('上次体检 10 月 16 日。新的冲突和建议会出现在这里。')
+  })
+
+  it('「全部」待处理空态：几个范围没查全（含有记忆、从没体检过的）时说有几个范围，不把各范围含全局的条数相加', () => {
+    const layers = [healthScope(GLOBAL, 2, { coverage: partial }), healthScope(APP, 2, { lastCheckupAt: null }), healthScope(BLOG, 1, { coverage: full })]
+    open({ view: 'todo', scope: { kind: 'all' } }, { views: { pending: empty, health: { ...health(), layers } } })
+    expect(panel()).toHaveTextContent('上次体检 10 月 16 日，有 2 个范围没查全，下次体检接着查。')
+  })
+
+  it('设置页状态卡：有范围没覆盖全时不说「状态良好」', () => {
+    const t = createTranslator(zh)
+    const clear = { pending: empty, library, health: health() }
+    expect(summarize(clear, true, NOW, t).conclusion).toBe('状态良好')
+    expect(summarize({ ...clear, health: health({ app: { coverage: partial } }) }, true, NOW, t)).toMatchObject({ conclusion: '上次体检还有 6 条没查到' })
+    expect(summarize({ ...clear, health: health({ app: { coverage: { ...full, baseline: 'truncated' } } }) }, true, NOW, t).conclusion).toBe('上次体检没查全')
+  })
+
+  it('健康视图这一层的覆盖是没读全的那次（每条都有结果）：首行、左栏、设置页状态卡、待处理空态都不说良好', () => {
+    const unread = { ...full, isReadComplete: false } as const
+    open(APP, { views: { pending: empty, health: health({ app: { coverage: unread } }) } })
+    expect(bar().querySelector('.pm-status-line')).toHaveTextContent(/^90 分\s*·\s*查过的部分良好$/)
+    expect(rail().getByRole('button', { name: /^app/ })).toHaveTextContent('没查全')
+    expect(panel()).toHaveTextContent('上次体检 10 月 16 日，内容检查没查全。')
+    expect(summarize({ pending: empty, library, health: health({ app: { coverage: unread } }) }, true, NOW, createTranslator(zh)).conclusion).toBe('上次体检没查全')
+  })
+
+  it('英文文案', () => {
+    const t = createTranslator(en)
+    expect(t('checkup.status.coverage.never', { n: '4' })).toBe('4 never checked')
+    expect(t('checkup.result.nothingNew.partial')).toBe('No new issues in the part checked')
+    expect(t('checkup.result.notReached')).toBe('Not reached this time; it continues next checkup')
+    expect(t('health.tier.green.partial')).toBe('Good in the part checked')
+  })
+
+  it('覆盖一行：英文一条时用单数；最久一次检查刚查过时读得通', () => {
+    const one = { ...partial, total: 1, checkedNow: 0, never: 1, changed: 0, awaiting: 0, oldestCheckedAt: NOW - 10_000 } as const
+    const { globalTotal: _, ...own } = one
+    expect(coverageParts(own, NOW, createTranslator(en))).toEqual(['Content check covers 1 memory', '0 checked this time', '1 never checked', 'oldest check: Just now'])
+    expect(coverageParts({ ...one, globalTotal: 1 }, NOW, createTranslator(en))[0]).toBe('Content check covers 1 memory (1 global)')
+    expect(coverageParts(own, NOW, createTranslator(zh))).toEqual(['内容检查共 1 条', '这次查了 0 条', '1 条从没查过', '最久一次检查：刚刚'])
   })
 })

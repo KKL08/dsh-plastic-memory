@@ -17,6 +17,7 @@ import { genId, kindOf, type LinkIds, type PendingDecision, type ProposalOp, typ
 import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import { baselineFor, type ReadInstructions } from '../governance/instructions.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
+import { memberScanFingerprints } from '../governance/checkup-plan.ts'
 import type { AutoCheckupSettingStore } from '../governance/auto-checkups.ts'
 import type { DreamsStore } from '../governance/dreams-records.ts'
 import { listModelChoices, type ModelSelectionStore } from '../governance/background-llm.ts'
@@ -42,6 +43,7 @@ import type { ReadEventFn } from '../tools/source.ts'
 import { generatePlan } from './model-plan.ts'
 import { generatePlanDrafts } from './model-draft-plan.ts'
 import { processInterval, runCheckup, type IntervalTimer } from './checkup-run.ts'
+import type { ScanCoreDeps } from '../tools/scan.ts'
 import type { CheckupSuggestions } from './checkup-suggestions.ts'
 import { runOrganize } from './organize-run.ts'
 import { INDEX_MAX_TOPICS_DEFAULT } from '../topic-index.ts'
@@ -89,6 +91,8 @@ export interface MemoryCommandDeps {
   host: ContextHost<{ workspacePath: string | undefined; delegationDepth: number; session: { id: string } }> & Pick<HostSession, 'llmOf'> & Partial<Pick<HostSession, 'modelCatalog'>>
   /** 按作用域取指令文件（AGENTS.md / CLAUDE.md）：体检、垂直冲突的建议与采纳都按记忆对应的那份，和借来的会话在哪个项目无关。 */
   instructions: ReadInstructions
+  /** 增量体检：体检结果库和整次的 token 上限（见 tools/scan.ts ScanToolDeps）。缺省每次整批重查、用默认上限。 */
+  incremental?: Pick<ScanCoreDeps, 'checkupCache' | 'tokenCap'>
   /** 体检开关（用时读配置）；关闭时治理类子命令返回 governance-disabled。缺省视为开启。 */
   isGovernanceEnabled?: () => boolean
   /** 旧 KV 导入是否已结清（导完且旧行已删）；缺省视为已结清。没结清时彻底删除回 failed：续传会把旧快照里的明文放回来。 */
@@ -717,6 +721,7 @@ async function dispatch(
         writes, changes,
         proposal: { source: plan.source, action: plan.action }, snapshotId,
         fingerprint: conflictFingerprint(entry.memoryIds.map(id => written.get(id)!), baseline),
+        memberScanFingerprints: memberScanFingerprints(entry.memoryIds.map(id => written.get(id)!)),
       }, now)
       if (!isSettled) throw new Error(`待决项 ${entry.id} 已不在待处理，这次${plan.action === 'rewrite' ? '改写' : '融合'}没有记上`)
       // 回执已经在冲突条目上：临时的整理记录不再留
@@ -1192,8 +1197,9 @@ async function dispatch(
       const r = await runCheckup({
         target, by: 'manual', llm,
         ...(currentWorkspace !== undefined ? { currentWorkspace } : {}),
+        ...(command.isFullRecheck === true ? { isFullRecheck: true } : {}),
       }, {
-        scan: { store: deps.store, registry: deps.registry, decisions: deps.decisions, cache: deps.cache, ignores: deps.ignores, instructions: deps.instructions },
+        scan: { store: deps.store, registry: deps.registry, decisions: deps.decisions, cache: deps.cache, ignores: deps.ignores, instructions: deps.instructions, ...deps.incremental },
         checkups: deps.checkups, views: deps.views,
         interval: deps.heartbeat ?? processInterval,
         onClaimChanged: () => deps.views.requestCheckups(),

@@ -42,11 +42,14 @@ const DAY_MS = 86_400_000
 /**
  * 到期计算：有效频率是每 N 天时，上次体检之后满 N × 24 小时到期，下次自动体检是上次加 N 天；错过几个周期也只是到期，不往后推。
  * 从没体检过的一开自动体检就到期（没有下次时间）。仅手动从不到期。
+ * continueAt：一次没查完的体检约的时间（见 storage/schema.ts CheckupRecord.continueAt），晚于上次体检时，下次自动体检取它和按周期算的较早的那个。
  */
-export function autoCheckupDue(frequency: AutoCheckupFrequency, lastCheckupAt: number | null, now: number): { nextCheckupAt: number | null; isDue: boolean } {
+export function autoCheckupDue(frequency: AutoCheckupFrequency, lastCheckupAt: number | null, now: number, continueAt?: number): { nextCheckupAt: number | null; isDue: boolean } {
   if (frequency === 'manual') return { nextCheckupAt: null, isDue: false }
-  if (lastCheckupAt === null) return { nextCheckupAt: null, isDue: true }
-  const nextCheckupAt = lastCheckupAt + frequency * DAY_MS
+  const isContinued = continueAt !== undefined && (lastCheckupAt === null || continueAt > lastCheckupAt)
+  if (lastCheckupAt === null) return isContinued ? { nextCheckupAt: continueAt!, isDue: now >= continueAt! } : { nextCheckupAt: null, isDue: true }
+  const byCycle = lastCheckupAt + frequency * DAY_MS
+  const nextCheckupAt = isContinued ? Math.min(byCycle, continueAt!) : byCycle
   return { nextCheckupAt, isDue: now >= nextCheckupAt }
 }
 

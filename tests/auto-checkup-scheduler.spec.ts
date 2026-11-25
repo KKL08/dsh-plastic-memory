@@ -279,7 +279,7 @@ describe('自动体检调度：到期就在后台体检一次', () => {
     expect(e.llm.requests[0]).toMatchObject(DEFAULT_ROUTE)
     expect(e.llm.requests[0]).not.toHaveProperty('sessionId')
     const at = NOW + AUTO_CHECKUP_FIRST_CHECK_MS
-    expect((await e.completed())[checkupKey({ kind: 'workspace', workspacePath: DISCUSSION })]).toEqual({ startedAt: at, completedAt: at, by: 'auto' })
+    expect((await e.completed())[checkupKey({ kind: 'workspace', workspacePath: DISCUSSION })]).toEqual({ startedAt: at, completedAt: at, by: 'auto', coverage: expect.any(Object) })
     expect((await e.decisions.list()).map(d => d.memoryIds)).toEqual([['mem_x', 'mem_y']])
     // 这个项目没有指令文件，结果不带说明；只查这一个范围，不跑跨项目重复检查
     expect((await e.lastResultOf(checkupKey(ws(DISCUSSION))))?.notes).toEqual([])
@@ -678,7 +678,7 @@ describe('自动体检调度：按范围认领', () => {
     openAgent()
     const result = await agent
     expect(result.kind).toBe('single')
-    expect(await e.completed()).toEqual({ global: { startedAt: autoStartedAt + 1000, completedAt: autoStartedAt + 3000, by: 'agent' } })
+    expect(await e.completed()).toEqual({ global: { startedAt: autoStartedAt + 1000, completedAt: autoStartedAt + 3000, by: 'agent', coverage: expect.any(Object) } })
     const status = await collectCheckupView({ store: e.store, checkups: e.checkups, autoCheckups: e.autoCheckups, cache: e.cache, now: () => e.clock.now })
     expect(status.scopes[0]!.lastCheckupAt).toBeGreaterThanOrEqual(lastAfterAuto)
     expect((await e.cache.get('global'))?.scannedAt ?? (await e.cache.list())[0]?.[1].scannedAt).toBeGreaterThanOrEqual(autoStartedAt)
@@ -728,7 +728,7 @@ describe('自动体检调度：失败与重试', () => {
     expect((await e.readView()).scopes[0]).toMatchObject({ failure: null, modelUnavailable: null, isDue: false })
   })
 
-  it('没做完的自动体检不写结果：最近一次结果仍是上一次做完的那次', async () => {
+  it('没做完的自动体检也写最近一次结果，说明码带原因；完成记录仍是上一次做完的那次', async () => {
     let reply: HostReply = 'ok'
     const e = env({ llm: fakeHostLlm({ reply: () => reply }) })
     await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
@@ -740,7 +740,10 @@ describe('自动体检调度：失败与重试', () => {
     reply = { code: 'RATE_LIMIT', message: 'too many requests' }
     await e.advance(DAY)
     expect((await failureOf(e))?.count).toBe(1)
-    expect(await e.lastResultOf('global')).toEqual(done)
+    const failed = await e.lastResultOf('global')
+    expect(failed).toMatchObject({ by: 'auto', notes: [{ code: 'semantic-failed', cause: { kind: 'model-error', hostCode: 'RATE_LIMIT' } }] })
+    expect(failed!.checkupId).not.toBe(done!.checkupId)
+    expect(Object.keys(await e.completed())).toEqual(['global'])
   })
 
   it('模型输出解析不了：按失败算，原因是解析不了', async () => {
@@ -814,24 +817,18 @@ describe('自动体检调度：上次体检的兜底（没有完成记录时取�
     return { checkup: [checkup.lastCheckupAt, checkup.isDue], health: health.layers[0]!.lastCheckupAt }
   }
 
-  it('从没完成过的范围：执行器写完缓存、在提交点前取消，仍到期、上次体检仍是没体检过，调度器照常去查', async () => {
+  it('从没完成过的范围：执行器查完一批、在提交点（写视图）前取消，仍到期、上次体检仍是没体检过，调度器照常去查', async () => {
     const e = env()
     await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
     await e.set({ kind: 'all' }, 1)
     const controller = new AbortController()
-    // 缓存写完就取消：执行器停在挂账前的检查点，不写完成记录
-    const cache = new Proxy(e.cache, {
-      get(target, prop) {
-        if (prop === 'update') return async (...args: Parameters<typeof target.update>) => { const r = await target.update(...args); controller.abort(); return r }
-        const value = Reflect.get(target, prop) as unknown
-        return typeof value === 'function' ? value.bind(target) : value
-      },
-    })
+    // 模型答完就取消：执行器停在挂账前的检查点，不写视图和完成记录
+    const llm = { complete: async () => { controller.abort(); return '{"findings":[]}' } }
     await executeScan({ layers: 'full' }, {
-      store: e.store, registry, decisions: e.decisions, cache, checkups: e.checkups,
-      instructions: noInstructions, host: { contextOf: async () => ({ workspacePath: undefined }), llmOf: () => ({ complete: async () => '{"findings":[]}' }) }, now: () => e.clock.now,
+      store: e.store, registry, decisions: e.decisions, cache: e.cache, checkups: e.checkups,
+      instructions: noInstructions, host: { contextOf: async () => ({ workspacePath: undefined }), llmOf: () => llm }, now: () => e.clock.now,
     }, { ...fakeExec(), signal: controller.signal }, { by: 'auto', isGlobalOnly: true }).catch(() => undefined)
-    expect(await e.cache.list()).toHaveLength(1)
+    expect(await e.cache.list()).toHaveLength(0)
     expect(await e.completed()).toEqual({})
     expect(await lastOf(e)).toEqual({ checkup: [null, true], health: null })
     e.scheduler.start()
@@ -992,7 +989,7 @@ describe('自动体检调度：体检之后生成处理建议', () => {
     e.scheduler.start()
     await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
     const at = NOW + AUTO_CHECKUP_FIRST_CHECK_MS
-    expect((await e.completed()).global).toEqual({ startedAt: at, completedAt: at, by: 'auto' })
+    expect((await e.completed()).global).toEqual({ startedAt: at, completedAt: at, by: 'auto', coverage: expect.any(Object) })
     expect((await e.readView()).scopes[0]).toMatchObject({ failure: null, isDue: false })
     expect((await e.decisions.list())[0]?.suggestionFailure?.cause).toMatchObject({ kind: 'model-error', hostCode: 'RATE_LIMIT' })
   })

@@ -9,11 +9,11 @@ import type { ScanCacheEntry } from '../governance/schema.ts'
 import { FINDING_TYPES } from '../governance/schema.ts'
 import type { HealthThresholds } from '../governance/health-presets.ts'
 import { runRuleScan } from '../governance/rule-scan.ts'
-import { scoreScope, listWorkspaces, validateScopePaths, crossScopeConflicts, checkupRowBase, ignoredNote, TIER_LABEL } from '../governance/scope-health.ts'
+import { scoreScope, listWorkspaces, validateScopePaths, crossScopeConflicts, checkupRowBase, coverageAdvice, coverageText, ignoredNote, TIER_LABEL } from '../governance/scope-health.ts'
 import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
 import type { AutoCheckupSettingStore } from '../governance/auto-checkups.ts'
-import { resolveAutoCheckup } from '../gui/contract.ts'
+import { isCoverageClear, resolveAutoCheckup, type CheckupCoverage } from '../gui/contract.ts'
 import type { DirectoryNote } from '../storage/table.ts'
 import { prereadScopes, listingNotes, checkupWorkspaces, renderDirectoryNotes } from './scope-preread.ts'
 import { decisionWorkspaces, decisionWorkspacesNote } from './workspace-gate.ts'
@@ -70,6 +70,8 @@ export interface SingleHealthResult {
   totalMemories: number
   /** 用户在记忆页忽略、没有计分的建议条数。 */
   ignoredCount: number
+  /** 上次体检的内容检查覆盖；上一个发布版写的完成记录、从没体检过的没有。 */
+  coverage?: CheckupCoverage
   /** 本作用域的全局提升候选数（闲时才进 recommendation 文本，字段常在）。 */
   promoteCandidates: number
   /** workspace 视图下全局检出的疑似密钥条数——不计本作用域分数，但必须报警。 */
@@ -98,6 +100,8 @@ export interface CheckupRow {
   issueSummary: string
   /** 用户忽略、没有计分的建议条数。 */
   ignoredCount: number
+  /** 上次体检的内容检查覆盖；上一个发布版写的完成记录、从没体检过的没有。 */
+  coverage?: CheckupCoverage
 }
 
 export interface CheckupHealthResult {
@@ -128,10 +132,13 @@ export function renderHealthResult(result: HealthToolResult): string {
     for (const row of result.rows) {
       const name = row.layer === 'global' ? 'global' : row.workspacePath!
       const gateNote = row.gate.secret ? '｜⚠️ 检出密钥' : ''
-      lines.push(`- ${name}：${Math.floor(row.score)}/100（${TIER_LABEL[row.tier]}）｜${row.totalMemories} 条｜${row.issueSummary}${gateNote}`)
+      const coverage = row.coverage !== undefined ? `｜${coverageText(row.coverage)}` : ''
+      lines.push(`- ${name}：${Math.floor(row.score)}/100（${TIER_LABEL[row.tier]}）｜${row.totalMemories} 条｜${row.issueSummary}${gateNote}${coverage}`)
     }
     const ignored = ignoredNote(result.rows.reduce((n, row) => n + row.ignoredCount, 0))
     if (ignored !== undefined) lines.push(ignored)
+    const partial = result.rows.filter(row => !isCoverageClear(row.coverage)).length
+    if (partial > 0) lines.push(`${partial} 个范围上次体检的内容检查没覆盖全（见各行），建议再运行一次 memory_scan`)
     for (const c of result.crossLayerConflicts) {
       lines.push(`⚠️ 跨层冲突：global ${c.globalId} 与 ${c.workspaces.length} 个项目存在待决冲突（${c.workspaces.join('、')}）——被多数项目反对的全局规则建议优先裁定（memory_confirm resolve：${c.decisionIds.join('、')}）`)
     }
@@ -145,6 +152,7 @@ export function renderHealthResult(result: HealthToolResult): string {
 
   const { breakdown } = result
   const lines = [result.message]
+  if (result.coverage !== undefined) lines.push(coverageText(result.coverage))
   lines.push(
     `规则层扣分 ${breakdown.ruleLayer.penalty}（secret ${breakdown.ruleLayer.secret} / expired ${breakdown.ruleLayer.expired} / bloat ${breakdown.ruleLayer.bloat} / orphan ${breakdown.ruleLayer.orphan} / malformed ${breakdown.ruleLayer.malformed}）；`
     + `语义层扣分 ${breakdown.semanticLayer.penalty}（conflict ${breakdown.semanticLayer.conflict} / redundancy ${breakdown.semanticLayer.redundancy} / misplaced ${breakdown.semanticLayer.misplaced} / unclear ${breakdown.semanticLayer.unclear}）；`
@@ -271,6 +279,9 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
     else if (isSemanticStale) recommendationKinds.push('semantic-stale')
     if (cachedAt === null && !isOwnless) actions.push('尚未做过语义扫描，建议首次运行 memory_scan')
     else if (isSemanticStale) actions.push(`语义扫描已是 ${Math.floor((now - cachedAt) / DAY)} 天前，建议重新运行 memory_scan`)
+    const incomplete = scored.coverage !== undefined ? coverageAdvice(scored.coverage) : undefined
+    if (incomplete !== undefined) recommendationKinds.push('checkup-incomplete')
+    if (incomplete !== undefined) actions.push(incomplete)
     if (health.freshness.staleCount > 0) recommendationKinds.push('freshness-stale')
     if (health.freshness.staleCount > 0) actions.push(`${health.freshness.staleCount} 条记忆超过衰退期，建议用 memory_confirm 确认或更新`)
     if (health.score < th.actionScoreThreshold) recommendationKinds.push('score-below-threshold')
@@ -331,6 +342,7 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
     },
     totalMemories: records.length,
     ignoredCount: scored.ignored.length,
+    ...(scored.coverage !== undefined ? { coverage: scored.coverage } : {}),
     promoteCandidates: scored.promoteCandidates,
     globalSecretAlert,
     overflow,

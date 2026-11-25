@@ -187,6 +187,68 @@ describe('立即体检：范围里还没有记忆', () => {
   })
 })
 
+describe('全部重查', () => {
+  const recheckButton = () => within(head()).getByRole('button', { name: '全部重查' })
+
+  it('标题行有「全部重查」；点了先弹确认，确认后发带 isFullRecheck 的体检，作用于左栏选中的范围', async () => {
+    const { gateway } = open(APP)
+    fireEvent.click(recheckButton())
+    const dialog = screen.getByRole('dialog')
+    expect(dialog).toHaveTextContent('全部重查会把没改过的也重新交给模型检查')
+    expect(gateway.executed).toEqual([])
+    await act(async () => { fireEvent.click(within(dialog).getByRole('button', { name: '全部重查' })) })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    pick('全局')
+    fireEvent.click(recheckButton())
+    await act(async () => { fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '全部重查' })) })
+    pick('全部')
+    fireEvent.click(recheckButton())
+    await act(async () => { fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '全部重查' })) })
+    expect(gateway.executed.map(e => e.command)).toEqual([
+      { cmd: 'scan', workspacePath: '/w/app', isFullRecheck: true },
+      { cmd: 'scan', layer: { kind: 'global' }, isFullRecheck: true },
+      { cmd: 'scan', isFullRecheck: true },
+    ])
+  })
+
+  it('取消、Esc 不发命令，焦点回到按钮；体检进行中、范围没有记忆时不显示', async () => {
+    const run = deferred()
+    const { gateway } = open(APP, { respond: () => run.promise })
+    fireEvent.click(recheckButton())
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '取消' }))
+    expect(document.activeElement).toBe(recheckButton())
+    fireEvent.click(recheckButton())
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(gateway.executed).toEqual([])
+    fireEvent.click(runButton())
+    expect(within(head()).queryByRole('button', { name: '全部重查' })).toBeNull()
+    cleanup()
+    open({ kind: 'workspace', workspacePath: '/w/new' })
+    expect(within(head()).queryByRole('button', { name: '全部重查' })).toBeNull()
+  })
+
+  it('记忆查看的数据还没读到：先不画「全部重查」，免得读到空范围时又消失', () => {
+    open(APP, { views: { library: undefined } })
+    expect(within(head()).queryByRole('button', { name: '全部重查' })).toBeNull()
+    expect(runButton()).toBeInTheDocument()
+  })
+
+  it('确认后焦点落到同一行的体检按钮上（显示「体检中…」），不掉到页面', async () => {
+    const run = deferred()
+    open(APP, { respond: () => run.promise })
+    fireEvent.click(recheckButton())
+    await act(async () => { fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '全部重查' })) })
+    expect(runButton()).toHaveTextContent('体检中…')
+    expect(runButton()).toHaveFocus()
+  })
+
+  it('英文文案', () => {
+    const t = createTranslator(en)
+    expect(t('checkup.recheck')).toBe('Recheck all')
+  })
+})
+
 describe('立即体检：体检中…', () => {
   it('本窗口发起的：点了就禁用、显示「体检中…」，再点不重发；切去别的范围再回来仍在体检；命令回来后恢复', async () => {
     const run = deferred()

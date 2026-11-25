@@ -583,7 +583,7 @@ describe('还没有自己记忆的项目', () => {
     expect(renderHealthResult(r)).not.toContain('从未做过语义扫描')
   })
 
-  it('项目只有坏文件（进了隔离）：不算还没有自己的记忆，照旧建议首扫；扫描给它写完成记录', async () => {
+  it('项目只有坏文件（进了隔离）：不算还没有自己的记忆，照旧建议首扫；扫描照查，坏文件不算没读全，照常写完成记录', async () => {
     const e = await scanEnv()
     await e.store.create(record({ id: 'mem_g1' }))
     const dir = join(e.root, workspaceDirName(WS))
@@ -594,7 +594,7 @@ describe('还没有自己记忆的项目', () => {
     expect(before.kind === 'single' && before.breakdown.ruleLayer.malformed).toBe(1)
     expectNeverScanned(before)
     expect(renderHealthResult(before)).not.toContain('还没有自己的记忆')
-    await e.scan()
+    expect(await e.scan()).toMatchObject({ kind: 'single', stats: { scanned: 1 } })
     expect((await e.checkups.list()).map(r => r.id)).toEqual([WS])
   })
 

@@ -5,7 +5,7 @@ import type { RefreshableClaim } from '../kv-table.ts'
 import { genId } from '../governance/schema.ts'
 import { maskDiagnostic } from '../secrets.ts'
 import { runScan, type ScanCoreDeps, type ScanInput, type ScanNote, type ScanToolResult } from '../tools/scan.ts'
-import { checkupWorkspaces } from '../tools/scope-preread.ts'
+import { checkupScanWorkspaces } from '../tools/scope-preread.ts'
 import type { Scope } from '../scope.ts'
 import { checkupKey, type CheckupCause, type CheckupResult, type PendingView } from './contract.ts'
 import { checkupResults, type CheckupTarget, type GlobalViews } from './views.ts'
@@ -75,9 +75,9 @@ async function releaseEach(claims: readonly RefreshableClaim[], log: MemoryLogge
 
 export interface CheckupRunDeps {
   /** 体检核心里和这次体检无关的依赖；体检记录表和时钟单独给。 */
-  scan: Omit<ScanCoreDeps, 'checkups' | 'now'>
+  scan: Omit<ScanCoreDeps, 'checkups' | 'now' | 'log'>
   /** 体检记录表：认领、完成记录（核心写）、最近一次结果、自动体检的失败。 */
-  checkups: Pick<CheckupRecordStore, 'list' | 'complete' | 'claim' | 'recordFailure' | 'recordResults'>
+  checkups: Pick<CheckupRecordStore, 'list' | 'complete' | 'recordContinue' | 'claim' | 'recordFailure' | 'recordResults'>
   /** 体检前只收集不落盘；体检后全量重写，返回值就是体检后的视图。 */
   views: Pick<ViewWriter, 'collectViews' | 'rewriteAll'>
   /** 持有认领期间的心跳计时。 */
@@ -101,6 +101,8 @@ export interface CheckupRunInput {
   confirmHeld?: () => Promise<boolean>
   /** 自动体检选的模型用不了、这次改用了默认模型：写进最近一次结果；缺省没有退回。 */
   modelFallback?: CheckupResult['modelFallback']
+  /** 全部重查（界面「全部重查」）：见 tools/scan.ts ScanInput.isFullRecheck。缺省为普通体检。 */
+  isFullRecheck?: boolean
 }
 
 export type CheckupRunOutcome =
@@ -127,14 +129,16 @@ export type CheckupRunOutcome =
  * 认领被接手或调用方取消时不留半截结果：核心在写入检查点前停下，不写完成记录和结果，这个范围照常到期；
  * 取消落在核心提交之后的，体检算做完，只是不写最近一次结果。
  *
- * 内容检查没做成（模型出错、宿主报模型用不了）两边口径不同：手动体检照样算做完，说明码带原因交给界面，结果照写；
- * 自动体检要据它记失败、管重试节奏，所以模型出错记失败返回「失败」，模型用不了不记、返回原因交给调度器。
+ * 收尾按核心给的每一轮的收尾表那一行（tools/scan.ts ScanRoundResult）：最近一次结果都照写，完成记录核心已经写了。
+ * 内容检查没做成（模型出错、宿主报模型用不了）两边口径不同：手动体检照样算做完，说明码带原因交给界面；
+ * 自动体检要据它记失败、管重试节奏，所以模型出错、范围没读全记失败返回「失败」，模型用不了不记、返回原因交给调度器。
+ * 提交前的存储步骤出错（挂账、写视图）两边都回失败。
  */
 export async function runCheckup(input: CheckupRunInput, deps: CheckupRunDeps): Promise<CheckupRunOutcome> {
   const { by, target } = input
   // 「全部」只查认领到的项目：核心自己再枚举会把认领之后才建的项目也查了
   const scopes: Scope[] = target.kind === 'all'
-    ? [{ kind: 'global' }, ...checkupWorkspaces(await deps.scan.store.listWorkspaceDirs()).map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
+    ? [{ kind: 'global' }, ...checkupScanWorkspaces(await deps.scan.store.listWorkspaceDirs()).map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
     : [target]
   const controller = new AbortController()
   const signal = input.signal !== undefined ? AbortSignal.any([input.signal, controller.signal]) : controller.signal
@@ -178,20 +182,15 @@ export async function runCheckup(input: CheckupRunInput, deps: CheckupRunDeps): 
     const result = await runScan({
       target: scanTarget, layers: 'full', llm: input.llm,
       ...(input.currentWorkspace !== undefined ? { currentWorkspace: input.currentWorkspace } : {}),
+      ...(input.isFullRecheck === true ? { isFullRecheck: true } : {}),
       signal, startedAt,
-    }, { ...deps.scan, checkups: deps.checkups, now: deps.now }, {
+    }, { ...deps.scan, checkups: deps.checkups, now: deps.now, log: deps.log }, {
       by, onScopeNotes: (scope, notes) => { scopeNotes.set(checkupKey(scope), notes) }, onCommitted: () => { isCommitted = true },
     })
     const after = await refresh(startedAt) ?? (before === undefined ? undefined : await collect())
     // 核心提交之后才被取消（认领被接手、插件卸载）：体检已经做完，只是不写最近一次结果，免得盖掉接手的那次
     if (signal.aborted) return result.kind === 'error' ? { kind: 'cancelled' } : doneOf(result)
     if (result.kind === 'error') return await failed(input, deps, scopes, { kind: 'error', message: result.message }, startedAt)
-    if (by === 'auto') {
-      const unavailable = result.notes.find(n => n.code === 'model-unavailable')
-      if (unavailable !== undefined) return { kind: 'model-unavailable', cause: unavailable.cause ?? { kind: 'model-error' } }
-      const semanticFailed = result.notes.find(n => n.code === 'semantic-failed')
-      if (semanticFailed !== undefined) return await failed(input, deps, scopes, semanticFailed.cause ?? { kind: 'model-error' }, startedAt)
-    }
     const compared = before !== undefined && after !== undefined ? { before, after } : undefined
     let checkupId: string | undefined
     if (compared !== undefined) {
@@ -201,6 +200,7 @@ export async function runCheckup(input: CheckupRunInput, deps: CheckupRunDeps): 
         const id = genId('ck')
         await deps.checkups.recordResults(checkupResults(compared.before, compared.after.pending, {
           target: resultTarget, checkupId: id, by, completedAt: deps.now(), notes: result.notes, scopeNotes,
+          coverages: new Map((result.rounds ?? []).map(r => [checkupKey(r.scope), r.coverage])),
           ...(input.modelFallback !== undefined ? { modelFallback: input.modelFallback } : {}),
           ...(result.usageTokens !== undefined ? { usageTokens: result.usageTokens } : {}),
         }))
@@ -208,6 +208,19 @@ export async function runCheckup(input: CheckupRunInput, deps: CheckupRunDeps): 
       } catch (err) {
         deps.log.warn('[plastic-memory] 记不下体检的结果', err)
       }
+    }
+    // 收尾表（tools/scan.ts closingRow）：最近一次结果上面照写；完成记录核心已按它写了
+    const rounds = result.rounds ?? []
+    if (by === 'auto') {
+      // 自动体检逐范围调度：按这个范围那一轮的收尾
+      const own = rounds.find(r => scopes.some(scope => checkupKey(scope) === checkupKey(r.scope)))
+      if (own?.closing === 'model-unavailable') return { kind: 'model-unavailable', cause: own.cause ?? { kind: 'model-error' } }
+      if (own?.closing === 'failed') return await failed(input, deps, scopes, own.cause ?? { kind: 'model-error' }, startedAt)
+      if (own?.closing === 'read-incomplete') return await failed(input, deps, scopes, READ_INCOMPLETE_CAUSE, startedAt)
+    } else {
+      // 手动体检：提交前的存储步骤出错照旧回失败；内容检查没做成、模型用不了算做完，说明码带原因交给界面
+      const storage = rounds.find(r => r.closing === 'failed' && r.cause?.kind === 'error')
+      if (storage !== undefined) return await failed(input, deps, scopes, storage.cause!, startedAt)
     }
     return doneOf(result, compared, checkupId)
   } catch (err) {
@@ -228,6 +241,9 @@ export async function runCheckup(input: CheckupRunInput, deps: CheckupRunDeps): 
     if (held !== undefined && !('busy' in held)) await held.release()
   }
 }
+
+/** 范围没读全（有记忆文件读不出、目录读不了）：自动体检记失败的原因，按失败的节奏重试，不每次检查都重跑。 */
+const READ_INCOMPLETE_CAUSE: CheckupCause = { kind: 'error', message: '有记忆文件读不出或目录读不了，这个范围没读全' }
 
 function doneOf(result: Exclude<ScanToolResult, { kind: 'error' }>, compared?: { before: PendingView; after: GlobalViews }, checkupId?: string): CheckupRunOutcome {
   return {

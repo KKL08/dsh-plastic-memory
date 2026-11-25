@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { applyChange } from '../src/change.ts'
 import {
-  advance, basisOf, changeOpSchema, changeReceiptSchema, checkOp, copyKey, hasForeignSecret, newProgress, receiptOf, revertBlock, reverted, scanFingerprint, scopeKeyOf,
+  advance, basisOf, changeOpSchema, changeReceiptSchema, checkOp, copyKey, hasForeignSecret, parseCopyKey, newProgress, receiptOf, revertBlock, reverted, scanFingerprint, scopeKeyOf,
   type ChangeOp, type CheckInput,
 } from '../src/governance/changeset.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
@@ -173,6 +173,13 @@ describe('同一批的进度', () => {
     const later = { ...written, content: '别处的版本' }
     const recall = { ...op({ kind: 'set-recall', patch: { recall: 'never' }, expect: { recall: null } }, read), id: 'o2' }
     expect(checkOp(recall, input(later, { progress }))).toMatchObject({ kind: 'skip', reason: 'basis-changed' })
+  })
+})
+
+describe('副本身份', () => {
+  it('能解析回作用域键和 id；不是这里写的形状为 undefined', () => {
+    expect(parseCopyKey(copyKey({ scopeKey: '/w/a', memoryId: 'mem_1' }))).toEqual({ scopeKey: '/w/a', memoryId: 'mem_1' })
+    for (const bad of ['mem_1', '["/w/a"]', '[1,"mem_1"]', '["/w/a",2]', '{"a":1}', '']) expect(parseCopyKey(bad), bad).toBeUndefined()
   })
 })
 

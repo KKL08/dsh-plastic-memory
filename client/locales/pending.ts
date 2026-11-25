@@ -23,6 +23,10 @@ export const pendingZh = {
 
   'pending.empty.title': '没有要处理的事',
   'pending.empty.lastScan': '上次体检 {date}。新的冲突和建议会出现在这里。',
+  'pending.empty.partial': '上次体检 {date}，还有 {n} 条没查到，下次体检接着查。新的冲突和建议会出现在这里。',
+  'pending.empty.partial.one': '上次体检 {date}，还有 {n} 条没查到，下次体检接着查。新的冲突和建议会出现在这里。',
+  'pending.empty.partial.bare': '上次体检 {date}，内容检查没查全。新的冲突和建议会出现在这里。',
+  'pending.empty.partial.scopes': '上次体检 {date}，有 {n} 个范围没查全，下次体检接着查。新的冲突和建议会出现在这里。',
   'pending.empty.never': '还没体检过。新的冲突和建议会出现在这里。',
 
   'pending.ignored.count': '不再提醒的 {n} 条',
@@ -313,6 +317,10 @@ export const pendingEn: Record<keyof typeof pendingZh, string> = {
 
   'pending.empty.title': 'Nothing to handle',
   'pending.empty.lastScan': 'Last checkup {date}. New conflicts and suggestions show up here.',
+  'pending.empty.partial': 'Last checkup {date}; {n} memories were not checked yet and the next checkup continues. New conflicts and suggestions show up here.',
+  'pending.empty.partial.one': 'Last checkup {date}; {n} memory was not checked yet and the next checkup continues. New conflicts and suggestions show up here.',
+  'pending.empty.partial.bare': 'Last checkup {date}; the content check was not complete. New conflicts and suggestions show up here.',
+  'pending.empty.partial.scopes': 'Last checkup {date}; {n} scopes were not fully checked and the next checkup continues. New conflicts and suggestions show up here.',
   'pending.empty.never': 'No checkup yet. New conflicts and suggestions show up here.',
 
   'pending.ignored.count': '{n} dismissed',

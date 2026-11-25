@@ -11,13 +11,15 @@ import { FileTable } from './storage/file-table.ts'
 import { SidecarStore } from './storage/sidecar.ts'
 import { createRootLock } from './storage/root-lock.ts'
 import type { LegacyKvTables } from './storage/legacy-kv-import.ts'
-import { localStateDir, OP_JOURNAL_FILE, DERIVED_INDEX_FILE, DIALOGUE_RECORDS_FILE, resolveMemoryRoot } from './storage/paths.ts'
+import { localStateDir, OP_JOURNAL_FILE, DERIVED_INDEX_FILE, DIALOGUE_RECORDS_FILE, CHECKUP_CACHE_FILE, resolveMemoryRoot } from './storage/paths.ts'
 import { DialogueRecordStore } from './storage/dialogue-records.ts'
 import { CATCHUP_BACKGROUND_BUDGET_MS, CATCHUP_BACKGROUND_INTERVAL_MS, DialogueCatchup } from './tools/dialogue-catchup.ts'
 import { NoReviewList } from './storage/no-review.ts'
 import { dialogueTokenizer } from './search/dialogue-tokenizer.ts'
 import { OpJournal } from './storage/op-journal.ts'
 import { DerivedIndex } from './storage/derived-index.ts'
+import { CheckupCache } from './storage/checkup-cache.ts'
+import { SCAN_TOKEN_CAP_DEFAULT } from './governance/checkup-plan.ts'
 import { stalenessNote } from './record-freshness.ts'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { Session } from '@deepseek-ai/dsh-session'
@@ -102,6 +104,8 @@ export interface Config {
     enabled: Volatile<boolean>
     health: { sensitivity: Volatile<HealthSensitivity> }
     globalPromoteTarget: Volatile<'plugin-global' | 'agents-md'>
+    /** 一次体检交给模型的 token 上限（按发出去的提示词估算，重试不算），到了就停，下次接着查。设置页不露，配置文件可改；改了下一次体检生效。 */
+    scan: { tokenCap: Volatile<number> }
   }
   search: {
     /** jieba 用户词典（每行「词 词频 词性」）的绝对路径，追加在主词典之上；不设只用主词典。改了下一次搜索生效。 */
@@ -179,6 +183,10 @@ export const Config = z.object({
       sensitivity: z.union(['conservative', 'normal', 'proactive'] as const).default('normal').volatile(),
     }).default({ sensitivity: 'normal' }),
     globalPromoteTarget: z.union(['plugin-global', 'agents-md'] as const).default('plugin-global').volatile(),
+    // 0、负数：体检回落默认值并记日志（governance/checkup-plan.ts resolveTokenCap）；类型不对、非有限数（.inf、.nan）由配置校验报错
+    scan: z.object({
+      tokenCap: z.number().default(SCAN_TOKEN_CAP_DEFAULT).volatile(),
+    }),
   }),
   search: z.object({
     userDictionaryPath: z.string().volatile(),
@@ -289,6 +297,10 @@ export async function apply(ctx: Context, config: Config) {
   // 派生索引库同样在记忆根之外、每台机器一份：存的都能从记忆文件重算，不可用时查找改回逐个读文件
   const derivedIndex = new DerivedIndex({ path: join(localStateDir(memoryRoot), DERIVED_INDEX_FILE), log: ctx.logger })
   ctx.effect(() => () => { derivedIndex.close() }, 'plastic-memory: derived index')
+  // 体检结果库也在记忆根之外、每台机器一份：存内容检查按批的结论，丢了只多花 token。token 上限每次体检现读配置
+  const checkupCache = new CheckupCache({ path: join(localStateDir(memoryRoot), CHECKUP_CACHE_FILE), log: ctx.logger })
+  ctx.effect(() => () => { checkupCache.close() }, 'plastic-memory: checkup cache')
+  const incremental = { checkupCache, tokenCap: () => config.governance.scan.tokenCap.get() }
   const fileTable = new FileTable({
     root: memoryRoot,
     lock: rootLock,
@@ -483,7 +495,7 @@ export async function apply(ctx: Context, config: Config) {
       // 垂直冲突对照每条记忆所在项目的指令文件，和触发调用的会话无关。
       // 扫描会写语义缓存、登记待决冲突，归写工具；health 纯读，不套门
       registerWrite(createScanTool({
-        store, registry, decisions, cache: scanCache, ignores, checkups, instructions,
+        store, registry, decisions, cache: scanCache, ignores, checkups, instructions, ...incremental, log: ctx.logger,
         host,
       })),
       ctx.tools.register(createHealthTool({
@@ -546,7 +558,7 @@ export async function apply(ctx: Context, config: Config) {
     // 卸载时取消手动体检之后还在跑的后续段（不等在途的模型调用）
     const unload = new AbortController()
     const command = createMemoryCommand({
-      memoryRoot, store, decisions, snapshots, cache: scanCache, checkups, autoCheckups, selections, ignores, registry, agentsMd, views: writer, instructions, dreams,
+      memoryRoot, store, decisions, snapshots, cache: scanCache, checkups, autoCheckups, selections, ignores, registry, agentsMd, views: writer, instructions, dreams, incremental,
       onAutoCheckupChanged: () => void scheduler?.recheck(),
       deleteDialogueRecords: () => dialogueCatchup.destroy(),
       suggestions: checkupSuggestions, signal: unload.signal,
@@ -580,7 +592,7 @@ export async function apply(ctx: Context, config: Config) {
   ctx.inject(['timer'], child => {
     const timer = child as unknown as AutoCheckupTimer
     const created = new AutoCheckupScheduler({
-      scan: { store, registry, decisions, cache: scanCache, ignores, instructions },
+      scan: { store, registry, decisions, cache: scanCache, ignores, instructions, ...incremental },
       checkups,
       // 体检前只收集；体检后立刻重写全部视图（没有视图写入器时一次体检改为现收一份）
       views: { collectViews, rewriteAll: async () => views?.rewriteAll() },

@@ -263,7 +263,7 @@ describe('scan：上次体检与完成记录', () => {
     const globalBefore = await healthOf(e, 'global')
     e.clock.now = NOW + 1000
     ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
-    expect(await completedOf(e, SESSION)).toEqual({ startedAt: NOW + 1000, completedAt: NOW + 1000, by: 'manual' })
+    expect(await completedOf(e, SESSION)).toEqual({ startedAt: NOW + 1000, completedAt: NOW + 1000, by: 'manual', coverage: expect.any(Object) })
     expect(await completedOf(e, GLOBAL)).toBeUndefined()
     expect((await e.cache.list()).map(([key]) => key)).toEqual([scopeCacheKey({ kind: 'workspace', workspacePath: SESSION_WS })])
     const globalAfter = await healthOf(e, 'global')
@@ -304,7 +304,7 @@ describe('scan：上次体检与完成记录', () => {
     expect(seen.join('\n')).toContain('mem_g')
     expect(seen.join('\n')).not.toContain('mem_s')
     expect((await e.cache.list()).map(([key]) => key)).toEqual([scopeCacheKey({ kind: 'global' })])
-    expect(await completedOf(e, GLOBAL)).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual' })
+    expect(await completedOf(e, GLOBAL)).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual', coverage: expect.any(Object) })
     expect(await completedOf(e, SESSION)).toBeUndefined()
     expect(body.scores!.map(s => s.layer)).toEqual([{ kind: 'global' }])
     expect(await lastCheckups(e)).toEqual({ global: NOW, [SESSION_WS]: null, [OTHER_WS]: null })
@@ -319,7 +319,7 @@ describe('scan：上次体检与完成记录', () => {
     const e = env({ llm: quiet })
     await seedScopes(e)
     ok(await e.run({ cmd: 'scan' }))
-    for (const layer of [GLOBAL, SESSION, OTHER]) expect(await completedOf(e, layer)).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual' })
+    for (const layer of [GLOBAL, SESSION, OTHER]) expect(await completedOf(e, layer)).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual', coverage: expect.any(Object) })
     expect(await lastCheckups(e)).toEqual({ global: NOW, [SESSION_WS]: NOW, [OTHER_WS]: NOW })
   })
 
@@ -331,7 +331,7 @@ describe('scan：上次体检与完成记录', () => {
     failing = true
     e.clock.now = NOW + 1000
     expect(ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS })).notes).toContain('semantic-failed')
-    expect(await completedOf(e, SESSION)).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual' })
+    expect(await completedOf(e, SESSION)).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual', coverage: expect.any(Object) })
     expect((await lastCheckups(e))[SESSION_WS]).toBe(NOW)
   })
 
@@ -366,7 +366,7 @@ describe('scan：上次体检与完成记录', () => {
     expect(after.scopes.map(s => [s.failure, s.modelUnavailable])).toEqual([[null, null], [null, null], [null, null]])
   })
 
-  it('写完缓存、挂账挂到一半时进程退出：不写完成记录，上次体检仍是之前那次；重跑后每个冲突只有一张卡', async () => {
+  it('挂账挂到一半时进程退出：视图和完成记录都不写，上次体检仍是之前那次；重跑后每个冲突只有一张卡', async () => {
     let dying = false
     let puts = 0
     const e = env({
@@ -392,14 +392,14 @@ describe('scan：上次体检与完成记录', () => {
     dying = true
     e.clock.now = NOW + 1000
     expect(err(await e.run({ cmd: 'scan', workspacePath: SESSION_WS })).code).toBe('failed')
-    expect((await e.cache.get(scopeCacheKey({ kind: 'workspace', workspacePath: SESSION_WS })))?.scannedAt).toBe(NOW + 1000)
-    expect(await completedOf(e, SESSION)).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual' })
+    expect((await e.cache.get(scopeCacheKey({ kind: 'workspace', workspacePath: SESSION_WS })))?.scannedAt).toBe(NOW)
+    expect(await completedOf(e, SESSION)).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual', coverage: expect.any(Object) })
     ok(await e.run({ cmd: 'refresh-views' }))
     expect((await lastCheckups(e))[SESSION_WS]).toBe(NOW)
     dying = false
     e.clock.now = NOW + 2000
     ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
-    expect(await completedOf(e, SESSION)).toEqual({ startedAt: NOW + 2000, completedAt: NOW + 2000, by: 'manual' })
+    expect(await completedOf(e, SESSION)).toEqual({ startedAt: NOW + 2000, completedAt: NOW + 2000, by: 'manual', coverage: expect.any(Object) })
     const cards = ledgerItems(pendingViewSchema.parse(await e.readView('pending')))
     expect(cards.map(i => i.kind)).toEqual(['conflict-horizontal', 'conflict-horizontal'])
     expect(await e.decisions.list()).toHaveLength(2)
@@ -422,7 +422,7 @@ describe('scan：上次体检与完成记录', () => {
     e.clock.now = NOW + 3000
     release()
     expect((await late).kind).toBe('single')
-    expect(await completedOf(e, SESSION)).toEqual({ startedAt: NOW + 2000, completedAt: NOW + 2000, by: 'manual' })
+    expect(await completedOf(e, SESSION)).toEqual({ startedAt: NOW + 2000, completedAt: NOW + 2000, by: 'manual', coverage: expect.any(Object) })
     const cached = await e.cache.get(scopeCacheKey({ kind: 'workspace', workspacePath: SESSION_WS }))
     expect(cached).toMatchObject({ scannedAt: NOW + 2000, findings: [] })
     ok(await e.run({ cmd: 'refresh-views' }))
@@ -484,7 +484,7 @@ describe('scan：最近一次结果', () => {
   const resultOf = async (e: ReturnType<typeof env>, layer: Parameters<typeof checkupKey>[0]) => (await recordOf(e, checkupKey(layer)))?.lastResult
 
   it('全部体检的说明码按范围给：一个范围内容检查没做完，别的范围不带；指令文件被截断只记在那个范围；整次的合并记在 all', async () => {
-    // 输入里有别的项目的记忆就输出无法解析（这个项目的内容检查和跨项目重复都没做成），其余照常
+    // 输入里有别的项目的记忆就输出无法解析（这个项目的内容检查没做成，体检就此停下，跨项目重复不再比），其余照常
     const llm: SemanticLlm = { complete: async (input) => JSON.stringify(input).includes('mem_o') ? 'not json' : '{"findings":[]}' }
     const e = env({ llm, instructions: { [OTHER_WS]: { kind: 'found', texts: ['用 pnpm'], isTruncated: true } } })
     await seed(e)
@@ -494,7 +494,7 @@ describe('scan：最近一次结果', () => {
     expect(await codes(GLOBAL)).toEqual([])
     expect((await codes(OTHER)).sort()).toEqual(['baseline-truncated', 'semantic-failed'])
     expect((await recordOf(e, 'all'))!.lastResult!.notes.map(n => n.code).sort())
-      .toEqual(['baseline-truncated', 'cross-ws-failed', 'semantic-failed'])
+      .toEqual(['baseline-truncated', 'semantic-failed'])
   })
 
   it('agent 体检（memory_scan）只写完成记录、不写结果：之前的最近一次结果原样留着', async () => {
@@ -512,7 +512,7 @@ describe('scan：最近一次结果', () => {
       store: e.store, registry, decisions: e.decisions, cache: e.cache, checkups: e.checkups,
       host: { contextOf: async () => ({ workspacePath: SESSION_WS }), llmOf: () => llm }, instructions: noInstructions, now: () => e.clock.now,
     }, fakeExec())
-    expect(await recordOf(e, checkupKey(OTHER))).toEqual({ id: checkupKey(OTHER), completed: { startedAt: NOW + 1000, completedAt: NOW + 1000, by: 'agent' } })
+    expect(await recordOf(e, checkupKey(OTHER))).toEqual({ id: checkupKey(OTHER), completed: { startedAt: NOW + 1000, completedAt: NOW + 1000, by: 'agent', coverage: expect.any(Object) } })
     expect((await recordOf(e, checkupKey(SESSION)))).toMatchObject({ completed: { by: 'agent' }, lastResult: before })
   })
 

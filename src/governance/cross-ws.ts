@@ -10,6 +10,9 @@ export interface CrossWsDuplicate {
   suggestion: string
 }
 
+/** 跨项目比较提示词的版本：改提示词或摘要行的写法时加一。缓存的结果按它区分。 */
+export const CROSS_WS_PROMPT_VERSION = 1
+
 /** 呈现限流：体检报告最多列这些，避免弱信号淹没主报告。 */
 export const CROSS_WS_LIMIT = 3
 
@@ -56,7 +59,7 @@ const SYSTEM_PROMPT = `你是记忆库治理审查员。给出的是多个项目
 没有发现输出 {"duplicates":[]}`
 
 // 摘要可能被手改进密钥，发给模型前和注入同口径遮掉高危
-const summaryLine = (r: MemoryRecord): string => `- ${maskSecretSurface(r).summary}`
+export const summaryLine = (r: MemoryRecord): string => `- ${maskSecretSurface(r).summary}`
 
 export function buildCrossWsPrompt(
   byWorkspace: ReadonlyMap<string, readonly MemoryRecord[]>,
@@ -90,10 +93,11 @@ export function parseCrossWsResult(raw: string, knownWs: ReadonlySet<string>): C
     const workspaces = (Array.isArray(d.workspaces) ? d.workspaces : [])
       .filter((w): w is string => typeof w === 'string' && knownWs.has(w))
     if (workspaces.length < 2 || typeof d.topic !== 'string' || d.topic.length === 0) continue
+    // 模型的原话会进体检结果库、返回给界面：高危和疑似密钥都先遮掉（同内容检查的发现）
     out.push({
-      topic: d.topic,
+      topic: maskSecrets(d.topic, { severity: 'suspected' }),
       workspaces: workspaces.sort(),
-      suggestion: typeof d.suggestion === 'string' ? d.suggestion : '',
+      suggestion: typeof d.suggestion === 'string' ? maskSecrets(d.suggestion, { severity: 'suspected' }) : '',
     })
   }
   return out.slice(0, CROSS_WS_LIMIT)

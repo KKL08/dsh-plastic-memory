@@ -5,6 +5,7 @@
  *   改了就发 set-auto-checkup；按钮和菜单只按体检视图显示，命令成功后服务端重写体检视图，各窗口读到同一份。
  * - 「立即体检」查这个范围，进行中显示「体检中…」并禁用（来源见 runs.ts），悬停写会查谁、记忆越多 token 越多。
  *   范围里还没有活跃记忆时不发命令，在按钮处弹出一句说明（弹层的关法和焦点回位同自动体检菜单）；按钮不置灰。
+ *   体检平时只查新的、改过的记忆；旁边的「全部重查」弹出确认，确认后连没改过的也重新交给模型查（体检进行中、范围没有记忆时不显示）。
  * 体检在配置文件里关闭时，两个控件换成一行「体检已在配置文件里关闭」。
  */
 import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type FocusEvent, type MouseEvent } from 'react'
@@ -38,8 +39,8 @@ export function TitleControls({ scope, session, runs, checkups, isGovernanceEnab
   isGovernanceEnabled: boolean
   /** 「全部」体检会查几个项目（有活跃记忆的；标题行「N 个项目和全局」还算只剩最近删除的，可能更多）。 */
   projectCount: number
-  /** 范围里没有活跃记忆（记忆查看的数据读到了、条数为 0）：点「立即体检」只弹说明。 */
-  isEmpty: boolean
+  /** 范围里没有活跃记忆（记忆查看的数据读到了、条数为 0）：点「立即体检」只弹说明。undefined = 数据还没读到，先不画「全部重查」。 */
+  isEmpty: boolean | undefined
 }) {
   const t = useT()
   if (!isGovernanceEnabled) return <p className="pm-head-off">{t('settings.governanceOff')}</p>
@@ -48,7 +49,8 @@ export function TitleControls({ scope, session, runs, checkups, isGovernanceEnab
       {/* 换范围时收起菜单、清掉没生效的草稿 */}
       {checkups !== undefined ? <AutoCheckup key={checkupKey(scope)} scope={scope} session={session} view={checkups} /> : null}
       {/* 换范围时收起说明弹层 */}
-      <RunCheckup key={`run:${checkupKey(scope)}`} scope={scope} runs={runs} projectCount={projectCount} isEmpty={isEmpty} />
+      {isEmpty !== false || runs.busyScope(scope) !== undefined ? null : <FullRecheck key={`recheck:${checkupKey(scope)}`} scope={scope} runs={runs} />}
+      <RunCheckup key={`run:${checkupKey(scope)}`} scope={scope} runs={runs} projectCount={projectCount} isEmpty={isEmpty === true} />
     </>
   )
 }
@@ -131,6 +133,74 @@ function RunCheckup({ scope, runs, projectCount, isEmpty }: { scope: PageScope; 
             onBlur={onNoteBlur}
           >
             <p id={`${noteId}-text`} className="pm-run-note-text">{text}</p>
+          </div>
+        )
+        : null}
+    </div>
+  )
+}
+
+/**
+ * 「全部重查」：点了弹出确认（关法和焦点回位同「立即体检」的说明弹层），确认后发带 isFullRecheck 的体检。
+ * 体检一开始这个按钮就不画了，确认时焦点先移到同一行的体检按钮（随即显示「体检中…」）。
+ */
+function FullRecheck({ scope, runs }: { scope: PageScope; runs: CheckupRuns }) {
+  const t = useT()
+  const dialogId = useId()
+  const [isOpen, setOpen] = useState(false)
+  const [isStartAligned, setStartAligned] = useState(false)
+  const root = useRef<HTMLDivElement>(null)
+  const dialog = useRef<HTMLDivElement>(null)
+  const button = () => root.current?.querySelector<HTMLButtonElement>('.pm-recheck') ?? null
+  const close = (focusButton: boolean) => {
+    setOpen(false)
+    if (focusButton) button()?.focus()
+  }
+  useLayoutEffect(() => {
+    if (isOpen) dialog.current?.querySelector<HTMLButtonElement>('.pm-recheck-confirm')?.focus()
+  }, [isOpen])
+  useEffect(() => {
+    if (!isOpen) return
+    const onPointer = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) close(false) }
+    document.addEventListener('pointerdown', onPointer, true)
+    return () => { document.removeEventListener('pointerdown', onPointer, true) }
+  }, [isOpen])
+  const toggle = () => {
+    if (isOpen) { close(false); return }
+    setStartAligned((button()?.getBoundingClientRect().right ?? Infinity) - NOTE_WIDTH < EDGE)
+    setOpen(true)
+  }
+  const onBlur = (event: FocusEvent<HTMLDivElement>) => {
+    const next = event.relatedTarget as Node | null
+    if (next !== null && !root.current?.contains(next)) close(false)
+  }
+  const confirm = () => {
+    close(false)
+    root.current?.parentElement?.querySelector<HTMLButtonElement>('.pm-run')?.focus()
+    runs.run(scope, { isFullRecheck: true })
+  }
+  return (
+    <div ref={root} className="pm-run-wrap">
+      <Button variant="ghost" className="pm-recheck" aria-haspopup="dialog" aria-expanded={isOpen} aria-controls={isOpen ? dialogId : undefined} onClick={toggle}>
+        {t('checkup.recheck')}
+      </Button>
+      {isOpen
+        ? (
+          <div
+            ref={dialog}
+            id={dialogId}
+            role="dialog"
+            aria-labelledby={`${dialogId}-text`}
+            tabIndex={-1}
+            className={isStartAligned ? 'pm-run-note pm-run-note--start' : 'pm-run-note'}
+            onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); close(true) } }}
+            onBlur={onBlur}
+          >
+            <p id={`${dialogId}-text`} className="pm-run-note-text">{t('checkup.recheck.confirm.text')}</p>
+            <div className="pm-recheck-actions">
+              <Button size="sm" variant="ghost" onClick={() => { close(true) }}>{t('checkup.recheck.cancel')}</Button>
+              <Button size="sm" variant="primary" className="pm-recheck-confirm" onClick={confirm}>{t('checkup.recheck.confirm')}</Button>
+            </div>
           </div>
         )
         : null}
@@ -433,6 +503,7 @@ export const titleControlsCss = `
 .pm-run-note--start, .pm-auto-menu--start { right: auto; left: 0; }
 .pm-run-note { width: 240px; box-sizing: border-box; padding: 10px 12px; }
 .pm-run-note-text { margin: 0; font-size: 13px; line-height: 1.5; color: var(--pm-text); }
+.pm-recheck-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 10px; }
 .pm-auto { position: relative; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 4px 8px; min-width: 0; }
 .pm-auto-failed { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text); }
 .pm-auto-trigger {

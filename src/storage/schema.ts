@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { CHECKUP_INITIATORS } from '../contract-codes.ts'
-import { autoCheckupFrequencySchema, checkupCauseSchema, checkupResultSchema, modelSelectionSchema, modelUnavailableCauseSchema } from '../gui/contract.ts'
+import { autoCheckupFrequencySchema, checkupCauseSchema, checkupCoverageSchema, checkupResultSchema, modelSelectionSchema, modelUnavailableCauseSchema } from '../gui/contract.ts'
 
 /** 易变召回统计的侧表行（`.state/recall-stats.json` 里的一条，见 storage/sidecar.ts）。
  *  文件永不承载这两个字段——否则每次 search 命中都产生文件 diff（git 噪音）。 */
@@ -39,7 +39,14 @@ export const checkupRecordSchema = z.object({
     startedAt: z.number(),
     completedAt: z.number(),
     by: z.enum(CHECKUP_INITIATORS),
+    /** 这次的内容检查覆盖（见 gui/contract.ts checkupCoverageSchema）；上一个发布版写的没有，写回时也会丢掉。 */
+    coverage: checkupCoverageSchema.optional(),
   }).optional(),
+  /**
+   * 一次没查完的体检约的下次自动体检时间：到了上限停下（完成后一天），或有没命中的批但一批都没轮到（那时起一天）。
+   * 晚于上次体检时，下次自动体检取它和按周期算的较早的那个；之后写完成记录时随之换掉或清掉。
+   */
+  continueAt: z.number().optional(),
   /** 自动体检连续没做完：次数、最近一次失败的时刻、原因。重试时间不存，生成体检视图时按当时的有效频率现算（见 gui/views.ts）。 */
   failure: z.object({
     count: z.number().int().positive(),

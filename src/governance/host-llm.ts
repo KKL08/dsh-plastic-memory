@@ -52,6 +52,9 @@ export function hostSemanticLlm(llm: HostLlmService | undefined, route: HostMode
   if (stream === undefined) return null
   return {
     model,
+    provider,
+    // 推理强度给了才带上：借会话的模型拿不到它，判断上下文里按空串算
+    ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
     async complete({ system, user }, signal, onUsage) {
       // 起步前先看取消：已取消就不发请求，直接抛（signal.reason 通常是 AbortError）。
       signal?.throwIfAborted()

@@ -1,7 +1,7 @@
 import { isAbsolute } from 'node:path'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { MemoryRecord } from '../record-schema.ts'
-import { pairKey } from './decisions.ts'
+import { isConflictOpen } from './decisions.ts'
 import type { AdviceIgnore, Finding, PendingDecision, ScanCacheEntry } from './schema.ts'
 import { FINDING_TYPES } from './schema.ts'
 import { runRuleScan, buildMalformedFindings } from './rule-scan.ts'
@@ -10,7 +10,7 @@ import { adviceFingerprint, applyIgnores, type IgnoredAdvice } from './advice-ig
 import type { DirectoryNote, LocatedRecord, QuarantineEntry } from '../storage/table.ts'
 import type { CheckupRecord } from '../storage/schema.ts'
 import { lastCheckupAt } from './checkup-records.ts'
-import { checkupKey } from '../gui/contract.ts'
+import { checkupKey, isFullyCovered, latestCoverage, uncheckedCount, type CheckupCoverage } from '../gui/contract.ts'
 import { scopeCacheKey, type Scope } from '../scope.ts'
 
 /** 健康档位的用户面标签（scan 体检行与 health message 共用一份，枚举值仍是 green/amber/red）。 */
@@ -88,6 +88,8 @@ export interface ScopePreread {
   ignores: readonly AdviceIgnore[]
   /** 体检记录表，键为范围键（checkupKey）：上次体检取它的完成记录。 */
   checkups: ReadonlyMap<string, CheckupRecord>
+  /** 这次没读全的作用域（键为 scopeCacheKey）：有读不出的文件、读不了的目录，或读取抛错（体检容忍时）。缺省都读全了。 */
+  unreadScopes?: ReadonlySet<string>
 }
 
 export interface ScopeHealthResult {
@@ -96,6 +98,8 @@ export interface ScopeHealthResult {
   health: HealthScore
   /** 上次体检（见 checkup-records.ts lastCheckupAt）；从没体检过为 null。 */
   lastCheckupAt: number | null
+  /** 现在说健不健康看的内容检查覆盖（完成记录和最近一次结果里较新那次的，见 latestCoverage）；上一个发布版写的记录、从没体检过的没有。 */
+  coverage?: CheckupCoverage
   /** 归入本作用域计分的 findings（规则层实时 + 语义层缓存过滤后，已剔除用户忽略的），供报告展示。 */
   ruleFindings: Finding[]
   semanticFindings: Finding[]
@@ -132,7 +136,7 @@ export function scoreScope(deps: ScopeHealthDeps, data: ScopePreread, scope: Sco
   ruleScan.push(...buildMalformedFindings(data.quarantined.get(scopeCacheKey(scope)) ?? []))
 
   const cached = data.cache.get(scopeCacheKey(scope))
-  const pendingKeys = new Set(data.pending.map(pairKey))
+  const isOpen = isConflictOpen(data.pending)
   const alive = (id: string) => data.byId.get(id)?.status === 'active'
   // 体检之后改过的记忆，缓存里关于它的结论（重复、放错层、表述不清）已不作数，下次体检再说；冲突走账本指纹，不在此列。
   // 手改文件不动 updatedAt，靠体检时记下的指纹认出；旧缓存没有指纹，只看 updatedAt
@@ -145,7 +149,7 @@ export function scoreScope(deps: ScopeHealthDeps, data: ScopePreread, scope: Sco
   const semanticScan = (cached?.findings ?? []).filter(f => {
     if (f.memoryIds.length === 0) return false
     if (!f.memoryIds.every(alive) || !f.memoryIds.some(id => liveIds.has(id))) return false
-    if (f.type === 'conflict') return pendingKeys.has(pairKey(f))
+    if (f.type === 'conflict') return isOpen(f)
     return !f.memoryIds.some(editedSinceScan)
   })
   const rule = applyIgnores(ruleScan, data.ignores, data.byId)
@@ -163,9 +167,11 @@ export function scoreScope(deps: ScopeHealthDeps, data: ScopePreread, scope: Sco
     totalMemories: records.length, ruleFindings, semanticFindings, freshnessRatios,
     scopeKind: scope.kind,
   })
+  const coverage = latestCoverage(data.checkups.get(checkupKey(scope)))
   return {
     scope, records, health,
     lastCheckupAt: lastCheckupAt(data.checkups.get(checkupKey(scope)), cached),
+    ...(coverage !== undefined ? { coverage } : {}),
     ruleFindings, semanticFindings,
     ignored: [...rule.ignored, ...semantic.ignored],
     // 与 computeHealth 的 staleCount 同一判据（ratio > 1）
@@ -224,6 +230,56 @@ export function ignoredNote(count: number): string | undefined {
   return count > 0 ? `已忽略 ${count} 条（用户可在记忆页「处理」视图的「不再提醒」里恢复）` : undefined
 }
 
+/** 覆盖停下的原因（还有没查到的时候说）。 */
+const COVERAGE_STOP_TEXT: Record<CheckupCoverage['stopped'], string | undefined> = {
+  'done': undefined,
+  'cap': '到了这次体检的 token 上限，下次接着查',
+  'batch-failed': '有一批没查成，下次再查',
+  'model-unavailable': '模型用不了，下次再查',
+  'not-reached': '这次没轮到，下次再查',
+}
+
+/** 本地日期（YYYY-MM-DD），和界面写日期同一个口径。 */
+function localDay(ms: number): string {
+  const d = new Date(ms)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+/**
+ * 内容检查覆盖的一句话（memory_scan、memory_health 的返回文字共用）：共几条（项目写明含全局几条）、这次查了几条；
+ * 没查到的分三种说（库读不了时统称「还没查」），有最久一次检查的时间就写；指令文件取不到或被截断、范围没读全、停下的原因也写上。
+ * isLastCheckup：这次没跑内容检查、说的是上次体检的覆盖，开头写明「上次体检」，不说「这次查了」，不写停下的原因。
+ */
+export function coverageText(c: CheckupCoverage, opts: { isLastCheckup?: boolean } = {}): string {
+  const total = c.globalTotal !== undefined ? `${c.total} 条（含全局 ${c.globalTotal} 条）` : `${c.total} 条`
+  const parts = [opts.isLastCheckup === true ? `上次体检的内容检查共 ${total}，查了 ${c.checkedNow} 条` : `内容检查共 ${total}，这次查了 ${c.checkedNow} 条`]
+  if (uncheckedCount(c) > 0) {
+    parts.push(c.isHistoryUnknown === true
+      ? `还没查 ${c.never} 条`
+      : [
+          ...(c.never > 0 ? [`从没查过 ${c.never} 条`] : []),
+          ...(c.changed > 0 ? [`改过还没重查 ${c.changed} 条`] : []),
+          ...(c.awaiting > 0 ? [`等着重查 ${c.awaiting} 条`] : []),
+        ].join('、'))
+    const stop = opts.isLastCheckup === true ? undefined : COVERAGE_STOP_TEXT[c.stopped]
+    if (stop !== undefined) parts.push(stop)
+  }
+  if (c.oldestCheckedAt !== null) parts.push(`最久一次检查在 ${localDay(c.oldestCheckedAt)}`)
+  if (c.baseline === 'unavailable') parts.push('指令文件取不到，没对照')
+  if (c.baseline === 'truncated') parts.push('指令文件太长被截断，只对照了前面一部分')
+  if (!c.isReadComplete) parts.push('有记忆文件读不出或目录读不了，这个范围没读全')
+  return parts.join('；')
+}
+
+/** 覆盖不全时给的建议（memory_health）：没覆盖全的原因，建议再体检一次。全覆盖时为 undefined。 */
+export function coverageAdvice(c: CheckupCoverage): string | undefined {
+  if (isFullyCovered(c)) return undefined
+  const unchecked = uncheckedCount(c)
+  return unchecked > 0
+    ? `上次体检的内容检查没覆盖全（${unchecked} 条还没查），建议再运行一次 memory_scan`
+    : '上次体检的内容检查没覆盖全（指令文件没对照全或范围没读全），建议处理后再运行一次 memory_scan'
+}
+
 /** 体检行里 scan 与 health 共有的字段。scan 另加 issues；health 另加上次体检、promoteCandidates。 */
 export function checkupRowBase(result: ScopeHealthResult): {
   layer: 'workspace' | 'global'
@@ -235,8 +291,11 @@ export function checkupRowBase(result: ScopeHealthResult): {
   issueSummary: string
   /** 用户忽略、没计分的建议条数。 */
   ignoredCount: number
+  /** 上次体检的内容检查覆盖；上一个发布版写的、从没体检过的没有。 */
+  coverage?: CheckupCoverage
 } {
   return {
+    ...(result.coverage !== undefined ? { coverage: result.coverage } : {}),
     layer: result.scope.kind,
     ...(result.scope.kind === 'workspace' ? { workspacePath: result.scope.workspacePath } : {}),
     totalMemories: result.records.length,

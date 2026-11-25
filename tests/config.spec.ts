@@ -33,7 +33,7 @@ describe('Config schema', () => {
       scenes: PRESET_SCENES,
       removedPresetTypes: [],
       builtinDecayDays: {},
-      governance: { enabled: true, health: { sensitivity: 'normal' }, globalPromoteTarget: 'plugin-global' },
+      governance: { enabled: true, health: { sensitivity: 'normal' }, globalPromoteTarget: 'plugin-global', scan: { tokenCap: 200_000 } },
       search: { source: 'both', dialogueTokenBudget: 1500, memoryQuotes: true, queryExpansion: true, dialogueToolResults: true },
       history: { mergeWindowMinutes: 60 },
       brewingDreams: { minIntervalDays: 7, minChanges: 30, minNewMessages: 50, idleMinutes: 30, weeklyTokenCap: 2_000_000, maxChangeRatio: 0.2 },
@@ -48,7 +48,7 @@ describe('Config schema', () => {
     const value = new Config({} as never)
     const refs = [
       value.template, value.customTypes, value.scenes, value.removedPresetTypes, value.builtinDecayDays, value.snapshotTokenBudget, value.snapshotOverflow, value.evidenceLookup,
-      value.governance.enabled, value.governance.health.sensitivity, value.governance.globalPromoteTarget,
+      value.governance.enabled, value.governance.health.sensitivity, value.governance.globalPromoteTarget, value.governance.scan.tokenCap,
       value.subagent.maxSavesPerSession, value.accent,
     ]
     for (const ref of refs) expect(typeof ref.get).toBe('function')

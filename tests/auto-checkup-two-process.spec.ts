@@ -115,7 +115,7 @@ describe('自动体检：两个宿主进程共用一个记忆根', () => {
     await a.send('open')
     await a.send('idle')
     await a.waitEvent('scanned')
-    expect(Object.fromEntries((await t.checkups.list()).map(r => [r.id, r.completed]))).toEqual({ global: { startedAt: NOW, completedAt: NOW, by: 'auto' } })
+    expect(Object.fromEntries((await t.checkups.list()).map(r => [r.id, r.completed]))).toEqual({ global: { startedAt: NOW, completedAt: NOW, by: 'auto', coverage: expect.any(Object) } })
     expect((await t.decisions.list()).map(d => d.memoryIds)).toEqual([])
     const after = await readView()
     expect(after.scopes).toEqual([{ scope: { kind: 'global' }, isCheckable: true, frequency: 1, isOwn: false, lastCheckupAt: NOW, nextCheckupAt: NOW + DAY, isDue: false, isInProgress: false, failure: null, modelUnavailable: null, lastResult: expect.objectContaining({ by: 'auto' }) }])
@@ -167,7 +167,7 @@ describe('自动体检：两个宿主进程共用一个记忆根', () => {
     expect((await readGlobalClaim()).pid).toBe(b.child.pid)
     await b.send('open')
     await b.send('idle')
-    expect((await t.checkups.list()).map(r => r.completed)).toEqual([{ startedAt: NOW, completedAt: NOW, by: 'auto' }])
+    expect((await t.checkups.list()).map(r => r.completed)).toEqual([{ startedAt: NOW, completedAt: NOW, by: 'auto', coverage: expect.any(Object) }])
     expect((await readView()).scopes[0]).toMatchObject({ isInProgress: false, isDue: false })
   }, 30_000)
 
@@ -205,7 +205,7 @@ describe('自动体检：两个宿主进程共用一个记忆根', () => {
     await b.send('idle')
     await b.waitEvent('scanned')
     // 缓存、账本、完成记录里都只有 b 的这次
-    expect((await t.checkups.list()).map(r => r.completed)).toEqual([{ startedAt: NOW + 61_000, completedAt: NOW + 61_000, by: 'auto' }])
+    expect((await t.checkups.list()).map(r => r.completed)).toEqual([{ startedAt: NOW + 61_000, completedAt: NOW + 61_000, by: 'auto', coverage: expect.any(Object) }])
     expect(await t.decisions.list()).toEqual([])
     expect((await t.cache.list()).map(([, c]) => [c.scannedAt, c.findings])).toEqual([[NOW + 61_000, []]])
     expect((await readView()).scopes[0]).toMatchObject({ isInProgress: false, lastCheckupAt: NOW + 61_000 })

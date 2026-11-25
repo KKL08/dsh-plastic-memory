@@ -76,6 +76,17 @@ describe('buildCrossWsPrompt / parseCrossWsResult', () => {
     expect(parseCrossWsResult('不是 JSON', known)).toBeNull()
   })
 
+  it('解析：主题和建议里的密钥（高危和疑似）都遮掉，再交给调用方（进结果库、返回给界面）', () => {
+    const parsed = parseCrossWsResult(JSON.stringify({
+      duplicates: [{ topic: `密钥 ${FAKE_SECRET.sk}，db password: SecretPass123`, workspaces: ['/a', '/b'], suggestion: `换掉 ${FAKE_SECRET.github}` }],
+    }), new Set(['/a', '/b']))!
+    const text = JSON.stringify(parsed)
+    expect(text).not.toContain(FAKE_SECRET.sk)
+    expect(text).not.toContain('SecretPass123')
+    expect(text).not.toContain(FAKE_SECRET.github)
+    expect(parsed[0]!.topic).toContain(SECRET_MASK)
+  })
+
   it('runCrossWsScan：LLM 抛出或输出无法解析 → failed（调用方降级到实体保底）', async () => {
     const byWs = new Map([['/a', [record({})]], ['/b', [record({})]]])
     const boom = await runCrossWsScan(byWs, [], { complete: async () => { throw new Error('x') } })
