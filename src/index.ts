@@ -131,6 +131,8 @@ export interface Config {
     idleMinutes: Volatile<number>
     /** 最近七天后台用量的上限（token）：到了就不再开始新的一次；0 为不限。 */
     weeklyTokenCap: Volatile<number>
+    /** 一次运行最多改动本范围在用记忆的比例（0 到 1）；整理的各步共用这一份，同一条记忆做几个操作只算一条。 */
+    maxChangeRatio: Volatile<number>
   }
   index: {
     /** 一个作用域（全局、每个项目各算）里主题数的上限；到了上限不再新建主题。设置页不露，配置文件可改；改了下一次整理生效。 */
@@ -194,6 +196,7 @@ export const Config = z.object({
     minNewMessages: z.number().default(DREAMS_DEFAULTS.minNewMessages).volatile(),
     idleMinutes: z.number().default(DREAMS_DEFAULTS.idleMinutes).volatile(),
     weeklyTokenCap: z.number().default(DREAMS_DEFAULTS.weeklyTokenCap).volatile(),
+    maxChangeRatio: z.number().default(DREAMS_DEFAULTS.maxChangeRatio).volatile(),
   }),
   index: z.object({
     maxTopics: z.natural().min(1).default(INDEX_MAX_TOPICS_DEFAULT).volatile(),
@@ -316,6 +319,7 @@ export async function apply(ctx: Context, config: Config) {
   const dreamsConfig = () => resolveDreamsConfig({
     minIntervalDays: config.brewingDreams.minIntervalDays.get(), minChanges: config.brewingDreams.minChanges.get(), minNewMessages: config.brewingDreams.minNewMessages.get(),
     idleMinutes: config.brewingDreams.idleMinutes.get(), weeklyTokenCap: config.brewingDreams.weeklyTokenCap.get(),
+    maxChangeRatio: config.brewingDreams.maxChangeRatio.get(),
   })
   // 后台模型的选择表：自动体检、梦境各一个键，设置页经 /memory set-model-selection 改，几个宿主进程共用一份
   const selections = new ModelSelectionStore(sidecar.modelSelections)

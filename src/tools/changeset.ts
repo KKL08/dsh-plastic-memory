@@ -8,7 +8,7 @@ import { mergeLinks, resolveLinks } from '../links.ts'
 import { newWriteOp } from '../storage/table.ts'
 import { layerOf } from '../storage/history.ts'
 import type { PendingDecisionsStore } from '../governance/decisions.ts'
-import type { SnapshotRecord } from '../governance/schema.ts'
+import { kindOf, type SnapshotRecord } from '../governance/schema.ts'
 import type { SnapshotStore } from '../governance/snapshots.ts'
 import { CHANGE_RECEIPT_STEP, changeReceiptStep, changeUndoneStep, ledgerSteps } from '../governance/op-steps.ts'
 import { writeGate } from '../governance/write-gate.ts'
@@ -56,14 +56,19 @@ export interface ApplyOptions {
    * 后台运行让路用；整批退的那一批不看它（要么全做要么全退）。
    */
   shouldStop?: () => boolean
+  /**
+   * 每个操作（或每一组）开始之前问一次放不放行：applied 是这一批到这时做成了、仍留在盘上的（见 isOnDisk：撤回干净的组不算）。不放行的这一项（这一组）
+   * 不做、各记一条 quota，后面的照问。记忆梦境按一次运行的改动量上限用它；整批退的那一批不看它。
+   */
+  admit?: (unit: readonly ChangeOp[], applied: readonly OpOutcome[]) => boolean
 }
 
 /**
  * has-secret：要软删的那条含密钥；link-invalid：要挂的 id 不合规（detail 是给模型看的原因）；invalid：拼出来的记录过不了格式校验；
  * changed：落盘那一刻文件被手改了；locked：这个发起方不许改这条（见 writeGate）；group：同组的另一步没过，这一步跟着不做；
- * stopped：调用方叫停了（shouldStop），这一项没开始。
+ * stopped：调用方叫停了（shouldStop），这一项没开始；quota：调用方不放行（admit，记忆梦境一次运行的改动量上限），这一项没做。
  */
-export type ApplySkipReason = SkipReason | 'has-secret' | 'link-invalid' | 'invalid' | 'changed' | 'locked' | 'group' | 'stopped'
+export type ApplySkipReason = SkipReason | 'has-secret' | 'link-invalid' | 'invalid' | 'changed' | 'locked' | 'group' | 'stopped' | 'quota'
 
 /** 一组的结果。applied：全做成了；skipped：第一步之前的核对没过，什么都没写；rolled-back：做到一半有一步不成，已做的按回执撤回了。 */
 export interface GroupResult {
@@ -122,6 +127,13 @@ export async function applyChangeset(ops: readonly ChangeOp[], opts: ApplyOption
       for (const rest of segments.slice(i)) for (const op of rest.ops) outcomes.push({ kind: 'skipped', opId: op.id, memoryId: op.memoryId, reason: 'stopped' })
       return { ...done(), isStopped: true }
     }
+    if (opts.isAllOrNothing !== true && opts.admit !== undefined) {
+      const applied = outcomes.filter(o => o.kind === 'applied' && isOnDisk(o, groups, ops))
+      if (!opts.admit(segment.ops, applied)) {
+        for (const op of segment.ops) outcomes.push({ kind: 'skipped', opId: op.id, memoryId: op.memoryId, reason: 'quota' })
+        continue
+      }
+    }
     if (segment.group !== undefined) {
       const r = await applyGroup(segment.group, segment.ops, segment.isBroken, opts, deps, progress)
       outcomes.push(...r.outcomes)
@@ -142,6 +154,16 @@ export async function applyChangeset(ops: readonly ChangeOp[], opts: ApplyOption
     }
   }
   return done()
+}
+
+/**
+ * 做成了的这一项现在还算不算这批留在盘上的：不在组里、或组做成了的算；组撤回了的，撤回出错留着（kept）、
+ * 已被别处接着改过撤不回（unrecorded）的那几条记忆上的仍算（写下过、没撤回），其余撤干净的不算。
+ */
+export function isOnDisk(outcome: OpOutcome, groups: readonly GroupResult[], ops: readonly ChangeOp[]): boolean {
+  const group = ops.find(op => op.id === outcome.opId)?.group
+  const result = group === undefined ? undefined : groups.find(g => g.group === group)
+  return result === undefined || result.state === 'applied' || [...(result.kept ?? []), ...(result.unrecorded ?? [])].includes(outcome.memoryId)
 }
 
 interface Segment { group?: string; ops: ChangeOp[]; /** 同一个 group 的操作不连续：整组不做。 */ isBroken: boolean }
@@ -261,12 +283,18 @@ export async function settleOpenGroups(deps: ChangesetDeps, opts: { by: string; 
           const left = await rollBack(receipts, { entryId: entry.id, by: opts.by }, deps)
           if (left.kept === undefined) await deps.decisions.closeGroup(entry.id, group)
         }
-        if (entry.id !== opts.own) await deps.decisions.removeEmptyRun(entry.id)
+        // 记忆梦境的批次：还有记忆的回执等着补记（文件已提交）时条目留着，不然那次改动就没了撤销入口
+        if (entry.id !== opts.own) await deps.decisions.removeEmptyRun(entry.id, kindOf(entry) === 'brewing-dreams-run' ? () => hasPendingReceipts(deps.store, entry.id) : undefined)
       } finally {
         await release().catch(() => {})
       }
     }
   })
+}
+
+/** 这条条目还有记忆的回执等着补记：操作日志里有记它回执的步骤没做完（文件提交了，记账失败）。 */
+export function hasPendingReceipts(store: Pick<MemoryStore, 'hasPendingStep'>, entryId: string): boolean {
+  return store.hasPendingStep(step => step.kind === CHANGE_RECEIPT_STEP && (step as { entryId?: unknown }).entryId === entryId)
 }
 
 /** 把一条条目上的回执全部按逆序撤掉（调用方结账没成时用）。分类同整批退。 */

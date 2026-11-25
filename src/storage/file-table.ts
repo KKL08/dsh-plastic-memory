@@ -1446,6 +1446,11 @@ export class FileTable implements MemoryTable {
     return this.isJournaling() && this.journal!.pending().some(row => row.op === op)
   }
 
+  /** 操作日志里还等着补做的步骤有没有一个对得上 match。没有操作日志时没有补做，一律为否。 */
+  hasPendingStep(match: (step: OpStep) => boolean): boolean {
+    return this.isJournaling() && this.journal!.pending().some(row => Array.isArray(row.steps) && row.steps.some(match))
+  }
+
   private async syncTopicIndex(dir: string, active: readonly LocatedRecord[], now: number, isComplete: boolean): Promise<'written' | 'unchanged' | 'retry'> {
     try {
       const listed = resolveDuplicates(active).filter(l => !isPendingDelegated(l.record))

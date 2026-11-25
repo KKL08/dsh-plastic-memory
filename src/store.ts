@@ -265,6 +265,11 @@ export class MemoryStore {
     return this.table.isOpPending?.(op) ?? false
   }
 
+  /** 操作日志里还等着补做的步骤有没有一个对得上 match（见 MemoryTable.hasPendingStep）。 */
+  hasPendingStep(match: (step: OpStep) => boolean): boolean {
+    return this.table.hasPendingStep?.(match) ?? false
+  }
+
   /**
    * 指向这条记忆的链接（前提、相关、取代，含归档里被取代、删除的记忆指过来的）。看的范围是能指向它的全部目录：
    * 项目记忆看本项目；全局记忆看全局和所有项目（项目记忆的关联和前提可以指向全局）。

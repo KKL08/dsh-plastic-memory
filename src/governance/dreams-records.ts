@@ -64,14 +64,16 @@ export class DreamsStore {
   /**
    * 一次运行开始：记成没做完（原因先写 lost，进程之后任何时候退出，下次都按上次没做完处理）。
    * 运行 id 就是它在账本里的批次条目 id（用不用得上都先记下）；上一次留下还没收尾的条目 id 接着带在这条记录里，
-   * 收尾成了才由 stop / complete 去掉。返回上一次留下的没做完的运行（没有为 undefined）。持有这个范围的认领时调用。
+   * 收尾成了才由 stop / complete 去掉。上一次留下的已用名额（quotaUsed）同样接着带，做完才清。
+   * 返回上一次留下的没做完的运行（没有为 undefined）。持有这个范围的认领时调用。
    */
   async begin(scope: Scope, runId: string, startedAt: number): Promise<DreamsUnfinished | undefined> {
     const key = scopeKey(scope)
     let previous: DreamsUnfinished | undefined
     await this.records.update(key, (cur) => {
       previous = cur?.unfinished
-      return { ...cur, id: key, unfinished: { runId, startedAt, stoppedAt: startedAt, reason: 'lost', entryIds: [...(previous?.entryIds ?? []), runId] } }
+      const quota = previous?.quotaUsed !== undefined ? { quotaUsed: previous.quotaUsed } : {}
+      return { ...cur, id: key, unfinished: { runId, startedAt, stoppedAt: startedAt, reason: 'lost', entryIds: [...(previous?.entryIds ?? []), runId], ...quota } }
     })
     return previous
   }
@@ -93,9 +95,9 @@ export class DreamsStore {
 
   /**
    * 一次运行没做完：记下停在什么时候、为什么；出错的连续出错次数加一。同样核对运行 id。
-   * entryIds：下次还要收尾的账本条目（这次的，加上这次没能收掉的以前的）。
+   * entryIds：下次还要收尾的账本条目（这次的，加上这次没能收掉的以前的）。quotaUsed：到这次为止没做完的几次合起来用掉的名额，不给就不改。
    */
-  async stop(scope: Scope, runId: string, stopped: { stoppedAt: number; reason: string; entryIds: string[] }, lastResult: DreamsLastResult): Promise<boolean> {
+  async stop(scope: Scope, runId: string, stopped: { stoppedAt: number; reason: string; entryIds: string[]; quotaUsed?: number }, lastResult: DreamsLastResult): Promise<boolean> {
     const key = scopeKey(scope)
     return this.records.update(key, (cur) => {
       if (cur?.unfinished?.runId !== runId) return undefined

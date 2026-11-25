@@ -20,12 +20,14 @@ export interface DreamsConfig {
   idleMinutes: number
   /** 最近七天后台用量的上限（token）；0 为不限。 */
   weeklyTokenCap: number
+  /** 一次运行最多改动本范围在用记忆的比例，取 (0, 1]。 */
+  maxChangeRatio: number
 }
 
-export const DREAMS_DEFAULTS: DreamsConfig = { minIntervalDays: 7, minChanges: 30, minNewMessages: 50, idleMinutes: 30, weeklyTokenCap: 2_000_000 }
+export const DREAMS_DEFAULTS: DreamsConfig = { minIntervalDays: 7, minChanges: 30, minNewMessages: 50, idleMinutes: 30, weeklyTokenCap: 2_000_000, maxChangeRatio: 0.2 }
 
 /**
- * 配置里读到的值整理成可用的：间隔、阈值、空闲分钟数要是正数，用量上限要不小于 0；不是的那一项用默认值。
+ * 配置里读到的值整理成可用的：间隔、阈值、空闲分钟数要是正数，用量上限要不小于 0，改动比例在 (0, 1] 里；不是的那一项用默认值。
  * badKeys 是用了默认值的键（调用方记日志）。
  */
 export function resolveDreamsConfig(raw: Partial<Record<keyof DreamsConfig, unknown>>): { config: DreamsConfig; badKeys: Array<keyof DreamsConfig> } {
@@ -34,7 +36,8 @@ export function resolveDreamsConfig(raw: Partial<Record<keyof DreamsConfig, unkn
   for (const key of Object.keys(DREAMS_DEFAULTS) as Array<keyof DreamsConfig>) {
     const value = raw[key]
     if (value === undefined) continue
-    const isOk = typeof value === 'number' && Number.isFinite(value) && (key === 'weeklyTokenCap' ? value >= 0 : value > 0)
+    const isOk = typeof value === 'number' && Number.isFinite(value)
+      && (key === 'weeklyTokenCap' ? value >= 0 : key === 'maxChangeRatio' ? value > 0 && value <= 1 : value > 0)
     if (isOk) config[key] = value
     else badKeys.push(key)
   }
@@ -69,6 +72,14 @@ export function countChanges(marks: Readonly<Record<string, string>> | undefined
   for (const [id, fingerprint] of Object.entries(current)) if (marks[id] !== fingerprint) changed++
   for (const id of Object.keys(marks)) if (!(id in current)) changed++
   return changed
+}
+
+/**
+ * 一次运行最多改动几条记忆：本范围在用条数乘比例取整，至少 1（小库不算成 0）。同一次运行里各步共用这一份，
+ * 同一条记忆做几个操作只算一条。
+ */
+export function changeQuota(activeCount: number, ratio: number): number {
+  return Math.max(1, Math.floor(activeCount * ratio))
 }
 
 export interface UsageRun { at: number; tokens: number }

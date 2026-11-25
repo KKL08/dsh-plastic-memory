@@ -80,9 +80,11 @@ export type ModelSelectionRow = z.infer<typeof modelSelectionRowSchema>
  * - completed：最近一次做完的运行。间隔从它算，没做完的运行不动它。
  * - unfinished：最近一次没做完的运行；运行一开始就写上（原因先记成 lost），做完才清。reason 开放取值
  *   （yielded 让路、failed 出错、lost 认领被接手或进程中途退出、model-unavailable），不认识的按 failed 待。
- *   entryId 是那次运行用过的账本条目。
+ *   entryIds 是还要收尾的账本条目。quotaUsed 是没做完的几次运行合起来已经用掉的改动量名额：续跑从这个数接着扣，做完清掉；
+ *   没有这一项（上一版写的）按 0 算。
  * - failure：连续出错的次数和最近一次的时刻；让路、认领被接手不计，做完一次清零。
- * - lastResult：最近一次运行的结果（做完没做完都记），给界面显示。
+ * - lastResult：最近一次运行的结果（做完没做完都记），给界面显示。skipped 是这次跳过没做的操作（依据变了、目标锁定、不在用、
+ *   超出改动量上限等），items 只留前若干条（tools/dreams-run.ts 的 DREAMS_SKIPPED_MAX），total 是总数；kind、reason 开放取值。
  * - runs：只在 `usage` 那条上，一次运行一行、逐次累加，只留最近七天的。
  */
 const dreamsStepSchema = z.object({ name: z.string(), state: z.string() })
@@ -90,7 +92,10 @@ export const dreamsRecordSchema = z.object({
   id: z.string(),
   enabled: z.boolean().optional(),
   completed: z.object({ runId: z.string(), startedAt: z.number(), endedAt: z.number() }).optional(),
-  unfinished: z.object({ runId: z.string(), startedAt: z.number(), stoppedAt: z.number(), reason: z.string(), entryIds: z.array(z.string()).optional() }).optional(),
+  unfinished: z.object({
+    runId: z.string(), startedAt: z.number(), stoppedAt: z.number(), reason: z.string(), entryIds: z.array(z.string()).optional(),
+    quotaUsed: z.number().int().nonnegative().optional(),
+  }).optional(),
   failure: z.object({ count: z.number().int().positive(), failedAt: z.number() }).optional(),
   lastResult: z.object({
     runId: z.string(),
@@ -101,6 +106,10 @@ export const dreamsRecordSchema = z.object({
     usageTokens: z.number(),
     modelFallback: z.object({ to: z.string(), reason: z.string() }).optional(),
     entryId: z.string().optional(),
+    skipped: z.object({
+      items: z.array(z.object({ step: z.string(), kind: z.string(), target: z.string(), reason: z.string() })),
+      total: z.number(),
+    }).optional(),
   }).optional(),
   runs: z.array(z.object({ runId: z.string(), at: z.number(), tokens: z.number() })).optional(),
 })

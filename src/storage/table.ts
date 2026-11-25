@@ -252,6 +252,8 @@ export interface MemoryTable {
   undoIndexPlan?(dir: string, plan: IndexPlan, opts?: { steps?: (op: string) => readonly OpStep[] }): Promise<IndexUndoOutcome>
   /** 这个操作是不是提交了、还有步骤等着补做。 */
   isOpPending?(op: string): boolean
+  /** 操作日志里还等着补做的步骤有没有一个对得上 match。 */
+  hasPendingStep?(match: (step: OpStep) => boolean): boolean
   /**
    * 这几个记忆目录（各含 .archive/）里指向 id 的链接，按 sortLinkRefs 排好。有派生库的实现先按文件签名核对、以文件为准，
    * 手改了还没整份核对的也查得到；代价是逐层列目录、逐个文件取签名。不提供时由调用方逐个读目录算（结果相同）。
