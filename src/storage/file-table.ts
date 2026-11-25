@@ -6,7 +6,7 @@ import { basename, dirname, join, relative } from 'node:path'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { Scope } from '../scope.ts'
 import {
-  byPosition, resolveDuplicates, pickLiveFirst, isScopeTarget, scopesOf, newWriteOp, outgoingLinks, sortLinkRefs,
+  byPosition, resolveDuplicates, pickLiveFirst, isIncompleteNote, isScopeTarget, scopesOf, newWriteOp, outgoingLinks, sortLinkRefs,
   type LinkQuery, type LinkRef, type MemoryTable, type WriteOp, type TopicIntent, type OpStep, type OpStepHandler, type MemoryLogger, type DirectoryNote, type QuarantineEntry, type LocatedFile, type LocatedRecord,
   type LocateTarget, type LocateOptions, type ScopeReadOptions, type ScopeReadResult, type WorkspaceDirListing, type KeywordMatch,
 } from './table.ts'
@@ -191,11 +191,6 @@ interface ListingCheck { isListed: boolean }
 
 function errnoCode(err: unknown): string | undefined {
   return (err as NodeJS.ErrnoException | undefined)?.code
-}
-
-/** 读得不全的目录说明：目录读不了、项目目录缺标记，里面的记忆没读到。 */
-function isIncompleteNote(note: DirectoryNote): boolean {
-  return note.code === 'dir-unreadable' || note.code === 'marker-missing'
 }
 
 /**
@@ -831,7 +826,7 @@ export class FileTable implements MemoryTable {
     for (const row of verified.rows) {
       if (row.sourceId === null) continue
       for (const link of row.links) {
-        if (link.targetId === id) refs.push({ sourceId: row.sourceId, kind: link.kind, ...(link.digest !== undefined ? { digest: link.digest } : {}) })
+        if (link.targetId === id) refs.push({ sourceId: row.sourceId, kind: link.kind, ...(link.digest !== undefined ? { digest: link.digest } : {}), sourceDir: dir })
       }
     }
     return { refs, isComplete: verified.isComplete }
@@ -854,7 +849,8 @@ export class FileTable implements MemoryTable {
     const found = this.index.linksToTarget(id, levels.map(l => l.level))
     if (found === undefined) return this.linksTo(id, dirs)
     const unreconciled = new Set(found.unreconciled)
-    const refs: LinkRef[] = found.refs.filter(r => !unreconciled.has(r.level)).map(({ level: _level, ...ref }) => ref)
+    const dirOf = new Map(levels.map(l => [l.level, l.dir]))
+    const refs: LinkRef[] = found.refs.filter(r => !unreconciled.has(r.level)).map(({ level, ...ref }) => ({ ...ref, sourceDir: dirOf.get(level)! }))
     let isComplete = !directoryNotes.some(isIncompleteNote)
     for (const { level, dir, loc } of levels.filter(l => unreconciled.has(l.level))) {
       const verified = await this.verifiedRefsTo(id, level, dir, loc, true)

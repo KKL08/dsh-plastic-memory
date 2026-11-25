@@ -360,6 +360,11 @@ All notable changes to this project are documented here. The format follows
   it off.
 - When `memory_search` searches past conversations only, it also looks for
   matching memories and moves the turns they were saved from up the results.
+- Each memory on the memory page has a Details button. It shows the memory's
+  card and its past versions, newest first: when each applied, why it changed,
+  when the fact held and the session it came from. Versions merged in from
+  another memory name that memory. Clicking a version shows its name and
+  content, and Back to list returns to the row it was opened from.
 
 ### Changed
 - Testing: `pnpm host:contract` runs the default-model automatic checkup

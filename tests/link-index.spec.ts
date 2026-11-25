@@ -19,6 +19,8 @@ import { SidecarStore } from '../src/storage/sidecar.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { commitChange } from '../src/commit-change.ts'
 import { isCurrentPremise, premiseDigest } from '../src/links.ts'
+import { sortLinkRefs } from '../src/storage/table.ts'
+import { InMemoryTable } from './helpers/in-memory-table.ts'
 
 // 链接反向索引：派生库记下谁经前提、相关、取代指向谁。真文件系统、真 node:sqlite。
 
@@ -108,14 +110,15 @@ describe('链接反向索引', () => {
       'mem_new→supersedes:mem_old', 'mem_old→premise:mem_page',
     ])
     const toPage = (await store.linksTo('mem_page', scopeAt(WS))).refs
+    // 每条带来源所在的记忆目录（归档里的也记作用域目录本身）
     expect(toPage).toEqual([
-      { sourceId: 'mem_decision', kind: 'premise', digest: 'dg_1' },
-      { sourceId: 'mem_fact', kind: 'related' },
-      { sourceId: 'mem_old', kind: 'premise', digest: 'dg_0' },
+      { sourceId: 'mem_decision', kind: 'premise', digest: 'dg_1', sourceDir: wsDir() },
+      { sourceId: 'mem_fact', kind: 'related', sourceDir: wsDir() },
+      { sourceId: 'mem_old', kind: 'premise', digest: 'dg_0', sourceDir: wsDir() },
     ])
-    expect((await store.linksTo('mem_old', scopeAt(WS))).refs).toEqual([{ sourceId: 'mem_new', kind: 'supersedes' }])
+    expect((await store.linksTo('mem_old', scopeAt(WS))).refs).toEqual([{ sourceId: 'mem_new', kind: 'supersedes', sourceDir: wsDir() }])
     // 全局记忆能被全局和各项目的记忆指向
-    expect((await store.linksTo('mem_global', { kind: 'global' })).refs).toEqual([{ sourceId: 'mem_fact', kind: 'related' }])
+    expect((await store.linksTo('mem_global', { kind: 'global' })).refs).toEqual([{ sourceId: 'mem_fact', kind: 'related', sourceDir: wsDir() }])
   })
 
   it('改掉、删掉关联也增量记下', async () => {
@@ -142,7 +145,7 @@ describe('链接反向索引', () => {
     const { store } = open()
     await store.create(record({ id: 'mem_page', name: '状态页' }))
     await store.create(record({ id: 'mem_fact', name: '事实', related: ['mem_page'] }))
-    expect((await store.linksTo('mem_page', scopeAt(WS))).refs).toEqual([{ sourceId: 'mem_fact', kind: 'related' }])
+    expect((await store.linksTo('mem_page', scopeAt(WS))).refs).toEqual([{ sourceId: 'mem_fact', kind: 'related', sourceDir: wsDir() }])
     const file = (await store.locate('mem_fact', scopeAt(WS)))!.filePath
     await writeFile(file, (await readFile(file, 'utf8')).replace(/^related:\n  - mem_page\n/m, ''))
     expect((await store.linksTo('mem_page', scopeAt(WS))).refs).toEqual([])
@@ -183,7 +186,7 @@ describe('链接反向索引', () => {
     table.afterWrite = async (filePath) => { await writeFile(filePath, encodeRecord({ ...fact, related: ['mem_c'] }, {})) }
     await store.update(fact, r => ({ ...r, related: ['mem_b'] }), scopeAt(WS))
     expect((await store.get('mem_fact', scopeAt(WS)))!.related).toEqual(['mem_c'])
-    expect((await store.linksTo('mem_c', scopeAt(WS))).refs).toEqual([{ sourceId: 'mem_fact', kind: 'related' }])
+    expect((await store.linksTo('mem_c', scopeAt(WS))).refs).toEqual([{ sourceId: 'mem_fact', kind: 'related', sourceDir: wsDir() }])
     expect((await store.linksTo('mem_b', scopeAt(WS))).refs).toEqual([])
   })
 
@@ -193,10 +196,31 @@ describe('链接反向索引', () => {
     await store.create(record({ id: 'mem_decision', name: '项目决定', premises: [{ id: 'mem_page', digest: 'dg_v2' }] }))
     for (const query of [store.linksTo.bind(store), store.indexedLinksTo.bind(store)]) {
       expect((await query('mem_page', { kind: 'global' })).refs).toEqual([
-        { sourceId: 'mem_decision', kind: 'premise', digest: 'dg_v1' },
-        { sourceId: 'mem_decision', kind: 'premise', digest: 'dg_v2' },
+        { sourceId: 'mem_decision', kind: 'premise', digest: 'dg_v1', sourceDir: join(root, GLOBAL_DIR) },
+        { sourceId: 'mem_decision', kind: 'premise', digest: 'dg_v2', sourceDir: wsDir() },
       ])
     }
+  })
+
+  it('同 id 的两份副本引了同一版：两份各算一条，按来源目录分开', async () => {
+    const { store } = open()
+    await store.create(record({ id: 'mem_decision', name: '全局决定', scope: 'global', workspacePath: undefined, premises: [{ id: 'mem_page', digest: 'dg_same' }] }))
+    await store.create(record({ id: 'mem_decision', name: '项目决定', premises: [{ id: 'mem_page', digest: 'dg_same' }] }))
+    for (const query of [store.linksTo.bind(store), store.indexedLinksTo.bind(store)]) {
+      expect((await query('mem_page', { kind: 'global' })).refs).toEqual([
+        { sourceId: 'mem_decision', kind: 'premise', digest: 'dg_same', sourceDir: join(root, GLOBAL_DIR) },
+        { sourceId: 'mem_decision', kind: 'premise', digest: 'dg_same', sourceDir: wsDir() },
+      ])
+    }
+  })
+
+  it('表不提供反向查询时逐个读目录算：同样带来源目录', async () => {
+    const table = new InMemoryTable('/in-memory', () => NOW)
+    const stats = new InMemoryBatchKvTable<RecallStats>()
+    const store = new MemoryStore(table, quietLog, stats)
+    await store.create(record({ id: 'mem_page', name: '状态页' }))
+    await store.create(record({ id: 'mem_fact', name: '事实', related: ['mem_page'] }))
+    expect((await store.linksTo('mem_page', scopeAt(WS))).refs).toEqual([{ sourceId: 'mem_fact', kind: 'related', sourceDir: join('/in-memory', workspaceDirName(WS)) }])
   })
 
   it('同 id 的两份决定各引一版：合并窗口里接着做状态变化，被引的那一版留档', async () => {
@@ -218,6 +242,25 @@ describe('链接反向索引', () => {
   })
 })
 
+describe('反向查询结果的排序与去重', () => {
+  it('同一来源、同一种、同一摘要：来源目录不同的都留着，相同的只留一条；先按来源 id，再按种类、摘要、来源目录排', () => {
+    const refs = sortLinkRefs([
+      { sourceId: 'mem_b', kind: 'related', sourceDir: '/r/ws' },
+      { sourceId: 'mem_a', kind: 'premise', digest: 'dg', sourceDir: '/r/ws' },
+      { sourceId: 'mem_a', kind: 'premise', digest: 'dg', sourceDir: '/r/global' },
+      { sourceId: 'mem_a', kind: 'premise', digest: 'dg', sourceDir: '/r/ws' },
+      { sourceId: 'mem_a', kind: 'related' },
+      { sourceId: 'mem_a', kind: 'related' },
+    ])
+    expect(refs).toEqual([
+      { sourceId: 'mem_a', kind: 'premise', digest: 'dg', sourceDir: '/r/global' },
+      { sourceId: 'mem_a', kind: 'premise', digest: 'dg', sourceDir: '/r/ws' },
+      { sourceId: 'mem_a', kind: 'related' },
+      { sourceId: 'mem_b', kind: 'related', sourceDir: '/r/ws' },
+    ])
+  })
+})
+
 describe('写锁内的按目标查', () => {
   it('只看库：手改加的前提到整份核对之后才算进来；带签名的完整查询当场就看得到', async () => {
     const { store } = open()
@@ -226,7 +269,7 @@ describe('写锁内的按目标查', () => {
     await store.maintain(scopeAt(WS))
     const file = (await store.locate('mem_decision', scopeAt(WS)))!.filePath
     await writeFile(file, (await readFile(file, 'utf8')).replace(/^id: (.*)$/m, 'id: $1\npremises:\n  - id: mem_page\n    digest: dg_hand'))
-    const expected = [{ sourceId: 'mem_decision', kind: 'premise', digest: 'dg_hand' }]
+    const expected = [{ sourceId: 'mem_decision', kind: 'premise', digest: 'dg_hand', sourceDir: wsDir() }]
     expect(await store.indexedLinksTo('mem_page', scopeAt(WS))).toEqual({ refs: [], isComplete: true })
     expect((await store.linksTo('mem_page', scopeAt(WS))).refs).toEqual(expected)
     await store.maintain(scopeAt(WS))
@@ -238,7 +281,7 @@ describe('写锁内的按目标查', () => {
     await store.create(record({ id: 'mem_page', name: '状态页' }))
     await store.create(record({ id: 'mem_decision', name: '决定', premises: [{ id: 'mem_page', digest: 'dg_1' }] }))
     expect(index.isLinkLevelReconciled(wsDir())).toBe(false)
-    const expected = { refs: [{ sourceId: 'mem_decision', kind: 'premise', digest: 'dg_1' }], isComplete: true }
+    const expected = { refs: [{ sourceId: 'mem_decision', kind: 'premise', digest: 'dg_1', sourceDir: wsDir() }], isComplete: true }
     expect(await store.indexedLinksTo('mem_page', scopeAt(WS))).toEqual(expected)
     expect(index.isLinkLevelReconciled(wsDir())).toBe(true)
     expect(index.isLinkLevelReconciled(join(wsDir(), ARCHIVE_DIR))).toBe(true)
@@ -274,7 +317,7 @@ describe('写锁内的按目标查', () => {
     expect(await isCurrentPremise(store, page)).toBe(true)
     // 这一次按文件核对过、补上了：之后照常只查库
     expect(index.isLinkLevelReconciled(wsDir())).toBe(true)
-    expect((await store.indexedLinksTo(page.id, scopeAt(WS))).refs).toEqual([{ sourceId: 'mem_decision', kind: 'premise', digest: premiseDigest(page) }])
+    expect((await store.indexedLinksTo(page.id, scopeAt(WS))).refs).toEqual([{ sourceId: 'mem_decision', kind: 'premise', digest: premiseDigest(page), sourceDir: wsDir() }])
   })
 
   it('整份核对时有文件读不出：不记核对过，原来记着的也作废，按被引用算', async () => {
@@ -290,7 +333,7 @@ describe('写锁内的按目标查', () => {
       await store.maintain(scopeAt(WS))
       expect(index.isLinkLevelReconciled(wsDir())).toBe(false)
       // 读不出的那份文件签名没变：按库里记着的、签名对得上的行算，它的前提照样查得到
-      expect((await store.indexedLinksTo(page.id, scopeAt(WS))).refs).toEqual([{ sourceId: 'mem_decision', kind: 'premise', digest: premiseDigest(page) }])
+      expect((await store.indexedLinksTo(page.id, scopeAt(WS))).refs).toEqual([{ sourceId: 'mem_decision', kind: 'premise', digest: premiseDigest(page), sourceDir: wsDir() }])
     } finally {
       await chmod(file, 0o600)   // 恢复权限，否则 afterEach 的 rm 会失败
     }
@@ -388,7 +431,7 @@ describe('写锁内的按目标查', () => {
     await seedLinked(store)
     await store.maintain(scopeAt(WS))
     expect(linksOf(index)).toContain('mem_decision→premise:mem_page')
-    expect((await store.indexedLinksTo('mem_old', scopeAt(WS))).refs).toEqual([{ sourceId: 'mem_new', kind: 'supersedes' }])
+    expect((await store.indexedLinksTo('mem_old', scopeAt(WS))).refs).toEqual([{ sourceId: 'mem_new', kind: 'supersedes', sourceDir: wsDir() }])
     const check = new DatabaseSync(indexPath())
     expect((check.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(3)
     check.close()

@@ -69,6 +69,10 @@ export interface NavTarget {
    */
   newItem?: NewItemJump
   /**
+   * 记忆查看直接打开 memoryId 那一条的详情（关联图上点了别的作用域的邻居，左栏切过去接着看它）。和 level 一样只对写它的那次导航有效。
+   */
+  detail?: true
+  /**
    * 从对话（右侧栏、对话卡、输入框「记忆」按钮）进来。那个对话就是当前选中的会话：它的项目在标题行和左栏标「当前对话」，
    * 没有记忆也列进左栏。
    */
@@ -110,7 +114,7 @@ export interface NavStore {
    * 没有（点左栏图标、宿主恢复上次的面板）就按默认落点。
    */
   takeEntry(): boolean
-  /** 页内用：只改给出的字段；组定位（level）和跳到「新」（newItem）不沿用。 */
+  /** 页内用：只改给出的字段；组定位（level）、跳到「新」（newItem）和直接打开详情（detail）不沿用。 */
   update(patch: Partial<NavTarget>): void
   /** 跳到宿主插件页里本插件的配置（记忆页的「设置」）；出口不可用时什么都不做。 */
   openSettings(): void
@@ -138,7 +142,7 @@ export function createNavStore(
     navigate: set,
     enter(next) { entered = true; set(toNavTarget(next)) },
     takeEntry() { const was = entered; entered = false; return was },
-    update(patch) { const { level: _level, newItem: _newItem, ...rest } = target; set({ ...rest, ...patch }) },
+    update(patch) { const { level: _level, newItem: _newItem, detail: _detail, ...rest } = target; set({ ...rest, ...patch }) },
     openSettings: () => { exits.settings?.() },
     openSidebarTab: () => { exits.sidebarTab?.() },
     canOpen: exit => exits[exit] !== undefined,

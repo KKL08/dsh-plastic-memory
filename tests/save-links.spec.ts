@@ -19,6 +19,7 @@ import { scopeAt } from '../src/scope.ts'
 import { MEMORY_ID_MAX_LENGTH, type MemoryRecord } from '../src/record-schema.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { OpJournal } from '../src/storage/op-journal.ts'
+import { workspaceDirName } from '../src/storage/paths.ts'
 import { createRootLock } from '../src/storage/root-lock.ts'
 import { candidate, record } from './helpers/record.ts'
 import { noInstructions } from './helpers/instructions.ts'
@@ -31,6 +32,8 @@ const WS = '/tmp/pm-links'
 const OTHER_WS = '/tmp/pm-links-other'
 const quietLog = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} }
 const registry = buildTypeRegistry({ template: 'office', customTypes: {} })
+/** 反向查询带的来源目录：本项目的记忆目录。 */
+const wsDir = () => join(root, workspaceDirName(WS))
 
 let root: string
 const journals: OpJournal[] = []
@@ -122,8 +125,8 @@ describe('新建时带关联', () => {
     const global = await seedGlobal(e)
     const fact = await create(e, { related: [page.id, global.id, page.id] })
     expect((await current(e, fact.id)).related).toEqual([page.id, global.id])
-    expect((await e.store.linksTo(page.id, scopeAt(WS))).refs).toEqual([{ sourceId: fact.id, kind: 'related' }])
-    expect((await e.store.linksTo(global.id, { kind: 'global' })).refs).toEqual([{ sourceId: fact.id, kind: 'related' }])
+    expect((await e.store.linksTo(page.id, scopeAt(WS))).refs).toEqual([{ sourceId: fact.id, kind: 'related', sourceDir: wsDir() }])
+    expect((await e.store.linksTo(global.id, { kind: 'global' })).refs).toEqual([{ sourceId: fact.id, kind: 'related', sourceDir: wsDir() }])
   })
 
   it('指向不存在、已删除的记忆：退回并说明，什么都不写', async () => {
@@ -161,7 +164,7 @@ describe('新建时带关联', () => {
     const page = await create(e)
     const decision = await create(e, { type: 'decision', premises: [page.id] })
     expect((await current(e, decision.id)).premises).toEqual([{ id: page.id, digest: premiseDigest(page) }])
-    expect((await e.store.linksTo(page.id, scopeAt(WS))).refs).toEqual([{ sourceId: decision.id, kind: 'premise', digest: premiseDigest(page) }])
+    expect((await e.store.linksTo(page.id, scopeAt(WS))).refs).toEqual([{ sourceId: decision.id, kind: 'premise', digest: premiseDigest(page), sourceDir: wsDir() }])
   })
 
   it('子 agent 新建时也能填 related', async () => {
@@ -190,7 +193,7 @@ describe('更新时带关联', () => {
     const [entry] = await linkEntries(e)
     expect(entry).toMatchObject({ memoryIds: [fact.id], links: { related: [b.id] }, settled: { verdict: 'linked' } })
     // 状态页和这次挂上去的都看得到这条线
-    expect((await e.store.linksTo(b.id, scopeAt(WS))).refs).toEqual([{ sourceId: fact.id, kind: 'related' }])
+    expect((await e.store.linksTo(b.id, scopeAt(WS))).refs).toEqual([{ sourceId: fact.id, kind: 'related', sourceDir: wsDir() }])
   })
 
   it('全部已经挂着：不写文件、不留回执', async () => {
@@ -498,7 +501,7 @@ describe('新建闸附的相近记忆', () => {
     expect(shown).toContain(page.id)
     expect(shown).toContain('related')
     updated(await linkOnly(e, decision.id, { related: [page.id] }))
-    expect((await e.store.linksTo(page.id, scopeAt(WS))).refs).toEqual([{ sourceId: decision.id, kind: 'related' }])
+    expect((await e.store.linksTo(page.id, scopeAt(WS))).refs).toEqual([{ sourceId: decision.id, kind: 'related', sourceDir: wsDir() }])
   })
 })
 

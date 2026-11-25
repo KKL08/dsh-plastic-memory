@@ -76,6 +76,11 @@ export interface DirectoryNote extends CodedNote<DirectoryNoteCode> {
   keptPath?: string
 }
 
+/** 读得不全的目录说明：目录读不了、项目目录缺标记，里面的记忆没读到。 */
+export function isIncompleteNote(note: DirectoryNote): boolean {
+  return note.code === 'dir-unreadable' || note.code === 'marker-missing'
+}
+
 /** 一次按范围读取里的一条记录：带实际文件路径与所在目录，索引行与注入尾注用它，不再从 name 重算。 */
 export interface LocatedRecord { record: MemoryRecord; filePath: string; dir: string }
 /** 定位结果：比 LocatedRecord 多带 extras（未知 frontmatter 键，写回时保留）。 */
@@ -97,8 +102,11 @@ export type LinkKind = (typeof LINK_KINDS)[number]
 /** 一条记忆指出去的一条链接；前提带当时的内容摘要。 */
 export interface OutgoingLink { kind: LinkKind; targetId: string; digest?: string }
 
-/** 指向某条记忆的一条链接：谁指过来、哪一种；前提带当时的内容摘要。 */
-export interface LinkRef { sourceId: string; kind: LinkKind; digest?: string }
+/**
+ * 指向某条记忆的一条链接：谁指过来、哪一种；前提带当时的内容摘要。sourceDir 是来源所在的记忆目录（作用域目录本身，归档里的也记它）：
+ * 同 id 在几个作用域各有一份时，靠它认是哪一份指过来的。反向查询的几种实现都带上；只看引用在不在的调用方可以不看它。
+ */
+export interface LinkRef { sourceId: string; kind: LinkKind; digest?: string; sourceDir?: string }
 
 /** 一条记忆指出去的全部链接，按前提、相关、取代的顺序，各自保持文件里的先后、去重。 */
 export function outgoingLinks(record: Pick<MemoryRecord, 'premises' | 'related' | 'supersedes'>): OutgoingLink[] {
@@ -123,17 +131,18 @@ export function outgoingLinks(record: Pick<MemoryRecord, 'premises' | 'related' 
 export interface LinkQuery { refs: LinkRef[]; isComplete: boolean }
 
 /**
- * 反向查询的结果排好序、同一来源同一种同一摘要只留一条（同 id 的几份副本都指过来、记的又是同一版时）。
- * 摘要不同的都留着：同 id 的两份决定各引了这条记忆的不同版本，两版都算被引用。
+ * 反向查询的结果排好序、同一来源目录里的同一来源、同一种、同一摘要只留一条（一层和它的归档里各有一份、记的又是同一版时）。
+ * 摘要不同的都留着：同 id 的两份决定各引了这条记忆的不同版本，两版都算被引用。来源目录不同的也都留着：那是同 id 在两个作用域的两份副本。
  */
 export function sortLinkRefs(refs: readonly LinkRef[]): LinkRef[] {
   const byKey = new Map<string, LinkRef>()
   for (const ref of refs) {
-    const key = `${ref.sourceId}\u0000${ref.kind}\u0000${ref.digest ?? ''}`
+    const key = `${ref.sourceId}\u0000${ref.kind}\u0000${ref.digest ?? ''}\u0000${ref.sourceDir ?? ''}`
     if (!byKey.has(key)) byKey.set(key, ref)
   }
   const byText = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
-  return [...byKey.values()].sort((a, b) => byText(a.sourceId, b.sourceId) || LINK_KINDS.indexOf(a.kind) - LINK_KINDS.indexOf(b.kind) || byText(a.digest ?? '', b.digest ?? ''))
+  return [...byKey.values()].sort((a, b) => byText(a.sourceId, b.sourceId) || LINK_KINDS.indexOf(a.kind) - LINK_KINDS.indexOf(b.kind)
+    || byText(a.digest ?? '', b.digest ?? '') || byText(a.sourceDir ?? '', b.sourceDir ?? ''))
 }
 
 /** 多词关键词的匹配模式：all = 全部词项命中，any = 任一词项命中。 */

@@ -1,5 +1,6 @@
 import { isMemoryIdShaped, type LinkIds, type MemoryRecord } from './record-schema.ts'
 import { computeDigest } from './storage/frontmatter.ts'
+import { byPosition, type LocatedFile } from './storage/table.ts'
 import { scopeKey, scopeOfMemory, type Scope } from './scope.ts'
 import type { MemoryStore } from './store.ts'
 
@@ -19,8 +20,21 @@ export function premiseDigest(record: Pick<MemoryRecord, 'name' | 'summary' | 'c
 }
 
 /** 这个作用域的记忆能指向哪些作用域：项目记忆看本项目和全局，全局记忆只看全局。 */
-function reachableScopes(owner: Scope): Scope[] {
+export function reachableScopes(owner: Scope): Scope[] {
   return owner.kind === 'global' ? [owner] : [owner, { kind: 'global' }]
+}
+
+/**
+ * 一条记忆的关联、前提、取代指向的是哪一份：owner 够得着的几个作用域（项目在前、全局在后）里先认在用的那份，都不在用取第一份。
+ * 哪里都没有为 undefined。保存时核对、详情里画关联都按它认。
+ */
+export async function locateLinkTarget(store: Pick<MemoryStore, 'locate'>, owner: Scope, id: string): Promise<LocatedFile | undefined> {
+  const copies: LocatedFile[] = []
+  for (const scope of reachableScopes(owner)) {
+    const copy = await store.locate(id, scope)
+    if (copy !== undefined) copies.push(copy)
+  }
+  return copies.find(c => byPosition(c).status === 'active') ?? copies[0]
 }
 
 /**
@@ -59,13 +73,8 @@ export async function resolveLinks(store: MemoryStore, owner: { id?: string; sco
       if (seen.has(id)) continue
       seen.add(id)
       if (id === owner.id) { problems.push(`${key} 里的 ${id} 是这条记忆自己，去掉它`); continue }
-      // 够得着的几个作用域里先认在用的那份
-      const copies: MemoryRecord[] = []
-      for (const scope of reachableScopes(owner.scope)) {
-        const copy = await store.get(id, scope)
-        if (copy !== undefined) copies.push(copy)
-      }
-      const found = copies.find(c => c.status === 'active') ?? copies[0]
+      const located = await locateLinkTarget(store, owner.scope, id)
+      const found = located === undefined ? undefined : byPosition(located)
       if (found === undefined) {
         const elsewhere = await store.get(id, {})
         problems.push(elsewhere === undefined

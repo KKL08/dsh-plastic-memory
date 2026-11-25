@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { linkIdsSchema, memoryRecordSchema } from '../record-schema.ts'
 import { sameScope, scopeKey, scopeOfMemory, scopeSchema, type Scope } from '../scope.ts'
+import type { LinkKind } from '../storage/table.ts'
 import {
   CHECKUP_CAUSE_KINDS, CHECKUP_INITIATORS, DIRECTORY_NOTE_CODES, IGNORABLE_ADVICE_TYPES, MODEL_CHANGE_KINDS, OVERFLOW_MODES, PROPOSAL_ACTIONS, RETIRED_SCAN_NOTE_CODES, SCAN_NOTE_CODES,
   SUGGESTION_FAILURE_KINDS,
@@ -602,6 +603,69 @@ export const libraryViewSchema = z.object({
 })
 export type LibraryView = z.infer<typeof libraryViewSchema>
 
+// —— 记忆详情（打开时现取，不进视图文件） ——
+
+/**
+ * 详情里的一版历史：这一版是当前版的时段、变化原因（遮盖过密钥、折成一行）、事实时间、出处会话（写下这一版内容的会话）。
+ * 并进来的版本带原记忆的 id 和名称（遮盖过），列表里标「并入自」。
+ */
+export const historyEntrySchema = z.object({
+  versionId: z.string(),
+  startedAt: z.number(),
+  endedAt: z.number(),
+  reason: z.string(),
+  factTime: z.string().optional(),
+  sourceSessionId: z.string().optional(),
+  mergedFrom: z.object({ id: z.string(), name: z.string() }).optional(),
+})
+export type HistoryEntry = z.infer<typeof historyEntrySchema>
+
+/** 记忆之间的三种显式链接（同 storage/table 的 LINK_KINDS）：前提、相关、取代。 */
+export const MEMORY_LINK_KINDS = ['premise', 'related', 'supersedes'] as const satisfies readonly LinkKind[]
+
+/**
+ * 关联图上邻居的状态：在用、被取代、已删除；unreadable 是这次没读出来（文件读不出、刚读到又找不到），
+ * missing 是指过去的记忆在够得着的作用域里都找不到、而且这些作用域都读全了（多半已经彻底删除）。
+ */
+export const LINK_NODE_STATES = ['active', 'superseded', 'deleted', 'unreadable', 'missing'] as const
+export type LinkNodeState = (typeof LINK_NODE_STATES)[number]
+
+/** 关联图上的一个邻居：按作用域 + id 认。名称遮盖过；读不到、找不到的没有名称，读不到时不知道作用域。 */
+export const linkNodeSchema = z.object({
+  id: z.string(),
+  scope: scopeSchema.optional(),
+  state: z.enum(LINK_NODE_STATES),
+  name: z.string().optional(),
+})
+export type LinkNode = z.infer<typeof linkNodeSchema>
+
+/** 一条链接：out 是中心这条指出去的（依据、相关、取代），in 是别的记忆指向中心的（被依据、相关、被取代）。 */
+export const linkEdgeSchema = z.object({ kind: z.enum(MEMORY_LINK_KINDS), direction: z.enum(['out', 'in']), node: linkNodeSchema })
+export type LinkEdge = z.infer<typeof linkEdgeSchema>
+
+/**
+ * memory-detail 的结果：这条记忆此刻的卡片和状态、历史版本（新的在前）、一层链接。isComplete 为假时只是读到的那部分：
+ * 历史有目录列不出、版本读不出；链接有目录或文件读不出。子 agent 的待确认记录被接受之前，它挂的链接不列。
+ */
+export const memoryDetailSchema = z.object({
+  memory: memoryCardSchema,
+  status: z.enum(['active', 'superseded', 'deleted']),
+  history: z.object({ versions: z.array(historyEntrySchema), isComplete: z.boolean() }),
+  links: z.object({ edges: z.array(linkEdgeSchema), isComplete: z.boolean() }),
+})
+export type MemoryDetail = z.infer<typeof memoryDetailSchema>
+
+/**
+ * read-version 的结果：found 是这一版的四个面（遮盖过密钥）；unreadable 是文件在、读不出；missing 是没找到，
+ * isComplete 为假时历史还有读不出的部分，不能断定它已经不在。
+ */
+export const versionReadSchema = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('found'), versionId: z.string(), name: z.string(), summary: z.string(), content: z.string(), tags: z.array(z.string()) }),
+  z.object({ status: z.literal('unreadable') }),
+  z.object({ status: z.literal('missing'), isComplete: z.boolean() }),
+])
+export type VersionDetail = z.infer<typeof versionReadSchema>
+
 // —— 最近删除 ——
 
 export const deletedItemSchema = z.object({
@@ -1171,6 +1235,13 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
    */
   z.object({ cmd: z.literal('organize-index'), scope: scopeSchema }),
   z.object({ cmd: z.literal('refresh-views') }),
+  /**
+   * 记忆详情：按精确作用域读这一条（在用、被取代、最近删除里的都行），连同历史版本和一层链接。只读：不进写入段、不写视图，
+   * 不受体检开关影响，子 agent 会话也能读。这一条不在回 not-found。
+   */
+  z.object({ cmd: z.literal('memory-detail'), memoryId: z.string(), layer: scopeSchema }),
+  /** 读这条记忆的一版历史（含并进来的版本），结果在 version。只读，同 memory-detail；这一条不在回 not-found，版本标识不合写法回 invalid-args。 */
+  z.object({ cmd: z.literal('read-version'), memoryId: z.string(), layer: scopeSchema, versionId: z.string() }),
   /** 删掉对话记录库（过往对话的本地副本）。原话功能还开着的话，下次用到时从会话日志重建。 */
   z.object({ cmd: z.literal('delete-dialogue-records') }),
   /**
@@ -1330,6 +1401,10 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
      * undo（撤销提升、撤销移到项目）：放回原作用域后仍够不着、去掉的。没去掉的时候缺省。
      */
     droppedLinks: z.array(droppedLinksSchema).optional(),
+    /** memory-detail：这条记忆的详情。 */
+    detail: memoryDetailSchema.optional(),
+    /** read-version：读到的那一版，或读不出、没找到。 */
+    version: versionReadSchema.optional(),
     /** list-models：能选的模型，按提供方分组。 */
     providers: modelChoicesSchema.optional(),
     /** migrate-type：这次改了类型或移到最近删除的条数。 */

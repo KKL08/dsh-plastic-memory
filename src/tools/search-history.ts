@@ -1,5 +1,5 @@
-import { historyWithMerged } from '../merged-history.ts'
-import { byVersionEnd, layerOf, versionReason, type HistoryVersion } from '../storage/history.ts'
+import { historyWithMerged, readHistoryVersion } from '../merged-history.ts'
+import { byVersionEnd, versionReason, type HistoryVersion } from '../storage/history.ts'
 import { byPosition } from '../storage/table.ts'
 import { maskSecrets, maskSecretSurface } from '../secrets.ts'
 import { sourceNote } from '../index-line.ts'
@@ -94,18 +94,12 @@ export async function executeHistorySearch(args: HistorySearchArgs, exec: ToolRu
         : `limit 已是上限 ${MAX_SEARCH_LIMIT}，只列出最新的 ${versions.length} 版。` } : {}),
     }
   }
-  const read = await deps.store.history.read(layerOf(found), args.id, args.version!)
+  const read = await readHistoryVersion(deps.store, found, args.version!)
   if (read.kind === 'unreadable') return { hits: [], noteCode: 'version-unreadable', note: '这一版的文件读不出来。可以用 id 配 history: true 看其他版本，或把 id 填进 query 读当前内容。' }
-  let version: HistoryVersion
-  if (read.kind === 'found') version = read.version
-  else {
-    const listing = await historyWithMerged(deps.store, found)
-    const merged = listing.versions.find(v => v.versionId === args.version && v.mergedFrom !== undefined)
-    if (merged === undefined) return listing.isComplete
-      ? { hits: [], noteCode: 'version-not-found', note: '找不到这一版（可能已被清理或撤销，也可能版本标识有误）。可以用 id 配 history: true 列出现有的版本。' }
-      : { hits: [], noteCode: 'history-incomplete', note: '这次没找到这一版，历史还有读不出的部分，所以不能确定它已经不在。可以用 id 配 history: true 看目前读得到的版本。' }
-    version = merged
-  }
+  if (read.kind === 'missing') return read.isComplete
+    ? { hits: [], noteCode: 'version-not-found', note: '找不到这一版（可能已被清理或撤销，也可能版本标识有误）。可以用 id 配 history: true 列出现有的版本。' }
+    : { hits: [], noteCode: 'history-incomplete', note: '这次没找到这一版，历史还有读不出的部分，所以不能确定它已经不在。可以用 id 配 history: true 看目前读得到的版本。' }
+  const version = read.version
   const record = version.record
   const masked = maskSecretSurface(record)
   return {

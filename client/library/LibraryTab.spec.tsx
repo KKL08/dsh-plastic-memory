@@ -130,11 +130,12 @@ describe('全部记忆', () => {
     }
   })
 
-  it('没有版本（digest）的行尾只有「删除」（幽灵按钮）和「打开文件」（纯图标）；没有「在访达中显示」', () => {
+  it('没有版本（digest）的行尾只有「详情」「删除」（幽灵按钮）和「打开文件」（纯图标）；没有「在访达中显示」', () => {
     renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { library: library() } }))
     const buttons = within(rowOf('提交前跑 typecheck')).getAllByRole('button')
-    expect(buttons.map(b => b.getAttribute('aria-label') ?? b.textContent)).toEqual(['删除', '打开文件'])
+    expect(buttons.map(b => b.getAttribute('aria-label') ?? b.textContent)).toEqual(['详情', '删除', '打开文件'])
     expect(buttons[0]).toHaveClass('pm-btn--ghost')
+    expect(buttons[1]).toHaveClass('pm-btn--ghost')
   })
 
   it('类型写显示名（待处理视图的 typeLabels），认不出的类型写 id：单个范围写在组标题上、卡片不再写；「全部」写在卡片上', () => {
@@ -772,17 +773,18 @@ describe('记忆查看：单条修改', () => {
   beforeEach(() => { localStorage.clear() })
   afterEach(() => { vi.useRealTimers(); localStorage.clear() })
 
-  it('故事 1：行尾依次是「修改」（小号次按钮）·「删除」（幽灵）·「打开文件」（纯图标，读屏名称和悬停提示都是「打开文件」）', () => {
+  it('行尾依次是「修改」（小号次按钮）·「详情」「删除」（幽灵）·「打开文件」（纯图标，读屏名称和悬停提示都是「打开文件」）', () => {
     const { gateway } = setup()
     const buttons = within(row()).getAllByRole('button')
-    expect(buttons.map(b => b.getAttribute('aria-label') ?? b.textContent)).toEqual(['修改', '删除', '打开文件'])
+    expect(buttons.map(b => b.getAttribute('aria-label') ?? b.textContent)).toEqual(['修改', '详情', '删除', '打开文件'])
     expect(buttons[0]).toHaveClass('pm-btn--secondary')
     expect(buttons[1]).toHaveClass('pm-btn--ghost')
-    expect(buttons[2]).toHaveClass('pm-btn--icon')
-    expect(buttons[2]).toHaveAttribute('title', '打开文件')
-    expect(buttons[2]).toHaveTextContent(/^$/)
-    expect(buttons[2]!.querySelector('svg')).not.toBeNull()
-    fireEvent.click(buttons[2]!)
+    expect(buttons[2]).toHaveClass('pm-btn--ghost')
+    expect(buttons[3]).toHaveClass('pm-btn--icon')
+    expect(buttons[3]).toHaveAttribute('title', '打开文件')
+    expect(buttons[3]).toHaveTextContent(/^$/)
+    expect(buttons[3]!.querySelector('svg')).not.toBeNull()
+    fireEvent.click(buttons[3]!)
     expect(gateway.opened).toEqual([{ path: '/m/app-1/a1.md' }])
   })
 
