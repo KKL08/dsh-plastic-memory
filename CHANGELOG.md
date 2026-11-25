@@ -354,6 +354,11 @@ All notable changes to this project are documented here. The format follows
   its count of memories not confirmed in a while. Upkeep now leaves the
   archive, recall counts, topic index and `MEMORY.md` alone until every
   folder involved can be listed.
+- The note after the memories loaded into a chat said that a memory named in
+  a compacted summary but missing from the list had been deleted or
+  rewritten, though the list can leave memories out. The note now says the
+  list is partial, and asks the chat to look such a memory up first and to
+  treat it as unconfirmed if nothing is found.
 - Submitting a memory card on the memory page could undo tags edited in the
   file while the card was open. A card now asks for a refresh when the
   memory's name, type, tags, summary or content changed after it opened.

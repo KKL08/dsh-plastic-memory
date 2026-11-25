@@ -331,9 +331,21 @@ describe('快照标题下的压缩引擎附注', () => {
     expect(MEMORY_AS_DATA_NOTE).toMatch(/以这里为准/)
   })
 
-  it('尾注还要盖住「摘要里有、这里没有」：那不是不一致，是已删除或已改写，模型不该把它当现存记忆', () => {
-    // 「不一致以这里为准」只管两边都有的条目；用户删掉的记忆在摘要里还可能留着转述，得明说它已不存在
-    expect(MEMORY_AS_DATA_NOTE).toMatch(/这里没有的记忆[^。；]*已删除/)
+  it('尾注盖住「摘要里有、这里没列出」：这里只列一部分，先按 id 或关键词查现状、以查到的为准，查不到的当作暂时无法确认', () => {
+    // 「不一致以这里为准」只管两边都有的条目。注入按主题截断，没列出的可能仍在库里；用户删掉的记忆在摘要里还可能留着转述，按 id 查得出来
+    expect(MEMORY_AS_DATA_NOTE).toMatch(/这里只列出一部分记忆/)
+    expect(MEMORY_AS_DATA_NOTE).toMatch(/这里没列出的[^。]*memory_search[^。]*按 id/)
+    expect(MEMORY_AS_DATA_NOTE).toMatch(/以查到的为准；查不到的，当作暂时无法确认。/)
+    // 目录暂时读不出时检索也查不到：查不到不等于删了或改了
+    expect(MEMORY_AS_DATA_NOTE).not.toMatch(/已删除或已改写/)
+  })
+
+  it('同主题超过成员行上限、只列出一部分时，尾注不把没列出的说成已删除', () => {
+    const records = Array.from({ length: 6 }, (_, i) => record({ id: `m${i}`, name: `条目${i}` }))
+    const { text } = assembleSnapshot({ ...base, records })
+    expect(text).toContain('另有 1 条')
+    expect(text).not.toMatch(/这里没有的记忆[^。；]*已删除/)
+    expect(text).toContain(MEMORY_AS_DATA_NOTE)
   })
 
   it('用量口径：附注与取代句只进 tokens.fixed，usedTokens 不计；core 区预算恰好够标题 + 一条 core 时仍装得下', () => {
