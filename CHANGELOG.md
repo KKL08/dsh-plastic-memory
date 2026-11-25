@@ -182,6 +182,29 @@ All notable changes to this project are documented here. The format follows
   static analysis for backtracking that grows faster than the input, and the
   private key block cases run under a time limit, so a regression fails the
   test instead of hanging the run.
+- Checkups now keep each batch's result and send a batch to the model again
+  only when the content of one of its memories, the checkup model or the
+  instruction files changed; adding evidence to a memory without changing
+  its content does not resend it. A checkup stops at a token cap
+  (`governance.scan.tokenCap`, 200,000 by default) and the next one
+  continues where it stopped.
+- Checkup results say how much of each scope was covered: memories never
+  checked, changed since their last check, or waiting to be rechecked, and
+  whether some memories could not be read. A scope is reported healthy only
+  when every memory in it has a current result and the instruction files
+  could be read in full; a scope with memories that was never checked counts
+  as not fully checked.
+- A project's coverage includes the global memories. Each project's checkup
+  checks them together with the project's own memories, so that conflicts
+  between the two are found, and keeps those results per project: a global
+  memory can be current in one project and still waiting in another.
+- A Recheck all action next to the checkup button sends every memory to the
+  model again, including those whose result is still current, after asking
+  for confirmation.
+- Testing: seeded random sequences run capped checkups between saves, edits,
+  deletions and conflict decisions, and check that every finding shown comes
+  from a current result or a still-valid earlier one, and that a final full
+  checkup finds the same as one started from an empty cache.
 - Testing: the model-backed checks in `pnpm host:contract` can run on another
   provider route DeepSeek Harness ships with, set with `TEST_LLM_PROVIDER`,
   `TEST_LLM_MODEL` and `TEST_LLM_API_KEY`. Setting only some of them stops the
@@ -268,6 +291,13 @@ All notable changes to this project are documented here. The format follows
   puts back only the fields the change wrote: a recall setting or links
   changed elsewhere since then are kept. If an undo stops partway, what was
   already undone stays undone and undoing again finishes the rest.
+- When the instruction files change, the next checkups recheck the whole
+  scope against them, even if no memory changed.
+- A small memory library is checked as a single batch: a checkup with no
+  memory changed sends nothing to the model, and a change to any one memory
+  rechecks the whole batch.
+- Expired memories are no longer sent to the content check. The rule check
+  still points them out.
 
 ### Fixed
 - A memory write that was cut short and whose file was then edited by hand
@@ -369,6 +399,8 @@ All notable changes to this project are documented here. The format follows
   as not generated when the model chose to merge or rewrite but left out the
   new text, and you had to ask for it again. The model is now asked once more
   on its own to include the text.
+- A conflict you kept or dismissed was not reported again when only the fact
+  time or validity of one of its memories changed.
 
 ## [0.2.0] - 2026-11-21
 
