@@ -9,6 +9,7 @@
  * 带委派 header 的真子会话存入待确认记忆、检索排在主档后、溯源只限自己的会话、父会话接受后进新会话的注入（H19）。
  * 无 key 也跑的宿主服务契约：经宿主 commands 服务执行 `/memory` 命令，结果过 GUI 契约 schema；自动体检调度器在宿主计时服务登记了定时器。
  * 对话记录库（H34，无 key）：从真会话的日志建库，用同一套分词搜到用户本人说的话，定时任务发的不收；按宿主的会话清单把库建完。
+ * 原话检索的连续调用上限（H36，无 key）：连续、并行、和别的工具交错三种调用形态，清零靠宿主真会话的事件。
  * 宿主接口探针（H22–H30、H32，无 key）：sessionQuery 的会话列举、父子追溯、标题、事件时间与过滤；当轮用户消息的来源标记；本进程的空闲信号；
  * 指令文件的修改时间；会话存档状态（含跨进程，第二趟）；会话卸下后读事件、另一个进程写下的会话（第二趟）；fork 型子会话的快照；经插件自有来源的消息开一轮（含续接冷会话）；各种会话的继承前缀长度（H32）。
  * 有 DEEPSEEK_API_KEY（或 test-model.ts 的替代路由可用）且宿主能选出默认模型时再跑语义扫描与取消两项、一次真实的自动体检（H17：无会话、宿主默认模型）、
@@ -46,6 +47,7 @@ import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCa
 import { readIndexFiles } from '../../src/storage/index-store.ts'
 import { workspaceDirName } from '../../src/storage/paths.ts'
 import { readIndex } from '../../src/topic-index.ts'
+import { dialogueNote } from '../../src/search/dialogue-format.ts'
 import type { TestModelState } from './test-model.ts'
 
 export const name = 'dsh-plastic-memory-host-contract'
@@ -931,6 +933,40 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       } finally {
         catchup.stop()
       }
+    })
+
+    // H36 原话检索的连续调用上限：装好的插件经真 ctx.tools 搜原话，清零靠宿主真会话的事件经插件的 session/event 监听送到。
+    // 三种调用形态各一个新会话（mkExec 先落一条 turn/start）：连续、并行、和别的工具交错。
+    const capLimit = dialogueNote('dialogue-search-limit')
+    const capSearch = async (exec: Exec): Promise<boolean> =>
+      JSON.stringify(await call('memory_search', { query: 'h36capprobe', source: 'dialogue' }, exec)).includes(capLimit)
+    const capToolCall = (exec: Exec, name: string) => (exec.agent.session as SessionLike)
+      .append('tool/call', { turn: 1, step: 1, callId: `h36-${name}-${rand()}`, name, arguments: '{}' })
+    await attempt('H36-CALL-CAP-SERIAL', async () => {
+      const exec = mkExec(mkWs('h36-serial'))
+      const limited: boolean[] = []
+      for (let i = 0; i < 5; i++) limited.push(await capSearch(exec))
+      return { ok: JSON.stringify(limited) === JSON.stringify([false, false, false, true, true]), detail: `第几次用完=${JSON.stringify(limited)}` }
+    })
+    await attempt('H36b-CALL-CAP-PARALLEL', async () => {
+      const exec = mkExec(mkWs('h36-parallel'))
+      const limited = await Promise.all([0, 1, 2, 3].map(() => capSearch(exec)))
+      return { ok: JSON.stringify(limited) === JSON.stringify([false, false, false, true]), detail: `并行四次用完=${JSON.stringify(limited)}` }
+    })
+    await attempt('H36c-CALL-CAP-INTERLEAVED', async () => {
+      const exec = mkExec(mkWs('h36-interleaved'))
+      const steps: string[] = []
+      const search = async (label: string) => { steps.push(`${label}:${await capSearch(exec) ? '用完' : '拿到'}`) }
+      for (let i = 0; i < 3; i++) await search('连续')
+      capToolCall(exec, 'memory_source')
+      await search('memory_source 之后')
+      capToolCall(exec, 'bash')
+      for (let i = 0; i < 3; i++) await search('bash 之后')
+      await search('bash 之后第四次')
+      ;(exec.agent.session as SessionLike).append('turn/start', { turn: 2 })
+      await search('新一轮')
+      const expected = ['连续:拿到', '连续:拿到', '连续:拿到', 'memory_source 之后:用完', 'bash 之后:拿到', 'bash 之后:拿到', 'bash 之后:拿到', 'bash 之后第四次:用完', '新一轮:拿到']
+      return { ok: JSON.stringify(steps) === JSON.stringify(expected), detail: steps.join(' → ') }
     })
 
     // H23 当轮起点用户消息的来源标记：宿主把 user 消息的 source 原样落进日志，sessionQuery 读回的事件带着它；

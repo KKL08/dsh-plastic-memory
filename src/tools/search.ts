@@ -16,6 +16,7 @@ import { matchWindow } from '../search/window.ts'
 import { judgeTopHit, matchedTerms, type TermHitCount } from '../search/coverage.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { ContextHost } from './host-session.ts'
+import type { DialogueCallCap } from './dialogue-call-cap.ts'
 import { sourceNote } from '../index-line.ts'
 import { stalenessNote } from '../record-freshness.ts'
 import { exposedPath, maskSecretSurface } from '../secrets.ts'
@@ -54,6 +55,8 @@ export interface SearchToolDeps {
   sessionRecall?: SessionRecall
   /** 有效期判定、计召回用的时钟，缺省取当前时间。 */
   now?: () => number
+  /** 原话检索的连续调用上限，按 `exec.agent.session` 分会话；没传时不限次数。 */
+  callCap?: DialogueCallCap
 }
 
 /**
@@ -486,6 +489,15 @@ async function searchSources(args: SearchArgs, exec: ToolRunContext, deps: Searc
     return listing === undefined || listing.top.length === 0 ? outcome : withMemoryQuotes(outcome, listing, query, deps as SearchToolDeps & { dialogue: DialogueSearchDeps }, deadline)
   }
   if (!hasQuery) return source === 'dialogue' ? { hits: [], dialogueText: DIALOGUE_QUERY_REQUIRED, onlyDialogue: true } : executeMemorySearch(args, exec, deps)
+  // 含原话的调用在任何异步读取之前占名额，失败也不退还。
+  if (deps.callCap?.claim(exec.agent?.session) === false) {
+    const dialogueText = dialogueNote('dialogue-search-limit')
+    if (source === 'dialogue') return { hits: [], dialogueText, onlyDialogue: true }
+    let listing: MemoryListing | undefined
+    const memories = await executeMemorySearch(args, exec, deps, isQuoting ? listed => { listing = listed } : undefined)
+    const outcome = listing === undefined || listing.top.length === 0 ? memories : await withMemoryQuotes(memories, listing, query, deps as SearchToolDeps & { dialogue: DialogueSearchDeps }, deadline)
+    return { ...outcome, dialogueText, onlyDialogue: false }
+  }
   // 两路共享同一次宿主快照；记忆执行器仍按原来的接口读取上下文。
   let context: Promise<SearchContext> | undefined
   const contextOf = () => context ??= deps.host.contextOf(exec)

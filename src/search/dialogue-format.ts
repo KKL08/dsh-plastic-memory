@@ -144,9 +144,9 @@ const DIALOGUE_NOTES: Record<Exclude<DialogueNoteCode, 'dialogue-index-building'
   'dialogue-search-limit': '连续检索次数已用完，请根据已有结果回答，或先做别的再搜。',
 }
 
-/** 说明码对应的文案。索引还在建时带上已覆盖的会话数。 */
+/** 说明码对应的文案。对话记录库还在建时带上已覆盖的会话数。 */
 export function dialogueNote(code: DialogueNoteCode, coveredSessions = 0): string {
-  return code === 'dialogue-index-building' ? `索引还在建，已覆盖 ${coveredSessions} 个会话。` : DIALOGUE_NOTES[code]
+  return code === 'dialogue-index-building' ? `对话记录库还在建，已覆盖 ${coveredSessions} 个会话。` : DIALOGUE_NOTES[code]
 }
 
 /** 消息引用只由会话和消息序号决定，删库重建后仍可复用。 */
