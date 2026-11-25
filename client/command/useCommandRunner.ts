@@ -20,6 +20,8 @@ export interface RunHandlers {
   onHandledElsewhere?: () => void
   /** 失败：'silent' 不显示；函数返回 true 表示调用方已就地处理，不再显示；返回一份 Failure 就原位显示它（换成调用方的说法）。 */
   onFailed?: 'silent' | ((failure: Failure) => boolean | Failure)
+  /** 等确认时点了「取消」：什么都没发。 */
+  onCancel?: () => void
 }
 
 export interface CommandRunner {
@@ -109,7 +111,12 @@ export function useCommandRunner(session: BorrowedSession): CommandRunner {
       const state = stateOf(key)
       if (state.kind === 'confirm-cross' || state.kind === 'confirm-secret' || state.kind === 'confirm-suspected') run(key, state.resend, handlersOf.current.get(key))
     },
-    cancel(key) { if (stateOf(key).kind !== 'busy') clear(key) },
+    cancel(key) {
+      const { kind } = stateOf(key)
+      if (kind === 'busy') return
+      clear(key)
+      if (kind.startsWith('confirm-')) handlersOf.current.get(key)?.onCancel?.()
+    },
     fail(key, detail) { setStates(prev => starting(prev, key, { kind: 'failed', detail, isLocalized: false })) },
   }
 }

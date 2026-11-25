@@ -43,6 +43,8 @@ export function usePromoteInPlace(
   session: BorrowedSession, memory: MemoryCard, scope: Scope | undefined, state: InPlacePromotion | undefined,
   /** 写进了 AGENTS.md：上层记下，记忆离开视图后这一行仍留着结果。 */
   onWroteAgentsMd?: () => void,
+  /** 上层这一行另有动作在途（右侧栏删除、撤销删除）时按钮暂不可用的原因。 */
+  blocked?: string,
 ): ReactNode {
   const t = useT()
   const promoteTarget = useGateway().useConfig()?.globalPromoteTarget
@@ -75,7 +77,7 @@ export function usePromoteInPlace(
     onHandledElsewhere() { setRefused(true) },
   }
   const shown = local ?? state
-  const unavailable = runner.unavailable(PROMOTE)
+  const unavailable = runner.unavailable(PROMOTE) ?? blocked
   const run = (command: MemoryCommand) => {
     setRefused(false)
     runner.run(PROMOTE, command, handlers)

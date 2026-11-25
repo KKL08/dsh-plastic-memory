@@ -163,17 +163,31 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   }
   // 发出 forget 时就记下（含密钥时确认后改发的彻底删除沿用这一次），等删除状态记成彻底删除再换上说明：
   // 网关记删除和成功回调不在同一次提交，回调里才记会先空出一帧（这一行没了、说明还没来），焦点趁机落到后面的控件上。
-  // 软删成功的去掉：之后在别处彻底删除的普通记忆不写含密钥那句
+  // 软删成功的去掉：之后在别处彻底删除的普通记忆不写含密钥那句。
+  // 什么都没删（失败、别处已处理、含密钥确认里点了「取消」）的两处都去掉：之后别处删掉这条时照旧直接去掉，不写成这里删的
   const forget = (memory: MemoryCardData) => {
     const memoryId = memory.id
+    const forgetHere = () => {
+      setPurged((prev) => { const next = new Set(prev); next.delete(memoryId); return next })
+      setRemoved((prev) => { const next = new Map(prev); next.delete(memoryId); return next })
+    }
     setPurged(prev => new Set(prev).add(memoryId))
     // 同样在发出时记下：网关记成软删的那一帧这一行就换成「已删除」，焦点落在原位的「撤销」上
     setRemoved(prev => new Map(prev).set(memoryId, { memory }))
-    run(memoryId, { cmd: 'forget', memoryId, layer: scopeOfMemory(memory) }, (_result, sent) => {
-      if (sent.cmd === 'forget') setPurged((prev) => { const next = new Set(prev); next.delete(memoryId); return next })
+    setRefused(undefined)
+    runner.run(memoryId, { cmd: 'forget', memoryId, layer: scopeOfMemory(memory) }, {
+      onOk(_result, sent) {
+        if (sent.cmd === 'forget') setPurged((prev) => { const next = new Set(prev); next.delete(memoryId); return next })
+      },
+      onHandledElsewhere() { setRefused(memoryId); forgetHere() },
+      onFailed() { forgetHere(); return false },
+      onCancel: forgetHere,
     })
   }
   const isPurged = (id: string) => purged.has(id) && deletions.of(id) === 'hard'
+  // 在途：这里发出的删除（含确认后改发的彻底删除）或撤销删除还没走完。视图可能先刷新、已经没有这一条，删除状态也可能
+  // 先于成功回调记下：这时照留下的那张卡画这一行（空状态上面也画），回执到了再换成说明、「已删除」或原样，焦点不会先跑到旁边的控件上
+  const isSending = (id: string) => removed.has(id) && runner.stateOf(id).kind === 'busy'
   // 撤销删除失败不写原因，那一行还是「已删除」（同对话交付卡）
   const restore = (memory: MemoryCardData) => {
     runner.run(memory.id, { cmd: 'restore', memoryId: memory.id, layer: scopeOfMemory(memory) }, {
@@ -212,14 +226,80 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     </div>
   )
   const refusedNote = <p className="pm-pending-error" role="alert" tabIndex={-1}>{t('sidebar.action.refused')}</p>
+  const viewLabels = mergeTypeLabels(library, pending)
+  const label = (type: string) => typeLabel(t, type, { viewLabels, customTypes: config?.customTypes })
+  const now = Date.now()
+  const card = (memory: MemoryCardData) => (
+    <MemoryCard memory={memory} now={now} typeLabel={label(memory.type)} hideScope={memory.scope === 'workspace'} />
+  )
+  /** 这一条的确认、失败或没有生效。 */
+  const failed = (id: string) => refused === id ? refusedNote : <CommandFeedback runner={runner} id={id} />
+  /** 还在的新写入一行：记忆卡、行尾删除，提升候选就地处理。 */
+  const savedRow = (id: string, memory: MemoryCardData) => (
+    <SavedRow
+      key={id}
+      session={session}
+      memory={memory}
+      card={card}
+      unavailable={isSending(id) ? runner.unavailable(id) : undefined}
+      onWroteAgentsMd={() => { setWroteAgentsMd(prev => new Map(prev).set(id, memory)) }}
+    >
+      <DeleteWithConfirm
+        onDelete={() => { forget(memory) }}
+        trigger={open => (
+          <Button
+            variant="icon"
+            aria-label={t('sidebar.saved.delete')}
+            title={t('sidebar.saved.delete')}
+            unavailable={runner.unavailable(id)}
+            onClick={open}
+          >
+            <Icon name="trash" size={14} />
+          </Button>
+        )}
+      />
+      {failed(id)}
+    </SavedRow>
+  )
+  /**
+   * 这次新写入的一条此刻画成什么，正常和空状态两处都用它：写进了 AGENTS.md 的留结果，彻底删除的留说明，软删的留「已删除 · 撤销」，
+   * 还在的照视图画；在途、撤销后视图还没带回来的照留下的卡画；别处删掉的不画。
+   */
+  const savedRowOf = (id: string): ReactNode => {
+    const wrote = wroteAgentsMd.get(id)
+    if (wrote !== undefined) return <SavedRow key={id} session={session} memory={wrote} card={card} state="wrote-agents-md">{null}</SavedRow>
+    if (isPurged(id)) return purgedNote(id)
+    const deleted = softRemoved(id)
+    if (deleted !== undefined) return deletedRow(id, deleted)
+    const live = isLiveWrite(id, byId, deletions) ? byId.get(id) : undefined
+    if (live !== undefined) return savedRow(id, live)
+    const entry = removed.get(id)
+    if (entry === undefined) return null
+    const isKept = isSending(id) || (entry.isRestored === true && deletions.of(id, scopeOfMemory(entry.memory)) === undefined)
+    return isKept ? savedRow(id, entry.memory) : null
+  }
+  // 这次新写入的只列还没进快照的（进了新快照的算在带入的记忆里）
+  const savedRows = (snapshot === undefined ? [] : writtenSinceSnapshot(snapshot)).flatMap((id) => {
+    const row = savedRowOf(id)
+    return row === null ? [] : [{ id, row }]
+  })
+  /**
+   * 「这次新写入的」一段，每行按 id 原位：在途的那一行、回执后换成的说明或「已删除 · 撤销」占同一个位置。
+   * 空状态也用这一段（不带标题，也不作为带名字的区域）：key 固定，删掉最后一条、页面换成空状态时这一段和里面的行
+   * 留在原来的节点上，不重挂，焦点不会被按位置挪到别的行上。
+   */
+  const savedSection = (head: ReactNode, after?: ReactNode) => (
+    <section key="saved" className="pm-side-section" aria-label={head === null ? undefined : t('sidebar.saved.title')}>
+      {head}
+      {/* 对话里刚写入的：撑开位置落进来，银藤浅底亮一下 */}
+      {savedRows.map(({ id, row }) => <Arrival key={id} arrivals={arrivals} id={id} highlight>{row}</Arrival>)}
+      {after}
+    </section>
+  )
   if (globalCount === 0 && projectCount === 0) {
     return (
       <div className="pm-side">
-        {(snapshot?.savedIds ?? []).filter(isPurged).map(purgedNote)}
-        {(snapshot?.savedIds ?? []).flatMap((id) => {
-          const memory = softRemoved(id)
-          return memory === undefined ? [] : [deletedRow(id, memory)]
-        })}
+        {savedRows.length > 0 ? savedSection(null) : null}
         {refused !== undefined ? refusedNote : null}
         <EmptyState variant="first" title={t('sidebar.empty.title')}>{t('sidebar.empty.body')}</EmptyState>
       </div>
@@ -233,8 +313,6 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     setUndone((prev) => { const next = new Map(prev); for (const id of backInView) next.delete(id); return next })
   }
   const stillUndone = [...undone.values()].filter(item => !backInView.includes(item.decisionId))
-  const viewLabels = mergeTypeLabels(library, pending)
-  const label = (type: string) => typeLabel(t, type, { viewLabels, customTypes: config?.customTypes })
   const ruledIds = new Set(ruled.map(r => r.decisionId))
   const { groups, decisions, inline } = groupInjected({
     injectedIds: snapshot?.injectedIds ?? [],
@@ -245,19 +323,6 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     conflicts: [...pendingItems, ...stillUndone].filter((item): item is Conflict => item.kind === 'conflict-horizontal'),
     verticals: [...pendingItems, ...stillUndone].filter((item): item is VerticalConflict => item.kind === 'conflict-vertical'),
   })
-  // 这次新写入的只列还没进快照、还在的；彻底删除的原位留说明
-  // 这里软删的原位留「已删除 · 撤销」，撤销后视图还没刷新回来的照留下的卡画
-  const saved = (snapshot === undefined ? [] : writtenSinceSnapshot(snapshot))
-    .flatMap((id): Array<{ id: string; memory: MemoryCardData | undefined; isWrittenToAgentsMd?: true; isDeleted?: true }> => {
-      if (wroteAgentsMd.has(id)) return [{ id, memory: wroteAgentsMd.get(id), isWrittenToAgentsMd: true }]
-      if (isPurged(id)) return [{ id, memory: undefined }]
-      const deleted = softRemoved(id)
-      if (deleted !== undefined) return [{ id, memory: deleted, isDeleted: true }]
-      const entry = removed.get(id)
-      const how = entry === undefined ? undefined : deletions.of(id, scopeOfMemory(entry.memory))
-      if (isLiveWrite(id, byId, deletions)) return [{ id, memory: byId.get(id) }]
-      return entry?.isRestored === true && how === undefined ? [{ id, memory: entry.memory }] : []
-    })
   // 这次对话里模型改写、替代的：快照冻结之后的（之前的已在这份快照里，同新写入的口径）。
   // 同一条改写多次只列最近那次；这次对话里新记的那条再被改写不另列，新写入那行已经是它
   const sessionChanges = snapshot === undefined ? [] : (library.data.modelChanges ?? [])
@@ -272,12 +337,6 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const restPending = ws === undefined || pending.status !== 'ready'
     ? 0
     : pending.data.items.filter(item => inWorkspace(item, ws) && !('decisionId' in item && (inline.has(item.decisionId) || ruledIds.has(item.decisionId)))).length
-  const now = Date.now()
-  const card = (memory: MemoryCardData) => (
-    <MemoryCard memory={memory} now={now} typeLabel={label(memory.type)} hideScope={memory.scope === 'workspace'} />
-  )
-  /** 这一条的确认、失败或没有生效。 */
-  const failed = (id: string) => refused === id ? refusedNote : <CommandFeedback runner={runner} id={id} />
   // 冲突对方可能在别的项目：那一方写项目名（这里的「本项目」是会话视图解析出的项目，和上面分层同一口径）
   const projectName = (m: MemoryCardData) =>
     m.scope === 'workspace' && m.workspacePath !== undefined && !samePath(m.workspacePath, ws) ? baseName(m.workspacePath) : undefined
@@ -418,49 +477,14 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
         {usage}
       </section>
 
-      {saved.length > 0 || changes.length > 0
+      {savedRows.length > 0 || changes.length > 0
         ? (
-          <section className="pm-side-section" aria-label={t('sidebar.saved.title')}>
+          savedSection(
             <div className="pm-side-section-head">
               <h2 className="pm-side-title">{t('sidebar.saved.title')}</h2>
               <p className="pm-side-hint">{t('sidebar.saved.note')}</p>
-            </div>
-            {saved.map(({ id, memory, isWrittenToAgentsMd, isDeleted }) => {
-              const row = memory === undefined
-                ? purgedNote(id)
-                : isDeleted === true
-                  ? deletedRow(id, memory)
-                : isWrittenToAgentsMd === true
-                  ? <SavedRow key={id} session={session} memory={memory} card={card} state="wrote-agents-md">{null}</SavedRow>
-                  : (
-                  <SavedRow
-                    key={id}
-                    session={session}
-                    memory={memory}
-                    card={card}
-                    onWroteAgentsMd={() => { setWroteAgentsMd(prev => new Map(prev).set(id, memory)) }}
-                  >
-                    <DeleteWithConfirm
-                      onDelete={() => { forget(memory) }}
-                      trigger={open => (
-                        <Button
-                          variant="icon"
-                          aria-label={t('sidebar.saved.delete')}
-                          title={t('sidebar.saved.delete')}
-                          unavailable={runner.unavailable(id)}
-                          onClick={open}
-                        >
-                          <Icon name="trash" size={14} />
-                        </Button>
-                      )}
-                    />
-                    {failed(id)}
-                  </SavedRow>
-                )
-              // 对话里刚写入的：撑开位置落进来，银藤浅底亮一下
-              return <Arrival key={id} arrivals={arrivals} id={id} highlight>{row}</Arrival>
-            })}
-            {changes.map(change => change.kind === 'rewrite'
+            </div>,
+            changes.map(change => change.kind === 'rewrite'
               ? (
                 <div key={change.decisionId} className="pm-side-change" data-memory-id={change.memoryId}>
                   {card(byId.get(change.memoryId) ?? change.before)}
@@ -476,8 +500,8 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
                     bySubject={change.by === undefined ? undefined : byId.get(change.by)?.name}
                   />
                 </div>
-              ))}
-          </section>
+              )),
+          )
         )
         : null}
 
@@ -561,17 +585,19 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
 }
 
 /** 这次新写入的一行：记忆卡 + 行尾删除；提升候选的建议区和两个动作（处理过换成结果行）在卡片下面。 */
-function SavedRow({ session, memory, card, state, onWroteAgentsMd, children }: {
+function SavedRow({ session, memory, card, state, unavailable, onWroteAgentsMd, children }: {
   session: BorrowedSession
   memory: MemoryCardData
   card: (memory: MemoryCardData) => ReactNode
   /** 提升状态；缺省按全部记忆视图（写进 AGENTS.md 的由上层给）。 */
   state?: InPlacePromotion
+  /** 这一行的删除或撤销在途：提升的两个按钮也暂不可用。 */
+  unavailable?: string | undefined
   onWroteAgentsMd?: () => void
   /** 行尾删除与它的反馈。 */
   children: ReactNode
 }) {
-  const promote = usePromoteInPlace(session, memory, scopeOfMemory(memory), state ?? promotionOf(memory), onWroteAgentsMd)
+  const promote = usePromoteInPlace(session, memory, scopeOfMemory(memory), state ?? promotionOf(memory), onWroteAgentsMd, unavailable)
   return (
     <div className="pm-side-saved" data-memory-id={memory.id}>
       <div>{card(memory)}</div>
