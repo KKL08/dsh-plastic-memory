@@ -114,16 +114,29 @@ function normalized(field: ReceiptField, value: unknown): unknown {
 export const fieldDigest = (record: MemoryRecord, field: ReceiptField) => sha1(fieldValue(record, field))
 
 /**
- * 扫描指纹：交给模型判断的全部字段（名称、摘要、正文、事实时间、有效期、来源方式、最近一次改动的性质、取代关系）。
+ * 发给体检模型的记忆内容字段：体检的模型行（semantic-scan.ts semanticMemoryLine）按这份清单写，扫描指纹也包含这份清单里的每一项。
+ * 行里写的内容字段因此总是指纹字段的子集：模型看得到的任一项变了，指纹一定跟着变。
+ */
+export const SCAN_CONTENT_FIELDS = ['type', 'name', 'content', 'summary', 'factTime', 'validFrom', 'validTo'] as const
+export type ScanContentField = (typeof SCAN_CONTENT_FIELDS)[number]
+
+/** 一个内容字段拿来比的值：没有记 null，正文的换行风格归一，有效期按文件里的分钟比。 */
+export function scanFieldValue(r: MemoryRecord, field: ScanContentField): unknown {
+  const value = r[field]
+  if (value === undefined || value === null) return null
+  if (field === 'content') return lf(value as string)
+  if (field === 'validFrom' || field === 'validTo') return roundValidity(field, value as number)
+  return value
+}
+
+/**
+ * 扫描指纹：交给模型判断的全部字段（SCAN_CONTENT_FIELDS：类型、名称、正文、摘要、事实时间、有效期），加上来源方式、最近一次改动的性质、取代关系。
  * 这些任一项变了，按旧内容做的判断就不算数。标签、注入档位、关联、锁、确认时间不在里面。
  */
 export function scanFingerprint(r: MemoryRecord): string {
   const latest = anchorsOf(r)[0]
   return sha1({
-    name: r.name, summary: r.summary, content: lf(r.content),
-    factTime: r.factTime ?? null,
-    validFrom: r.validFrom === undefined ? null : roundValidity('validFrom', r.validFrom),
-    validTo: r.validTo === undefined ? null : roundValidity('validTo', r.validTo),
+    ...Object.fromEntries(SCAN_CONTENT_FIELDS.map(field => [field, scanFieldValue(r, field)])),
     sourceMode: latest === undefined ? null : anchorSourceMode(latest),
     changeKind: r.lastChange?.kind ?? null,
     supersedes: r.supersedes ?? [],

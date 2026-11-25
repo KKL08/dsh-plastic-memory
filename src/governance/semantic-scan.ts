@@ -1,12 +1,19 @@
 import type { MemoryRecord } from '../record-schema.ts'
+import { isExpired } from '../record-freshness.ts'
 import { SEVERITY_BY_TYPE, type Finding } from './schema.ts'
 import { maskDiagnostic, maskSecretSurface, maskSecrets } from '../secrets.ts'
 import { estimateTokens } from '../snapshot.ts'
+import { formatValidity } from '../validity.ts'
+import { SCAN_CONTENT_FIELDS, type ScanContentField } from './changeset.ts'
 
 /** 语义层的 LLM 抽象：纯逻辑只依赖这个接口，真机接线在 index.ts。 */
 export interface SemanticLlm {
   /** 解析出的模型名（「让模型改」写在界面上）；宿主接线总会带上，测试桩可以不给。 */
   readonly model?: string
+  /** 提供方（宿主的路由名）；宿主接线总会带上，测试桩可以不给。体检的判断上下文按它区分结果。 */
+  readonly provider?: string
+  /** 推理强度（宿主适配器的取值）；借会话的模型拿不到，缺省。 */
+  readonly reasoningEffort?: string
   /**
    * signal 触发时应尽快取消在途请求，并抛出 AbortError（宿主 exec.signal 契约）。
    * onUsage：宿主流里报了用量时，按这次调用的实际 token 数回调一次（宿主在出错收尾前报了用量的也计入）；没报就不回调。
@@ -36,6 +43,12 @@ export function reportedTokens(usage: ReportedUsage): number | undefined {
 export function isAbort(err: unknown, signal?: AbortSignal): boolean {
   return signal?.aborted === true || (err instanceof Error && err.name === 'AbortError')
 }
+
+/**
+ * 体检提示词的版本：改系统提示词、记忆行格式（semanticMemoryLine）或基线段落的写法时加一。
+ * 体检结果按它区分，换了版本，按旧提示词查出的结论不再沿用。
+ */
+export const SEMANTIC_PROMPT_VERSION = 2
 
 /** 一次调用里记忆列表的 token 预算（snapshot.estimateTokens 估算）。整库塞进一条消息会撑爆上下文窗口，超了就分批。 */
 export const SEMANTIC_BATCH_TOKEN_BUDGET = 30_000
@@ -69,10 +82,36 @@ export function buildSemanticPrompt(
   }
 }
 
-/** 记忆列表里的一条（明确密钥已遮）。分批按它估算 token，与发给模型的文字同一口径。 */
+/**
+ * 记忆列表里一条的各个内容字段，按 SCAN_CONTENT_FIELDS（扫描指纹也含这份清单）：类型写在首行，名称、正文、摘要各一行，
+ * 事实时间、有效期起止有才写。没有的字段返回 undefined，不写这一行。
+ */
+const LINE_FIELDS: Record<ScanContentField, (r: MemoryRecord) => string | undefined> = {
+  type: r => r.type,
+  name: r => r.name,
+  content: r => r.content,
+  summary: r => r.summary,
+  factTime: r => (r.factTime === undefined ? undefined : maskSecrets(r.factTime)),
+  validFrom: r => (r.validFrom === undefined ? undefined : formatValidity(r.validFrom)),
+  validTo: r => (r.validTo === undefined ? undefined : formatValidity(r.validTo)),
+}
+
+/**
+ * 记忆列表里的一条（明确密钥已遮）。分批按它估算 token，与发给模型的文字同一口径。内容字段出自 SCAN_CONTENT_FIELDS。
+ * 标签不发给模型，遮盖时也不带上：只改标签时这一行不变，和批的键一致。
+ */
 export function semanticMemoryLine(record: MemoryRecord): string {
-  const r = maskSecretSurface(record)
-  return `- id=${r.id} type=${r.type} scope=${r.scope}${r.workspacePath ? `(${r.workspacePath})` : ''}\n  name: ${r.name}\n  content: ${r.content}\n  summary: ${r.summary}`
+  const r = maskSecretSurface({ ...record, tags: [] })
+  const lines = SCAN_CONTENT_FIELDS.filter(field => field !== 'type').flatMap((field) => {
+    const value = LINE_FIELDS[field](r)
+    return value === undefined ? [] : [`  ${field}: ${value}`]
+  })
+  return [`- id=${r.id} type=${LINE_FIELDS.type(r)} scope=${r.scope}${r.workspacePath ? `(${r.workspacePath})` : ''}`, ...lines].join('\n')
+}
+
+/** 语义检查准入：在用、没过期（还没生效的照常进）。只管交给模型的输入；规则层照旧看全部记忆。 */
+export function isSemanticAdmitted(r: MemoryRecord, now: number): boolean {
+  return r.status === 'active' && !isExpired(r, now)
 }
 
 /**
@@ -245,7 +284,7 @@ export async function runSemanticScan(
 }
 
 /** 一批的调用：解析失败带提示重试一次，两次都不行返回重试那次没做成的原因。 */
-async function scanBatch(
+export async function scanBatch(
   records: MemoryRecord[],
   baseline: readonly string[] | null,
   llm: SemanticLlm,
