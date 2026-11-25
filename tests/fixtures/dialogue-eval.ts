@@ -11,7 +11,7 @@ export interface EvalMemory {
   sessionId: string
   eventRange: [number, number]
 }
-/** 每类五题，标识符一类另有换写法的题；换说法题只用于观察基线，不参与参数选择。 */
+/** 每类至少五题，另含标识符换写法和近原文临界负例；换说法题只用于观察基线，不参与参数选择。 */
 export const DIALOGUE_EVAL_CATEGORIES = [
   'bigram', 'single-char', 'mixed', 'identifier', 'fullwidth', 'cross-word',
   'before-anchor', 'near-verbatim', 'long-message', 'tool-result', 'paraphrase', 'no-answer',
@@ -363,9 +363,34 @@ for (const [n, { base, query }] of CROSS_WRITING.entries()) {
   queries.push({ ...source, id: `${base}-cross-${n + 1}`, query })
 }
 
-/** 十五份十二轮会话，办公占六成；不收录材料与真实候选放在同一日志里。 */
+// 临界负例保留共同正文，只改变一个值或增加一句，避免把独有信息当成重复。
+const boundaries = [
+  { text: '归档任务每批处理 120 条记录，先核对批次号，再确认签收状态，最后保存检查清单。', from: '120', to: '121', query: '归档任务每批处理' },
+  { text: '本次交接由林舟负责，先核对批次号，再确认签收状态，最后保存检查清单。', from: '林舟', to: '林周', query: '本次交接负责' },
+  { text: '归档清单写入 config/staging/archive.json，先核对批次号，再确认签收状态，最后保存检查清单。', from: 'staging', to: 'production', query: '归档清单写入' },
+  { text: '旅途交接先核对批次号，再确认签收状态，最后保存检查清单。另须保留纸质签收单。', from: '另须保留纸质签收单。', to: '', query: '纸质签收单' },
+]
+for (const [i, item] of boundaries.entries()) {
+  const session = sessions[i]!
+  const sessionId = session.log.header.id!
+  const events = session.log.events
+  const start = events.at(-1)!.seq! + 1
+  const time = events.at(-1)!.time!
+  const body = (text: string) => [{ type: 'text', text }]
+  events.push(
+    { seq: start, time: time + 100, type: 'turn/start', data: { turn: 12 } },
+    { seq: start + 1, time: time + 200, type: 'user/message', data: { role: 'user', content: body(item.query), source: { kind: 'user' } } },
+    { seq: start + 2, time: time + 300, type: 'assistant/message', data: { message: { role: 'assistant', content: body(item.text) } } },
+    { seq: start + 3, time: time + 400, type: 'turn/end', data: { turn: 12 } },
+  )
+  const id = `memory-boundary-${i + 1}`
+  memories.push({ id, name: item.query, summary: item.query, body: item.text.replace(item.from, item.to), sessionId, eventRange: [start, start + 3] })
+  queries.push({ id: `near-verbatim-boundary-${i + 1}`, category: 'near-verbatim', scene: session.scene, query: item.query, answers: [{ sessionId, seq: start + 2 }], anchorMemoryId: id })
+}
+
+/** 十五份十二到十三轮会话，办公占六成；不收录材料与真实候选放在同一日志里。 */
 export const DIALOGUE_EVAL_SESSIONS: readonly EvalSession[] = sessions
-/** 五个补找锚和五条近原文记忆，出处均落在对应会话自己的事件内。 */
+/** 五个补找锚和九条近原文记忆，出处均落在对应会话自己的事件内。 */
 export const DIALOGUE_EVAL_MEMORIES: readonly EvalMemory[] = memories
-/** 六十道人工指定答案的题，另加四道标识符换写法的题；空答案只表示该库无依据，不生成否定事实。 */
+/** 六十道人工指定答案的题，另加四道标识符换写法和四道去重临界负例；空答案只表示该库无依据，不生成否定事实。 */
 export const DIALOGUE_EVAL_QUERIES: readonly DialogueEvalQuery[] = queries
