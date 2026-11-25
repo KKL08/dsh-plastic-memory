@@ -2,10 +2,10 @@ import { z } from 'zod'
 import { jsonObjectIn } from '../json-reply.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { CONTENT_LENGTH_HINT, clipText, isContentLong } from '../save-signals.ts'
-import { SECRET_MASK, hasSecret, maskSecretSurface, maskSecrets } from '../secrets.ts'
+import { SECRET_MASK, hasSecret, maskSecretSurface } from '../secrets.ts'
 import { UNSORTED_TITLE, readIndex, type IndexFiles } from '../topic-index.ts'
 import { copyKey, fieldValue, scanFingerprint, scopeKeyOf, sha1 } from './changeset.ts'
-import { TIDY_BATCH_CHARS, TIDY_SUMMARY_MAX, TIDY_TAGS_MAX, oneLine } from './dreams-tidy.ts'
+import { TIDY_BATCH_CHARS, TIDY_SUMMARY_MAX, TIDY_TAGS_MAX, droppedText, oneLine } from './dreams-tidy.ts'
 
 /**
  * 记忆梦境合并零碎记忆：给模型的输入、对模型输出的解析和成组方案的规划，纯逻辑：不读盘、不调模型、不落盘。
@@ -162,18 +162,12 @@ export interface PlanMergesOptions {
   maxMembers: number
 }
 
-/** 丢掉的组在结果里列出的每个 id 最长这么多字符（认不出的 id 是模型写的，先遮再截）。 */
-const DROPPED_ID_MAX = 40
 /** 丢掉的组在结果里列出的 id 合起来最长这么多字符。 */
 const DROPPED_TARGET_MAX = 160
 
-/**
- * 丢掉的组在结果里怎么写：模型给的各条 id 用逗号连起来。认不出的 id 是模型写的、要落进侧表的报告：先遮疑似和高危密钥，再截短；
- * 整串再限一次长度。
- */
+/** 丢掉的组在结果里怎么写：模型给的各条 id（见 droppedText）用逗号连起来，整串再限一次长度。 */
 function droppedTarget(ids: readonly string[], shown: ReadonlyMap<string, MemoryRecord>): string {
-  const listed = ids.map(id => (shown.has(id) ? id : clipText(maskSecrets(id, { severity: 'suspected' }), DROPPED_ID_MAX)))
-  return clipText(listed.join(','), DROPPED_TARGET_MAX)
+  return clipText(ids.map(id => droppedText(id, shown)).join(','), DROPPED_TARGET_MAX)
 }
 
 /**

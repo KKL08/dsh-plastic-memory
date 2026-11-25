@@ -238,6 +238,40 @@ describe('模型给的操作', () => {
     })
   })
 
+  it('逐条整理时模型填了认不出的 id：列进结果之前遮住像密钥的值、截短过长的，认得的 id 原样', async () => {
+    await seed(FOUR)
+    const long = `mem_${'x'.repeat(500)}`
+    replies.tidy = [[
+      { op: 'refresh', id: FAKE_SECRET.sk, summary: '甲' },
+      { op: 'refresh', id: long, summary: '乙' },
+      { op: 'recall', id: 'mem_c', recall: 'core' },
+    ]]
+    expect((await dream()).kind).toBe('completed')
+    const targets = (await lastResult())!.skipped!.items.map(x => x.target)
+    expect(targets).toHaveLength(3)
+    expect(targets[0]).not.toContain(FAKE_SECRET.sk)
+    expect(targets[1]!.startsWith('mem_x')).toBe(true)
+    expect(targets[1]!.length).toBeLessThan(50)
+    expect(targets[2]).toBe('mem_c')
+  })
+
+  it('逐条整理时模型给的操作名认不出：列进结果之前同样遮住像密钥的值、截短过长的，认得的操作名原样', async () => {
+    await seed(FOUR)
+    const long = `op_${'y'.repeat(500)}`
+    replies.tidy = [[
+      { op: FAKE_SECRET.sk, id: 'mem_a' },
+      { op: long, id: 'mem_b' },
+      { op: 'recall', id: 'mem_c', recall: 'core' },
+    ]]
+    expect((await dream()).kind).toBe('completed')
+    const kinds = (await lastResult())!.skipped!.items.map(x => x.kind)
+    expect(kinds).toHaveLength(3)
+    expect(kinds[0]).not.toContain(FAKE_SECRET.sk)
+    expect(kinds[1]!.startsWith('op_y')).toBe(true)
+    expect(kinds[1]!.length).toBeLessThan(50)
+    expect(kinds[2]).toBe('recall')
+  })
+
   it('同一条记忆给了 21 个操作：多出来的一个丢掉，别的记忆的操作照做，运行照常做完', async () => {
     await seed(FOUR)
     replies.tidy = [[...Array.from({ length: 21 }, (_, i) => ({ op: 'refresh', id: 'mem_a', summary: `新摘要${i}` })), { op: 'recall', id: 'mem_b', recall: 'passive' }]]
