@@ -74,7 +74,7 @@ describe('一轮里挑哪几段', () => {
       seg(14, 'assistant', '建议用 PostgreSQL，已经装好了'),
       seg(15, 'assistant', '还有别的要调整吗'),
     ], [keywordRanker('PostgreSQL', tokenizer)])
-    expect(picked.map(m => [m.seq, m.speaker, m.text, m.isPartial])).toEqual([
+    expect(picked.map(m => [m.seq, m.speaker, m.text, m.segmentCount > 1])).toEqual([
       [11, 'user', '数据库用哪个', false],
       [14, 'assistant', '建议用 PostgreSQL，已经装好了', false],
     ])
@@ -83,7 +83,7 @@ describe('一轮里挑哪几段', () => {
   it('切过的用户消息给最相关的一段，标成节选并带总段数', async () => {
     const tokenizer = await dialogueTokenizer({ log: { warn() {} } })
     const picked = pickTurnMessages([seg(11, 'user', '第一段说背景', 0), seg(11, 'user', '第二段说写锁', 1), seg(11, 'user', '第三段收尾', 2)], [keywordRanker('写锁', tokenizer)])
-    expect(picked).toEqual([{ seq: 11, speaker: 'user', at: 1011, text: '第二段说写锁', segmentCount: 3, isPartial: true }])
+    expect(picked).toEqual([{ seq: 11, segment: 1, speaker: 'user', at: 1011, text: '第二段说写锁', segmentCount: 3 }])
   })
 
   it('助手段一段都对不上：给最后一条助手正文的第一段', async () => {
@@ -91,7 +91,7 @@ describe('一轮里挑哪几段', () => {
     const picked = pickTurnMessages([
       seg(11, 'user', '好'), seg(12, 'assistant', '甲'), seg(14, 'assistant', '乙一', 0), seg(14, 'assistant', '乙二', 1),
     ], [keywordRanker('写锁', tokenizer)])
-    expect(picked.at(-1)).toMatchObject({ seq: 14, text: '乙一', segmentCount: 2, isPartial: true })
+    expect(picked.at(-1)).toMatchObject({ seq: 14, text: '乙一', segmentCount: 2 })
   })
 
   it('打分来源可以有几个：前一个对不上时用后一个', () => {
@@ -219,8 +219,8 @@ describe('记忆名称和渲染', () => {
 
   it('本项目会话：整条给的带引用，节选带节选说明；别的项目会话：不带引用，节选说明指向传记忆 id 回查', () => {
     const messages = [
-      { seq: 11, speaker: 'user' as const, at: undefined, text: '问', segmentCount: 1, isPartial: false, isSameAsMemory: false },
-      { seq: 12, speaker: 'assistant' as const, at: undefined, text: '答二', segmentCount: 3, isPartial: true, isSameAsMemory: false },
+      { seq: 11, segment: 0, speaker: 'user' as const, at: undefined, text: '问', segmentCount: 1, isSameAsMemory: false },
+      { seq: 12, segment: 1, speaker: 'assistant' as const, at: undefined, text: '答二', segmentCount: 3, isSameAsMemory: false },
     ]
     const local = renderMemoryQuote({ memoryId: 'mem_a', turns: [{ sessionId: 's', isInProject: true, messages }], sameSource: [] })!
     expect(local).toContain(`<${DIALOGUE_QUOTE_TAG}>`)
@@ -234,7 +234,7 @@ describe('记忆名称和渲染', () => {
 
   it('原话和记忆正文相同：只给日期和位置', () => {
     const text = renderMemoryQuote({ memoryId: 'mem_a', sameSource: [], turns: [{ sessionId: 's', isInProject: true, messages: [
-      { seq: 11, speaker: 'user', at: new Date(2026, 10, 24, 9, 5).getTime(), text: '记住数据库用 PostgreSQL', segmentCount: 1, isPartial: false, isSameAsMemory: true },
+      { seq: 11, segment: 0, speaker: 'user', at: new Date(2026, 10, 24, 9, 5).getTime(), text: '记住数据库用 PostgreSQL', segmentCount: 1, isSameAsMemory: true },
     ] }] })!
     expect(text).toContain('[2026-11-24 09:05] 用户：（和记忆正文相同，从略）〔引用 s#11〕')
     expect(text).not.toContain('记住数据库用 PostgreSQL')

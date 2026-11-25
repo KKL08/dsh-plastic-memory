@@ -27,6 +27,13 @@ All notable changes to this project are documented here. The format follows
   not enough. Whenever results can include quoted messages, from conversation
   search or from these quotes, the guidance also says when to expand an excerpt
   by its reference.
+- When `memory_search` covers both memories and past conversations, each
+  exchange appears only once. An exchange quoted under a memory is left out of
+  the conversation results, and other parts of it that match the search are
+  added under that memory. A conversation turn that a listed memory was saved
+  from, but that is not quoted under it, ranks higher and names that memory.
+  Conversation results keep their own limit of about 1,500 tokens
+  (`search.dialogueTokenBudget`), separate from the quotes under memories.
 - Groundwork for Brewing Dreams, an experimental background pass that tidies
   memories while no chat is running. It is off and has no switch yet. Once on
   for a scope (all memories, or one project), a pass starts only when enough

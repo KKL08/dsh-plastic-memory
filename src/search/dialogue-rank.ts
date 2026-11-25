@@ -4,7 +4,7 @@ import type { SearchTier } from './ranking.ts'
 import { estimateTokens } from '../snapshot.ts'
 
 /** 原话段的稳定身份；不能靠正文去重，相同的话可能说过多次。 */
-export const segmentKey = (s: DialogueSegment): string => JSON.stringify([s.sessionId, s.seq, s.segment])
+export const segmentKey = (s: Pick<DialogueSegment, 'sessionId' | 'seq' | 'segment'>): string => JSON.stringify([s.sessionId, s.seq, s.segment])
 /** 装填所需的原文及定位信息，不包含库查询分数。 */
 export type DialogueSegment = Omit<DialogueHit, 'score' | 'cwd' | 'isSubagent'>
 /** 一轮只取最好段的分数，不因长消息段多而加分。 */
@@ -16,6 +16,8 @@ export interface DialogueTurnCandidate {
   score: number
   hits: Array<DialogueHit & { tier: SearchTier }>
   via: string[]
+  /** 融合后的名次（0 起）：有它时排序按它，不再比档位和分数。 */
+  rank?: number
 }
 /** 会话内按轮序号排列，best 单独保留供首轮配额使用。 */
 export interface DialogueSessionGroup { sessionId: string; turns: DialogueTurnCandidate[]; best: DialogueTurnCandidate }
@@ -72,24 +74,74 @@ export function groupHitsByTurn(hits: readonly (DialogueHit & { tier: SearchTier
 /** 轮序号反映原始对话顺序，避免缺失或倒退的时刻打乱上下文。 */
 export const compareDialogueTurns = (a: { turnSeq: number }, b: { turnSeq: number }): number => a.turnSeq - b.turnSeq
 
+/** 两轮谁在前：都有融合名次时按名次，否则按档位和分数。 */
+const compareTurns = (a: DialogueTurnCandidate, b: DialogueTurnCandidate) => a.rank !== undefined && b.rank !== undefined ? a.rank - b.rank : compare(a, b)
+
 /** 组间按最好轮，组内统一按轮序号；不做预算取舍。 */
 export function orderCandidates(turns: readonly DialogueTurnCandidate[]): DialogueSessionGroup[] {
   const groups = new Map<string, DialogueSessionGroup>()
   for (const turn of turns) {
     const group = groups.get(turn.sessionId)
     if (!group) groups.set(turn.sessionId, { sessionId: turn.sessionId, turns: [turn], best: turn })
-    else { group.turns.push(turn); if (compare(turn, group.best) < 0) group.best = turn }
+    else { group.turns.push(turn); if (compareTurns(turn, group.best) < 0) group.best = turn }
   }
   for (const group of groups.values()) group.turns.sort(compareDialogueTurns)
-  return [...groups.values()].sort((a, b) => compare(a.best, b.best))
+  return [...groups.values()].sort((a, b) => compareTurns(a.best, b.best))
 }
+
+/** 融合的参数 k：名次差在头部影响大、往后变平。 */
+export const RRF_K = 60
+/** 融合的一路：每个候选给稳定身份、所属的轮、这一路里的名次（1 起，可以并列）。原始分数留在各路内部。 */
+export interface FusionLane { name: string; items: ReadonlyArray<{ id: string; turn: string; rank: number }> }
+/** 融合结果的一轮：合并后的分数，和来自哪几路的哪些候选（按各自的名次）。 */
+export interface FusedTurn { turn: string; score: number; sources: Array<{ lane: string; id: string }> }
+
+/**
+ * 多路按名次合并（RRF）：每一路里一轮取它最好的候选的名次，各路的 1/(k+名次) 相加，不比原始分数；名次用候选给的值，并列的同分。
+ * pinned 指定一路的前几轮固定在最前、按那一路的顺序，其余按合并分数排；分数相同时先出现的在前。
+ */
+export function fuseLanes(lanes: readonly FusionLane[], pinned?: { lane: string; count: number }): FusedTurn[] {
+  const fused = new Map<string, FusedTurn & { order: number }>()
+  const laneOrders = new Map<string, string[]>()
+  for (const lane of lanes) {
+    const best = new Map<string, number>()
+    for (const item of lane.items) if (!best.has(item.turn) || item.rank < best.get(item.turn)!) best.set(item.turn, item.rank)
+    const order = [...best.entries()].sort((a, b) => a[1] - b[1])
+    laneOrders.set(lane.name, order.map(([turn]) => turn))
+    for (const [turn, rank] of order) {
+      let entry = fused.get(turn)
+      if (!entry) fused.set(turn, entry = { turn, score: 0, sources: [], order: fused.size })
+      entry.score += 1 / (RRF_K + rank)
+    }
+  }
+  const ranked = [...fused.values()].sort((a, b) => b.score - a.score || a.order - b.order)
+  for (const entry of ranked) {
+    const items = lanes.flatMap(lane => lane.items.filter(item => item.turn === entry.turn).map(item => ({ lane: lane.name, id: item.id, rank: item.rank })))
+    entry.sources = items.sort((a, b) => a.rank - b.rank).map(({ lane, id }) => ({ lane, id }))
+  }
+  const head = pinned === undefined ? [] : (laneOrders.get(pinned.lane) ?? []).slice(0, Math.max(0, pinned.count))
+  const ordered = [...head.map(turn => fused.get(turn)!), ...ranked.filter(entry => !head.includes(entry.turn))]
+  return ordered.map(({ turn, score, sources }) => ({ turn, score, sources }))
+}
+
+/** 装填时别处带来的东西。 */
+export interface FillContext {
+  /** 别处已经给出的段：不再给、不计费。 */
+  given?: ReadonlySet<string>
+  /** 已附在别处（记忆下面）的轮：不分组、不占首轮名额、不计入省略数；其余命中和别的命中一起按名次装，邻段照带。 */
+  attached?: readonly DialogueTurnCandidate[]
+  /** 一段占多少预算；缺省按原文估算。输出时从略的段按输出的长度算。 */
+  costOf?(segment: DialogueSegment): number
+}
+
 /** 先各组最好轮的最好段，再其余命中，最后邻段和邻轮；放不下的整段跳过。 */
-export function fillBudget(groups: readonly DialogueSessionGroup[], neighbors: NeighborSource, budgetTokens: number): DialogueFill {
+export function fillBudget(groups: readonly DialogueSessionGroup[], neighbors: NeighborSource, budgetTokens: number, context: FillContext = {}): DialogueFill {
   const result: DialogueFill = { segments: [], usedTokens: 0, omittedTurns: 0, partialTurns: 0 }
-  const selected = new Set<string>()
+  const selected = new Set<string>(context.given)
+  const attached = context.attached ?? []
   const add = (s: DialogueSegment) => {
     const key = segmentKey(s)
-    const cost = estimateTokens(s.text)
+    const cost = context.costOf?.(s) ?? estimateTokens(s.text)
     if (selected.has(key) || result.usedTokens + cost > budgetTokens) return
     selected.add(key); result.segments.push(s); result.usedTokens += cost
   }
@@ -99,8 +151,15 @@ export function fillBudget(groups: readonly DialogueSessionGroup[], neighbors: N
     const best = [...group.best.hits].sort(compare)[0]
     if (best) add(best)
   }
-  for (const hit of turns.flatMap(turn => turn.hits).sort(compare)) add(hit)
-  const included = priority.filter(t => t.hits.some(h => selected.has(segmentKey(h))))
+  // 其余命中：融合过的按所属轮的融合名次、同一轮里按段分数；没融合过的先比档位再比分数
+  const pool = [...turns, ...attached]
+  const rankOf = new Map(pool.flatMap(t => t.hits.map(h => [segmentKey(h), t.rank] as const)))
+  const byRank = (a: DialogueHit & { tier: SearchTier }, b: DialogueHit & { tier: SearchTier }) => {
+    const [ra, rb] = [rankOf.get(segmentKey(a)), rankOf.get(segmentKey(b))]
+    return ra !== undefined && rb !== undefined ? ra - rb || a.score - b.score : compare(a, b)
+  }
+  for (const hit of pool.flatMap(turn => turn.hits).sort(byRank)) add(hit)
+  const included = [...priority, ...attached].filter(t => t.hits.some(h => selected.has(segmentKey(h))))
   for (const turn of included) for (const hit of turn.hits) if (result.usedTokens < budgetTokens && selected.has(segmentKey(hit))) for (const s of neighbors.adjacent(hit)) add(s)
   for (const turn of included) if (result.usedTokens < budgetTokens) for (const s of neighbors.turns(turn)) add(s)
   for (const turn of turns) {

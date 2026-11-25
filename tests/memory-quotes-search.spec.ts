@@ -285,13 +285,13 @@ describe('去重', () => {
 })
 
 describe('和原话检索同时开', () => {
-  it('现状：检索来源含原话时，同一轮既附在记忆下面，又出现在原话检索的结果里', async () => {
+  it('检索来源含原话时，附在记忆下面的那一轮不再出现在其他原话里，只出现一处', async () => {
     const r = withAnchors([anchor('s1', [10, 14])], { id: 'mem_a', content: '写锁在提交前拿' })
     const { deps } = await setup([r], { source: 'both' })
     const { result, text } = await run(deps)
     expect(quoteOf(result, 'mem_a')).toContain('用户：写锁要在提交前拿')
-    expect(result.dialogueText).toContain('用户：写锁要在提交前拿')
-    expect(text.split('用户：写锁要在提交前拿')).toHaveLength(3)
+    expect(result.dialogueText).not.toContain('写锁要在提交前拿')
+    expect(text.split('用户：写锁要在提交前拿')).toHaveLength(2)
   })
 })
 
@@ -409,10 +409,11 @@ describe('时限', () => {
     expect(quoteOf(result, 'mem_a')).toContain('助手：好的，写锁放在提交前，已经改好')
   })
 
-  it('原话检索超时退回记忆：不再另拿两秒取原话，开头说明一次本次没取到原话，会话表只查一次', async () => {
+  it('原话检索超时退回只查记忆：不再另拿两秒取原话，只在原话段说明一次，会话表只查一次', async () => {
     const { result, tableCalls } = await timedSearch(2100)
     expect(tableCalls).toBe(1)
-    expect(result.quoteNote).toBe(MEMORY_QUOTES_UNAVAILABLE)
+    expect(result.quoteNote).toBeUndefined()
+    expect(result.dialogueText).toBe(dialogueNote('dialogue-unavailable'))
     expect(quoteOf(result, 'mem_a')).toBe('')
     expect(result.hits.map(h => h.id)).toEqual(['mem_a'])
   })
@@ -445,12 +446,13 @@ describe('库这次用不了', () => {
     expect(host.listSessions).not.toHaveBeenCalled()
   })
 
-  it('库打不开、两路都查：记忆这边说出处原话取不到，原话这边说暂时查不了，没有还在整理', async () => {
+  it('库打不开、两路都查：退回只查记忆，只说一次原话暂时查不了，没有还在整理', async () => {
     const r = withAnchors([anchor('s1', [10, 14])], { id: 'mem_a', content: '写锁在提交前拿' })
     const { deps, host } = await setup([r], { isBroken: true, source: 'both' })
     const { result, text } = await run(deps)
-    expect(result.quoteNote).toBe(MEMORY_QUOTES_UNAVAILABLE)
-    expect(text).toContain(dialogueNote('dialogue-unavailable'))
+    expect(result.quoteNote).toBeUndefined()
+    expect(text.split(dialogueNote('dialogue-unavailable'))).toHaveLength(2)
+    expect(text).not.toContain(MEMORY_QUOTES_UNAVAILABLE)
     expect(text).not.toContain(QUOTE_PENDING)
     expect(host.listSessions).not.toHaveBeenCalled()
   })
