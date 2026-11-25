@@ -1,3 +1,4 @@
+import { isAbsolute } from 'node:path'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { pairKey } from './decisions.ts'
@@ -27,6 +28,15 @@ export function listWorkspaces(records: Iterable<MemoryRecord>): string[] {
     if (r.status === 'active' && r.scope === 'workspace' && r.workspacePath !== undefined) paths.add(r.workspacePath)
   }
   return [...paths].sort()
+}
+
+/**
+ * 按范围设置的后台功能（自动体检、记忆梦境）要看的范围：全局在前，加上记忆根下列出的每个项目，再加上还没有自己的记忆、
+ * 单独设了开关的项目（settingKeys 里的绝对路径；别的键是「全部」「全局」这类，不算）。项目按路径排序、去重。
+ */
+export function scheduledScopes(listedWorkspaces: Iterable<string>, settingKeys: Iterable<string>): Scope[] {
+  const own = [...settingKeys].filter(key => isAbsolute(key))
+  return [{ kind: 'global' }, ...[...new Set([...listedWorkspaces, ...own])].sort().map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
 }
 
 /**

@@ -1079,6 +1079,7 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
     // H30 经插件自有消息通道交给主模型：插件来源的 user 消息经 agent.followup 投给一个会话，宿主开一轮、把它作为当轮起点落进日志，
     // 这一步的 agent/pre-step 照常经过，插件的记忆快照落在投递的消息前面。跑着的这一轮里 workspace/session-activity 回 { kind: 'turn' }。
     // 路由指向不存在的提供方，模型调用在请求时失败，不出网；真模型收到后怎么处理不在这里验。
+    // 这一轮跑过之后，插件的活动表（记忆根 .state/activity/）里有这个工作目录：开始跑的时刻记下了，现在标着不在跑。
     await attempt('H30-HANDOFF-OWN-CHANNEL', async () => {
       if (!sq || !agentFactory) return { ok: false, detail: `前提缺失 sessionQuery=${!!sq} agents=${!!agentFactory}` }
       const ws = mkWs('probe-handoff')
@@ -1105,10 +1106,29 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
         const snapshot = events.find(e => isPluginMessage(e) && formOf(e.data) === 'snapshot')?.seq ?? -1
         const turnEnd = events.find(e => e.type === 'turn/end')?.data as { reason?: { kind?: string } } | undefined
         const hasTurnActivity = activity.some(a => a.kind === 'turn')
+        // 活动表是异步写的：等到这个工作目录出现、并且已经标成不在跑
+        type ActivityRow = { isRunning?: boolean; lastActiveAt?: number; lastStartedAt?: number }
+        const readActivity = (): ActivityRow | undefined => {
+          const dir = join(memoriesRoot, '.state', 'activity')
+          if (!existsSync(dir)) return undefined
+          for (const file of readdirSync(dir).filter(f => f.endsWith('.json'))) {
+            try {
+              const row = (JSON.parse(readFileSync(join(dir, file), 'utf8')) as { workspaces?: Record<string, ActivityRow> }).workspaces?.[ws]
+              if (row !== undefined) return row
+            } catch { /* 正在替换的文件：下一次再读 */ }
+          }
+          return undefined
+        }
+        let boardRow = readActivity()
+        for (let i = 0; i < 50 && (boardRow === undefined || boardRow.isRunning !== false); i++) {
+          await new Promise(resolve => setTimeout(resolve, 100))
+          boardRow = readActivity()
+        }
+        const isOnBoard = boardRow?.isRunning === false && typeof boardRow.lastStartedAt === 'number' && typeof boardRow.lastActiveAt === 'number'
         return {
-          ok: statuses.includes('running') && statuses.at(-1) === 'idle' && hasTurnActivity
+          ok: statuses.includes('running') && statuses.at(-1) === 'idle' && hasTurnActivity && isOnBoard
             && turnStart >= 0 && delivered > turnStart && snapshot >= 0 && snapshot < delivered,
-          detail: `statuses=${statuses.join('→')} statusAfterFollowup=${statusAfterFollowup} sessionActivity=${JSON.stringify(activity)}`
+          detail: `statuses=${statuses.join('→')} statusAfterFollowup=${statusAfterFollowup} sessionActivity=${JSON.stringify(activity)} activityBoard=${JSON.stringify(boardRow)}`
             + ` events=${events.map(e => `${e.seq}:${e.type}${isPluginMessage(e) ? `(${formOf(e.data)})` : ''}`).join(',')}`
             + ` turnStartSeq=${turnStart} snapshotSeq=${snapshot} deliveredSeq=${delivered} turnEnd=${turnEnd?.reason?.kind}`,
         }

@@ -192,6 +192,47 @@ describe('合并', () => {
   })
 })
 
+describe('调用方中途叫停', () => {
+  const edit = (r: MemoryRecord, id: string, extra: Partial<ChangeOp> = {}): ChangeOp =>
+    ({ id, kind: 'edit', memoryId: r.id, scopeKey: 'global', basis: [basisOf(r)], patch: { content: `${id} 改的` }, expect: { content: r.content }, ...extra })
+  async function stoppedRun(w: World, ops: ChangeOp[], stopAfter: number, extra: { isAllOrNothing?: boolean } = {}) {
+    await w.decisions.addChangeRun(ENTRY, { kind: 'edit', summary: '测试', workspaces: ['global'], memoryIds: [] }, 'batch-edited', T0 + 1)
+    let asked = 0
+    return applyChangeset(ops, { entryId: ENTRY, by: 'dreams', at: T0 + 1000, isSecretChecked: true, shouldStop: () => asked++ >= stopAfter, ...extra }, w.deps)
+  }
+
+  it('每个操作之前问一次：叫停之后的都不做，各记一条 stopped；已做的留着、有回执', async () => {
+    const w = world()
+    const [a, b, c] = [await seed(w, 'mem_a'), await seed(w, 'mem_b'), await seed(w, 'mem_c')]
+    const r = await stoppedRun(w, [edit(a, 'o1'), edit(b, 'o2'), edit(c, 'o3')], 1)
+    expect(r.isStopped).toBe(true)
+    expect(r.outcomes.map(o => (o.kind === 'skipped' ? o.reason : o.kind))).toEqual(['applied', 'stopped', 'stopped'])
+    expect((await now(w, a)).content).toBe('o1 改的')
+    expect((await now(w, b)).content).toBe(b.content)
+    expect((await receiptsOfEntry(w.decisions, ENTRY)).map(x => x.id)).toEqual(['o1'])
+  })
+
+  it('一组算一个整体：开始了的组做完，叫停只拦在组与组之间', async () => {
+    const w = world()
+    const [a, b, c] = [await seed(w, 'mem_a'), await seed(w, 'mem_b'), await seed(w, 'mem_c')]
+    // 第一次问（组之前）放行，第二次问（第三个操作之前）叫停
+    const r = await stoppedRun(w, [edit(a, 'o1', { group: 'g1' }), edit(b, 'o2', { group: 'g1' }), edit(c, 'o3')], 1)
+    expect(r.groups).toEqual([{ group: 'g1', state: 'applied' }])
+    expect(r.outcomes.map(o => (o.kind === 'skipped' ? o.reason : o.kind))).toEqual(['applied', 'applied', 'stopped'])
+    expect(await openGroups(w)).toEqual([])
+  })
+
+  it('一开始就叫停：什么都不做；整批退的那一批不看它', async () => {
+    const w = world()
+    const [a, b] = [await seed(w, 'mem_a'), await seed(w, 'mem_b')]
+    const none = await stoppedRun(w, [edit(a, 'o1')], 0)
+    expect(none).toMatchObject({ isStopped: true, outcomes: [{ kind: 'skipped', reason: 'stopped' }] })
+    const all = await stoppedRun(w, [edit(a, 'o2'), edit(b, 'o3')], 0, { isAllOrNothing: true })
+    expect(all.isStopped).toBeUndefined()
+    expect(all.outcomes.map(o => o.kind)).toEqual(['applied', 'applied'])
+  })
+})
+
 describe('中断与收尾', () => {
   /** 做完第一步就断了：组的标记和第一步的回执留在条目上。 */
   async function interrupted(w: World) {

@@ -72,3 +72,61 @@ export type AutoCheckupSetting = z.infer<typeof autoCheckupSettingSchema>
  */
 export const modelSelectionRowSchema = modelSelectionSchema.extend({ id: z.string() })
 export type ModelSelectionRow = z.infer<typeof modelSelectionRowSchema>
+
+/**
+ * 记忆梦境的开关和运行记录（`.state/dreams/<sha1(id)>.json`，见 storage/sidecar.ts）。id 是范围键（`global` 或项目的绝对路径），
+ * 另有两个特殊的键：`all` 只放默认开关（管没单独设过的范围），`usage` 只放用量。
+ * - enabled：这个范围单独设的开关；没有这个键 = 跟随 `all`，`all` 也没有 = 关。
+ * - completed：最近一次做完的运行。间隔从它算，没做完的运行不动它。
+ * - unfinished：最近一次没做完的运行；运行一开始就写上（原因先记成 lost），做完才清。reason 开放取值
+ *   （yielded 让路、failed 出错、lost 认领被接手或进程中途退出、model-unavailable），不认识的按 failed 待。
+ *   entryId 是那次运行用过的账本条目。
+ * - failure：连续出错的次数和最近一次的时刻；让路、认领被接手不计，做完一次清零。
+ * - lastResult：最近一次运行的结果（做完没做完都记），给界面显示。
+ * - runs：只在 `usage` 那条上，一次运行一行、逐次累加，只留最近七天的。
+ */
+const dreamsStepSchema = z.object({ name: z.string(), state: z.string() })
+export const dreamsRecordSchema = z.object({
+  id: z.string(),
+  enabled: z.boolean().optional(),
+  completed: z.object({ runId: z.string(), startedAt: z.number(), endedAt: z.number() }).optional(),
+  unfinished: z.object({ runId: z.string(), startedAt: z.number(), stoppedAt: z.number(), reason: z.string(), entryIds: z.array(z.string()).optional() }).optional(),
+  failure: z.object({ count: z.number().int().positive(), failedAt: z.number() }).optional(),
+  lastResult: z.object({
+    runId: z.string(),
+    kind: z.string(),
+    by: z.string(),
+    endedAt: z.number(),
+    steps: z.array(dreamsStepSchema),
+    usageTokens: z.number(),
+    modelFallback: z.object({ to: z.string(), reason: z.string() }).optional(),
+    entryId: z.string().optional(),
+  }).optional(),
+  runs: z.array(z.object({ runId: z.string(), at: z.number(), tokens: z.number() })).optional(),
+})
+export type DreamsRecord = z.infer<typeof dreamsRecordSchema>
+
+/**
+ * 记忆梦境的变化基线（`.state/dream-marks/<sha1(id)>.json`），一个范围一条：runId 那次运行开始时读到的在用记忆，
+ * 记忆 id → 内容指纹（governance/dreams-gate.ts dreamContentFingerprint）。只有 runId 等于这个范围 completed.runId 时才算数：
+ * 基线先写、完成记录后写，两次写之间断了就对不上，按基线不可用处理。
+ */
+export const dreamMarksSchema = z.object({
+  id: z.string(),
+  runId: z.string(),
+  takenAt: z.number(),
+  marks: z.record(z.string(), z.string()),
+})
+export type DreamMarks = z.infer<typeof dreamMarksSchema>
+
+/**
+ * 活动表的一行（`.state/activity/<sha1(id)>.json`），一个宿主进程一条，id 是进程启动时生成的。at 是最近一次写入（有会话在跑期间定时刷新）；
+ * workspaces 的键是工作目录键（项目的绝对路径，没有工作目录的会话用 `global`，还没解析出来的用 `?`）：
+ * isRunning 这个进程里它有没有会话在跑，lastActiveAt 最近一次开始或停下的时刻，lastStartedAt 最近一次开始跑的时刻。
+ */
+export const activityEntrySchema = z.object({
+  id: z.string(),
+  at: z.number(),
+  workspaces: z.record(z.string(), z.object({ isRunning: z.boolean(), lastActiveAt: z.number(), lastStartedAt: z.number().optional() })),
+})
+export type ActivityEntry = z.infer<typeof activityEntrySchema>

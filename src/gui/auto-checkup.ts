@@ -41,6 +41,8 @@ export interface AutoCheckupSchedulerDeps {
   onClaimChanged?: () => Promise<void>
   /** 体检之后的后续段（给冲突生成处理建议，一次最多 10 条）；缺省不生成。 */
   suggestions?: Pick<CheckupSuggestions, 'run'>
+  /** 一轮检查（含补的那遍）做完之后调用：别的后台功能（记忆梦境）接在它后面查自己的。卸载之后不调。 */
+  onRoundDone?: () => void
   now: () => number
   log?: MemoryLogger
 }
@@ -101,6 +103,7 @@ export class AutoCheckupScheduler {
         } while (this.isRerunRequested && !this.isDisposed)
       } finally {
         this.running = undefined
+        if (!this.isDisposed) this.deps.onRoundDone?.()
       }
     })()
     this.running = run

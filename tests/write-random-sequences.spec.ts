@@ -9,6 +9,11 @@ import { buildTypeRegistry } from '../src/type-registry.ts'
 import { editFingerprint } from '../src/governance/snapshots.ts'
 import { executeSnapshotTool } from '../src/tools/snapshot.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
+import { basisOf, scopeKeyOf } from '../src/governance/changeset.ts'
+import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
+import { DREAMS_DEFAULTS } from '../src/governance/dreams-gate.ts'
+import { DreamsStore } from '../src/governance/dreams-records.ts'
+import { runDreams } from '../src/tools/dreams-run.ts'
 
 vi.mock('node:fs/promises', async () => (await import('./helpers/interleave.ts')).interleavedFs)
 
@@ -16,7 +21,7 @@ const hooks = { beforeCommit: async () => {} }
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 const initial = { a: 'workspace', b: 'workspace', isSameName: false } as const
 const base = memorySubject(initial)
-const kinds = ['新建', '整条更新', '精确修改', '补证', '删除', '提升', '界面批量写入'] as const
+const kinds = ['新建', '整条更新', '精确修改', '补证', '删除', '提升', '界面批量写入', '梦境改写'] as const
 type Kind = typeof kinds[number]
 interface Write { writer: number; index: number; kind: Kind }
 const ref = (r: MemoryRecord) => ({ memoryId: r.id, layer: { kind: 'workspace' as const, workspacePath: W }, base: { updatedAt: r.updatedAt, digest: editFingerprint(r) } })
@@ -62,6 +67,36 @@ const generators: Record<Kind, (w: MemoryWorld, op: Write, before: MemoryRecord)
     expect(await w.store.get(second.id, { workspacePath: W })).toMatchObject({ content })
     expect(result).toMatchObject({ ok: true })
     expect(await w.store.get(before.id, { workspacePath: W })).toMatchObject({ content })
+  },
+  // 记忆梦境的一次完整运行（认领、记开始、读基线、步骤里应用一条变更集操作、记结果），和前台的写入抢同一把锁、同一本账
+  梦境改写: async (w, op, before) => {
+    const content = `梦境改写${op.index}`
+    const scope = { kind: 'workspace', workspacePath: W } as const
+    const checkups = new CheckupRecordStore(w.sidecar.checkups)
+    const result = await runDreams(scope, { by: 'manual' }, {
+      store: w.store, snapshots: w.snapshots, decisions: w.decisions, dreams: new DreamsStore(w.sidecar.dreams, w.sidecar.dreamMarks), log: { info() {}, warn() {}, error() {} },
+      claimScope: async () => {
+        const claimed = await checkups.claim([scope])
+        return 'busy' in claimed ? claimed : { release: async () => { for (const claim of claimed.claims) await claim.release() } }
+      },
+      activity: async () => ({ isComplete: true, workspaces: new Map() }),
+      resolveLlm: async () => ({ llm: null, isSelected: false, fellBack: false }),
+      config: () => DREAMS_DEFAULTS,
+      isGovernanceEnabled: () => true,
+      plan: [{
+        name: 'edit', needsChanges: false,
+        run: async (ctx) => {
+          const read = (await w.store.get(before.id, { workspacePath: W }))!
+          const applied = await ctx.apply([{ id: `dream_${op.index}`, kind: 'edit', memoryId: read.id, scopeKey: scopeKeyOf(read), basis: [basisOf(read)], patch: { content }, expect: { content: read.content } }])
+          expect(applied.outcomes.map(o => o.kind)).toEqual(['applied'])
+        },
+      }],
+      interval: () => () => {},
+      now: () => STORE_NOW,
+      newRunId: () => `pd_dream_${op.index}`,
+    })
+    expect(result).toMatchObject({ kind: 'completed', entryId: `pd_dream_${op.index}` })
+    expect(await w.store.get(before.id, { workspacePath: W })).toMatchObject({ content, lastChange: { by: 'dreams' } })
   },
 }
 

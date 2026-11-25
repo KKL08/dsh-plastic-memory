@@ -51,7 +51,12 @@ import { AdviceIgnoreStore } from './governance/advice-ignores.ts'
 import { CheckupRecordStore } from './governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from './governance/auto-checkups.ts'
 import { ModelSelectionStore, createBackgroundLlmResolver } from './governance/background-llm.ts'
-import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from './governance/schema.ts'
+import { DREAMS_DEFAULTS, resolveDreamsConfig } from './governance/dreams-gate.ts'
+import { DreamsStore } from './governance/dreams-records.ts'
+import { maintainStep } from './tools/dreams-run.ts'
+import { DreamsScheduler } from './tools/dreams-scheduler.ts'
+import { ActivityBoard } from './governance/session-activity.ts'
+import { adviceIgnoreSchema, genId, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from './governance/schema.ts'
 import type { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import { createInstructionReader } from './governance/instructions.ts'
 import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
@@ -60,6 +65,8 @@ import { MEMORY_RPC_CHANNEL } from './gui/contract.ts'
 import { createMemoryRpcHandler, type MemoryRpcHandler } from './gui/rpc.ts'
 import { ViewWriter, collectCheckupView, collectGlobalViews } from './gui/view-writer.ts'
 import { AutoCheckupScheduler, type AutoCheckupTimer } from './gui/auto-checkup.ts'
+import { holdCheckups } from './gui/checkup-run.ts'
+import { GLOBAL_SCOPE_KEY } from './scope.ts'
 import { CheckupSuggestions } from './gui/checkup-suggestions.ts'
 import { buildSessionView } from './gui/views.ts'
 import { ACCENTS, type Accent, type SessionView } from './gui/contract.ts'
@@ -111,6 +118,19 @@ export interface Config {
   history: {
     /** 同一会话在这么多分钟里接连对同一条记忆做的状态变化只留一次历史版本，后面的原因追加进去。设置页不露，配置文件可改；改了下一次保存生效。 */
     mergeWindowMinutes: Volatile<number>
+  }
+  brewingDreams: {
+    /** 记忆梦境（实验）的启动条件，设置页不露，配置文件可改；改了下一轮检查生效。范围开关不在这里，在记忆根的侧表里（几个进程共用）。 */
+    /** 距上次做完至少隔这么多天。 */
+    minIntervalDays: Volatile<number>
+    /** 上次做完之后内容变了的记忆不少于这么多条才再做。 */
+    minChanges: Volatile<number>
+    /** 上次做完之后没回看的用户消息不少于这么多条也算有内容可做。 */
+    minNewMessages: Volatile<number>
+    /** 涉及的工作目录都没有会话在跑、并且安静了这么多分钟才开始。 */
+    idleMinutes: Volatile<number>
+    /** 最近七天后台用量的上限（token）：到了就不再开始新的一次；0 为不限。 */
+    weeklyTokenCap: Volatile<number>
   }
   index: {
     /** 一个作用域（全局、每个项目各算）里主题数的上限；到了上限不再新建主题。设置页不露，配置文件可改；改了下一次整理生效。 */
@@ -166,6 +186,14 @@ export const Config = z.object({
   }),
   history: z.object({
     mergeWindowMinutes: z.number().default(MERGE_WINDOW_MINUTES_DEFAULT).volatile(),
+  }),
+  // 取值范围不在这里拦：坏值在用的时候换成默认值并记日志（resolveDreamsConfig），不让整份配置加载失败
+  brewingDreams: z.object({
+    minIntervalDays: z.number().default(DREAMS_DEFAULTS.minIntervalDays).volatile(),
+    minChanges: z.number().default(DREAMS_DEFAULTS.minChanges).volatile(),
+    minNewMessages: z.number().default(DREAMS_DEFAULTS.minNewMessages).volatile(),
+    idleMinutes: z.number().default(DREAMS_DEFAULTS.idleMinutes).volatile(),
+    weeklyTokenCap: z.number().default(DREAMS_DEFAULTS.weeklyTokenCap).volatile(),
   }),
   index: z.object({
     maxTopics: z.natural().min(1).default(INDEX_MAX_TOPICS_DEFAULT).volatile(),
@@ -283,6 +311,12 @@ export async function apply(ctx: Context, config: Config) {
   const checkups = new CheckupRecordStore(sidecar.checkups)
   // 自动体检设置表：记忆页经 /memory set-auto-checkup 改，几个宿主进程共用一份
   const autoCheckups = new AutoCheckupSettingStore(sidecar.autoCheckups)
+  // 记忆梦境的侧表：范围开关、每个范围的运行记录、变化基线、七天用量，几个宿主进程共用一份
+  const dreams = new DreamsStore(sidecar.dreams, sidecar.dreamMarks)
+  const dreamsConfig = () => resolveDreamsConfig({
+    minIntervalDays: config.brewingDreams.minIntervalDays.get(), minChanges: config.brewingDreams.minChanges.get(), minNewMessages: config.brewingDreams.minNewMessages.get(),
+    idleMinutes: config.brewingDreams.idleMinutes.get(), weeklyTokenCap: config.brewingDreams.weeklyTokenCap.get(),
+  })
   // 后台模型的选择表：自动体检、梦境各一个键，设置页经 /memory set-model-selection 改，几个宿主进程共用一份
   const selections = new ModelSelectionStore(sidecar.modelSelections)
   // 指令文件（AGENTS.md / CLAUDE.md）按作用域现读，用宿主自己的指令文件包（用到时才加载，解析到宿主那份）：
@@ -292,6 +326,8 @@ export async function apply(ctx: Context, config: Config) {
   let views: ViewWriter | undefined
   // 自动体检调度器：宿主有计时服务时才有，见下方 ctx.inject(['timer'], …)
   let scheduler: AutoCheckupScheduler | undefined
+  // 记忆梦境调度器：同上
+  let dreamsScheduler: DreamsScheduler | undefined
   // 会话归属对照（契约 GUI_WORKSPACE_MAP_FILE）：每次解析都记一笔原始 cwd → 项目；写入器就位前解析到的先留着，就位时补记
   const earlyWorkspaces = new Map<string, string>()
   const resolveCwd = async (cwd: string | undefined) => {
@@ -537,10 +573,50 @@ export async function apply(ctx: Context, config: Config) {
       onChecked: async () => { await views?.requestCheckups() },
       onClaimChanged: async () => { await views?.requestCheckups() },
       suggestions: checkupSuggestions,
+      onRoundDone: () => void dreamsScheduler?.recheck(),
       now: () => Date.now(),
       log: ctx.logger,
     })
     scheduler = created
+    // 活动表：本进程里哪些工作目录有会话在跑，写到侧表给别的进程看；记忆梦境据此判空闲、让路
+    const board = new ActivityBoard({
+      table: sidecar.activity, processId: genId('proc'), log: ctx.logger, now: () => Date.now(),
+      interval: (callback, delayMs) => timer.interval(callback, delayMs),
+      source: {
+        onStatus: listener => ctx.on('agent/status', ({ agent, status }) => { listener(agent, status) }),
+        list: () => {
+          const agents = ctx.get('agents') as { list?(): Array<{ status: string }> } | undefined
+          return agents?.list?.().map(agent => ({ agent, status: agent.status }))
+        },
+        // 不经 resolveCwd：这里只为判空闲，不往会话归属对照里记
+        workspaceKeyOf: async agent => (await resolveWorkspacePath(ctx, (agent as { session?: { header?: { cwd?: string } } }).session?.header?.cwd)) ?? GLOBAL_SCOPE_KEY,
+      },
+    })
+    void board.start().catch((err: unknown) => { ctx.logger.warn('[plastic-memory] 活动表启动失败，记忆梦境不会自动运行', err) })
+    // 记忆梦境：接在自动体检每一轮之后查门槛；这一版的运行计划只有维护一步
+    const dreamsCreated = new DreamsScheduler({
+      run: {
+        store, snapshots, decisions, dreams, log: ctx.logger,
+        claimScope: (scope, onLost) => holdCheckups(checkups, [scope], {
+          interval: (callback, delayMs) => timer.interval(callback, delayMs), onLost, onChange: async () => { await views?.requestCheckups() }, log: ctx.logger,
+        }),
+        activity: maxAgeMs => board.view(maxAgeMs),
+        resolveLlm: () => resolveBackgroundLlm('dreams'),
+        config: () => dreamsConfig().config,
+        isGovernanceEnabled: () => config.governance.enabled.get(),
+        plan: [maintainStep(store)],
+        interval: (callback, delayMs) => timer.interval(callback, delayMs),
+        now: () => Date.now(),
+        // 运行 id 同时是这次运行在账本里的条目 id，和别的条目同一种写法
+        newRunId: () => genId('pd'),
+      },
+      store, board,
+      timeout: (callback, delayMs) => timer.timeout(callback, delayMs),
+      badConfigKeys: () => dreamsConfig().badKeys,
+      log: ctx.logger,
+    })
+    dreamsScheduler = dreamsCreated
+    dreamsCreated.start()
     created.start()
     // 对话记录库的后台推进：一次只跑一段，上一段没跑完这一拍就跳过；功能关着时什么都不做
     let isAdvancing = false
@@ -552,7 +628,10 @@ export async function apply(ctx: Context, config: Config) {
     return async () => {
       stopAdvancing()
       if (scheduler === created) scheduler = undefined
+      if (dreamsScheduler === dreamsCreated) dreamsScheduler = undefined
       await created.dispose()
+      await dreamsCreated.dispose()
+      await board.dispose()
     }
   })
 
@@ -602,6 +681,7 @@ export async function apply(ctx: Context, config: Config) {
     await views?.rewriteAll()
     // 体检开关变了：自动体检立刻重算（打开时到期的范围马上开始查）
     if (changed('governance.enabled')) void scheduler?.recheck()
+    if (changed('governance.enabled') || changed('brewingDreams.minIntervalDays', 'brewingDreams.minChanges', 'brewingDreams.minNewMessages', 'brewingDreams.idleMinutes', 'brewingDreams.weeklyTokenCap')) void dreamsScheduler?.recheck()
   })
 
   // frozen snapshot：按 session 隔离缓存，session/created 异步解析 workspace，compaction 结束标过期、下一次组装重建。
