@@ -13,8 +13,9 @@ import { roundValidity } from '../validity.ts'
  */
 
 /** 这一版落地的操作。 */
-export const CHANGE_OP_KINDS = ['edit', 'forget', 'keep', 'corroborate', 'set-validity', 'set-recall', 'link'] as const
+export const CHANGE_OP_KINDS = ['edit', 'forget', 'keep', 'corroborate', 'set-validity', 'set-recall', 'link', 'create'] as const
 /** 词汇里有、落地在后面版本的操作：读得出，应用时跳过。 */
+/** 合并、并成版本、拆分由 changeset-plans.ts 展开成上面的操作，这三个词自己不落地。 */
 export const RESERVED_OP_KINDS = ['version', 'merge', 'split', 'move-scope', 'mark-exception', 'set-topic'] as const
 export type ChangeOpKind = (typeof CHANGE_OP_KINDS)[number]
 
@@ -31,7 +32,7 @@ const FIELDS_BY_KIND: Record<ChangeOpKind, readonly PatchField[]> = {
   edit: ['name', 'summary', 'content', 'tags', 'factTime'],
   'set-validity': ['validFrom', 'validTo'],
   'set-recall': ['recall'],
-  forget: [], keep: [], corroborate: [], link: [],
+  forget: [], keep: [], corroborate: [], link: [], create: [],
 }
 
 /** 补丁：只列要改的字段和新值；null 是清掉这个字段（名称、摘要、正文、标签清不掉）。 */
@@ -50,6 +51,11 @@ export type FieldPatch = z.infer<typeof fieldPatchSchema>
 /** 依据：判断时读过的一条记忆（目标自己也列在里面）当时的扫描指纹和作用域键。 */
 export const opBasisSchema = z.object({ memoryId: z.string(), fingerprint: z.string(), scopeKey: z.string() })
 export type OpBasis = z.infer<typeof opBasisSchema>
+
+/** 新建的那条的内容；其余字段从 from 那条继承（见 createdFrom）。 */
+export const createDraftSchema = z.object({ name: z.string().min(1), summary: z.string(), content: z.string(), tags: z.array(z.string()) }).strict()
+export type CreateDraft = z.infer<typeof createDraftSchema>
+const copyRefSchema = z.object({ memoryId: z.string(), scopeKey: z.string() })
 
 const linkDeltaSchema = z.object({ add: linkIdsSchema.partial().optional(), remove: linkIdsSchema.partial().optional() })
 
@@ -70,6 +76,14 @@ export const changeOpSchema = z.object({
   change: z.enum(CHANGE_KINDS).optional(),
   /** 状态变化的原因，随历史版本留着。 */
   reason: z.string().optional(),
+  /** 一起成立的一组：连续的、带同一个 group 的操作全做成才算成，一步不成就把组内已做的撤回。 */
+  group: z.string().optional(),
+  /** forget：这条并进了哪条（合并、并成版本），记在软删的那一版上；那条要在依据里。 */
+  into: copyRefSchema.extend({ as: z.enum(['merge', 'version']) }).optional(),
+  /** create：从哪条继承类型、出处这些；那条要在依据里。memoryId 是定好的新 id，scopeKey 是落在哪。 */
+  from: copyRefSchema.optional(),
+  /** create：新建的那条的内容。 */
+  draft: createDraftSchema.optional(),
 })
 export type ChangeOp = z.infer<typeof changeOpSchema>
 
@@ -165,9 +179,10 @@ export function patchedFields(op: ChangeOp): PatchField[] {
 /**
  * 跳过的原因。unsupported：这一版不落地的操作，或补丁里有这种操作不该带的字段；gone：目标不在了、不在用；
  * moved：目标或依据换了作用域；basis-changed：依据的记忆内容变了、不在用了；field-changed：补丁里的字段已不是读到时的值；
- * foreign-secret：改写稿里带进了原记忆没有的疑似密钥，或有高危密钥；no-change：补丁和现状一样，没有可写的。
+ * foreign-secret：改写稿里带进了原记忆没有的疑似密钥，或有高危密钥；no-change：补丁和现状一样，没有可写的；
+ * id-taken：要新建的 id 在那个作用域已经有了。
  */
-export type SkipReason = 'unsupported' | 'gone' | 'moved' | 'basis-changed' | 'field-changed' | 'foreign-secret' | 'no-change'
+export type SkipReason = 'unsupported' | 'gone' | 'moved' | 'basis-changed' | 'field-changed' | 'foreign-secret' | 'no-change' | 'id-taken'
 
 export type OpCheck =
   /** 写：fields 是要改的字段和新值（值是 undefined 即清掉）。 */
@@ -176,6 +191,8 @@ export type OpCheck =
   | { kind: 'link' }
   | { kind: 'corroborate' }
   | { kind: 'forget' }
+  /** 新建：from 是继承的那条（写入段里刚读到的）。 */
+  | { kind: 'create'; from: MemoryRecord }
   /** 核对过了，不写（keep）。 */
   | { kind: 'none' }
   | { kind: 'skip'; reason: SkipReason; memoryId: string }
@@ -233,15 +250,28 @@ export function checkOp(op: ChangeOp, input: CheckInput): OpCheck {
   if (kind === 'link' && (op.links === undefined || isLinkDeltaCrossed(op.links))) return skip('unsupported')
   // 改动的性质只有改内容、改有效期的操作能声明，补证走它自己的操作
   if (op.change !== undefined && (op.change === 'corroborate' || (kind !== 'edit' && kind !== 'set-validity'))) return skip('unsupported')
+  const own = copyKey(op)
+  const inBasis = (ref: { memoryId: string; scopeKey: string }) => op.basis.some(b => copyKey(b) === copyKey(ref))
+  // 去向只有删除能带，指的是别的一条、且在依据里（它变了这次合并就不算数）
+  if (op.into !== undefined && (kind !== 'forget' || copyKey(op.into) === own || !inBasis(op.into))) return skip('unsupported')
+  const isCreate = kind === 'create'
+  if (isCreate !== (op.from !== undefined) || isCreate !== (op.draft !== undefined)) return skip('unsupported')
+  // 新建的那条落在它继承的那条所在的作用域（继承的字段里就有作用域）：两边不一致的不收
+  if (isCreate && (op.links !== undefined || !inBasis(op.from!) || op.from!.scopeKey !== op.scopeKey || copyKey(op.from!) === own)) return skip('unsupported')
 
   const { target, progress } = input
-  if (target === undefined || target.status !== 'active') return skip('gone')
-  // 目标自己必须在依据里：没有它，目标读到时的版本和作用域无从核对
-  const own = copyKey(op)
-  if (!op.basis.some(b => copyKey(b) === own)) return skip('unsupported')
+  if (isCreate) {
+    if (target !== undefined) return skip('id-taken')
+  } else {
+    if (target === undefined || target.status !== 'active') return skip('gone')
+    // 目标自己必须在依据里：没有它，目标读到时的版本和作用域无从核对
+    if (!inBasis(op)) return skip('unsupported')
+  }
   for (const basis of op.basis) {
     const key = copyKey(basis)
-    if (progress.forgotten.has(key) && key !== own) continue
+    // 这一批自己删掉的依据不再核对；但要继承的那条、要并进去的那条必须还在用
+    const isNeededLive = (op.from !== undefined && copyKey(op.from) === key) || (op.into !== undefined && copyKey(op.into) === key)
+    if (progress.forgotten.has(key) && key !== own && !isNeededLive) continue
     const record = key === own ? target : input.basis.get(key)
     if (record === undefined || record.status !== 'active') return skip('basis-changed', basis.memoryId)
     if (scopeKeyOf(record) !== basis.scopeKey) return skip('moved', basis.memoryId)
@@ -251,9 +281,16 @@ export function checkOp(op: ChangeOp, input: CheckInput): OpCheck {
   const written = progress.written.get(own)
   for (const field of fields) {
     const expected = written?.has(field) === true ? written.get(field) : normalized(field, op.expect?.[field])
-    if (!isDeepStrictEqual(fieldValue(target, field), expected)) return skip('field-changed')
+    if (target === undefined || !isDeepStrictEqual(fieldValue(target, field), expected)) return skip('field-changed')
   }
 
+  if (isCreate) {
+    const from = input.basis.get(copyKey(op.from!))!
+    // 疑似密钥只放行继承的那条里已有的，别的依据里的不算
+    if (input.isSecretChecked && hasForeignSecret(op.draft!, [from])) return skip('foreign-secret')
+    return { kind: 'create', from }
+  }
+  if (target === undefined) return skip('gone')
   if (kind === 'keep') return { kind: 'none' }
   if (kind === 'forget') return { kind: 'forget' }
   if (kind === 'corroborate') return { kind: 'corroborate' }
@@ -269,6 +306,23 @@ export function checkOp(op: ChangeOp, input: CheckInput): OpCheck {
 function isLinkDeltaCrossed(links: NonNullable<ChangeOp['links']>): boolean {
   const crossed = (add: readonly string[] | undefined, remove: readonly string[] | undefined) => (add ?? []).some(id => (remove ?? []).includes(id))
   return crossed(links.add?.related, links.remove?.related) || crossed(links.add?.premises, links.remove?.premises)
+}
+
+/** 新建的那条在回执里记摘要的字段：撤销时凭它们判断还是不是这次写下的样子。 */
+export const CREATE_RECEIPT_FIELDS = ['name', 'summary', 'content', 'tags'] as const satisfies readonly ReceiptField[]
+
+/**
+ * 新建的那条（拆分）：内容是稿里的，类型、作用域、出处清单、置信度、事实时间、有效期、待确认身份、注入档位从 from 继承；
+ * 锁、关联和前提、取代关系、最近一次内容改动、状态起点不继承。创建、修改、确认时间是这次的时刻。
+ */
+export function createdFrom(from: MemoryRecord, draft: CreateDraft, id: string, at: number): MemoryRecord {
+  const inherited = Object.fromEntries((['workspacePath', 'sourceTrail', 'factTime', 'validFrom', 'validTo', 'delegation', 'recall', 'globalCandidate'] as const)
+    .flatMap(key => (from[key] === undefined ? [] : [[key, from[key]]])))
+  return {
+    id, type: from.type, scope: from.scope, source: from.source, confidence: from.confidence,
+    ...inherited, ...draft,
+    createdAt: at, updatedAt: at, lastConfirmedAt: at, lastRecalledAt: null, recallCount: 0, status: 'active',
+  } as MemoryRecord
 }
 
 /** 这次内容改动的性质：操作声明的，缺省细化。 */
@@ -303,12 +357,14 @@ export const changeReceiptSchema = z.object({
   confirmedAt: z.number(),
   /** 删除的回执：写下的删除时刻。撤销时对不上，说明期间被恢复过、又被别处删了一次。 */
   deletedAt: z.number().optional(),
+  /** 属于哪一组（见 ChangeOp.group）；没做完的组按它找出已做的几步撤回。 */
+  group: z.string().optional(),
 })
 export type ChangeReceipt = z.infer<typeof changeReceiptSchema>
 
 /** 写成之后算回执：written 是提交的那一版。 */
 export function receiptOf(
-  input: { id: string; op: string; kind: ChangeOpKind; fields: readonly ReceiptField[]; snapshotId?: string; links?: { added: LinkIds; removed: LinkIds } },
+  input: { id: string; op: string; kind: ChangeOpKind; fields: readonly ReceiptField[]; snapshotId?: string; links?: { added: LinkIds; removed: LinkIds }; group?: string },
   written: MemoryRecord,
 ): ChangeReceipt {
   return {
@@ -320,9 +376,11 @@ export function receiptOf(
     ...(written.status === 'deleted' && written.deletedAt !== undefined ? { deletedAt: written.deletedAt } : {}),
     ...(input.snapshotId !== undefined ? { snapshotId: input.snapshotId } : {}),
     ...(input.links !== undefined ? { links: input.links } : {}),
-    isContent: input.fields.some(field => (CONTENT_PATCH_FIELDS as readonly string[]).includes(field)),
+    // 新建的回执记了内容字段的摘要，但它不是一次内容改动：撤销是把这条删掉，不按最近一次内容改动核对
+    isContent: input.kind !== 'create' && input.fields.some(field => (CONTENT_PATCH_FIELDS as readonly string[]).includes(field)),
     trail: trailDigest(written),
     confirmedAt: written.lastConfirmedAt,
+    ...(input.group !== undefined ? { group: input.group } : {}),
   }
 }
 
@@ -347,6 +405,7 @@ export function revertBlock(receipt: ChangeReceipt, current: MemoryRecord | unde
     return receipt.snapshotId !== undefined && before === undefined ? 'expired' : undefined
   }
   if (receipt.fields.some(field => fieldDigest(current, field as ReceiptField) !== receipt.after[field])) return 'field-changed'
+  if (receipt.kind === 'create') return undefined
   if (receipt.isContent && current.lastChange?.op !== receipt.op) return 'overwritten'
   const touchesTrail = receipt.isContent || receipt.kind === 'corroborate'
   if (touchesTrail && trailDigest(current) !== receipt.trail) return 'corroborated'
@@ -360,11 +419,13 @@ const without = (ids: readonly string[] | undefined, drop: readonly string[]) =>
 /**
  * 撤销还原成什么：刚读到的那一版，只把这次改的字段改回改前的值。改了内容的把最近一次内容改动、修改时间、状态起点、出处清单
  * 一起还原成快照里那份；确认时间还是这次写下的值才改回。关联和前提按增量：它加的还在就去掉，它去掉的还没回来就加回。
- * 期间别处改的注入档位、锁、关联原样留着。删除的撤销把状态放回在用、修改时间改回删之前的。
+ * 期间别处改的注入档位、锁、关联原样留着。删除的撤销把状态放回在用、修改时间改回删之前的、去掉并入的去向。
+ * 新建的撤销是把那条软删（删除时刻由执行器补）。
  */
 export function reverted(receipt: ChangeReceipt, current: MemoryRecord, before: MemoryRecord | undefined): MemoryRecord {
+  if (receipt.kind === 'create') return { ...current, status: 'deleted' }
   if (receipt.kind === 'forget') {
-    const { deletedAt: _deletedAt, ...rest } = current
+    const { deletedAt: _deletedAt, mergedInto: _mergedInto, ...rest } = current
     return { ...rest, status: 'active', updatedAt: before?.updatedAt ?? current.updatedAt }
   }
   const next: Record<string, unknown> = { ...current }

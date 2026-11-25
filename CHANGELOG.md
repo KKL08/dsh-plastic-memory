@@ -125,6 +125,11 @@ All notable changes to this project are documented here. The format follows
   test instead of hanging the run.
 
 ### Changed
+- Merging two memories now records which memory the removed one went into.
+  The removed memory keeps its earlier versions while it is in recently
+  deleted; when it is deleted for good, they move under the memory that was
+  kept and stay marked as coming from the removed one. Restoring the removed
+  memory, or undoing the merge, brings both back as they were.
 - `memory_save` now refuses a new memory only when it is almost word for
   word the same as an existing one (ignoring spaces and punctuation); the
   reply names that memory and the three ways forward. Other new memories

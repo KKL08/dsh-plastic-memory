@@ -74,10 +74,11 @@ interface ChangeReceiptStep extends OpStep {
   fields: ReceiptField[]
   snapshotId?: string
   links?: { added: LinkIds; removed: LinkIds }
+  group?: string
 }
 interface ChangeUndoneStep extends OpStep { kind: typeof CHANGE_UNDONE_STEP; entryId: string; receiptOp: string }
 
-export function changeReceiptStep(input: { entryId: string; opId: string; opKind: ChangeOpKind; fields: ReceiptField[]; snapshotId?: string; links?: { added: LinkIds; removed: LinkIds } }): ChangeReceiptStep {
+export function changeReceiptStep(input: { entryId: string; opId: string; opKind: ChangeOpKind; fields: ReceiptField[]; snapshotId?: string; links?: { added: LinkIds; removed: LinkIds }; group?: string }): ChangeReceiptStep {
   return { kind: CHANGE_RECEIPT_STEP, ...input }
 }
 
@@ -133,6 +134,7 @@ export function ledgerSteps(decisions: PendingDecisionsStore, log: MemoryLogger 
       const receipt = receiptOf({
         id: step.opId, op, kind: step.opKind, fields: step.fields,
         ...(step.snapshotId !== undefined ? { snapshotId: step.snapshotId } : {}), ...(step.links !== undefined ? { links: step.links } : {}),
+        ...(step.group !== undefined ? { group: step.group } : {}),
       }, record)
       if (!(await decisions.appendChange(step.entryId, receipt))) {
         log.warn(`[plastic-memory] 操作 ${op} 做成了，但它那次处理的记录已经不在，没有撤销入口`)

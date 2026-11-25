@@ -10,6 +10,7 @@ import { ARCHIVE_DIR, GLOBAL_DIR, deriveFileId, isReservedFileName, slugifyName,
 import { RETENTION_MS } from '../../src/retention.ts'
 import type { Scope } from '../../src/scope.ts'
 import { InMemoryVersionHistory } from './in-memory-history.ts'
+import { carryMergedHistory, layerOf } from '../../src/storage/history.ts'
 
 /** 双后端套件往虚拟目录放文件用的记录：缺 id 时按相对路径派生（对应 FileTable 读手建文件）。 */
 export type SeedRecord = Omit<MemoryRecord, 'id'> & { id?: string }
@@ -136,7 +137,11 @@ export class InMemoryTable implements MemoryTable {
       let record = s.record
       if (inArchive && record.status === 'active') record = { ...record, status: 'deleted' }
       if (record.status === 'deleted' && record.deletedAt === undefined) record = { ...record, deletedAt: now }
-      if (inArchive && record.status === 'deleted' && record.deletedAt! < now - RETENTION_MS) { this.slots.delete(s.filePath); continue }
+      if (inArchive && record.status === 'deleted' && record.deletedAt! < now - RETENTION_MS) {
+        await this.carryHistory(record, s.dir)
+        this.slots.delete(s.filePath)
+        continue
+      }
       if (!inArchive && record.status !== 'active') {
         this.slots.delete(s.filePath)
         const filePath = this.pathFor(record, archive, basename(s.filePath, '.md'))   // 搬家不改文件名
@@ -169,9 +174,17 @@ export class InMemoryTable implements MemoryTable {
     if (!current) throw new RecordNotFoundError(id)
     return this.place(current, fn(current.record), isScopeTarget(from))
   }
-  async delete(id: string, at: LocateTarget, skipIf?: (current: LocatedFile) => boolean) {
+  private carryHistory(record: MemoryRecord, dir: string) {
+    return carryMergedHistory(this.history, record, dir, async (id, scope) => {
+      const found = await this.locate(id, scope)
+      return found === undefined ? undefined : layerOf(found)
+    })
+  }
+
+  async delete(id: string, at: LocateTarget, skipIf?: (current: LocatedFile) => boolean, _op?: unknown, opts: { isHistoryCarried?: boolean } = {}) {
     const current = await this.locate(id, at)
     if (!current || skipIf?.(current)) return false
+    if (opts.isHistoryCarried === true) await this.carryHistory(current.record, current.dir)
     // 与 FileTable 同语义：可见集合（global + 该记录目录）里同 id 的其余副本一并删除；给作用域时只删该目录里的
     for (const s of this.slots.values()) {
       if (s.record.id === id && ((!isScopeTarget(at) && s.dir === this.globalDir) || s.dir === current.dir)) {

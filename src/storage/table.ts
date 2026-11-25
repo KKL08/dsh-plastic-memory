@@ -221,7 +221,7 @@ export interface MemoryTable {
   update(id: string, from: LocateTarget, fn: (current: MemoryRecord) => MemoryRecord, op?: WriteOp): Promise<MemoryRecord>
   /** 物理删除（含 .archive/ 里的文件）；at 同 update，清副本见 LocateTarget。
    *  召回统计行只在哪个作用域都没有这个 id 了才清。skipIf：对锁内定位到的当前文件求值，为真就不删、返回 false。 */
-  delete(id: string, at: LocateTarget, skipIf?: (current: LocatedFile) => boolean, op?: WriteOp): Promise<boolean>
+  delete(id: string, at: LocateTarget, skipIf?: (current: LocatedFile) => boolean, op?: WriteOp, opts?: { /** 带去向的记忆：历史先并到去向那条名下再删（最近删除里的彻底删除）。密钥硬删不给。 */ isHistoryCarried?: boolean }): Promise<boolean>
   /** 这个 id 在哪些作用域有副本（任何状态，含只在 .archive/ 里的）：全局在前，项目按路径排序，同一作用域只算一次。在写锁内扫（理由同 locate）。 */
   copiesOf(id: string): Promise<Scope[]>
   /**

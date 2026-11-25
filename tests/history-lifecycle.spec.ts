@@ -1,12 +1,13 @@
 import { sidecarSchemas } from './helpers/sidecar-schemas.ts'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { chmod, mkdir, mkdtemp, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
-import { FileVersionHistory, STATE_CHANGE_VERSION, type HistoryVersion } from '../src/storage/history.ts'
+import { FileVersionHistory, STATE_CHANGE_VERSION, carryMergedHistory, versionOfMerged, type HistoryVersion } from '../src/storage/history.ts'
+import { historyWithMerged } from '../src/merged-history.ts'
 import { ARCHIVE_DIR, GLOBAL_DIR, HISTORY_DIR, workspaceDirName } from '../src/storage/paths.ts'
 import { createRootLock } from '../src/storage/root-lock.ts'
 import { MemoryStore } from '../src/store.ts'
@@ -19,7 +20,7 @@ import { executePromote } from '../src/tools/promote.ts'
 import { executeUndo } from '../src/tools/undo.ts'
 import { createAgentsMdWriter } from '../src/storage/agents-md.ts'
 import { RETENTION_MS } from '../src/retention.ts'
-import { scopeAt } from '../src/scope.ts'
+import { GLOBAL_SCOPE_KEY, scopeAt } from '../src/scope.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
@@ -252,10 +253,10 @@ describe('物理删除连目录一起删', () => {
 
   describe('同一层里在用的那份读不出时，到期的同 id 副本被清扫：历史不当成没人要的删掉', () => {
     /** 全局有一条在用、带历史的记忆，最近删除里还有一份同 id、早已过了保留期的副本。 */
-    async function liveWithExpiredDuplicate(e: Env) {
+    async function liveWithExpiredDuplicate(e: Env, extra: Partial<MemoryRecord> = {}) {
       const m = await withVersion(e)
       await mkdir(join(globalDir(), ARCHIVE_DIR), { recursive: true })
-      await writeFile(join(globalDir(), ARCHIVE_DIR, '早已删掉的副本.md'), encodeRecord({ ...m, status: 'deleted', deletedAt: e.now() - RETENTION_MS - MINUTE }, {}))
+      await writeFile(join(globalDir(), ARCHIVE_DIR, '早已删掉的副本.md'), encodeRecord({ ...m, status: 'deleted', deletedAt: e.now() - RETENTION_MS - MINUTE, ...extra }, {}))
       return { m, filePath: (await e.store.locate(m.id, GLOBAL))!.filePath }
     }
 
@@ -277,6 +278,16 @@ describe('物理删除连目录一起删', () => {
       await writeFile(filePath, `---\nid: ${m.id}\nname: [坏掉\n---\n第二版\n`)
       await e.table.maintain([globalDir()])
       expect(await versionsIn(e, globalDir(), m.id)).toEqual(['第一版'])
+    })
+
+    it('到期的那份副本还并进了另一条：历史也不搬过去', async () => {
+      const e = env()
+      const keeper = await withVersion(e, { name: '留下的' })
+      const { m, filePath } = await liveWithExpiredDuplicate(e, { mergedInto: { id: keeper.id, scopeKey: 'global', as: 'merge' } })
+      await writeFile(filePath, `---\nid: ${m.id}\nname: [坏掉\n---\n第二版\n`)
+      await e.table.maintain([globalDir()])
+      expect(await versionsIn(e, globalDir(), m.id)).toEqual(['第一版'])
+      expect((await e.store.history.list({ dir: globalDir(), loc: { scope: 'global' } }, keeper.id)).filter(v => v.mergedFrom !== undefined)).toEqual([])
     })
   })
 })
@@ -541,5 +552,149 @@ describe('内存表（测试用的参考实现）', () => {
     clock.now += RETENTION_MS + MINUTE
     await table.maintain([g, ws])
     expect([await listed(g, c.id), await listed(ws, 'mem_gone'), await listed(g, a.id), await listed(ws, a.id)]).toEqual([0, 0, 0, 1])
+  })
+})
+
+describe('合并进另一条：历史并到存活那条名下', () => {
+  /** 被合并方软删并记下去向（合并、并成版本的那次删除写下的样子）。 */
+  async function mergedAway(e: Env, from: MemoryRecord, into: MemoryRecord, as: 'merge' | 'version' = 'merge') {
+    const mergedInto = { id: into.id, scopeKey: into.workspacePath ?? 'global', as, ...(as === 'version' ? { endedAt: e.now() } : {}) }
+    expect(await e.store.softDeleteUnlessSecret(from, { at: scopeAt(from.workspacePath), now: e.now(), mergedInto })).toBe('deleted')
+  }
+  const merged = async (e: Env, dir: string, id: string) => (await e.store.history.list({ dir, loc: { scope: 'global' } }, id)).map(v => [v.record.content, v.mergedFrom ?? null, v.kind])
+
+  it('软删期间留在原处；到期清扫时搬到存活那条名下，文件里记的还是原来那条的 id', async () => {
+    const e = env()
+    const keeper = await withVersion(e, { name: '留下的', content: '甲一' })
+    const gone = await withVersion(e, { ...inWs, name: '并进去的', content: '乙一' })
+    await mergedAway(e, gone, keeper)
+    expect(await versionsIn(e, wsDir(), gone.id)).toEqual(['乙一'])
+    e.clock.now += RETENTION_MS + MINUTE
+    await e.store.maintain(scopeAt(WS))
+    expect(await e.store.get(gone.id, scopeAt(WS))).toBeUndefined()
+    expect(await exists(historyDir(wsDir(), gone.id))).toBe(false)
+    expect(await merged(e, globalDir(), keeper.id)).toEqual([['甲一', null, STATE_CHANGE_VERSION], ['乙一', gone.id, STATE_CHANGE_VERSION]])
+  })
+
+  it('最近删除里的彻底删除：同样先搬过去；并成版本的，它自己也成一版', async () => {
+    const e = env()
+    const current = await withVersion(e, { name: '当前页', content: '甲一' })
+    const old = await withVersion(e, { name: '旧状态', content: '乙一' })
+    await mergedAway(e, old, current, 'version')
+    expect(await e.store.hardDelete(old, { at: GLOBAL, isHistoryCarried: true })).toBe(true)
+    const versions = await merged(e, globalDir(), current.id)
+    expect(versions).toHaveLength(3)
+    expect(versions).toEqual(expect.arrayContaining([
+      ['甲一', null, STATE_CHANGE_VERSION], ['乙一', old.id, STATE_CHANGE_VERSION], ['乙一（新）', old.id, 'merged'],
+    ]))
+  })
+
+  it('密钥硬删不搬：历史照旧全删', async () => {
+    const e = env()
+    const keeper = await withVersion(e, { name: '留下的', content: '甲一' })
+    const gone = await withVersion(e, { name: '并进去的', content: '乙一' })
+    await mergedAway(e, gone, keeper)
+    expect(await e.store.hardDelete(gone, { at: GLOBAL })).toBe(true)
+    expect(await merged(e, globalDir(), keeper.id)).toEqual([['甲一', null, STATE_CHANGE_VERSION]])
+  })
+
+  it('存活那条期间被提升到全局：到全局找到它，历史搬过去', async () => {
+    const e = env()
+    const keeper = await withVersion(e, { ...inWs, name: '留下的', content: '甲一' })
+    const gone = await withVersion(e, { ...inWs, name: '并进去的', content: '乙一' })
+    await mergedAway(e, gone, keeper)
+    await e.store.update(keeper, ({ workspacePath: _w, ...cur }) => ({ ...cur, scope: 'global' }), scopeAt(WS))
+    e.clock.now += RETENTION_MS + MINUTE
+    await e.store.maintain(scopeAt(WS))
+    expect((await merged(e, globalDir(), keeper.id)).map(v => v[1])).toEqual([null, gone.id])
+  })
+
+  it('存活那条已经不在：历史随被合并方一起删', async () => {
+    const e = env()
+    const keeper = await withVersion(e, { name: '留下的', content: '甲一' })
+    const gone = await withVersion(e, { name: '并进去的', content: '乙一' })
+    await mergedAway(e, gone, keeper)
+    await e.store.hardDelete(keeper, { at: GLOBAL })
+    e.clock.now += RETENTION_MS + MINUTE
+    await e.store.maintain(GLOBAL)
+    expect(await exists(historyDir(globalDir(), gone.id))).toBe(false)
+    expect(await exists(historyDir(globalDir(), keeper.id))).toBe(false)
+  })
+
+  it('版本文件撞名：内容不同的换一个版本 id，两份都在；搬过的再搬一次不多出来', async () => {
+    const history = new FileVersionHistory()
+    const layer = { dir: globalDir(), loc: { scope: 'global' } as const }
+    const version = (id: string, content: string): HistoryVersion => ({
+      versionId: 'same', record: record({ id, content }), extras: {}, startedAt: T0, endedAt: T0 + MINUTE, kind: STATE_CHANGE_VERSION, writes: [],
+    })
+    await history.write(layer, version('mem_keep', '甲'))
+    await history.write(layer, version('mem_gone', '乙'))
+    await history.absorb({ dir: globalDir(), memoryId: 'mem_gone', scopeKey: GLOBAL_SCOPE_KEY }, { dir: globalDir(), memoryId: 'mem_keep' })
+    await history.absorb({ dir: globalDir(), memoryId: 'mem_gone', scopeKey: GLOBAL_SCOPE_KEY }, { dir: globalDir(), memoryId: 'mem_keep' })
+    expect((await history.list(layer, 'mem_keep')).map(v => [v.versionId, v.record.content, v.mergedFrom ?? null])).toEqual([['same', '甲', null], ['same-02', '乙', 'mem_gone']])
+    expect(await exists(historyDir(globalDir(), 'mem_gone'))).toBe(false)
+  })
+
+  it('从最近删除恢复：去向去掉', async () => {
+    const e = env()
+    const keeper = await withVersion(e, { name: '留下的', content: '甲一' })
+    const gone = await withVersion(e, { name: '并进去的', content: '乙一' })
+    await mergedAway(e, gone, keeper)
+    expect((await e.store.get(gone.id, GLOBAL))!.mergedInto).toMatchObject({ id: keeper.id })
+    expect(await e.store.restoreArchived(gone, { at: GLOBAL, now: e.now() })).toBe(true)
+    expect((await e.store.get(gone.id, GLOBAL))!.mergedInto).toBeUndefined()
+  })
+
+  it('存活那条的文件读不出：这次不清被合并方，它和它的历史都留着', async () => {
+    const e = env()
+    const keeper = await withVersion(e, { name: '留下的', content: '甲一' })
+    const gone = await withVersion(e, { name: '并进去的', content: '乙一' })
+    await mergedAway(e, gone, keeper)
+    await writeFile((await e.store.locate(keeper.id, GLOBAL))!.filePath, '写坏了的文件')
+    await expect(e.store.hardDelete(gone, { at: GLOBAL, isHistoryCarried: true })).rejects.toThrow()
+    expect(await versionsIn(e, globalDir(), gone.id)).toEqual(['乙一'])
+    expect((await e.store.get(gone.id, GLOBAL))!.status).toBe('deleted')
+  })
+
+  it('存活那条名下同名的版本文件解不开：不盖掉它，并进来的那版换一个版本 id', async () => {
+    const history = new FileVersionHistory()
+    const home = { dir: globalDir(), loc: { scope: 'global' } as const }
+    const gone = record({ id: 'mem_old', status: 'deleted', deletedAt: T0, stateSince: T0 - MINUTE, mergedInto: { id: 'mem_target', scopeKey: 'global', as: 'version', endedAt: T0 } })
+    const taken = join(historyDir(globalDir(), 'mem_target'), `${versionOfMerged(gone).versionId}.md`)
+    await mkdir(historyDir(globalDir(), 'mem_target'), { recursive: true })
+    await writeFile(taken, '以后的格式，现在解不开')
+    await carryMergedHistory(history, gone, join(root, 'source'), async () => home)
+    expect(await readFile(taken, 'utf8')).toBe('以后的格式，现在解不开')
+    expect((await history.list(home, 'mem_target')).map(v => v.mergedFrom)).toEqual(['mem_old'])
+  })
+
+  it('同一个 id 的另一份副本并进来：认得出是并进来的，搬两遍不多出来；不同项目的同 id 副本各算各的', async () => {
+    const history = new FileVersionHistory()
+    const home = { dir: globalDir(), loc: { scope: 'global' } as const }
+    const copy = (workspacePath: string, content: string, intoId: string) => record({
+      id: 'mem_same', scope: 'workspace', workspacePath, content, status: 'deleted', deletedAt: T0, stateSince: T0 - MINUTE,
+      mergedInto: { id: intoId, scopeKey: 'global', as: 'version', endedAt: T0 },
+    })
+    const own = copy('/p0', '项目里的那份', 'mem_same')
+    await carryMergedHistory(history, own, join(root, 'p0'), async () => home)
+    await carryMergedHistory(history, own, join(root, 'p0'), async () => home)
+    expect((await history.list(home, 'mem_same')).map(v => [v.record.content, v.mergedFrom, v.mergedFromScope])).toEqual([['项目里的那份', 'mem_same', '/p0']])
+
+    for (const [ws, content] of [['/p1', '第一个项目的'], ['/p2', '第二个项目的']] as const) {
+      await carryMergedHistory(history, copy(ws, content, 'mem_target'), join(root, ws.slice(1)), async () => home)
+    }
+    expect((await history.list(home, 'mem_target')).map(v => [v.record.content, v.mergedFromScope]).sort()).toEqual([['第一个项目的', '/p1'], ['第二个项目的', '/p2']])
+  })
+
+  it('并进去之后存活那条被提升到全局：清之前照样读得到并进来的历史', async () => {
+    const e = env()
+    const keeper = await withVersion(e, { ...inWs, name: '留下的', content: '甲一' })
+    const gone = await withVersion(e, { name: '并进去的', content: '乙一' })
+    await mergedAway(e, gone, keeper, 'version')
+    const read = async (at: typeof GLOBAL | ReturnType<typeof scopeAt>) => (await historyWithMerged(e.store, (await e.store.locate(keeper.id, at))!)).filter(v => v.mergedFrom !== undefined).length
+    const before = await read(scopeAt(WS))
+    expect(before).toBeGreaterThan(0)
+    await e.store.update(keeper, ({ workspacePath: _ws, ...r }) => ({ ...r, scope: 'global' }), scopeAt(WS))
+    expect(await read(GLOBAL)).toBe(before)
   })
 })
