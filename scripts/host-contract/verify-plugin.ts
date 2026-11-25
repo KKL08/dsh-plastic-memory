@@ -30,6 +30,11 @@ import { snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
 import { createSystemMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Context } from '@deepseek-ai/cordis'
 import { memoryCommandResultSchema } from '../../src/gui/contract.ts'
+import { executeSearch } from '../../src/tools/search.ts'
+import { executeSource, renderSourceResult } from '../../src/tools/source.ts'
+import { MemoryStore } from '../../src/store.ts'
+import { FileTable } from '../../src/storage/file-table.ts'
+import { buildTypeRegistry } from '../../src/type-registry.ts'
 import { SidecarStore } from '../../src/storage/sidecar.ts'
 import { DialogueRecordStore } from '../../src/storage/dialogue-records.ts'
 import { DialogueCatchup } from '../../src/tools/dialogue-catchup.ts'
@@ -389,6 +394,14 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
         { name: string; parameters?: { properties?: Record<string, unknown>; required?: string[] } } | undefined
       const parameters = schema?.parameters
       return { ok: parameters?.properties?.messageRef !== undefined && !(parameters.required ?? []).includes('memoryId'), detail: JSON.stringify(parameters) }
+    })
+
+    // 来源参数始终注册，开关只影响执行分流。
+    await attempt('SEARCH-SOURCE-SCHEMA', async () => {
+      const schema = tools.schemas().find(s => s.name === 'memory_search') as
+        { parameters?: { properties?: { source?: { enum?: string[] } }; required?: string[] } } | undefined
+      const parameters = schema?.parameters
+      return { ok: JSON.stringify(parameters?.properties?.source?.enum) === JSON.stringify(['memory', 'dialogue', 'both']) && !(parameters?.required ?? []).includes('source'), detail: JSON.stringify(parameters) }
     })
 
     // H2 无 cwd 会话 create 拒存（Ungrouped 会话不落 global）
@@ -790,7 +803,7 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       const parent = sessions.create(undefined, { meta: { cwd: ws } })
       probeParent = parent
       parent.append('turn/start', { turn: 1 })
-      parent.append('user/message', userMessage('H22 用户本人发的消息'), { surfaceOp: 'append' })
+      parent.append('user/message', userMessage('H22 用户本人发的消息 dialoguereferenceprobe'), { surfaceOp: 'append' })
       parent.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
       parent.append('turn/start', { turn: 2 })
       parent.append('user/message', userMessage('H22 定时任务发的消息', { kind: 'schedule' }), { surfaceOp: 'append' })
@@ -833,11 +846,13 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       const pid = probeParent.header.id
       const cwd = probeParent.header.cwd
       const quiet = { info: () => {}, warn: () => {}, error: () => {} }
-      const records = new DialogueRecordStore({ path: join(mkdtempSync(join(tmpdir(), 'h34-')), 'dialogue-records.sqlite'), log: quiet })
+      const probeRoot = mkdtempSync(join(tmpdir(), 'h34-'))
+      const records = new DialogueRecordStore({ path: join(probeRoot, 'dialogue-records.sqlite'), log: quiet })
+      const probeHost = createCordisHostSession({ lookup: key => ctx.get(key), logger: quiet, resolveCwd: async dir => dir })
       const tokenizer = await dialogueTokenizer()
       const catchup = new DialogueCatchup({
         store: records, log: quiet,
-        host: createCordisHostSession({ lookup: key => ctx.get(key), logger: quiet, resolveCwd: async dir => dir }),
+        host: probeHost,
         noReview: { isMarkedNoReview: async () => false, sessionIds: async () => new Set<string>() },
         tokenizer: async () => tokenizer,
         workspaceOf: async dir => dir,
@@ -853,12 +868,24 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
         for (let i = 0; i < 5 && built.kind === 'ready' && built.status !== 'ready'; i++) built = await catchup.advance(5_000)
         const builtStatus = built.kind === 'ready' ? built.status : built.kind
         const listed = built.kind === 'ready' ? built.coverage.sessions : 0
-        const hits = records.search(readiness.gen, tokenizer.match('用户本人')!.all, { limit: 10, weights: DIALOGUE_BM25_WEIGHTS })
+        const hits = records.search(readiness.gen, tokenizer.match('dialoguereferenceprobe')!.all, { limit: 10, weights: DIALOGUE_BM25_WEIGHTS })
         const fromSchedule = records.search(readiness.gen, tokenizer.match('定时任务')!.all, { limit: 10, weights: DIALOGUE_BM25_WEIGHTS })
         const hit = hits.find(h => h.sessionId === pid)
+        const sidecar = new SidecarStore({ root: probeRoot, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
+        const memoryStore = new MemoryStore(new FileTable({ root: probeRoot, stats: sidecar.recallStats }), quiet, sidecar.recallStats)
+        const noReview = { sessionIds: async () => new Set<string>() }
+        const result = await executeSearch({ query: 'dialoguereferenceprobe', source: 'dialogue' }, { agent: { session: probeParent, options: {} }, signal: new AbortController().signal } as unknown as Parameters<typeof executeSearch>[1], {
+          store: memoryStore, registry: buildTypeRegistry({ template: 'coding', customTypes: {} }), host: probeHost, searchSource: () => 'dialogue',
+          dialogue: { store: records, catchup, host: probeHost, noReview, workspaceOf: async dir => dir, tokenizer: async () => tokenizer, hasBackgroundTimer: () => true },
+        })
+        const ref = result.dialogueText?.match(/〔引用 ([^〕]+)〕/)?.[1]
+        const source = ref === undefined ? undefined : await executeSource({ messageRef: ref }, { workspacePath: cwd, session: { id: pid } }, {
+          store: memoryStore, host: probeHost, noReview, workspaceOf: async dir => dir, dialogueStore: records, isDialogueEnabled: () => true,
+        })
+        const expanded = source !== undefined && source.kind === 'ok' && renderSourceResult(source).includes('H22 用户本人发的消息 dialoguereferenceprobe')
         return {
-          ok: hit?.text === 'H22 用户本人发的消息' && hit.speaker === 'user' && fromSchedule.length === 0 && readiness.isCaughtUp && builtStatus === 'ready',
-          detail: `status=${builtStatus} sessions=${listed} caughtUp=${readiness.isCaughtUp} hit=${JSON.stringify(hit?.text)} speaker=${hit?.speaker} scheduleHits=${fromSchedule.length} degraded=${tokenizer.degraded}`,
+          ok: hit?.text === 'H22 用户本人发的消息 dialoguereferenceprobe' && hit.speaker === 'user' && fromSchedule.length === 0 && readiness.isCaughtUp && builtStatus === 'ready' && expanded,
+          detail: `status=${builtStatus} sessions=${listed} caughtUp=${readiness.isCaughtUp} hit=${JSON.stringify(hit?.text)} speaker=${hit?.speaker} scheduleHits=${fromSchedule.length} degraded=${tokenizer.degraded} referenceExpanded=${expanded}`,
         }
       } finally {
         catchup.stop()

@@ -440,6 +440,14 @@ export async function apply(ctx: Context, config: Config) {
   // memory_search 的 types 说明同样从类型表生成，类型配置热更新时随 memory_save 一起重注册；执行时仍经转发对象现读类型表
   const registerSearch = () => ctx.tools.register(createSearchTool({
     store, registry, host, sessionRecall: snapshotCache,
+    searchSource: () => config.search.source.get(),
+    dialogue: {
+      store: dialogueCatchup.readStore, catchup: dialogueCatchup, host, noReview,
+      workspaceOf: cwd => resolveWorkspacePath(ctx, cwd),
+      tokenizer: () => dialogueTokenizer({ userDictionaryPath: () => config.search.userDictionaryPath.get(), log: ctx.logger }),
+      hasBackgroundTimer: () => scheduler !== undefined,
+      budget: () => config.search.dialogueTokenBudget.get(), includeTools: () => config.search.dialogueToolResults.get(),
+    },
     tokenizer: { userDictionaryPath: () => config.search.userDictionaryPath.get(), log: ctx.logger },
   }))
   let disposeSearch = registerSearch()

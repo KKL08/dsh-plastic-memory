@@ -1,5 +1,6 @@
 import type { DialogueNoteCode, DialogueSpeaker } from '../contract-codes.ts'
 import { formatValidity } from '../validity.ts'
+import type { TermHitCount } from './coverage.ts'
 import { SEGMENT_MAX_TOKENS } from './segments.ts'
 
 /**
@@ -140,3 +141,40 @@ export function parseMessageRef(text: string): MessageRef | undefined {
 
 /** 标记本次指定的消息，与周围仅作上下文的消息区分。 */
 export const MESSAGE_REF_MARK = '【指定消息】'
+
+/** 原话检索需要文本关键词，类型和编号筛选留在记忆一路。 */
+export const DIALOGUE_QUERY_REQUIRED = '搜原话要给关键词。'
+/** 会话放行信息不完整时不对是否存在原话作判断。 */
+export const DIALOGUE_SESSIONS_UNAVAILABLE = '这次读不到会话信息，过往对话的原话没查。'
+/** 仅在索引与追赶都完整时使用。 */
+export const DIALOGUE_NO_HIT = '过往对话里没有找到。'
+/** 无时刻的未追完状态也要有说明，不编造覆盖日期。 */
+export const DIALOGUE_COVERAGE_PENDING = '对话记录库还没追完，覆盖时间暂不可用。'
+/** 整条消息的引用标注，与节选标注互斥。 */
+export function messageReferenceNote(ref: string): string { return `〔引用 ${ref}〕` }
+/** 会话头只写宿主给的标题与真实日期。 */
+export function dialogueSessionHeading(title: string | undefined, at: number | undefined): string {
+  return [title, at === undefined ? undefined : formatValidity(at).slice(0, 10)].filter(x => x !== undefined).join(' · ')
+}
+/** 部分命中时只陈述覆盖情况，是否重搜由调用方判断。 */
+export const DIALOGUE_OR_FALLBACK_NOTE = '没有原话段同时含全部关键词，以下按相关性排序。'
+/** 首段覆盖不到一半时提示调整查询，避免把弱结果当定论。 */
+export const DIALOGUE_RETRY_HINT = '命中弱，可以换同义词、换成另一种语言的写法、减少词数或换个角度再搜一次。'
+/** 只有覆盖不到一半才判弱，子串命中不套用此提示。 */
+export const DIALOGUE_LOW_COVERAGE_NOTE = `没有原话段同时含全部关键词，排第一的对上的查询内容不到一半，以下按相关性排序。${DIALOGUE_RETRY_HINT}`
+/** 所有词都出现但部分未按整词命中，仍保留命中事实。 */
+export const DIALOGUE_SUBSTRING_FALLBACK_NOTE = '关键词都出现了，但有的不是完整的词，以下按相关性排序。'
+/** 同一消息中遗漏的段用独占一行的标记隔开，避免把不连续原文拼成连续引文。 */
+export const DIALOGUE_SEGMENT_GAP = '\n……\n'
+
+// 最多列八个词，避免说明本身挤占正文篇幅。
+const DIALOGUE_TERM_NOTE_MAX = 8
+/** 按候选原话段计数；截断时明确范围，没有可列的词就省略。 */
+export function dialogueTermHitNote(counts: readonly TermHitCount[], isLimited = false): string | undefined {
+  if (counts.length === 0) return undefined
+  const list = (items: readonly string[]) => items.length > DIALOGUE_TERM_NOTE_MAX
+    ? `${items.slice(0, DIALOGUE_TERM_NOTE_MAX).join('、')} 等 ${items.length} 个` : items.join('、')
+  const head = `${isLimited ? '本次取到的候选段中，' : ''}各关键词命中的原话段数：${list(counts.map(c => `${c.label} ${c.count} 段`))}。`
+  const zero = counts.filter(c => c.count === 0).map(c => c.label)
+  return zero.length === 0 ? head : `${head}${isLimited ? '这些段里' : '范围内'}一段都没命中的：${list(zero)}。`
+}

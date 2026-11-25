@@ -21,7 +21,7 @@ function describeTypes(registry: TypeRegistry): string {
 
 /**
  * memory_search 的 source 参数：这次查哪里，缺省跟随设置。工具形状不随设置变：设置是只查记忆时参数仍在，
- * 传了 dialogue 或 both 就照常查记忆并附一句说明。原话检索接上之前先不注册。
+ * 传了 dialogue 或 both 就照常查记忆并附一句说明。按配置决定是否执行原话检索。
  */
 export const SEARCH_SOURCE_PARAMETER = {
   type: 'string',
@@ -39,6 +39,8 @@ export function createSearchTool(deps: SearchToolDeps): ToolDefinition {
     description: [
       '查长期记忆用这个工具：想知道某件事有没有记过、记的是什么，或按 id 取一条。',
       '范围是本项目和全局记忆。结果按相关性排好，密钥已遮盖，每条带出处、是否陈旧和记忆文件的绝对路径，要看原文就直接读这个文件；正文给全文或其中一段（节选）。代码和项目文件用 grep 搜；记忆目录不要用 grep 搜：那里还存着已删除和其他项目的记忆，grep 的结果也不排序，所以找记忆统一用这个工具。',
+      '能查本项目过往对话的原话，能找到没记成记忆的内容。',
+      '原话结果里每条消息带引用，可以用 memory_source 看完整内容。',
       '查询写法：',
       '- 查询是空格分隔的关键词，中英文均可，版本号、路径这类原样文字可以直接搜。同时含全部关键词的记忆排在最前，所以一次查询里放预期会在同一条记忆里一起出现的词，排序最准。',
       '- 记忆里的说法可能和用户的不同：开头记忆索引里的说法、用户的原话，以及你判断意思相近或相关的写法，都可以拿来搜。',
@@ -56,6 +58,7 @@ export function createSearchTool(deps: SearchToolDeps): ToolDefinition {
       '- 排在前面的带完整正文；很长的记忆和排在后面的条目可能只给正文的一段（有命中词时取命中词附近），头行会标「节选」和正文总字符数。要全文，用这个工具按 id 查，或读头行末尾的文件。',
     ].join('\n'),
     parameters: {
+      source: SEARCH_SOURCE_PARAMETER,
       query: { type: 'string', required: true, description: '空格分隔的关键词，中英文均可；对名称、摘要、标签、内容匹配。不是全命中的结果在头行标出完整对上的关键词；没有记录命中全部关键词时结果开头会说明，排第一的有关键词没完整对上时列出各关键词命中几条；排第一的对上的查询内容不到一半、或只有子串命中时会提示命中弱' },
       types: { type: 'array', items: { type: 'string' }, description: describeTypes(deps.registry) },
       scope: { type: 'string', enum: ['global', 'workspace', 'all-visible'], description: '缺省 all-visible（global + 当前 workspace）' },
