@@ -1084,8 +1084,9 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   /**
    * 体检，目标三选一：不带参数 = 全部（逐个查每个项目，再单独查一遍全局）；workspacePath = 这个项目（读全局加本项目、
    * 只写本项目的缓存）；layer = 全局（只查全局、只写全局的缓存）。两者不能同时给。体检完给覆盖到的每个范围写完成记录（发起方界面手动）。
+   * isFullRecheck：全部重查，之前查过、没变的也重新交给模型（见 tools/scan.ts ScanInput.isFullRecheck）；缺省为普通体检。
    */
-  z.object({ cmd: z.literal('scan'), workspacePath: z.string().optional(), layer: z.object({ kind: z.literal('global') }).optional() })
+  z.object({ cmd: z.literal('scan'), workspacePath: z.string().optional(), layer: z.object({ kind: z.literal('global') }).optional(), isFullRecheck: z.boolean().optional() })
     .refine(c => c.workspacePath === undefined || c.layer === undefined, { message: 'workspacePath 与 layer 只能给一个' }),
   /**
    * 改一个范围的自动体检频率：具体值（manual 或 1–90 天）写进自动体检设置表，和「全部」的值相同也写（算单独设置）；

@@ -62,7 +62,7 @@ describe('体检结果库', () => {
   it('全部重查的时刻：早于它查的结论读出来照旧有，命中由调用方按时刻判；清理删掉被作废的行和不晚于它的时刻', () => {
     const { cache } = open()
     cache.write('global', row('old', 100))
-    cache.write('global', row('stale', 300))
+    cache.write('global', row('stale', 150))
     expect(cache.markRecheck(['global', 'cross-ws'], 200)).toBe(true)
     cache.write('global', row('new', 300))
     expect(cache.readRound('global')!.recheckBefore).toBe(200)
@@ -75,6 +75,16 @@ describe('体检结果库', () => {
     cache.dropRound('global')
     expect(cache.readRound('global')).toEqual({ rows: [], recheckBefore: 0 })
     expect(cache.readRound('cross-ws')!.recheckBefore).toBe(200)
+  })
+
+  it('全部重查的时刻只往后挪：再记一个更早的不改；库里这一轮有不早于它查的行时，记在最晚那一行之后', () => {
+    const { cache } = open()
+    cache.markRecheck(['global'], 500)
+    cache.markRecheck(['global'], 100)
+    expect(cache.readRound('global')!.recheckBefore).toBe(500)
+    cache.write('/w', row('same-ms', 700))
+    cache.markRecheck(['/w'], 700)
+    expect(cache.readRound('/w')!.recheckBefore).toBe(701)
   })
 
   it('行的结构校验：成员不是字符串对、检查时刻不是非负整数、JSON 坏了的行读不出来，其余照常', () => {

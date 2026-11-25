@@ -13,7 +13,7 @@ import { buildTypeRegistry } from '../src/type-registry.ts'
 import { RETENTION_MS } from '../src/retention.ts'
 import { ViewWriter, collectCheckupView, collectGlobalViews } from '../src/gui/view-writer.ts'
 import { runCheckup, type CheckupRunDeps, type CheckupRunInput } from '../src/gui/checkup-run.ts'
-import { checkupKey } from '../src/gui/contract.ts'
+import { checkupKey, memoryCommandSchema } from '../src/gui/contract.ts'
 import type { PendingTable } from '../src/governance/decisions.ts'
 import type { ReadInstructions } from '../src/governance/instructions.ts'
 import type { ScanCacheEntry } from '../src/governance/schema.ts'
@@ -477,5 +477,26 @@ describe('和 0.2.0 共存', () => {
     const parsed = checkupRecordSchema.parse(rewritten)
     expect(parsed.completed).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual' })
     expect(parsed.lastResult).not.toHaveProperty('coverage')
+  })
+})
+
+describe('全部重查经界面体检', () => {
+  it('scan 命令带 isFullRecheck 时，没改过的也重新交给模型；不带时直接用上次的结论', async () => {
+    const e = env()
+    await threeGlobal(e)
+    const m = stubModel()
+    await e.run({ target: GLOBAL, llm: m })
+    e.clock.now = NOW + 1000
+    await e.run({ target: GLOBAL, llm: m })
+    expect(m.calls).toHaveLength(3)
+    e.clock.now = NOW + 2000
+    await e.run({ target: GLOBAL, llm: m, isFullRecheck: true })
+    expect(m.calls).toHaveLength(6)
+  })
+
+  it('命令契约：isFullRecheck 可选，只收布尔值', () => {
+    expect(memoryCommandSchema.safeParse({ cmd: 'scan', isFullRecheck: true }).success).toBe(true)
+    expect(memoryCommandSchema.safeParse({ cmd: 'scan', workspacePath: PROJECT, isFullRecheck: false }).success).toBe(true)
+    expect(memoryCommandSchema.safeParse({ cmd: 'scan', isFullRecheck: 'yes' }).success).toBe(false)
   })
 })

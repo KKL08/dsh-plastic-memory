@@ -605,6 +605,25 @@ describe('上限、沿用', () => {
     expect(ledgerAfter.find(d => d.id === pairOf(['mem_s2a']).id)).toEqual(pairOf(['mem_s2a']))
   })
 
+  it('更新的行已经查过同一组记忆、没有这条发现：更旧的行里的这条不再沿用', async () => {
+    const e = await env()
+    await threeBatches(e)
+    const unclear = [{ type: 'unclear' as const, ids: ['mem_b2'] }]
+    await e.scan({ llm: stubModel({ findings: unclear }) })
+    // 换模型，上限只够一批：两次查完 b1、b2，b2 这次没有发现；b3 没查到，库里新旧两份行都在
+    e.tokenCap.value = 1
+    const b = stubModel({ model: 'model-b' })
+    for (let i = 0; i < 2; i++) {
+      e.clock.now += 1000
+      await e.scan({ llm: b })
+    }
+    expect(findingKeys(await e.view(GLOBAL))).toEqual([])
+    // 全部重查被上限打断在 b1：model-a 那一行里 b2 的旧发现不能复活
+    e.clock.now += 1000
+    await e.scan({ llm: b, isFullRecheck: true })
+    expect(findingKeys(await e.view(GLOBAL))).toEqual([])
+  })
+
   it('项目读不全时，读不到的那份按读不到算：同 id 在全局另有一份，不当成这份已删', async () => {
     const e = await env()
     const project: Scope = { kind: 'workspace', workspacePath: '/work/p' }
@@ -742,6 +761,99 @@ describe('上限、沿用', () => {
     e.clock.now += 1000
     expect(isFullyCovered(coverageOf(await e.scan({ llm: m })))).toBe(true)
     expect(await e.decisions.list()).toEqual([])
+  })
+})
+
+describe('全部重查', () => {
+  const P1 = '/work/one'
+  const P2 = '/work/two'
+  async function seed(e: CheckupEnv): Promise<void> {
+    await e.store.put(record({ id: 'mem_g', name: '全局' }))
+    await e.store.put(record({ id: 'mem_p1', name: '一', scope: 'workspace', workspacePath: P1 }))
+    await e.store.put(record({ id: 'mem_p2', name: '二', scope: 'workspace', workspacePath: P2 }))
+  }
+  const all = { kind: 'checkup' as const, workspaces: [P1, P2] }
+  const rounds = ['global', P1, P2, CROSS_WS_ROUND]
+
+  it('选「全部」、上限只够第一轮：下一次普通体检第二轮不命中、接着查；跨项目比较也重查；全查完后 meta 行没了', async () => {
+    const e = await env()
+    await seed(e)
+    const m = stubModel()
+    await e.scan({ llm: m, target: all })
+    const calls = m.calls.length
+    expect(m.crossCalls).toBe(1)
+
+    e.clock.now += 1000
+    e.tokenCap.value = 1
+    const recheckAt = e.clock.now
+    await e.scan({ llm: m, target: all, isFullRecheck: true })
+    expect(m.calls.length).toBe(calls + 1)
+    // 全局这一轮只有一批、这次查完了：全覆盖，它的 meta 行当场清掉；其余几轮还记着
+    expect(e.db.readRound('global')!.recheckBefore).toBe(0)
+    for (const round of [P1, P2, CROSS_WS_ROUND]) expect(e.db.readRound(round)!.recheckBefore, round).toBe(recheckAt)
+
+    // 之后的普通体检：被作废的轮不命中，接着查（每次一批），跨项目比较最后也重查
+    let runs = 0
+    let isDone = false
+    while (!isDone) {
+      e.clock.now += 1000
+      const r = checkup(await e.scan({ llm: m, target: all }))
+      isDone = (r.rounds ?? []).every(x => isFullyCovered(x.coverage)) && !r.isCrossWsSkipped
+      expect(++runs).toBeLessThan(6)
+    }
+    expect(m.calls.length).toBe(calls + 3)
+    expect(m.crossCalls).toBe(2)
+    for (const round of rounds) expect(e.db.readRound(round)!.recheckBefore, round).toBe(0)
+  })
+
+  it('一批都没成功：checks 的行一条没少', async () => {
+    const e = await env()
+    await threeBatches(e)
+    const m = stubModel()
+    await e.scan({ llm: m })
+    m.fail = () => 'unparseable'
+    e.clock.now += 1000
+    await e.scan({ llm: m, isFullRecheck: true })
+    expect(e.db.readRound('global')!.rows).toHaveLength(3)
+  })
+
+  it('读不全的轮做全部重查：查完了库里的行也一条没删，meta 行留着', async () => {
+    const e = await env()
+    const [, b2] = await threeBatches(e)
+    const m = stubModel()
+    await e.scan({ llm: m })
+    await e.store.hardDelete(b2!)
+    unreadableArchive(e)
+    e.clock.now += 1000
+    const r = single(await e.scan({ llm: m, isFullRecheck: true }))
+    expect(r.rounds![0]!.closing).toBe('read-incomplete')
+    // 两批按原键重写，删掉的那条所在的过时行还在
+    expect(e.db.readRound('global')!.rows).toHaveLength(3)
+    expect(e.db.readRound('global')!.rows.some(row => row.members.some(([copy]) => copy.includes('mem_b2')))).toBe(true)
+    expect(e.db.readRound('global')!.recheckBefore).toBe(e.clock.now)
+  })
+
+  it('同一毫秒内先体检再点全部重查：旧行都不命中，全部重发；这次查的结论之后照常命中', async () => {
+    const e = await env()
+    await threeBatches(e)
+    const m = stubModel()
+    await e.scan({ llm: m })
+    await e.scan({ llm: m, isFullRecheck: true })
+    expect(m.calls).toHaveLength(6)
+    await e.scan({ llm: m })
+    expect(m.calls).toHaveLength(6)
+  })
+
+  it('记不下全部重查：这次照样全部重查，记一条日志', async () => {
+    const e = await env()
+    await threeBatches(e)
+    const m = stubModel()
+    await e.scan({ llm: m })
+    e.deps.checkupCache = { ...e.db, readRound: r => e.db.readRound(r), write: (r, row) => e.db.write(r, row), prune: (r, k, t) => e.db.prune(r, k, t), dropRound: r => e.db.dropRound(r), rounds: () => e.db.rounds(), markRecheck: () => false, retryOpen: () => { e.db.retryOpen() } }
+    e.clock.now += 1000
+    await e.scan({ llm: m, isFullRecheck: true })
+    expect(m.calls).toHaveLength(6)
+    expect(e.logs.some(l => l.includes('全部重查记不下来'))).toBe(true)
   })
 })
 

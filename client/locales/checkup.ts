@@ -2,6 +2,10 @@
 
 export const checkupZh = {
   'checkup.run': '立即体检',
+  'checkup.recheck': '全部重查',
+  'checkup.recheck.confirm.text': '体检平时只查新的和改过的记忆。全部重查会把没改过的也重新交给模型检查，用的 token 更多；一次查不完的，之后的体检接着查。',
+  'checkup.recheck.confirm': '全部重查',
+  'checkup.recheck.cancel': '取消',
   'checkup.running': '体检中…',
   'checkup.run.hint.all': '逐个检查全局和 {n} 个项目的记忆；记忆越多，用的 token 越多',
   'checkup.run.hint.all.one': '逐个检查全局和 {n} 个项目的记忆；记忆越多，用的 token 越多',
@@ -150,6 +154,10 @@ export type CheckupLocaleKey = keyof typeof checkupZh
 
 export const checkupEn: Record<CheckupLocaleKey, string> = {
   'checkup.run': 'Check now',
+  'checkup.recheck': 'Recheck all',
+  'checkup.recheck.confirm.text': 'A checkup normally looks only at new and changed memories. Recheck all sends unchanged ones to the model again and uses more tokens; whatever one checkup cannot finish, the next ones continue.',
+  'checkup.recheck.confirm': 'Recheck all',
+  'checkup.recheck.cancel': 'Cancel',
   'checkup.running': 'Checking…',
   'checkup.run.hint.all': 'Checks global and each of the {n} projects in turn; more memories use more tokens',
   'checkup.run.hint.all.one': 'Checks global and the {n} project in turn; more memories use more tokens',

@@ -101,6 +101,8 @@ export interface CheckupRunInput {
   confirmHeld?: () => Promise<boolean>
   /** 自动体检选的模型用不了、这次改用了默认模型：写进最近一次结果；缺省没有退回。 */
   modelFallback?: CheckupResult['modelFallback']
+  /** 全部重查（界面「全部重查」）：见 tools/scan.ts ScanInput.isFullRecheck。缺省为普通体检。 */
+  isFullRecheck?: boolean
 }
 
 export type CheckupRunOutcome =
@@ -180,6 +182,7 @@ export async function runCheckup(input: CheckupRunInput, deps: CheckupRunDeps): 
     const result = await runScan({
       target: scanTarget, layers: 'full', llm: input.llm,
       ...(input.currentWorkspace !== undefined ? { currentWorkspace: input.currentWorkspace } : {}),
+      ...(input.isFullRecheck === true ? { isFullRecheck: true } : {}),
       signal, startedAt,
     }, { ...deps.scan, checkups: deps.checkups, now: deps.now, log: deps.log }, {
       by, onScopeNotes: (scope, notes) => { scopeNotes.set(checkupKey(scope), notes) }, onCommitted: () => { isCommitted = true },

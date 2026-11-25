@@ -77,12 +77,19 @@ export class CheckupCache {
     }) ?? false
   }
 
-  /** 全部重查：这几轮早于 at 查的结论不再直接用。写不进去返回 false 并记日志。 */
+  /**
+   * 全部重查：这几轮此刻之前查的结论不再直接用。记的时刻不早于 at，也晚于库里这一轮最晚查的那一行（同一毫秒里先查、再点全部重查，
+   * 旧行也作废）；已经记了更晚的时刻的不往回改。写不进去返回 false 并记日志。
+   */
   markRecheck(rounds: readonly string[], at: number): boolean {
     return this.exec('写', (db) => {
       inTransaction(db, () => {
-        const put = db.prepare('INSERT OR REPLACE INTO meta(round, recheck_before) VALUES (?, ?)')
-        for (const round of rounds) put.run(round, at)
+        const latest = db.prepare('SELECT MAX(checked_at) AS latest FROM checks WHERE round = ?')
+        const put = db.prepare('INSERT INTO meta(round, recheck_before) VALUES (?, ?) ON CONFLICT(round) DO UPDATE SET recheck_before = MAX(recheck_before, excluded.recheck_before)')
+        for (const round of rounds) {
+          const checked = (latest.get(round) as { latest: unknown } | undefined)?.latest
+          put.run(round, typeof checked === 'number' && Number.isFinite(checked) ? Math.max(at, checked + 1) : at)
+        }
       })
       return true
     }) ?? false

@@ -323,6 +323,8 @@ async function prepareRound(input: {
   instructions: ReadInstructions
   registry: TypeRegistry
   resultsDb: ScanCoreDeps['checkupCache']
+  /** 全部重查的时刻：早于它查的结论这次都不命中（库里记没记下都一样）。 */
+  recheckAt?: number
 }): Promise<SemanticRound> {
   const { scope } = input
   const round = roundOf(scope)
@@ -331,7 +333,7 @@ async function prepareRound(input: {
   const ctx = checkContext(SEMANTIC_PROMPT_VERSION, input.llm, instructionState(files))
   const read = input.resultsDb?.readRound(round)
   const history = read === undefined ? undefined : findingsRows(read.rows)
-  const recheckBefore = read?.recheckBefore ?? 0
+  const recheckBefore = Math.max(read?.recheckBefore ?? 0, input.recheckAt ?? 0)
   const rows = new Map(history?.map(row => [row.key, row]))
   const batches = planSemanticBatches(orderForPrompt(input.records, input.registry)).map((records): RoundBatch => {
     const members = batchMembers(records)
@@ -374,6 +376,7 @@ function prepareCrossWs(
   llm: SemanticLlm,
   now: number,
   resultsDb: ScanCoreDeps['checkupCache'],
+  recheckAt = 0,
 ): CrossWsCheck {
   const admitted = new Map([...byWorkspace].map(([ws, records]) => [ws, records.filter(r => isSemanticAdmitted(r, now))]))
   const global = globalRecords.filter(r => isSemanticAdmitted(r, now))
@@ -383,7 +386,7 @@ function prepareCrossWs(
   const key = batchKey(checkContext(CROSS_WS_PROMPT_VERSION, llm, null), members)
   const prompt = buildCrossWsPrompt(admitted, global)
   const read = resultsDb?.readRound(CROSS_WS_ROUND)
-  const recheckBefore = read?.recheckBefore ?? 0
+  const recheckBefore = Math.max(read?.recheckBefore ?? 0, recheckAt)
   const row = crossWsRows(read?.rows ?? []).find(r => r.key === key)
   return {
     byWorkspace: admitted, global, members, key,
@@ -511,6 +514,11 @@ export interface ScanInput {
   signal?: AbortSignal
   /** 这次扫描开始的时刻（完成记录的开始时间、缓存不回退的比较点）；缺省 = 进核心时现读。 */
   startedAt?: number
+  /**
+   * 全部重查（只有界面体检给）：开始时给要查的每一轮（全库体检含跨项目比较）记下「此刻之前查的都不算」，之后这些轮的旧结论都不命中，
+   * 被上限打断后普通体检接着查，直到查完。记不下来时这次在内存里照样按全没命中跑，记日志（续不上）。
+   */
+  isFullRecheck?: boolean
 }
 
 /**
@@ -647,19 +655,26 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
   resultsDb?.retryOpen()
   const byWorkspace = new Map(wsList.map(ws => [ws, active(r => r.scope === 'workspace' && r.workspacePath === ws)]))
   const globalRecords = active(isGlobal)
+  const checkable = scopes.filter(hasOwnMemories)
+  // 全部重查：给要查的每一轮（全库体检含跨项目比较）记下此刻，记不下来这次照样按全没命中跑
+  const recheckAt = input.isFullRecheck === true && semanticLlm !== null ? now : undefined
+  if (recheckAt !== undefined && resultsDb !== undefined) {
+    const marked = resultsDb.markRecheck([...checkable.map(roundOf), ...(checkup && byWorkspace.size >= 2 ? [CROSS_WS_ROUND] : [])], recheckAt)
+    if (!marked) log.warn('[plastic-memory] 全部重查记不下来，这次照样全部重查；被上限打断的话，下次体检不会接着重查')
+  }
   const rounds: SemanticRound[] = []
   if (semanticLlm !== null) {
-    for (const scope of scopes.filter(hasOwnMemories)) {
+    for (const scope of checkable) {
       signal?.throwIfAborted()
       rounds.push(await prepareRound({
         scope, records: inputOf(scope).filter(r => isSemanticAdmitted(r, now)), isReadComplete: isReadCompleteFor(scope),
-        llm: semanticLlm, instructions, registry: deps.registry, resultsDb,
+        llm: semanticLlm, instructions, registry: deps.registry, resultsDb, ...(recheckAt !== undefined ? { recheckAt } : {}),
       }))
     }
   }
   const roundByKey = new Map(rounds.map(r => [r.round, r]))
   const cross = semanticLlm !== null && checkup && byWorkspace.size >= 2
-    ? prepareCrossWs(byWorkspace, globalRecords, semanticLlm, now, resultsDb)
+    ? prepareCrossWs(byWorkspace, globalRecords, semanticLlm, now, resultsDb, recheckAt)
     : undefined
 
   // —— 按计划发各轮的批（没命中的、刷新）；跨项目比较排进同一个上限，放到提交之后做 ——
@@ -702,7 +717,9 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
     batch.sent = 'ok'
     batch.findings = findings
     // 写不进去：这一批的结论留在内存里照常用（库自己记日志），下次重查
-    if (resultsDb !== undefined && !resultsDb.write(round.round, { key: batch.key, checkedAt: clock(), members: batch.members, result: findings })) round.isDbWriteFailed = true
+    // 检查时刻不早于这一轮的全部重查时刻：同一毫秒里点的全部重查，这次查的照样算数
+    const checkedAt = Math.max(clock(), round.recheckBefore)
+    if (resultsDb !== undefined && !resultsDb.write(round.round, { key: batch.key, checkedAt, members: batch.members, result: findings })) round.isDbWriteFailed = true
   }
 
   // —— 每一轮：覆盖、挂账、写视图（提交点） ——
@@ -838,7 +855,7 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
         const found = await runCrossWsScan(cross.byWorkspace, cross.global, semanticLlm, signal, onUsage)
         if (!found.failed) {
           duplicates = { items: found.items, via: 'semantic' }
-          cross.hit = { key: cross.key, checkedAt: clock(), members: cross.members, result: found.items }
+          cross.hit = { key: cross.key, checkedAt: Math.max(clock(), cross.recheckBefore), members: cross.members, result: found.items }
           isCrossDbWritten = resultsDb?.write(CROSS_WS_ROUND, cross.hit) ?? true
         } else {
           notes.push({ code: 'cross-ws-failed', text: '跨项目重复分析失败（LLM 输出无法解析），退用实体聚类保底' })

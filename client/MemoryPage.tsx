@@ -218,7 +218,7 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
                 checkups={checkups}
                 isGovernanceEnabled={isGovernanceEnabled}
                 projectCount={checkupProjectCount}
-                isEmpty={libraryCount === 0}
+                isEmpty={libraryCount === undefined ? undefined : libraryCount === 0}
               />
             </div>
           </header>

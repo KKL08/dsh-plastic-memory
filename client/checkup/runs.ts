@@ -21,15 +21,16 @@ export interface CheckupRuns {
   busyScope(scope: PageScope): PageScope | undefined
   /** 本窗口在这个范围发起的上一次手动体检没做成时的错误；「全部」只看「全部」那一次。 */
   failure(scope: PageScope): RunFailure | undefined
-  /** 发起这个范围的体检；没有会话或已在进行中时什么都不做。 */
-  run(scope: PageScope): void
+  /** 发起这个范围的体检（isFullRecheck：全部重查）；没有会话或已在进行中时什么都不做。 */
+  run(scope: PageScope, opts?: { isFullRecheck?: boolean }): void
 }
 
-/** 范围 → scan 的目标：「全部」不带参数，全局只查全局，项目带它的路径。 */
-export function scanCommand(scope: PageScope): MemoryCommand {
-  return scope.kind === 'all' ? { cmd: 'scan' }
-    : scope.kind === 'global' ? { cmd: 'scan', layer: { kind: 'global' } }
-      : { cmd: 'scan', workspacePath: scope.workspacePath }
+/** 范围 → scan 的目标：「全部」不带参数，全局只查全局，项目带它的路径；全部重查另带 isFullRecheck。 */
+export function scanCommand(scope: PageScope, opts: { isFullRecheck?: boolean } = {}): MemoryCommand {
+  const recheck = opts.isFullRecheck === true ? { isFullRecheck: true } : {}
+  return scope.kind === 'all' ? { cmd: 'scan', ...recheck }
+    : scope.kind === 'global' ? { cmd: 'scan', layer: { kind: 'global' }, ...recheck }
+      : { cmd: 'scan', workspacePath: scope.workspacePath, ...recheck }
 }
 
 /** 本窗口记下的：running = 命令还没回来；busy = 命令回了 busy，等体检视图重写；failed = 回了别的错误（failedAt 是命令回来的时刻）。 */
@@ -59,11 +60,11 @@ export function useCheckupRuns(session: BorrowedSession, checkups: CheckupView |
     const entry = local.get(checkupKey(scope))
     return entry?.state === 'failed' ? entry.failure : undefined
   }
-  const run = (scope: PageScope) => {
+  const run = (scope: PageScope, opts: { isFullRecheck?: boolean } = {}) => {
     if (session.kind !== 'ready' || busyScope(scope) !== undefined) return
     const key = checkupKey(scope)
     setLocal(prev => new Map(prev).set(key, { scope, state: 'running' }))
-    void gateway.execute(session.sessionId, scanCommand(scope)).then((result) => {
+    void gateway.execute(session.sessionId, scanCommand(scope, opts)).then((result) => {
       if (!live.current) return
       setLocal((prev) => {
         const next = new Map(prev)

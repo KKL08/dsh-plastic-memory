@@ -1195,6 +1195,7 @@ async function dispatch(
       const r = await runCheckup({
         target, by: 'manual', llm,
         ...(currentWorkspace !== undefined ? { currentWorkspace } : {}),
+        ...(command.isFullRecheck === true ? { isFullRecheck: true } : {}),
       }, {
         scan: { store: deps.store, registry: deps.registry, decisions: deps.decisions, cache: deps.cache, ignores: deps.ignores, instructions: deps.instructions, ...deps.incremental },
         checkups: deps.checkups, views: deps.views,
