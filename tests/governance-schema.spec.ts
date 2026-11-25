@@ -30,8 +30,8 @@ describe('governance schemas', () => {
     expect(memorySnapshotSchema.safeParse({ ...base, operation: 'pre-cleanup' }).success).toBe(false)
   })
 
-  it('finding 类型枚举共 9 个且 severity 映射完整', () => {
-    expect(FINDING_TYPES).toHaveLength(9)
+  it('finding 类型枚举共 12 个且 severity 映射完整', () => {
+    expect(FINDING_TYPES).toHaveLength(12)
     for (const t of FINDING_TYPES) {
       expect(['critical', 'warning', 'info']).toContain(SEVERITY_BY_TYPE[t])
     }

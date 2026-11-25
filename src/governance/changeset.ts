@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { z } from 'zod'
-import { CHANGE_KINDS, anchorSourceMode, anchorsOf, linkIdsSchema, type ChangeKind, type LinkIds, type MemoryRecord } from '../record-schema.ts'
+import { CHANGE_KINDS, anchorSourceMode, anchorsOf, readChangeKind, linkIdsSchema, type ChangeKind, type LinkIds, type MemoryRecord } from '../record-schema.ts'
 import { GLOBAL_SCOPE_KEY } from '../scope.ts'
 import { detectSecrets, secretValues } from '../secrets.ts'
 import { roundValidity } from '../validity.ts'
@@ -115,7 +115,7 @@ export const fieldDigest = (record: MemoryRecord, field: ReceiptField) => sha1(f
 
 /**
  * 发给体检模型的记忆内容字段：体检的模型行（semantic-scan.ts semanticMemoryLine）按这份清单写，扫描指纹也包含这份清单里的每一项。
- * 行里写的内容字段因此总是指纹字段的子集：模型看得到的任一项变了，指纹一定跟着变。
+ * 行里的内容字段都在内容指纹里，行里另外的线索字段在记忆行指纹里。
  */
 export const SCAN_CONTENT_FIELDS = ['type', 'name', 'content', 'summary', 'factTime', 'validFrom', 'validTo'] as const
 export type ScanContentField = (typeof SCAN_CONTENT_FIELDS)[number]
@@ -130,11 +130,25 @@ export function scanFieldValue(r: MemoryRecord, field: ScanContentField): unknow
 }
 
 /**
- * 内容指纹：只含发给体检模型的内容字段（SCAN_CONTENT_FIELDS）。体检的批键、已裁决冲突各成员的指纹用它：
- * 模型看不到的出处、改动性质、取代关系变了，按旧内容做的判断照样算数。
+ * 内容指纹：只含发给体检模型的内容字段（SCAN_CONTENT_FIELDS）。已裁决冲突各成员的指纹用它：
+ * 只换出处、改动性质、取代关系的补证不改变裁决依据。
  */
 export function scanContentFingerprint(r: MemoryRecord): string {
   return sha1(Object.fromEntries(SCAN_CONTENT_FIELDS.map(field => [field, scanFieldValue(r, field)])))
+}
+
+/**
+ * 记忆行指纹：体检模型那一行里出现的全部字段（SCAN_CONTENT_FIELDS，加记录时间、最新出处的来源方式、归一后的最近一次改动性质）。
+ * 体检批的缓存键用它：行里的任一项变了，这一批重发给模型。已裁决冲突各成员的指纹不用它（见 scanContentFingerprint）。
+ */
+export function scanLineFingerprint(r: MemoryRecord): string {
+  const latest = anchorsOf(r)[0]
+  return sha1({
+    ...Object.fromEntries(SCAN_CONTENT_FIELDS.map(field => [field, scanFieldValue(r, field)])),
+    recordedAt: new Date(r.createdAt).toISOString().slice(0, 16) + 'Z',
+    sourceMode: latest === undefined ? null : anchorSourceMode(latest),
+    lastChange: readChangeKind(r.lastChange?.kind) ?? null,
+  })
 }
 
 /**

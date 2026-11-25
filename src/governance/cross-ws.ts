@@ -1,17 +1,25 @@
 import type { MemoryRecord } from '../record-schema.ts'
+import { injectionText } from '../index-line.ts'
 import { extractEntities } from '../text.ts'
 import { maskSecrets, maskSecretSurface } from '../secrets.ts'
 import { isAbort, type SemanticLlm } from './semantic-scan.ts'
 
-/** 跨项目重复主题：多个 workspace 各自记了同一件事而 global 缺位——"该全局"的行为证据。 */
+/**
+ * 跨项目重复主题：多个 workspace 各自记了同一件事而 global 缺位——"该全局"的行为证据。
+ * memoryIds：模型点名的、各项目里说这件事的那几条（只留提示词里列出、只在一个项目里出现的 id；分属至少两个项目才有这一项，
+ * 有这一项的才挂进待决账本）。promote：建议升为全局的那一条（memoryIds 里的一条，没有或不在里面时没有这一项）。
+ * 实体聚类保底给的没有这两项。
+ */
 export interface CrossWsDuplicate {
   topic: string
   workspaces: string[]
   suggestion: string
+  memoryIds?: string[]
+  promote?: string
 }
 
 /** 跨项目比较提示词的版本：改提示词或摘要行的写法时加一。缓存的结果按它区分。 */
-export const CROSS_WS_PROMPT_VERSION = 1
+export const CROSS_WS_PROMPT_VERSION = 2
 
 /** 呈现限流：体检报告最多列这些，避免弱信号淹没主报告。 */
 export const CROSS_WS_LIMIT = 3
@@ -54,12 +62,13 @@ export function findEntityDuplicates(
 const SYSTEM_PROMPT = `你是记忆库治理审查员。给出的是多个项目（workspace）各自的记忆摘要清单和全局（global）记忆清单。
 找出"多个项目重复记录同一件事、而 global 缺位"的主题——这是该内容本应全局共享的行为证据。
 判定标准：至少两个项目在讲同一个事实/偏好/流程；global 清单里没有对应条目；内容确实与具体项目无关。
-只报有把握的，不确定不报。只输出 JSON，格式：
-{"duplicates":[{"topic":"一句话概括主题","workspaces":["路径1","路径2"],"suggestion":"建议提炼成怎样的一条 global 记忆"}]}
+只报有把握的主题。只输出 JSON，格式：
+{"duplicates":[{"topic":"一句话概括主题","workspaces":["路径1","路径2"],"suggestion":"建议提炼成怎样的一条 global 记忆","memoryIds":["mem_a","mem_b"],"promote":"mem_a"}]}
+workspaces 原样填标题里的项目路径；memoryIds 取各项目清单里的记忆 id，覆盖至少两个项目；promote 填 memoryIds 中建议升为全局的那条 id。
 没有发现输出 {"duplicates":[]}`
 
-// 摘要可能被手改进密钥，发给模型前和注入同口径遮掉高危
-export const summaryLine = (r: MemoryRecord): string => `- ${maskSecretSurface(r).summary}`
+/** 摘要行标出记忆 id，正文遮掉高危密钥并折成一行。 */
+export const summaryLine = (r: MemoryRecord): string => `- [${r.id}] ${injectionText(maskSecretSurface(r).summary)}`
 
 export function buildCrossWsPrompt(
   byWorkspace: ReadonlyMap<string, readonly MemoryRecord[]>,
@@ -73,7 +82,11 @@ export function buildCrossWsPrompt(
   return { system: SYSTEM_PROMPT, user: sections.join('\n\n') }
 }
 
-export function parseCrossWsResult(raw: string, knownWs: ReadonlySet<string>): CrossWsDuplicate[] | null {
+/**
+ * 解析跨项目比较的输出。ids：提示词里列出、只在一个项目里出现的记忆 id 和它所在的项目（同一个 id 出现在几个项目里的不在表里）；
+ * 不在表里的 id 丢掉。不给时 memoryIds、promote 一律不留。
+ */
+export function parseCrossWsResult(raw: string, knownWs: ReadonlySet<string>, ids?: ReadonlyMap<string, string>): CrossWsDuplicate[] | null {
   const stripped = raw.replace(/```(?:json)?/g, '').trim()
   const start = stripped.indexOf('{')
   const end = stripped.lastIndexOf('}')
@@ -93,11 +106,15 @@ export function parseCrossWsResult(raw: string, knownWs: ReadonlySet<string>): C
     const workspaces = (Array.isArray(d.workspaces) ? d.workspaces : [])
       .filter((w): w is string => typeof w === 'string' && knownWs.has(w))
     if (workspaces.length < 2 || typeof d.topic !== 'string' || d.topic.length === 0) continue
+    const memoryIds = [...new Set((Array.isArray(d.memoryIds) ? d.memoryIds : [])
+      .filter((id): id is string => typeof id === 'string' && ids?.has(id) === true))]
+    const isCrossProject = new Set(memoryIds.map(id => ids!.get(id))).size >= 2
     // 模型的原话会进体检结果库、返回给界面：高危和疑似密钥都先遮掉（同内容检查的发现）
     out.push({
       topic: maskSecrets(d.topic, { severity: 'suspected' }),
       workspaces: workspaces.sort(),
       suggestion: typeof d.suggestion === 'string' ? maskSecrets(d.suggestion, { severity: 'suspected' }) : '',
+      ...(isCrossProject ? { memoryIds, ...(typeof d.promote === 'string' && memoryIds.includes(d.promote) ? { promote: d.promote } : {}) } : {}),
     })
   }
   return out.slice(0, CROSS_WS_LIMIT)
@@ -120,7 +137,16 @@ export async function runCrossWsScan(
     if (isAbort(err, signal)) throw err
     // 普通失败降级到调用方的实体保底
   }
-  const items = raw === null ? null : parseCrossWsResult(raw, new Set(byWorkspace.keys()))
+  const owners = new Map<string, Set<string>>()
+  for (const [ws, records] of byWorkspace) {
+    for (const r of records) {
+      const scopes = owners.get(r.id) ?? new Set<string>()
+      scopes.add(ws)
+      owners.set(r.id, scopes)
+    }
+  }
+  const ids = new Map([...owners].filter(([, scopes]) => scopes.size === 1).map(([id, scopes]) => [id, [...scopes][0]!]))
+  const items = raw === null ? null : parseCrossWsResult(raw, new Set(byWorkspace.keys()), ids)
   if (items === null) return { items: [], failed: true }
   return { items, failed: false }
 }

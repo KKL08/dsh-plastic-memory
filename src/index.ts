@@ -302,7 +302,6 @@ export async function apply(ctx: Context, config: Config) {
   // 体检结果库也在记忆根之外、每台机器一份：存内容检查按批的结论，丢了只多花 token。token 上限每次体检现读配置
   const checkupCache = new CheckupCache({ path: join(localStateDir(memoryRoot), CHECKUP_CACHE_FILE), log: ctx.logger })
   ctx.effect(() => () => { checkupCache.close() }, 'plastic-memory: checkup cache')
-  const incremental = { checkupCache, tokenCap: () => config.governance.scan.tokenCap.get() }
   const fileTable = new FileTable({
     root: memoryRoot,
     lock: rootLock,
@@ -486,6 +485,8 @@ export async function apply(ctx: Context, config: Config) {
       return null
     }
   }
+  const findingSources = { readEvent: getReadEvent, noReview }
+  const incremental = { checkupCache, tokenCap: () => config.governance.scan.tokenCap.get(), sources: findingSources }
   ctx.tools.register(createSourceTool({ store, host, noReview, workspaceOf: cwd => resolveWorkspacePath(ctx, cwd),
     dialogueStore: dialogueCatchup.readStore, isDialogueEnabled, dialogueToolResults: () => config.search.dialogueToolResults.get() }))
   // 体检、健康分、裁决、提升四个工具随体检开关注册 / 注销（开关热更新时再同步一次）。

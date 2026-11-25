@@ -21,6 +21,7 @@ import { indexedIds, isIndexPath } from './helpers/topic-index.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { TypeRegistryError } from '../src/errors.ts'
 import { buildSemanticPrompt } from '../src/governance/semantic-scan.ts'
+import { SOURCE_CHECK_SYSTEM_PROMPT } from '../src/tools/finding-sources.ts'
 import { record } from './helpers/record.ts'
 import { MemoryStore } from '../src/store.ts'
 import { overflowLevel } from '../src/snapshot.ts'
@@ -782,7 +783,7 @@ describe('体检后续段接线', () => {
     expect(t.ctx.llmRequests[1]).toMatchObject({ provider: 'deepseek', model: 'deepseek-v4-flash' })
   })
 
-  it('后续段生成建议时经宿主 sessionQuery 回查两条的出处：用户原话进提示词，条目上的建议记回查过出处', async () => {
+  it('体检复判与后续建议各回查双方出处：三次模型调用按序执行，原话进入两段提示词并记下回查状态', async () => {
     const reads: string[] = []
     const sessionQuery = {
       readEvent: async ({ sessionId }: { sessionId: string }) => {
@@ -792,18 +793,27 @@ describe('体检后续段接线', () => {
     }
     const t = await boot(undefined, { sessionQuery })
     t.ctx.llmScript.push(conflictFound, [
+      { type: 'text-delta', index: 0, text: '{"verdict":"conflict","summary":"出处确认包管理器矛盾","suggestedAction":"裁决"}' },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ], [
       { type: 'text-delta', index: 0, text: '{"action":"keep-a","reason":"A 是明确说过的"}' },
       { type: 'finish', reason: { kind: 'stop' } },
     ])
     expect(await t.scanGlobal()).toMatchObject({ ok: true, cmd: 'scan' })
     await vi.waitFor(async () => {
-      expect((await t.ledger())[0]).toMatchObject({ suggestion: { action: 'keep-a', isSourced: true } })
+      expect((await t.ledger())[0]).toMatchObject({ sourceCheck: 'checked', suggestion: { action: 'keep-a', isSourced: true } })
     })
-    expect(reads.sort()).toEqual(['sess-mem_a', 'sess-mem_b'])
-    expect(t.ctx.llmRequests).toHaveLength(2)
-    const prompt = JSON.stringify(t.ctx.llmRequests[1]!.messages)
-    expect(prompt).toContain('sess-mem_a 里的原话')
-    expect(prompt).toContain('sess-mem_b 里的原话')
+    expect(reads.sort()).toEqual(['sess-mem_a', 'sess-mem_a', 'sess-mem_b', 'sess-mem_b'])
+    expect(t.ctx.llmRequests).toHaveLength(3)
+    expect(t.ctx.llmRequests[1]).toMatchObject({ system: SOURCE_CHECK_SYSTEM_PROMPT })
+    expect(t.ctx.llmRequests[2]).toMatchObject({
+      system: expect.stringContaining('给出一个处理结论和一句理由。用户看过结论和理由后，再决定是否采纳。'),
+    })
+    for (const request of t.ctx.llmRequests.slice(1)) {
+      const prompt = JSON.stringify(request.messages)
+      expect(prompt).toContain('sess-mem_a 里的原话')
+      expect(prompt).toContain('sess-mem_b 里的原话')
+    }
   })
 
   it('对话里 agent 调 memory_scan 扫出冲突：不跟着生成建议；之后在记忆页手动体检才生成，用的是体检的模型', async () => {

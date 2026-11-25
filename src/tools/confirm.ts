@@ -1,7 +1,7 @@
 import type { MemoryLogger, MemoryStore } from '../store.ts'
 import { conflictFingerprint, isBaselineCurrent, isBasisCurrent, type PendingDecisionsStore } from '../governance/decisions.ts'
 import { baselineFor, type ReadInstructions } from '../governance/instructions.ts'
-import { kindOf, verdictLoser, type PendingDecision, type SettledProposal, type SuggestionBasis } from '../governance/schema.ts'
+import { FINDING_LEDGER_KINDS, VERDICTS_BY_KIND, kindOf, verdictLoser, type FindingLedgerKind, type PendingDecision, type ResolveVerdict, type SettledProposal, type SuggestionBasis } from '../governance/schema.ts'
 import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
 import { ALREADY_REVIEWED_REASON, NOT_DELEGATED_REASON, isPendingDelegated, type MemoryRecord } from '../record-schema.ts'
 import { verdictOfAction, type AcceptRejectCode, type DecisionRejectCode, type GovernanceRejectCode, type ProposalAction } from '../contract-codes.ts'
@@ -11,6 +11,8 @@ import type { Scope } from '../scope.ts'
 import { executeForget } from './forget.ts'
 import { memberScanFingerprints } from '../governance/checkup-plan.ts'
 import { hasCriticalSecret } from '../secrets.ts'
+import { versionPlan } from '../governance/changeset-plans.ts'
+import { applyChangeset } from './changeset.ts'
 
 export interface ConfirmToolDeps {
   store: MemoryStore
@@ -26,10 +28,14 @@ export interface ConfirmToolDeps {
   instructions: ReadInstructions
 }
 
-/** allowCrossWorkspace：用户明确选择「全局整理」时才为 true，放行其他项目的记录（见 workspace-gate.ts）。 */
+/**
+ * allowCrossWorkspace：用户明确选择「全局整理」时才为 true，放行其他项目的记录（见 workspace-gate.ts）。
+ * resolve 的 verdict 按待决项的种类取 VERDICTS_BY_KIND 里的值，表外的组合回 invalid-args、条目不动。
+ * current 只给 as-versions 用：留作当前状态页的那一条，必须是这一对里的一条（缺省或不在这一对里回 invalid-args）。
+ */
 export type ConfirmArgs =
   | { action: 'refresh'; memoryId: string; allowCrossWorkspace?: boolean }
-  | { action: 'resolve'; decisionId: string; verdict: 'keep-left' | 'keep-right' | 'keep-both' | 'dismiss'; allowCrossWorkspace?: boolean }
+  | { action: 'resolve'; decisionId: string; verdict: ResolveVerdict; current?: string; allowCrossWorkspace?: boolean }
   | { action: 'accept-subagent'; memoryId: string; allowCrossWorkspace?: boolean }
 
 /** 只给 GUI 用的选项，不在工具参数里，模型传不进来。 */
@@ -183,8 +189,22 @@ async function resolveClaimed(
   }
 
   // 提升候选、超限提醒不是冲突，不能按 memoryIds 位置裁决（否则可能删掉候选记忆）；条目不动
-  if (kindOf(entry) !== 'conflict') {
+  if (!(FINDING_LEDGER_KINDS as readonly string[]).includes(kindOf(entry))) {
     return { kind: 'error', message: `待决项 ${entry.id} 不是冲突（${kindOf(entry)}），不能用 resolve 裁决，账本条目保留。` }
+  }
+
+  const allowed: readonly string[] = VERDICTS_BY_KIND[kindOf(entry) as FindingLedgerKind]
+  if (!allowed.includes(args.verdict)) {
+    return { kind: 'error', code: 'invalid-args', message: `这种待决项可用的裁决：${allowed.join('、')}。条目保留。` }
+  }
+  // 并成版本在落盘前还没有删除回执，须独立认领这一对，不能用 verdictLoser 决定。
+  if (args.verdict === 'as-versions') {
+    if (entry.baselineRef !== undefined || entry.memoryIds.length !== 2 || entry.memoryIds[0] === entry.memoryIds[1] || args.current === undefined || !entry.memoryIds.includes(args.current)) {
+      return { kind: 'error', code: 'invalid-args', message: '并成版本需要两条不同的横向记忆，并用 current 指定其中一条留作当前页。' }
+    }
+    const paired = await deps.decisions.withPairClaim(entry, () => resolveVersions(entry, args, context, deps, now, locate))
+    if (!paired.isClaimed) return { kind: 'error', code: 'claimed', message: `待决项 ${entry.id} 的这一对记忆正在被另一次操作处理，未做任何改动。` }
+    return paired.value
   }
 
   if (verdictLoser(entry, args.verdict) === undefined) return resolveEntry(entry, args, context, deps, now, locate, options)
@@ -195,6 +215,43 @@ async function resolveClaimed(
     return { kind: 'error', code: 'claimed', message: `待决项 ${entry.id} 的这一对记忆正在被另一次操作处理，未做任何改动。` }
   }
   return paired.value
+}
+
+/** 持有条目和配对认领后并成版本，按整组结果结清，回执交给现有撤销流程。 */
+async function resolveVersions(
+  entry: PendingDecision,
+  args: Extract<ConfirmArgs, { action: 'resolve' }>,
+  context: GovernanceContext,
+  deps: ConfirmToolDeps,
+  now: number,
+  locate: (id: string) => Promise<MemoryRecord | undefined>,
+): Promise<ConfirmResult> {
+  const members = await Promise.all(entry.memoryIds.map(locate))
+  if (members.some(r => r?.status !== 'active') || entry.fingerprint === undefined || conflictFingerprint(members as MemoryRecord[]) !== entry.fingerprint) {
+    return { kind: 'error', code: 'stale', message: '这两条记忆已改变或不在用，保留条目，请重新体检。' }
+  }
+  const records = members as MemoryRecord[]
+  const { rejected, otherWorkspaces } = gateRecords(records, context, args.allowCrossWorkspace)
+  if (rejected.length > 0) return { kind: 'error', code: 'cross-workspace', rejected, message: `未裁决待决项 ${entry.id}，账本条目保留。${crossWorkspaceNote(rejected, [])}` }
+  const current = records.find(r => r.id === args.current)!
+  const old = records.find(r => r.id !== args.current)!
+  const result = await applyChangeset(
+    versionPlan({ id: `${entry.id}-version`, current, old, group: entry.id }),
+    { entryId: entry.id, by: 'main', at: now, isSecretChecked: false, isSecret: hasCriticalSecret }, deps,
+  )
+  if (result.groups?.[0]?.state !== 'applied') {
+    if (result.groups?.[0]?.state === 'skipped' && result.outcomes.some(o => o.kind === 'skipped' && o.reason === 'has-secret')) {
+      return { kind: 'error', message: '旧状态那条含高危密钥，无法并成版本；要删除请用 memory_forget。' }
+    }
+    return { kind: 'error', code: 'stale', message: '并成版本的依据已失效，保留条目，请重新体检。' }
+  }
+  await deps.decisions.settle(entry.id, 'as-versions', now)
+  const alsoCleared = await deps.decisions.removeByMemoryIds([old.id], entry.id)
+  const actions = [`将 ${old.name} 并为 ${current.name} 的历史版本`]
+  return {
+    kind: 'resolved', decisionId: entry.id, verdict: 'as-versions', actions, alsoCleared, otherWorkspaces,
+    message: `已并成版本：${actions.join('；')}。${crossWorkspaceNote([], otherWorkspaces)}`,
+  }
 }
 
 /** 条目已认领（要删一方时冲突身份也已认领）后裁决。 */
@@ -208,11 +265,13 @@ async function resolveEntry(
   { adopt }: ConfirmOptions,
 ): Promise<ConfirmResult> {
   const vertical = entry.baselineRef !== undefined
-  // 账本里的条目也要过基数校验：横向必须是两个不同 id，垂直必须恰好一个。旧版本写入的或
+  // 账本里的条目也要过基数校验：跨项目重复至少两个不同 id，其余横向恰好两个，垂直恰好一个。旧版本写入的或
   // 手工篡改的非法条目一旦按 memoryIds[0]/[1] 裁决，就可能删掉用户要保留的那条。
   const wellFormed = vertical
     ? entry.memoryIds.length === 1
-    : entry.memoryIds.length === 2 && entry.memoryIds[0] !== entry.memoryIds[1]
+    : kindOf(entry) === 'cross-duplicate'
+      ? entry.memoryIds.length >= 2 && new Set(entry.memoryIds).size === entry.memoryIds.length
+      : entry.memoryIds.length === 2 && entry.memoryIds[0] !== entry.memoryIds[1]
   if (!wellFormed) {
     await deps.decisions.remove(entry.id)
     return { kind: 'error', message: `待决项 ${entry.id} 的记忆 id 不合法（${entry.memoryIds.join('、')}），已从账本清除，未做任何删除。` }
@@ -300,8 +359,9 @@ async function resolveEntry(
     }
   } else {
     if (toDelete) actions.push(`败方记忆 ${toDelete.id} 已是删除状态，无需再删`)
-    if (args.verdict === 'keep-both') actions.push('两条并存（用户确认不冲突）')
-    if (args.verdict === 'dismiss') actions.push('标记为误报')
+    if (args.verdict === 'keep-both' || args.verdict === 'not-conflict') actions.push('两条并存（用户确认不冲突）')
+    if (args.verdict === 'exception') actions.push('记成例外，保留双方记忆')
+    if (args.verdict === 'dismiss') actions.push('忽略这条发现')
     // 两边都留（keep-both / dismiss / 垂直 keep-left）：记下裁决，双方内容不变时体检不再报。
     // 败方早已删除的删一方裁决同样记下（没有快照可恢复）。
     // 升级前导入的条目没有指纹：按双方此刻的内容现算（同体检），垂直冲突拿不到这条记忆对应的指令文件时算不出，只能移出账本

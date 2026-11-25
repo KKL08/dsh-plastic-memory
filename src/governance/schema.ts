@@ -18,14 +18,47 @@ export function genId(prefix: string): string {
  * link 是一次只挂关联、前提的保存（只改元数据，不拍快照）留的回执：生来就已结清，links 记这次新加的 id，撤销时只去掉这些，撤后标 isUndone。
  * brewing-dreams-run 是记忆梦境一次运行的批次条目：生来就已结清（裁决记 batch-edited），记忆的改动回执在 changes、索引操作的回执在 indexRun，
  * 可以整批撤，也可以按回执单条撤；一条回执都不剩时移出账本。0.2.0 不认识这个种类，读到时跳过。
+ * 体检的另外四种发现（FINDING_LEDGER_KINDS）：missed-change 漏记的变化（两条分开的记忆，时间先后解释得了差异）、
+ * exception 例外提示（范围解释得了差异）、premise-changed 依据已变（决定记下的前提摘要和被依据记忆现在的对不上，代码直接判）、
+ * cross-duplicate 跨项目重复（几个项目各记了同一件事）。0.2.0 不认识这几个种类，读到时跳过。
  */
-export const PENDING_KINDS = ['conflict', 'promote-candidate', 'overflow', 'edit', 'move', ...MODEL_CHANGE_KINDS, 'index-organize', 'link', 'brewing-dreams-run'] as const
+export const PENDING_KINDS = [
+  'conflict', 'promote-candidate', 'overflow', 'edit', 'move', ...MODEL_CHANGE_KINDS, 'index-organize', 'link', 'brewing-dreams-run',
+  'missed-change', 'premise-changed', 'exception', 'cross-duplicate',
+] as const
 export type PendingKind = (typeof PENDING_KINDS)[number]
 
 /** 条目种类，缺省即冲突（旧条目）。 */
 export function kindOf(entry: { kind?: PendingKind }): PendingKind {
   return entry.kind ?? 'conflict'
 }
+
+/** 体检挂进账本、等用户看的五种发现（冲突加四种新发现）。 */
+export const FINDING_LEDGER_KINDS = ['conflict', 'missed-change', 'premise-changed', 'exception', 'cross-duplicate'] as const satisfies readonly PendingKind[]
+export type FindingLedgerKind = (typeof FINDING_LEDGER_KINDS)[number]
+
+/**
+ * 对「一对记忆」下的判断：冲突、漏记的变化、例外提示。用户对其中任一种裁成「确实不冲突」「记成例外」（以及沿用的「两条都留」）之后，
+ * 两边的扫描指纹都没变时，这一对再被报成三种里的哪一种都不挂账（配对排除）。
+ */
+export const PAIR_FINDING_KINDS = ['conflict', 'missed-change', 'exception'] as const satisfies readonly FindingLedgerKind[]
+
+/** 配对排除的裁决：两条都留（旧取值，按确实不冲突处理）、确实不冲突、记成例外。 */
+export const PAIR_EXCLUDING_VERDICTS = ['keep-both', 'not-conflict', 'exception'] as const
+
+/**
+ * 每种发现能用的裁决（memory_confirm resolve 与界面共用这一份；不在表里的组合退回，条目不动）。
+ * 冲突：全部取值；as-versions 只用在横向冲突上（要两条记忆）。漏记的变化：并成版本、确实不冲突、忽略。
+ * 依据已变：忽略（复查过仍成立；要改决定走 memory_save）。例外提示：忽略。跨项目重复：忽略（要提升走 memory_promote）。
+ */
+export const VERDICTS_BY_KIND = {
+  'conflict': ['keep-left', 'keep-right', 'keep-both', 'dismiss', 'not-conflict', 'exception', 'as-versions'],
+  'missed-change': ['as-versions', 'not-conflict', 'dismiss'],
+  'premise-changed': ['dismiss'],
+  'exception': ['dismiss'],
+  'cross-duplicate': ['dismiss'],
+} as const satisfies Record<FindingLedgerKind, readonly SettledVerdict[]>
+export type ResolveVerdict = (typeof VERDICTS_BY_KIND)[FindingLedgerKind][number]
 
 /**
  * 已裁决条目的 verdict。两边都留：keep-both、dismiss（也是超限提醒的「忽略」）、垂直 keep-left；
@@ -41,8 +74,14 @@ export function kindOf(entry: { kind?: PendingKind }): PendingKind {
  * 依据和结论代码 proposal、改前的冲突指纹 priorFingerprint；条目 fingerprint 换成改后的。
  * index-organized：一次整理索引（种类 index-organize），回执在条目的 indexRun 里。
  * linked：一次只挂关联、前提的保存（种类 link），新加的 id 在条目的 links 里。
+ * not-conflict：确实不冲突（配对排除，见 PAIR_EXCLUDING_VERDICTS）；exception：记成例外（同样配对排除；对方是项目记忆的例外由例外表从这里重建）；
+ * as-versions：两条并成状态页的新旧版本（旧状态那条软删、记下去向），逐操作回执在条目的 changes 里，撤销按回执还原、条目回到待处理。
+ * 这三个取值 0.2.0 不认识：用它们结清的条目它读到时跳过。
  */
-export const SETTLED_VERDICTS = ['keep-both', 'dismiss', 'keep-left', 'keep-right', 'keep-local', 'promoted', 'edited', 'merged', 'moved', 'rewritten', 'superseded', 'batch-edited', 'plan-applied', 'index-organized', 'linked'] as const
+export const SETTLED_VERDICTS = [
+  'keep-both', 'dismiss', 'keep-left', 'keep-right', 'keep-local', 'promoted', 'edited', 'merged', 'moved', 'rewritten', 'superseded', 'batch-edited', 'plan-applied', 'index-organized', 'linked',
+  'not-conflict', 'exception', 'as-versions',
+] as const
 export type SettledVerdict = (typeof SETTLED_VERDICTS)[number]
 
 /**
@@ -55,13 +94,14 @@ export function snapshotIdFor(
 }
 
 /**
- * 裁决要删掉的一方（败方）；两边都留、或不是冲突条目时为 undefined。
+ * 裁决要删掉的一方（败方）；并成版本按删除回执取旧状态那条，两边都留时为 undefined。
  * 横向：left=memoryIds[0]、right=memoryIds[1]；垂直（有 baselineRef）：left=记忆、right=基线，基线不可删，keep-right 意为记忆删除。
  * plan-applied 的败方是结清信息回执里删除的那一条（融合时并入的那条；垂直改写没有败方）。
  */
 export function verdictLoser(
-  entry: { kind?: PendingKind; memoryIds: string[]; baselineRef?: string; settled?: { receipts?: readonly BatchReceipt[] } }, verdict: SettledVerdict,
+  entry: { kind?: PendingKind; memoryIds: string[]; baselineRef?: string; settled?: { receipts?: readonly BatchReceipt[] }; changes?: ReadonlyArray<{ kind: string; memoryId: string }> }, verdict: SettledVerdict,
 ): string | undefined {
+  if (verdict === 'as-versions') return entry.changes?.find(r => r.kind === 'forget')?.memoryId
   if (kindOf(entry) !== 'conflict') return undefined
   if (verdict === 'plan-applied') return entry.settled?.receipts?.find(r => r.op === 'forget')?.memoryId
   if (entry.baselineRef !== undefined) return verdict === 'keep-right' ? entry.memoryIds[0] : undefined
@@ -207,6 +247,19 @@ export const pendingDecisionSchema = z.object({
   origin: z.object({ sessionId: z.string(), callId: z.string(), by: z.string().optional() }).optional(),
   /** 冲突：模型给的处理建议，见 storedSuggestionSchema。依据版本对不上时视图当作没有建议。其余条目没有此字段。 */
   suggestion: storedSuggestionSchema.optional(),
+  /**
+   * 体检给的方案（新发现种类上）：漏记的变化建议并成版本、哪一条留作当前状态页（current 是这一对里的一条）；
+   * 跨项目重复建议把哪一条升为全局（memoryId 是这一组里的一条）。模型没给或给的不在条目里时没有这一项。
+   */
+  plan: z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('as-versions'), current: z.string() }),
+    z.object({ kind: z.literal('promote'), memoryId: z.string() }),
+  ]).optional(),
+  /**
+   * 横向的疑似矛盾报出之前回查两边出处的结果：checked 两边都读到、核实过；unreadable 有一边读不到（没有出处、会话读不出、
+   * 用户标了不回看）；unchecked 这次没读（超出一次体检的回查上限，或核实那次调用没做成）。没回查过的（纵向冲突、旧条目）没有这一项。
+   */
+  sourceCheck: z.enum(['checked', 'unreadable', 'unchecked']).optional(),
   /** 冲突：处理建议最近一次没生成成的原因；生成成功时清掉。 */
   suggestionFailure: suggestionFailureSchema.optional(),
   /** 冲突：体检自己发起的生成对这个冲突指纹试过几次（用户点「补上建议」不计）；指纹变了从头算。 */
@@ -263,13 +316,21 @@ export type MemorySnapshot = z.infer<typeof memorySnapshotSchema>
 export const FINDING_TYPES = [
   'secret', 'expired', 'bloat', 'orphan', 'malformed', // 规则层
   'conflict', 'redundancy', 'misplaced', 'unclear', // 语义层
+  'missed-change', 'exception', 'premise-changed', // 只进账本（见 LEDGER_ONLY_FINDING_TYPES）
 ] as const
 export type FindingType = (typeof FINDING_TYPES)[number]
 
+/**
+ * 只进待决账本的发现：漏记的变化、例外（语义层）和依据已变（代码按前提摘要判，规则层）。它们出现在体检结果库的行里和 memory_scan 的结果里，
+ * 不写进体检视图（语义缓存是 0.2.0 也读的侧表，它不认识这几个类型，整条视图会被它跳过），也不计健康分。
+ */
+export const LEDGER_ONLY_FINDING_TYPES = ['missed-change', 'exception', 'premise-changed'] as const satisfies readonly FindingType[]
+export type LedgerOnlyFindingType = (typeof LEDGER_ONLY_FINDING_TYPES)[number]
+
 export const SEVERITY_BY_TYPE = {
   secret: 'critical', conflict: 'critical',
-  expired: 'warning', misplaced: 'warning', bloat: 'warning', malformed: 'warning',
-  redundancy: 'info', unclear: 'info', orphan: 'info',
+  expired: 'warning', misplaced: 'warning', bloat: 'warning', malformed: 'warning', 'premise-changed': 'warning',
+  redundancy: 'info', unclear: 'info', orphan: 'info', 'missed-change': 'info', exception: 'info',
 } as const satisfies Record<FindingType, 'critical' | 'warning' | 'info'>
 
 export const findingSchema = z.object({
@@ -280,6 +341,10 @@ export const findingSchema = z.object({
   summary: z.string(),
   suggestedAction: z.string(),
   baselineRef: z.string().optional(),
+  /** 漏记的变化：模型建议留作当前状态页的那一条（memoryIds 里的一条）；不在 memoryIds 里的解析时丢掉。 */
+  current: z.string().optional(),
+  /** 横向冲突回查出处的结果（见 PendingDecision.sourceCheck），随这一批的结论存进体检结果库，命中时照用。 */
+  sourceCheck: z.enum(['checked', 'unreadable', 'unchecked']).optional(),
 })
 export type Finding = z.infer<typeof findingSchema>
 

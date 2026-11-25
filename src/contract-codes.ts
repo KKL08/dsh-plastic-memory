@@ -46,7 +46,8 @@ export type GovernanceRejectCode =
 export type DecisionRejectCode =
   | 'claimed'           // 条目正被另一次裁决或体检认领
   | 'not-found'         // 条目不存在：已被裁决，或涉及的记忆已删除
-  | 'stale'             // 落盘处理方案（只有 GUI 会带）：建议已被新的一份替换，或两条在方案生成后被改过
+  | 'stale'             // 落盘处理方案（只有 GUI 会带）：建议已被新的一份替换，或两条在方案生成后被改过；并成版本：两条在报出之后被改过、已不在用
+  | 'invalid-args'      // 这种待决项不能用这个裁决（见 VERDICTS_BY_KIND），或并成版本没给、给错留作当前状态页的那一条；message 列出这种待决项能用的裁决。条目不动
 
 /** memory_confirm accept-subagent 什么都没动的原因（tools/confirm.ts）。 */
 export type AcceptRejectCode =

@@ -94,7 +94,7 @@ export interface MemoryCommandDeps {
   /** 按作用域取指令文件（AGENTS.md / CLAUDE.md）：体检、垂直冲突的建议与采纳都按记忆对应的那份，和借来的会话在哪个项目无关。 */
   instructions: ReadInstructions
   /** 增量体检：体检结果库和整次的 token 上限（见 tools/scan.ts ScanToolDeps）。缺省每次整批重查、用默认上限。 */
-  incremental?: Pick<ScanCoreDeps, 'checkupCache' | 'tokenCap'>
+  incremental?: Pick<ScanCoreDeps, 'checkupCache' | 'tokenCap' | 'sources'>
   /** 体检开关（用时读配置）；关闭时治理类子命令返回 governance-disabled。缺省视为开启。 */
   isGovernanceEnabled?: () => boolean
   /** 旧 KV 导入是否已结清（导完且旧行已删）；缺省视为已结清。没结清时彻底删除回 failed：续传会把旧快照里的明文放回来。 */

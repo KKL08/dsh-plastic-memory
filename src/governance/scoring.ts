@@ -1,4 +1,4 @@
-import { FINDING_TYPES, type Finding, type FindingType } from './schema.ts'
+import { FINDING_TYPES, type Finding, type FindingType, type LedgerOnlyFindingType } from './schema.ts'
 import type { Scope } from '../scope.ts'
 
 /** 红线触发时 score 的红区上限：密钥存在即不可接受，gate 判死而非扣分算术（高分不能稀释它）。 */
@@ -17,7 +17,10 @@ export const CONFLICT_CAP = 30
  * validTo 过期已被注入/检索过滤，危害降级为存储噪音；workspace 层 misplaced 6——
  * "该升未升"是机会成本，另有提升候选流程承接）。
  */
-export const NOISE_CAPS: Record<Exclude<FindingType, 'secret' | 'conflict'>, number> = {
+/** 计噪音分的问题类型：密钥走红线门、冲突计条扣分，只进账本的发现不计分。 */
+export type NoiseFindingType = Exclude<FindingType, 'secret' | 'conflict' | LedgerOnlyFindingType>
+
+export const NOISE_CAPS: Record<NoiseFindingType, number> = {
   redundancy: 6, misplaced: 6, unclear: 6, bloat: 6, expired: 6, orphan: 6, malformed: 6,
 }
 export const GLOBAL_MISPLACED_CAP = 10
@@ -70,9 +73,9 @@ export function computeHealth(input: HealthInput): HealthScore {
   const counts = Object.fromEntries(FINDING_TYPES.map(t => [t, 0])) as Record<FindingType, number>
   for (const f of [...input.ruleFindings, ...input.semanticFindings]) counts[f.type]++
 
-  const capOf = (type: Exclude<FindingType, 'secret' | 'conflict'>): number =>
+  const capOf = (type: NoiseFindingType): number =>
     type === 'misplaced' && scopeKind === 'global' ? GLOBAL_MISPLACED_CAP : NOISE_CAPS[type]
-  const noisePenalty = (type: Exclude<FindingType, 'secret' | 'conflict'>): number =>
+  const noisePenalty = (type: NoiseFindingType): number =>
     capOf(type) * noiseProgress(counts[type], input.totalMemories)
 
   const conflictPenalty = Math.min(CONFLICT_CAP, counts.conflict * CONFLICT_UNIT)

@@ -8,7 +8,7 @@ import type { InstructionFiles } from './instructions.ts'
 import type { SemanticLlm } from './semantic-scan.ts'
 import type { CrossWsDuplicate } from './cross-ws.ts'
 import { findingSchema, type Finding } from './schema.ts'
-import { copyKey, parseCopyKey, scanContentFingerprint, scopeKeyOf } from './changeset.ts'
+import { copyKey, parseCopyKey, scanContentFingerprint, scanLineFingerprint, scopeKeyOf } from './changeset.ts'
 
 /**
  * 增量体检的纯函数：判断上下文、批的键、库里一行算不算命中、发哪些批（顺序、上限、刷新）、覆盖、发布的发现、收尾表。不碰磁盘、不调模型。
@@ -36,13 +36,13 @@ export function checkContext(promptVersion: number, llm: Pick<SemanticLlm, 'prov
   return JSON.stringify([promptVersion, llm.provider ?? '', llm.model ?? '', llm.reasoningEffort ?? '', ...(instructions === null ? [] : [instructions])])
 }
 
-/** 批的一个成员：副本身份（changeset.ts copyKey，作用域取预读实际选中的那份）和它的内容指纹（changeset.ts scanContentFingerprint）。 */
+/** 批的一个成员：副本身份（changeset.ts copyKey，作用域取预读实际选中的那份）和它的记忆行指纹（changeset.ts scanLineFingerprint）。 */
 export type BatchMember = readonly [copy: string, fingerprint: string]
 
 /** 一批的成员，按副本身份排序：批内顺序不影响批的键。 */
 export function batchMembers(records: readonly MemoryRecord[]): BatchMember[] {
   return records
-    .map((r): BatchMember => [memberCopyKey(r), scanContentFingerprint(r)])
+    .map((r): BatchMember => [memberCopyKey(r), scanLineFingerprint(r)])
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
 }
 
@@ -51,7 +51,7 @@ export function batchMembers(records: readonly MemoryRecord[]): BatchMember[] {
  * 再报同一冲突时它和冲突指纹都没变才算裁决过（见 governance/decisions.ts upsert）。只换出处、改动性质的补证不算变。
  */
 export function memberScanFingerprints(records: readonly MemoryRecord[]): Record<string, string> {
-  return Object.fromEntries(batchMembers(records))
+  return Object.fromEntries(records.map(r => [memberCopyKey(r), scanContentFingerprint(r)]))
 }
 
 /** 一条记忆的副本身份。 */
@@ -84,7 +84,7 @@ export type FindingsRow = CheckupCacheRow & { result: Finding[] }
 /** 跨项目比较一行的结论：它自己的结果结构。 */
 export type CrossWsRow = CheckupCacheRow & { result: CrossWsDuplicate[] }
 
-const crossWsDuplicatesSchema = z.array(z.object({ topic: z.string(), workspaces: z.array(z.string()), suggestion: z.string() }))
+const crossWsDuplicatesSchema = z.array(z.object({ topic: z.string(), workspaces: z.array(z.string()), suggestion: z.string(), memoryIds: z.array(z.string()).optional(), promote: z.string().optional() }))
 
 /** 普通轮的行过结构校验：结论是发现的数组，每条发现引用的记忆 id 都在这一行的成员里。过不了的不要。 */
 export function findingsRows(rows: readonly CheckupCacheRow[]): FindingsRow[] {

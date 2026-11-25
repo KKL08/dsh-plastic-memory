@@ -9,6 +9,7 @@ export interface Observation { expected: Category | 'none'; predicted: Predictio
 export function classify(findings: readonly { type: string; summary?: string }[]): Prediction[] {
   return [...new Set(findings.map((f): Prediction => {
     if (f.type === 'conflict') return 'contradiction'
+    if (f.type === 'missed-change') return 'change'
     if ((CATEGORIES as readonly string[]).includes(f.type)) return f.type as Category
     return 'other'
   }))]
