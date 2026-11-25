@@ -220,7 +220,7 @@ function groupBySeq<T extends { seq: number; segment: number }>(parts: readonly 
 
 /**
  * 附在一条记忆下面的文字：「出处同」各一行、状态说明一行，原话包进标签（几轮之间空一行）。没有可写的返回 undefined。
- * 同一条消息给了几段时拼成一条，不相邻的段之间加缺段标记；和记忆正文相同的段从略。没给全的消息标节选。
+ * 同一条消息给了几段时拼成一条，不相邻的段之间加缺段标记；和记忆正文相同的段从略。没给全的消息标节选，从略的段也一样：模型要知道还有其余段。
  * 本项目的会话：整条给的带引用，节选的带节选说明（引用写在说明里）；别的项目的会话不带引用，节选说明改成传记忆 id 回查。
  */
 export function renderMemoryQuote(input: { memoryId: string; turns: readonly QuoteTurnView[]; sameSource: readonly string[]; status?: string }): string | undefined {
@@ -230,7 +230,7 @@ export function renderMemoryQuote(input: { memoryId: string; turns: readonly Quo
     const m = parts[0]!
     const text = parts.map((p, i) => (i > 0 && p.segment !== parts[i - 1]!.segment + 1 ? DIALOGUE_SEGMENT_GAP : '') + (p.isSameAsMemory ? SAME_AS_MEMORY_NOTE : p.text)).join('')
     const line = renderDialogueLine({ speaker: m.speaker, at: m.at, text })
-    const isExcerpt = parts.length < m.segmentCount && !parts.every(p => p.isSameAsMemory)
+    const isExcerpt = parts.length < m.segmentCount
     if (!turn.isInProject) return line + (isExcerpt ? excerptByMemoryNote(m.segmentCount, input.memoryId) : '')
     const ref = formatMessageRef({ sessionId: turn.sessionId, seq: m.seq })
     return line + (isExcerpt ? excerptNote(m.segmentCount, ref) : messageReferenceNote(ref))

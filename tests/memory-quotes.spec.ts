@@ -260,6 +260,13 @@ describe('记忆名称和渲染', () => {
     expect(text).not.toContain('记住数据库用 PostgreSQL')
   })
 
+  it('切过段的长消息只给了和记忆正文相同的那一段：从略，照样标节选，让模型知道还有其余段', () => {
+    const text = renderMemoryQuote({ memoryId: 'mem_a', sameSource: [], turns: [{ sessionId: 's', isInProject: true, messages: [
+      { seq: 12, segment: 1, speaker: 'assistant', at: undefined, text: '数据库用 PostgreSQL', segmentCount: 3, isSameAsMemory: true },
+    ] }] })!
+    expect(text).toContain('助手：（和记忆正文相同，从略）（节选，这条消息共 3 段，可用 memory_source 带上引用 s#12 看更多内容）')
+  })
+
   it('只有说明、没有原话时不出标签；什么都没有时不出东西', () => {
     expect(renderMemoryQuote({ memoryId: 'mem_a', turns: [], sameSource: ['数据库'], status: undefined })).toBe('出处同「数据库」')
     expect(renderMemoryQuote({ memoryId: 'mem_a', turns: [], sameSource: [], status: '出处的会话已不在' })).toBe('出处原话：出处的会话已不在')
