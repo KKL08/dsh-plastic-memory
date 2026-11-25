@@ -1,7 +1,7 @@
 import type { Dirent } from 'node:fs'
 import { mkdir, readdir, readFile, rm, rmdir, rename, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
-import { mergedIntoOf, type MemoryRecord } from '../record-schema.ts'
+import { isDateMs, mergedIntoOf, type MemoryRecord } from '../record-schema.ts'
 import { GLOBAL_SCOPE_KEY, scopeOfLedger, type Scope } from '../scope.ts'
 import { linkExclusive } from './exclusive-link.ts'
 import { decodeFile, encodeRecord, type FileLocation } from './frontmatter.ts'
@@ -82,10 +82,33 @@ export function versionOfMerged(record: MemoryRecord): HistoryVersion {
   }
 }
 
-/** 一条记忆的历史版本。读写都在调用方的写入段里做，这里不加锁。 */
+/**
+ * 一条记忆在一层里列出的历史版本。isComplete 为假时 versions 只是读到的那几版：目录列不出（不存在以外的错误），
+ * 或有版本文件读不出、解析不了。目录不存在是「没有历史」，isComplete 为真。读不全时不能据此下「没有某一版」的结论。
+ */
+export interface VersionListing {
+  /** 按结束时间从早到晚。 */
+  versions: HistoryVersion[]
+  isComplete: boolean
+}
+
+/** 按版本标识读一版：found 读到了；missing 这一层没有这个文件；unreadable 文件在，但读不出或解析不了。 */
+export type VersionRead =
+  | { kind: 'found'; version: HistoryVersion }
+  | { kind: 'missing' }
+  | { kind: 'unreadable' }
+
+/** 一条记忆的历史版本。写都在调用方的写入段里做，这里不加锁；读（list、read、countVersions）在写入段外也能调。 */
 export interface VersionHistory {
-  /** 按结束时间从早到晚。读不出的版本文件跳过。 */
-  list(layer: HistoryLayer, memoryId: string): Promise<HistoryVersion[]>
+  /** 按结束时间从早到晚。读不出的版本文件跳过，isComplete 记下读没读全。 */
+  list(layer: HistoryLayer, memoryId: string): Promise<VersionListing>
+  /** 读这一层里这条记忆的某一版（只看这一层的这个目录，不找并进来的）。versionId 由调用方先按 VERSION_ID_PATTERN 校验过。 */
+  read(layer: HistoryLayer, memoryId: string, versionId: string): Promise<VersionRead>
+  /**
+   * 这一层里这条记忆有几个版本文件：只列目录、数文件名合 VERSION_FILE_RE 的，不读不解析（读不出的版本文件也算一个）。
+   * 目录不存在为 0；目录列不出（不存在以外的错误）为 undefined，调用方不能把它当成 0。
+   */
+  countVersions(dir: string, memoryId: string): Promise<number | undefined>
   /** 按版本 id 整份写下（已有就换掉）。只用于这条记忆自己的版本。 */
   write(layer: HistoryLayer, version: HistoryVersion): Promise<void>
   /**
@@ -138,7 +161,7 @@ const VERSION_KEYS = ['versionOf', 'versionStartedAt', 'versionEndedAt', 'versio
 const iso = (ms: number) => new Date(ms).toISOString()
 const ms = (value: unknown): number | undefined => {
   const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Date.parse(value) : value instanceof Date ? value.getTime() : NaN
-  return Number.isFinite(parsed) ? parsed : undefined
+  return isDateMs(parsed) ? parsed : undefined
 }
 const text = (value: unknown): string | undefined => typeof value === 'string' && value !== '' ? value : undefined
 
@@ -178,7 +201,8 @@ function decodeVersion(raw: string, path: string, versionId: string, loc: FileLo
     delete extras[key]
   }
   const endedAt = ms(own.versionEndedAt)
-  if (endedAt === undefined) return undefined
+  const startedAt = ms(own.versionStartedAt)
+  if (endedAt === undefined || (own.versionStartedAt !== undefined && startedAt === undefined)) return undefined
   const writes = readWrites(own.versionWrites)
   const sessionId = text(own.versionSessionId)
   const from = typeof own.versionMergedFrom === 'object' && own.versionMergedFrom !== null ? own.versionMergedFrom as Record<string, unknown> : {}
@@ -188,7 +212,7 @@ function decodeVersion(raw: string, path: string, versionId: string, loc: FileLo
     versionId,
     record: decoded.record,
     extras,
-    startedAt: ms(own.versionStartedAt) ?? decoded.record.createdAt,
+    startedAt: startedAt ?? decoded.record.createdAt,
     endedAt,
     kind: text(own.versionKind) ?? STATE_CHANGE_VERSION,
     ...(sessionId !== undefined ? { sessionId } : {}),
@@ -197,7 +221,13 @@ function decodeVersion(raw: string, path: string, versionId: string, loc: FileLo
   }
 }
 
-const VERSION_FILE_RE = /^([0-9A-Za-z-]+)\.md$/
+/**
+ * 版本标识的写法：版本文件名去掉 `.md` 的部分。插件写下的是结束时刻的 UTC 紧凑写法加可选的两位序号，
+ * 手放进来的文件只要合这个写法也认。检索按版本标识读一版时，入参先按它整段校验，不合的退回，不拼进路径。
+ */
+export const VERSION_ID_PATTERN = '[0-9A-Za-z-]+'
+
+const VERSION_FILE_RE = new RegExp(`^(${VERSION_ID_PATTERN})\\.md$`)
 
 /** 历史版本落在磁盘上：`<层目录>/.history/<记忆 id>/<版本 id>.md`，内容是改前的整个记忆文件加版本自己的几个键。 */
 export class FileVersionHistory implements VersionHistory {
@@ -212,30 +242,46 @@ export class FileVersionHistory implements VersionHistory {
     return dir
   }
 
-  async list(layer: HistoryLayer, memoryId: string): Promise<HistoryVersion[]> {
+  async list(layer: HistoryLayer, memoryId: string): Promise<VersionListing> {
     const dir = this.dirOf(layer, memoryId)
     let names: string[]
     try {
       names = await readdir(dir)
-    } catch {
-      return []
+    } catch (err) {
+      return { versions: [], isComplete: (err as NodeJS.ErrnoException).code === 'ENOENT' }
     }
     const versions: HistoryVersion[] = []
+    let isComplete = true
     for (const name of names) {
       const versionId = VERSION_FILE_RE.exec(name)?.[1]
       if (versionId === undefined) continue
-      const path = join(dir, name)
-      let raw: string
-      try {
-        raw = await readFile(path, 'utf8')
-      } catch {
-        continue
-      }
-      const version = decodeVersion(raw, path, versionId, layer.loc)
-      // 没写来源的（原样搬来的）：记录 id 和目录对不上就是并进来的
-      if (version !== undefined) versions.push(version.mergedFrom !== undefined || version.record.id === memoryId ? version : { ...version, mergedFrom: version.record.id })
+      const read = await this.read(layer, memoryId, versionId)
+      if (read.kind === 'found') versions.push(read.version)
+      else isComplete = false
     }
-    return versions.sort(byVersionEnd)
+    return { versions: versions.sort(byVersionEnd), isComplete }
+  }
+
+  async read(layer: HistoryLayer, memoryId: string, versionId: string): Promise<VersionRead> {
+    const path = join(this.dirOf(layer, memoryId), `${versionId}.md`)
+    let raw: string
+    try {
+      raw = await readFile(path, 'utf8')
+    } catch (err) {
+      return { kind: (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'unreadable' }
+    }
+    const version = decodeVersion(raw, path, versionId, layer.loc)
+    if (version === undefined) return { kind: 'unreadable' }
+    // 原样搬来的版本可能没写来源，按记录 id 补认。
+    return { kind: 'found', version: version.mergedFrom !== undefined || version.record.id === memoryId ? version : { ...version, mergedFrom: version.record.id } }
+  }
+
+  async countVersions(dir: string, memoryId: string): Promise<number | undefined> {
+    try {
+      return (await readdir(this.dirOf({ dir }, memoryId))).filter(name => VERSION_FILE_RE.test(name)).length
+    } catch (err) {
+      return (err as NodeJS.ErrnoException).code === 'ENOENT' ? 0 : undefined
+    }
   }
 
   async write(layer: HistoryLayer, version: HistoryVersion): Promise<void> {

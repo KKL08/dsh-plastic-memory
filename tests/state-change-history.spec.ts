@@ -73,7 +73,7 @@ async function create(e: Env, partial: object = {}): Promise<MemoryRecord> {
 const current = async (e: Env, id: string, workspacePath: string | undefined = WS) => (await e.store.get(id, scopeAt(workspacePath)))!
 async function versionsOf(e: Env, id: string, workspacePath: string | undefined = WS): Promise<HistoryVersion[]> {
   const found = (await e.store.locate(id, scopeAt(workspacePath)))!
-  return e.store.history.list(layerOf(found), id)
+  return (await e.store.history.list(layerOf(found), id)).versions
 }
 const update = (e: Env, id: string, partial: object, opts?: Parameters<Env['save']>[1]) =>
   e.save({ action: 'update', id, name: '部署方式', summary: '怎么部署', ...partial }, opts)

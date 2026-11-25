@@ -75,7 +75,7 @@ function written(r: PipelineResult): MemoryRecord {
 }
 async function versionsOf(store: MemoryStore, id: string): Promise<HistoryVersion[]> {
   const found = (await store.locate(id, scopeAt(WS)))!
-  return store.history.list(layerOf(found), id)
+  return (await store.history.list(layerOf(found), id)).versions
 }
 const facts = (anchors: readonly SourceAnchor[]) => anchors.map(a => ({ at: a.at, sourceMode: a.sourceMode, initiator: a.initiator, evidence: a.evidence }))
 

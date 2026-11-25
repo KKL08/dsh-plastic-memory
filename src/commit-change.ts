@@ -44,7 +44,7 @@ export function historySteps(store: MemoryStore, snapshots: SnapshotStore, log: 
       const found = scope === undefined ? undefined : await store.locate(record.id, scope)
       if (found === undefined) return
       const layer = layerOf(found)
-      const versions = await store.history.list(layer, record.id)
+      const { versions } = await store.history.list(layer, record.id)
       if (versions.some(v => v.writes.some(w => w.op === op))) return
       // 原因不进操作日志（日志不留记忆里的文字）：从写成的那一版的最近一次内容改动里取
       const reason = record.lastChange?.op === op ? record.lastChange.reason : undefined
@@ -180,13 +180,13 @@ export async function commitChange<Stop = never>(input: CommitChangeInput<Stop>,
       const scope = scopeOfMemory(target)
       const found = scope === undefined ? undefined : await store.locate(target.id, scope)
       if (found !== undefined) {
-        const versions = await store.history.list(layerOf(found), target.id)
+        const { versions, isComplete } = await store.history.list(layerOf(found), target.id)
         const last = versions.at(-1)
         const windowMs = deps.mergeWindowMs ?? MERGE_WINDOW_MINUTES_DEFAULT * 60_000
         // 接着改才并：当前这一版得是那个版本最后一笔写下的。中间别人改过正文（另一个会话纠错、界面里改）就另留一版，不然中间那一版哪里都不剩
         const lastWrite = last?.writes.at(-1)
         // 当前这一版被某条决定引用为前提时也另留一版：决定依据的那个状态要留得住
-        const isMerged = last !== undefined && last.kind === STATE_CHANGE_VERSION && input.sessionId !== undefined
+        const isMerged = isComplete && last !== undefined && last.kind === STATE_CHANGE_VERSION && input.sessionId !== undefined
           && last.sessionId === input.sessionId && at >= last.endedAt && at - last.endedAt < windowMs
           && lastWrite !== undefined && target.lastChange?.op === lastWrite.op && target.updatedAt === lastWrite.at
           && !(await isCurrentPremise(store, target))

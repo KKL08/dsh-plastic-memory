@@ -1,3 +1,4 @@
+import type { HistoryListing, HistoryVersionInfo } from './search-history.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { executeSearch, renderSearchResult, type SearchHit, type SearchToolDeps } from './search.ts'
@@ -43,6 +44,7 @@ export function createSearchTool(deps: SearchToolDeps): ToolDefinition {
       '能查本项目过往对话的原话，能找到没记成记忆的内容。原话照当时的原文给出，可能含密钥等敏感内容。',
       `排在前面的记忆后面可能附着它出处的原话（看用户的设置）。记忆和原话都查时，结果分${MEMORY_SECTION_HEADING}${DIALOGUE_SECTION_HEADING}两段：其他原话是没附在记忆下面的原话，某一轮是某条记忆的出处时会注明对应哪条记忆。`,
       '原话结果里每条消息带引用，可以用 memory_source 看这条消息的更多内容；展开的内容有长度上限，超出会标明截断。',
+      '用 id 配 history: true 列出历史版本（新的在前，用 limit 控制条数）；用 id 配 version 读一版的全文，正文里的密钥已遮盖。要读当前内容，把 id 填进 query。',
       '查询写法：',
       '- 查询是空格分隔的关键词，中英文均可，版本号、路径这类原样文字可以直接搜。同时含全部关键词的记忆排在最前，所以一次查询里放预期会在同一条记忆里一起出现的词，排序最准。',
       '- 记忆里的说法可能和用户的不同：开头记忆索引里的说法、用户的原话，以及你判断意思相近或相关的写法，都可以拿来搜。',
@@ -61,7 +63,10 @@ export function createSearchTool(deps: SearchToolDeps): ToolDefinition {
     ].join('\n'),
     parameters: {
       source: SEARCH_SOURCE_PARAMETER,
-      query: { type: 'string', required: true, description: '空格分隔的关键词，中英文均可；对名称、摘要、标签、内容匹配。不是全命中的结果在头行标出完整对上的关键词；没有记录命中全部关键词时结果开头会说明，排第一的有关键词没完整对上时列出各关键词命中几条；排第一的对上的查询内容不到一半、或只有子串命中时会提示命中弱' },
+      id: { type: 'string', description: '记忆 id。配 history: true 列历史版本，配 version 读一版；要读当前内容，把 id 填进 query' },
+      history: { type: 'boolean', description: '配 id 设为 true 时列历史版本；false 等同未传' },
+      version: { type: 'string', description: '配 id 读一版的全文，填列历史（history: true）返回的版本标识，不含 .md 后缀' },
+      query: { type: 'string', description: '空格分隔的关键词，中英文均可；对名称、摘要、标签、内容匹配。不是全命中的结果在头行标出完整对上的关键词；没有记录命中全部关键词时结果开头会说明，排第一的有关键词没完整对上时列出各关键词命中几条；排第一的对上的查询内容不到一半、或只有子串命中时会提示命中弱' },
       types: { type: 'array', items: { type: 'string' }, description: describeTypes(deps.registry) },
       scope: { type: 'string', enum: ['global', 'workspace', 'all-visible'], description: '缺省 all-visible（global + 当前 workspace）' },
       limit: { type: 'number', description: '返回条数上限，缺省 10，最大 50；命中更多时结果开头会说明总数' },
@@ -69,7 +74,7 @@ export function createSearchTool(deps: SearchToolDeps): ToolDefinition {
     },
     output: {
       schema: { type: 'json' },
-      render: (_args, value) => [{ type: 'text', text: renderSearchResult(value as unknown as { hits: SearchHit[]; note?: string; moreNote?: string }) }],
+      render: (_args, value) => [{ type: 'text', text: renderSearchResult(value as unknown as { hits: SearchHit[]; note?: string; moreNote?: string; history?: HistoryListing; version?: HistoryVersionInfo }) }],
     },
     execute: async (args, exec) => toToolOutput(await executeSearch(args, exec, deps)),
   })

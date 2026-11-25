@@ -214,7 +214,7 @@ describe('链接反向索引', () => {
     await store.create(record({ id: 'mem_decision', name: '项目决定', premises: [{ id: 'mem_page', digest: premiseDigest(second) }] }))
     expect((await change(second, '第三版', NOW + 2000)).kind).toBe('written')
     const found = (await store.locate('mem_page', { kind: 'global' }))!
-    expect((await store.history.list(layerOf(found), 'mem_page')).map(v => v.record.content)).toEqual([page.content, '第二版'])
+    expect((await store.history.list(layerOf(found), 'mem_page')).versions.map(v => v.record.content)).toEqual([page.content, '第二版'])
   })
 })
 

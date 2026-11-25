@@ -416,6 +416,17 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       return { ok: JSON.stringify(parameters?.properties?.source?.enum) === JSON.stringify(['memory', 'dialogue', 'both']) && !(parameters?.required ?? []).includes('source'), detail: JSON.stringify(parameters) }
     })
 
+    // 历史模式的参数：query 不再必填，id、history、version 都是可选参数，由执行器校验组合。
+    await attempt('SEARCH-HISTORY-SCHEMA', async () => {
+      const schema = tools.schemas().find(s => s.name === 'memory_search') as
+        { parameters?: { properties?: Record<string, { type?: string }>; required?: string[] } } | undefined
+      const parameters = schema?.parameters
+      const properties = parameters?.properties ?? {}
+      const required = parameters?.required ?? []
+      const isShaped = properties.id?.type === 'string' && properties.history?.type === 'boolean' && properties.version?.type === 'string'
+      return { ok: isShaped && !['query', 'id', 'history', 'version'].some(k => required.includes(k)), detail: JSON.stringify(parameters) }
+    })
+
     // H2 无 cwd 会话 create 拒存（Ungrouped 会话不落 global）
     await attempt('H2-NO-CWD-REJECTED', async () => {
       const r = await call('memory_save', { action: 'create', name: 'no-cwd', summary: 's', content: 'c', ...MEMORY_BASE }, mkExec(undefined)) as { kind: string; code?: string }
@@ -553,6 +564,24 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
         ok: isGuided && isAssumed && isArchived && isKept,
         detail: `first=${first.kind}/${first.code} second=${second.kind}/${JSON.stringify(second.warnings?.map(w => w.code))} versions=${versions.length} third=${third.kind}/${third.record?.content}`,
       }
+    })
+
+    // 历史模式经真宿主走一遍：状态变化留下一版，按 id 列出来、按版本标识读回改前的内容；两种结果都过宿主的无损校验。
+    await attempt('SEARCH-HISTORY-MODE', async () => {
+      type Saved = { kind: string; record?: { id: string } }
+      type Listed = { noteCode?: string; history?: { versions?: Array<{ versionId: string; reason: string }>; isComplete?: boolean } }
+      type Read = { noteCode?: string; hits?: Array<{ id: string; content: string }>; version?: { versionId: string } }
+      const created = await call('memory_save', { action: 'create', name: 'history-probe', summary: '历史探针', content: '探针第一版', ...MEMORY_BASE }, execA) as Saved
+      if (created.kind !== 'saved' || !created.record) return { ok: false, detail: `create kind=${created.kind}` }
+      const id = created.record.id
+      const changed = await call('memory_save', { action: 'update', id, change: 'state-change', changeReason: '探针换版', name: 'history-probe', summary: '历史探针', content: '探针第二版', ...MEMORY_BASE }, execA) as Saved
+      const listed = await call('memory_search', { id, history: true }, execA) as Listed
+      const [first] = listed.history?.versions ?? []
+      const read = first === undefined ? undefined : await call('memory_search', { id, version: first.versionId }, execA) as Read
+      const isListed = listed.noteCode === undefined && listed.history?.isComplete === true && first?.reason === '探针换版'
+      const isRead = read?.version?.versionId === first?.versionId && read?.hits?.[0]?.content === '探针第一版'
+      const isLossless = snapshotJsonValue(listed) !== undefined && read !== undefined && snapshotJsonValue(read) !== undefined
+      return { ok: changed.kind === 'updated' && isListed && isRead && isLossless, detail: `update=${changed.kind} listed=${JSON.stringify(listed)} read=${JSON.stringify(read)}` }
     })
 
     // H9a 证据锚悬空：记忆文件是用户可编辑的 markdown——真 Session 正常保存后，把磁盘上那条记录的

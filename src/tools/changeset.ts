@@ -528,18 +528,21 @@ function mergedIntoFor(op: ChangeOp, target: MemoryRecord, basis: ReadonlyMap<st
  * 撤销一次状态变化前，先把它在历史版本里留下的撤掉：这一版是它留的档就删掉，是并进别人留的那版就拿掉它那一笔（连同它给的原因）。
  * 按改前快照的 id 认是哪一次写入。先撤版本、再恢复记忆：中途断掉只是少一个历史版本，不会留下和当前页内容相同的版本。
  * 返回放回去的函数：恢复没成时照原样放回。
+ * 历史读不全、又没找到这次写入的那一版时记一条 warn（那一版可能正在读不出的文件里），撤销照常往下走。
  */
-export async function withdrawVersion(store: MemoryStore, before: SnapshotRecord, snapshotId: string): Promise<() => Promise<void>> {
+export async function withdrawVersion(store: MemoryStore, before: SnapshotRecord, snapshotId: string, log: MemoryLogger = console): Promise<() => Promise<void>> {
   const found = await store.locate(before.id, scopeAt(before.workspacePath))
   if (found === undefined) return async () => {}
   const layer = layerOf(found)
-  for (const version of await store.history.list(layer, before.id)) {
+  const { versions, isComplete } = await store.history.list(layer, before.id)
+  for (const version of versions) {
     const index = version.writes.findIndex(w => w.snapshot === snapshotId)
     if (index < 0) continue
     if (index === 0) await store.history.remove(layer, before.id, version.versionId)
     else await store.history.write(layer, { ...version, writes: version.writes.filter((_, i) => i !== index) })
     return () => store.history.write(layer, version)
   }
+  if (!isComplete) log.warn(`历史读不全，未找到待撤销版本：记忆 ${before.id}，快照 ${snapshotId}`)
   return async () => {}
 }
 
@@ -564,7 +567,7 @@ export async function revertChange(entryId: string, receipt: ChangeReceipt, opts
     if (block !== undefined || current === undefined) return { kind: 'blocked', block: block ?? 'gone' }
     // 这次写入留过历史版本的（状态变化）：先撤版本，再改回记忆，同一个写入段里别的写入插不进两步中间
     const putVersionBack = receipt.isContent && before !== undefined && receipt.snapshotId !== undefined
-      ? await withdrawVersion(store, before, receipt.snapshotId)
+      ? await withdrawVersion(store, before, receipt.snapshotId, deps.log)
       : async () => {}
     const { redacted: _redacted, ...plain } = before ?? ({} as SnapshotRecord)
     // 新建的撤销是软删进最近删除：删除时刻这里补

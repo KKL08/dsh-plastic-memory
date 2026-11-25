@@ -1,3 +1,5 @@
+import { dirname } from 'node:path'
+import { VERSION_ID_PATTERN } from '../storage/history.ts'
 import type { SearchSource } from '../contract-codes.ts'
 import { retrieveDialogue, finishDialogue, renderDialogueSearch, runPath, catchUpFor, listSessionTable, shareDialogueReads, DIALOGUE_PATH_BUDGET_MS, type DialogueSearchDeps, type FinishedDialogue } from './dialogue-search.ts'
 import { dialogueNote, renderSearchSections, DIALOGUE_QUERY_REQUIRED, MEMORY_QUOTES_UNAVAILABLE } from '../search/dialogue-format.ts'
@@ -17,6 +19,7 @@ import type { ContextHost } from './host-session.ts'
 import { sourceNote } from '../index-line.ts'
 import { stalenessNote } from '../record-freshness.ts'
 import { exposedPath, maskSecretSurface } from '../secrets.ts'
+import { executeHistorySearch, type HistoryListing, type HistoryVersionInfo } from './search-history.ts'
 
 /** memory_search 运行时需要的会话上下文，由宿主会话适配器的 contextOf 提供。 */
 export interface SearchContext {
@@ -53,14 +56,25 @@ export interface SearchToolDeps {
   now?: () => number
 }
 
+/**
+ * memory_search 的参数。query、types、id 至少给一个；合法组合见 searchArgsError。
+ * 「给了」的口径：query 不是 undefined（空串也算给了，空串加 types 是列出某几类的用法）；types 是非空数组；id 不是 undefined。
+ */
 export interface SearchArgs {
   source?: SearchSource
-  query: string
+  query?: string
   types?: string[]
   scope?: 'global' | 'workspace' | 'all-visible'
+  /** 关键词检索时是返回条数上限；历史模式列版本时是版本条数上限。按版本读一版时不收。 */
   limit?: number
-  /** 缺省 any：按档位排好的全部命中；all：只返回全命中档（同时含全部关键词）。 */
+  /** 缺省 any：按档位排好的全部命中；all：只返回全命中档（同时含全部关键词）。历史模式不收。 */
   match?: 'any' | 'all'
+  /** 记忆 id：配 history: true 列它的历史版本，或配 version 读其中一版。不和 query、types 一起用。 */
+  id?: string
+  /** 配 id：列出这条记忆的历史版本。false 和不传一样。 */
+  history?: boolean
+  /** 配 id：按版本标识读那一版的全文。只收合 VERSION_ID_PATTERN 整段的写法。 */
+  version?: string
 }
 
 export interface SearchHit {
@@ -82,6 +96,38 @@ export interface SearchHit {
   contentChars?: number
   /** 记忆带原话开着时才有：接在正文后面的出处原话或说明（原话不遮盖）。 */
   quote?: string
+  /**
+   * 这条记忆自己的历史目录里有几个版本文件（只数文件名，不解析）；有至少一版、且目录列得出时才有。
+   * 只给实际输出的命中数；软删窗口里并进来、还没搬过来的版本不计，按 id 列历史时可能多几版。
+   */
+  versionCount?: number
+}
+
+/** 命中头行里标历史版本数的那一段，接在陈旧和命中说明之后、节选说明之前。 */
+export function versionCountNote(count: number): string {
+  return ` · 有 ${count} 个历史版本`
+}
+
+/**
+ * 参数组合校验，纯函数：合法返回 undefined；不合法返回给模型看的一句说明，写明是哪两个参数冲突或哪个参数不对。
+ * 不合法的组合：query、types、id 一个都没给；history 或 version 没带 id；history 和 version 同时给；id 和 query 或 types 同时给；
+ * 只给 id 没配 history 或 version；id 配了 match，或 source 不是 memory；version 配了 limit；version 不合版本标识的写法；id 为空串。
+ */
+export function searchArgsError(args: SearchArgs): string | undefined {
+  if (args.id === '') return '请在 id 中填写记忆 id。'
+  if (args.history === true && args.version !== undefined) return 'history 和 version 对应两种操作，请选择 history: true 列历史，或 version 读一版。'
+  if (args.history === true && args.id === undefined) return '使用 history: true 时请同时填写 id。'
+  if (args.version !== undefined && args.id === undefined) return '使用 version 时请同时填写 id。'
+  if (args.version !== undefined && !new RegExp(`^(?:${VERSION_ID_PATTERN})$`).test(args.version)) return 'version 请填写列历史（history: true）返回的版本标识，由 ASCII 字母、数字或连字符组成，不含 .md 后缀。'
+  if (args.id !== undefined) {
+    if (args.query !== undefined) return 'id 和 query 对应历史与当前内容两种查询，请选择其中一种。'
+    if (args.types?.length) return 'id 已指定记忆，请去掉 types 后查询历史。'
+    if (args.match !== undefined) return 'id 已指定记忆，请去掉 match 后查询历史。'
+    if (args.source !== undefined && args.source !== 'memory') return '按 id 查历史时，source 请设为 memory 或不传。'
+    if (args.version !== undefined && args.limit !== undefined) return 'version 每次读取一版全文，请去掉 limit；limit 用于 history 列表。'
+    if (args.history !== true && args.version === undefined) return '给 id 后，列历史请配 history: true，读一版请配 version；要这条当前的内容，请把 id 填进 query。'
+  } else if (args.query === undefined && !args.types?.length) return '请填写 query、非空 types，或用 id 配 history: true 或 version 查历史。'
+  return undefined
 }
 
 // 结果分级的门槛（字符数按遮盖密钥后的正文取字符串长度）。一次检索往上下文里放的正文要有个可预期的上限：
@@ -197,13 +243,25 @@ export function truncationNote(total: number, shown: number, atCap: boolean): st
  * 把命中结果渲染成给模型看的一段文本：有说明先写说明，再列命中（头行末尾带文件绝对路径）。纯函数。
  * 节选条目在头行路径前标字数，路径保持在行末；有节选条目时开头说明最后接节选说明。
  */
-export function renderSearchResult(result: { hits: SearchHit[]; note?: string; moreNote?: string; quoteNote?: string; dialogueText?: string; onlyDialogue?: boolean; pathNote?: string }): string {
+export function renderSearchResult(result: { hits: SearchHit[]; note?: string; moreNote?: string; quoteNote?: string; dialogueText?: string; onlyDialogue?: boolean; pathNote?: string; history?: HistoryListing; version?: HistoryVersionInfo }): string {
+  if (result.history !== undefined) {
+    const h = result.history
+    return [
+      `记忆 ${h.memoryId} 的历史：共读到 ${h.total} 版，给出 ${h.versions.length} 版。`,
+      result.note, result.moreNote,
+      ...h.versions.map(v => `版本 ${v.versionId} · 结束 ${v.endedAt}${v.reason !== '' ? ` · 原因：${v.reason}` : ''}${v.mergedFrom !== undefined ? ` · 并入自 ${v.mergedFrom}` : ''}`),
+    ].filter((line): line is string => line !== undefined).join('\n')
+  }
+  if (result.version !== undefined) {
+    const v = result.version
+    return `记忆 ${v.memoryId} 的版本 ${v.versionId} · 起始 ${v.startedAt} · 结束 ${v.endedAt}${v.reason !== '' ? ` · 原因：${v.reason}` : ''}${v.mergedFrom !== undefined ? ` · 并入自 ${v.mergedFrom}` : ''}\n\n${renderSearchResult({ hits: result.hits })}`
+  }
   if (result.dialogueText !== undefined) {
     const memories = result.onlyDialogue ? undefined : renderSearchResult({ hits: result.hits, note: result.note, moreNote: result.moreNote, quoteNote: result.quoteNote })
     return result.onlyDialogue ? result.dialogueText : renderSearchSections({ memories, dialogue: result.dialogueText })
   }
   if (result.pathNote) return result.pathNote + '\n' + renderSearchResult({ hits: result.hits, note: result.note, moreNote: result.moreNote, quoteNote: result.quoteNote })
-  const blocks = result.hits.map(h => `[${h.id}] ${h.type}｜${h.summary}${h.sourceNote}${h.stalenessNote}${h.matchNote}${h.isExcerpt ? ` · 节选，正文共 ${h.contentChars} 字符` : ''}${h.path !== undefined ? ` · ${h.path}` : ''}\n${h.content}${h.quote !== undefined ? `\n${h.quote}` : ''}`)
+  const blocks = result.hits.map(h => `[${h.id}] ${h.type}｜${h.summary}${h.sourceNote}${h.stalenessNote}${h.matchNote}${h.versionCount !== undefined ? versionCountNote(h.versionCount) : ''}${h.isExcerpt ? ` · 节选，正文共 ${h.contentChars} 字符` : ''}${h.path !== undefined ? ` · ${h.path}` : ''}\n${h.content}${h.quote !== undefined ? `\n${h.quote}` : ''}`)
   const excerptNote = result.hits.some(h => h.isExcerpt) ? EXCERPT_NOTE : undefined
   const head = [result.note, result.moreNote, excerptNote, result.quoteNote].filter((x): x is string => x !== undefined).join('\n')
   if (head !== '') blocks.unshift(head)
@@ -244,7 +302,7 @@ async function executeMemorySearch(
     : a.scope === 'workspace' && workspacePath
       ? { kind: 'workspace', workspacePath }
       : { kind: 'visible', workspacePath }
-  const found = await findMemoryCandidates({ query: a.query, types: a.types, scope: scopeFilter }, deps)
+  const found = await findMemoryCandidates({ query: a.query ?? '', types: a.types, scope: scopeFilter }, deps)
   const now = found.at
   const ranked = found.candidates
   const isDirect = found.isDirectHit
@@ -292,7 +350,7 @@ async function executeMemorySearch(
       ? { moreNote: truncationNote(listed.length, top.length, limit === MAX_SEARCH_LIMIT) + (listed.length > allOnly.length && allOnly.some(e => e.tier === 'all') ? MATCH_ALL_HINT : '') }
       : {}),
     // 与注入同口径：只遮明确密钥（疑似级写入时用户已确认）；文件路径同注入，name 被遮的不给，其余遮一遍
-    hits: top.map(({ record: h, tier: rankedTier, tokenHits, filePath }, i) => {
+    hits: top.map(({ record: h, tier: rankedTier, tokenHits, filePath }, i): SearchHit => {
       const masked = maskSecretSurface(h)
       const path = exposedPath(h, filePath)
       // id 直达置顶的那条就是模型按 id 要的，不标命中情况（同它不出说明码）
@@ -333,6 +391,10 @@ async function executeMemorySearch(
       }
     }),
   }
+  for (const [i, candidate] of top.entries()) {
+    const count = await deps.store.history.countVersions(dirname(candidate.filePath), candidate.record.id)
+    if (count !== undefined && count >= 1) result.hits[i]!.versionCount = count
+  }
   // 输出定了才记召回：拿得到会话时同一会话每条只计一次，拿不到时每次都计
   const topIds = top.map(e => e.record.id)
   if (sessionRecall && handle) await sessionRecall.markRecalled(handle, topIds)
@@ -344,7 +406,7 @@ async function executeMemorySearch(
 /** 记忆一路这次返回的候选（和 hits 逐条对应）和会话上下文：记忆带原话从这里取锚，不再按 id 读记忆。 */
 interface MemoryListing { top: readonly MemoryCandidate[]; context: SearchContext }
 
-type SearchOutcome = Awaited<ReturnType<typeof executeMemorySearch>> & { dialogueText?: string; onlyDialogue?: boolean; pathNote?: string; quoteNote?: string }
+type SearchOutcome = Awaited<ReturnType<typeof executeMemorySearch>> & { dialogueText?: string; onlyDialogue?: boolean; pathNote?: string; quoteNote?: string; history?: HistoryListing; version?: HistoryVersionInfo }
 
 /**
  * 记忆带原话：先走和原话检索同一个追库入口，再给排名靠前的记忆接上出处原话。用检索开头定下的截止时间剩下的部分，
@@ -394,6 +456,12 @@ function withQuoteBlocks(outcome: SearchOutcome, quotes: MemoryQuotes, merged: F
  * 解析来源、分路检索。开头定一个截止时间，原话检索和附原话都用它剩下的部分；追库和会话表各路共用、各只做一次。
  */
 export async function executeSearch(args: SearchArgs, exec: ToolRunContext, deps: SearchToolDeps): Promise<SearchOutcome> {
+  // 不合法的组合都落在这几种参数上：只给 query（以及 source、types、scope、limit、match）的老用法不经校验
+  if (args.query === undefined || args.id !== undefined || args.history !== undefined || args.version !== undefined) {
+    const reason = searchArgsError(args)
+    if (reason !== undefined) return { hits: [], noteCode: 'invalid-args', note: reason }
+    if (args.id !== undefined) return executeHistorySearch({ ...args, id: args.id }, exec, deps)
+  }
   const deadline = (deps.now ?? Date.now)() + DIALOGUE_PATH_BUDGET_MS
   return searchSources(args, exec, deps.dialogue === undefined ? deps : { ...deps, dialogue: shareDialogueReads(deps.dialogue) }, deadline)
 }
@@ -406,7 +474,8 @@ async function searchSources(args: SearchArgs, exec: ToolRunContext, deps: Searc
   const now = deps.now ?? Date.now
   const configured = deps.searchSource?.() ?? 'memory'
   const source = args.source ?? configured
-  const hasQuery = args.query.trim() !== ''
+  const query = args.query ?? ''
+  const hasQuery = query.trim() !== ''
   // 带原话开不开只在开头读一次：检索中途改了设置，下次检索才生效
   const isQuoting = deps.memoryQuotes?.() === true && deps.dialogue !== undefined && hasQuery
   if (configured === 'memory' || source === 'memory') {
@@ -414,7 +483,7 @@ async function searchSources(args: SearchArgs, exec: ToolRunContext, deps: Searc
     const memories = await executeMemorySearch(args, exec, deps, isQuoting ? listed => { listing = listed } : undefined)
     const outcome = configured === 'memory' && source !== 'memory' ? { ...memories, pathNote: dialogueNote('dialogue-source-off') } : memories
     // 记忆一条都没命中：没有要附原话的，结果照常（含「没有匹配的记忆。」）
-    return listing === undefined || listing.top.length === 0 ? outcome : withMemoryQuotes(outcome, listing, args.query, deps as SearchToolDeps & { dialogue: DialogueSearchDeps }, deadline)
+    return listing === undefined || listing.top.length === 0 ? outcome : withMemoryQuotes(outcome, listing, query, deps as SearchToolDeps & { dialogue: DialogueSearchDeps }, deadline)
   }
   if (!hasQuery) return source === 'dialogue' ? { hits: [], dialogueText: DIALOGUE_QUERY_REQUIRED, onlyDialogue: true } : executeMemorySearch(args, exec, deps)
   // 两路共享同一次宿主快照；记忆执行器仍按原来的接口读取上下文。
@@ -429,15 +498,15 @@ async function searchSources(args: SearchArgs, exec: ToolRunContext, deps: Searc
     if (!deps.dialogue) throw new Error('缺少原话依赖')
     const dialogue = { ...deps.dialogue, isEnabled: () => deps.searchSource?.() !== 'memory' }
     const ctx = await contextOf()
-    const retrieval = await retrieveDialogue(args, ctx, dialogue)
+    const retrieval = await retrieveDialogue({ query }, ctx, dialogue)
     if (retrieval.kind !== 'ready' || source !== 'both') return { result: retrieval.kind === 'ready' ? await finishDialogue(retrieval, dialogue) : retrieval }
     // 两路候选都出自这一次检索：记忆取自这次读盘，原话取自这次追到的库；融合时不再读记忆
     const memoryHits = (await memories()).hits
     const top = listing?.top ?? []
     const shown = shownOf(top, memoryHits)
-    const quotes = wantsQuotes && top.length > 0 ? await quoteMemories(shown, args.query, ctx, quoteDepsOf(dialogue), retrieval.gen) : undefined
+    const quotes = wantsQuotes && top.length > 0 ? await quoteMemories(shown, query, ctx, quoteDepsOf(dialogue), retrieval.gen) : undefined
     const blocks = quotes?.quotes ?? []
-    const { lane, related } = memoryLane(top, args.query, { store: dialogue.store, gen: retrieval.gen, tokenizer: await dialogue.tokenizer(), allowed: retrieval.allowed })
+    const { lane, related } = memoryLane(top, query, { store: dialogue.store, gen: retrieval.gen, tokenizer: await dialogue.tokenizer(), allowed: retrieval.allowed })
     // 已附在记忆下面的轮对应附它的那条记忆
     for (const [i, block] of blocks.entries()) for (const t of block?.turns ?? []) related.set(t.key, top[i]!.record)
     const result = await finishDialogue(retrieval, dialogue, {
