@@ -83,3 +83,18 @@ jobs:
           key: dsh-host-floor-${{ runner.os }}-${{ hashFiles('package.json') }}
       - run: pnpm host:smoke
       - run: pnpm host:contract
+
+  # Compares refine, corroborate and state-change write medians for 1,000 and
+  # 5,000 memories within the same run. It is not a required check because
+  # timing on shared runners is noisy: a red run needs a look but does not block merging.
+  scale-bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm bench:scale

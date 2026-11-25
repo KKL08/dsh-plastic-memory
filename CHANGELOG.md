@@ -168,6 +168,11 @@ All notable changes to this project are documented here. The format follows
 - Refining a memory, recording a state change and other single-memory
   edits no longer reread every memory in the project to check their
   snapshot, so these writes slow down much less as a project grows.
+- Testing: a separate CI check compares write medians for 1,000 and 5,000
+  memories in one project, with version history and links, within the same
+  run. It asserts refine, corroborate and state-change writes and only
+  reports creates; it does not block merging, since timing on shared
+  runners is noisy.
 - Memories whose effective time is still in the future no longer enter conversations
   or search results, and are not reported as expired.
 - Merging two memories now records which memory the removed one went into.
