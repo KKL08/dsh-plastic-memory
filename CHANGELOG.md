@@ -230,6 +230,8 @@ All notable changes to this project are documented here. The format follows
   lists its memories without topics and says so. A type's priority no
   longer orders the loaded memories; it orders the content checkup, and the
   memories of a scope listed without topics.
+- Testing: the scale check also asserts that the topic list and memory lines
+  stay within their token cap at 1,000 and 5,000 memories.
 - Refining a memory, recording a state change and other single-memory
   edits no longer reread every memory in the project to check their
   snapshot, so these writes slow down much less as a project grows.
