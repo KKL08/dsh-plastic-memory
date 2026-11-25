@@ -440,6 +440,14 @@ export async function apply(ctx: Context, config: Config) {
   // memory_search 的 types 说明同样从类型表生成，类型配置热更新时随 memory_save 一起重注册；执行时仍经转发对象现读类型表
   const registerSearch = () => ctx.tools.register(createSearchTool({
     store, registry, host, sessionRecall: snapshotCache,
+    searchSource: () => config.search.source.get(),
+    dialogue: {
+      store: dialogueCatchup.readStore, catchup: dialogueCatchup, host, noReview,
+      workspaceOf: cwd => resolveWorkspacePath(ctx, cwd),
+      tokenizer: () => dialogueTokenizer({ userDictionaryPath: () => config.search.userDictionaryPath.get(), log: ctx.logger }),
+      hasBackgroundTimer: () => scheduler !== undefined,
+      budget: () => config.search.dialogueTokenBudget.get(), includeTools: () => config.search.dialogueToolResults.get(),
+    },
     tokenizer: { userDictionaryPath: () => config.search.userDictionaryPath.get(), log: ctx.logger },
   }))
   let disposeSearch = registerSearch()
@@ -458,7 +466,8 @@ export async function apply(ctx: Context, config: Config) {
       return null
     }
   }
-  ctx.tools.register(createSourceTool({ store, host }))
+  ctx.tools.register(createSourceTool({ store, host, noReview, workspaceOf: cwd => resolveWorkspacePath(ctx, cwd),
+    dialogueStore: dialogueCatchup.readStore, isDialogueEnabled, dialogueToolResults: () => config.search.dialogueToolResults.get() }))
   // 体检、健康分、裁决、提升四个工具随体检开关注册 / 注销（开关热更新时再同步一次）。
   // 灵敏度与提升目标不必重注册：工具执行时经 getter 现读配置。
   let governanceTools: Array<() => void> = []

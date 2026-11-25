@@ -105,6 +105,8 @@ export interface DialogueHit extends DialogueSessionInfo {
 }
 
 export interface DialogueSearchOptions {
+  /** 只搜放行的会话；空数组不打开库。 */
+  sessionIds?: readonly string[]
   limit: number
   /** w、b、c 三列的权重。 */
   weights: readonly [number, number, number]
@@ -352,12 +354,18 @@ export class DialogueRecordStore {
 
   /** 全文检索：match 是调用方用同一套分词拼好的查询式。按相关度从高到低。 */
   search(gen: number, match: string, opts: DialogueSearchOptions): DialogueHit[] {
+    if (opts.sessionIds?.length === 0) return []
     return this.run(db => {
       const where: string[] = ['segments_fts MATCH ?', 's.gen = ?']
       const args: Array<string | number> = [match, gen]
       const among = (column: string, values: readonly string[], negate = false) => {
         where.push(`${column} ${negate ? 'NOT ' : ''}IN (${values.map(() => '?').join(', ')})`)
         args.push(...values)
+      }
+      // JSON 表值只占一个参数，允许会话数不受 SQLite 变量上限约束。
+      if (opts.sessionIds !== undefined) {
+        where.push('s.session_id IN (SELECT value FROM json_each(?))')
+        args.push(JSON.stringify(opts.sessionIds))
       }
       if (opts.speakers !== undefined) among('s.speaker', opts.speakers)
       if (opts.cwds !== undefined) among('se.cwd', opts.cwds)

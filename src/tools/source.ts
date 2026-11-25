@@ -1,7 +1,7 @@
 import type { MemoryStore } from '../store.ts'
 import { anchorsOf, anchorSourceMode } from '../record-schema.ts'
 import type { MemoryRecord, SourceAnchor } from '../record-schema.ts'
-import type { SourceRejectCode } from '../contract-codes.ts'
+import type { DialogueSpeaker, SourceRejectCode } from '../contract-codes.ts'
 import { maskSecretSurface } from '../secrets.ts'
 import { isOwnEvent, messageText, relocateByTime } from '../session-log.ts'
 import type { RawEvent } from '../session-log.ts'
@@ -10,7 +10,9 @@ import { byPosition } from '../storage/table.ts'
 import { layerOf, byVersionEnd } from '../storage/history.ts'
 import { formatValidity } from '../validity.ts'
 import type { HostSession } from './host-session.ts'
-import { anchorReadPolicy, sessionFacts } from './session-access.ts'
+import { DialogueStoreUnavailable, type DialogueRecordStore } from '../storage/dialogue-records.ts'
+import { parseMessageRef, renderDialogueLine, wrapDialogueQuote, MESSAGE_REF_MARK } from '../search/dialogue-format.ts'
+import { anchorReadPolicy, sessionFacts, sessionTable, sessionReadPolicy } from './session-access.ts'
 
 export type { RawEvent }
 
@@ -25,15 +27,21 @@ export interface ReadEventFn {
   }>
 }
 
-/** 下钻只经宿主适配器读完整日志和标题。 */
+/** 记忆锚经宿主读日志；消息引用只读库，宿主仅提供会话表和标题。 */
 export interface SourceToolDeps {
   store: MemoryStore
-  host: Pick<HostSession, 'readSessionLog' | 'sessionTitleOf'>
+  host: Pick<HostSession, 'readSessionLog' | 'sessionTitleOf'> & Partial<Pick<HostSession, 'listSessions'>>
+  noReview?: { sessionIds(): Promise<Set<string>> }
+  workspaceOf?: (cwd: string | undefined) => Promise<string | undefined>
+  dialogueStore?: Pick<DialogueRecordStore, 'state' | 'segmentsOf' | 'turnsOf' | 'queued'>
+  isDialogueEnabled?: () => boolean
+  dialogueToolResults?: () => boolean
 }
 
-/** 模型只能从记忆选择锚，不能指定任意会话。 */
+/** 按记忆锚或消息引用定位；二选一由执行器校验。 */
 export interface SourceArgs {
-  memoryId: string
+  memoryId?: string
+  messageRef?: string
   window?: number
   anchor?: number
   mode?: 'window' | 'page' | 'find'
@@ -48,12 +56,13 @@ export interface ListedAnchor { anchor: SourceAnchor; fromVersion?: string }
 
 /** 定位结果携带放行所需的记忆和选中锚。 */
 export type SourceTarget =
+  | { via: 'reference'; sessionId: string; seq: number }
   | { via: 'anchor'; record: MemoryRecord; anchors: ListedAnchor[]; anchorIndex: number; sessionId: string; range: [number, number]; anchorTime: number }
 
 type SourceContext = { workspacePath: string | undefined; session?: { id: string }; delegation?: object }
 
 /** 下钻结果：计数只包含本会话、此次范围内的事件。 */
-export type SourceResult =
+type AnchorSourceResult =
   | { kind: 'ok'; via: 'anchor'; memoryId: string; name: string; sessionId: string
       session: { title?: string; startedAt?: number }
       anchors: Array<{ index: number; at: number; change?: string; by?: string; sessionId: string; isFromHistory: boolean; isSelected: boolean }>
@@ -66,7 +75,18 @@ export type SourceResult =
   | { kind: 'rejected'; memoryId: string; code: SourceRejectCode; reason: string }
   | { kind: 'unavailable'; memoryId: string; reason: string }
 
+/** 引用路径不借用记忆编号；失败时保留调用方的引用。 */
+export type ReferenceSourceResult =
+  | { kind: 'ok'; via: 'reference'; messageRef: string; sessionId: string; session: { title?: string }; counts: { total: number; given: number; skipped: number }; lines: string[] }
+  | { kind: 'forbidden'; messageRef: string }
+  | { kind: 'rejected'; messageRef: string; code: SourceRejectCode; reason: string }
+  | { kind: 'unavailable'; messageRef: string; reason: string }
+/** 记忆出处和消息引用各自携带原始标识。 */
+export type SourceResult = AnchorSourceResult | ReferenceSourceResult | { kind: 'rejected'; code: 'invalid-args'; reason: string }
 type SourceFailure = Exclude<SourceResult, { kind: 'ok' }>
+
+/** 指定消息最多给八千字符，避免单条长消息挤满上下文。 */
+export const MESSAGE_REF_TEXT_CAP = 8000
 
 /** 单页限制上下文体积，与已有窗口上限一致。 */
 const WINDOW_CAP = 24
@@ -114,6 +134,20 @@ function invalidArgs(args: SourceArgs): string | undefined {
 
 /** 先校验纯参数，再定位可见记忆及锚；失败时不读会话。 */
 export async function locateSource(args: SourceArgs, context: SourceContext, deps: SourceToolDeps): Promise<SourceTarget | SourceFailure> {
+  if (args.memoryId === undefined && args.messageRef === undefined) return { kind: 'rejected', code: 'invalid-args', reason: 'memoryId 和 messageRef 给一个' }
+  if (args.messageRef !== undefined) {
+    const reject = (reason: string): SourceFailure => ({ kind: 'rejected', messageRef: args.messageRef!, code: 'invalid-args', reason })
+    if (args.memoryId !== undefined) return reject('memoryId 和 messageRef 只给一个')
+    for (const key of ['anchor', 'mode', 'cursor', 'query', 'include', 'hop', 'window'] as const) {
+      if (args[key] !== undefined) return reject(`${key} 只和 memoryId 一起用`)
+    }
+    const ref = typeof args.messageRef === 'string' ? parseMessageRef(args.messageRef) : undefined
+    return ref ? { via: 'reference', ...ref } : reject('messageRef 取原话检索结果里给出的引用')
+  }
+  return locateAnchor(args as SourceArgs & { memoryId: string }, context, deps)
+}
+
+async function locateAnchor(args: SourceArgs & { memoryId: string }, context: SourceContext, deps: SourceToolDeps): Promise<Extract<SourceTarget, { via: 'anchor' }> | SourceFailure> {
   const reason = invalidArgs(args)
   if (reason) return invalid(args.memoryId, reason)
   const found = await deps.store.locate(args.memoryId, { workspacePath: context.workspacePath })
@@ -163,7 +197,7 @@ function eventText(event: RawEvent, include: SourceArgs['include']) {
 }
 
 /** 读取、筛选与渲染只用一次读取所得的日志；同一调用内复用父子会话的读取结果。 */
-export async function readSource(target: SourceTarget, args: SourceArgs, deps: SourceToolDeps): Promise<SourceResult> {
+export async function readSource(target: Extract<SourceTarget, { via: 'anchor' }>, args: SourceArgs & { memoryId: string }, deps: SourceToolDeps): Promise<SourceResult> {
   const { record } = target
   const unavailable = (reason: string): SourceFailure => ({ kind: 'unavailable', memoryId: args.memoryId, reason })
   const unknownReason = '这个会话分不清哪些内容是它自己的，只能围绕出处读'
@@ -211,7 +245,7 @@ export async function readSource(target: SourceTarget, args: SourceArgs, deps: S
   let requested: [number, number] = [...target.range]
   let selected = events
   const notes: string[] = []
-  let find: Extract<SourceResult, { kind: 'ok' }>['find']
+  let find: Extract<AnchorSourceResult, { kind: 'ok' }>['find']
   const cursorSeq = args.cursor === undefined ? undefined : Number(args.cursor.split(':')[1])
   if (args.hop === 'child') {
     requested = [events[0]?.seq ?? 0, events.at(-1)?.seq ?? 0]
@@ -289,9 +323,12 @@ export async function readSource(target: SourceTarget, args: SourceArgs, deps: S
 }
 
 /** 定位和放行成功才读取原文。 */
+export async function executeSource(args: SourceArgs & { memoryId: string; messageRef?: never }, context: SourceContext, deps: SourceToolDeps): Promise<AnchorSourceResult>
+export async function executeSource(args: SourceArgs, context: SourceContext, deps: SourceToolDeps): Promise<SourceResult>
 export async function executeSource(args: SourceArgs, context: SourceContext, deps: SourceToolDeps): Promise<SourceResult> {
   const target = await locateSource(args, context, deps)
-  return 'via' in target ? readSource(target, args, deps) : target
+  if (!('via' in target)) return target
+  return target.via === 'reference' ? readReference(target, args.messageRef!, context, deps) : readSource(target, args as SourceArgs & { memoryId: string }, deps)
 }
 
 /** 返回开头的会话行：标题、时间、这一段的事件计数。 */
@@ -303,6 +340,12 @@ export function renderSessionHead(session: { sessionId: string; title?: string; 
 
 /** 将结构化下钻结果渲染成带出处和翻页提示的文本。 */
 export function renderSourceResult(result: SourceResult): string {
+  if ('messageRef' in result) {
+    if (result.kind === 'forbidden') return '这个会话不可回看。'
+    if (result.kind === 'rejected') return `未回查：${result.reason}`
+    if (result.kind === 'unavailable') return `原话不可用（${result.reason}）。`
+    return [renderSessionHead({ sessionId: result.sessionId, ...result.session }, result.counts), wrapDialogueQuote(result.lines.join('\n'))].join('\n')
+  }
   switch (result.kind) {
     case 'not-found':
       return `记忆不存在或已删除：${result.memoryId}`
@@ -332,5 +375,67 @@ export function renderSourceResult(result: SourceResult): string {
         renderSessionHead({ sessionId: result.sessionId, ...result.session }, result.counts), ...result.notes,
         ...(result.lines.length ? result.lines : [empty]), ...tail].join('\n')
     }
+  }
+}
+
+/**
+ * 按消息引用读原话：放行（只凭会话）→ 对上库里的行 → 取这一轮和前后各一轮。只读对话记录库，不读日志。
+ * 被指定的那条整条给（上限 MESSAGE_REF_TEXT_CAP），其余按短上限。
+ */
+async function readReference(target: Extract<SourceTarget, { via: 'reference' }>, messageRef: string, context: SourceContext, deps: SourceToolDeps): Promise<ReferenceSourceResult> {
+  const unavailable = (reason: string): ReferenceSourceResult => ({ kind: 'unavailable', messageRef, reason })
+  const missing = (): ReferenceSourceResult => ({ kind: 'rejected', messageRef, code: 'reference-not-found', reason: '引用对不上现有的原话' })
+  if (!deps.isDialogueEnabled?.()) return unavailable('原话检索没开')
+  const store = deps.dialogueStore
+  if (!store) return unavailable('原话暂不可用')
+  try {
+    if (store.state().status === 'none') return unavailable('原话暂不可用')
+    if (!deps.host.listSessions || !deps.noReview || !deps.workspaceOf) return unavailable('这次读不到会话信息，稍后再试')
+    const table = await sessionTable({ listSessions: () => deps.host.listSessions!() }, deps.noReview, deps.workspaceOf)
+    const policy = sessionReadPolicy(table, target.sessionId, context)
+    if (!policy.ok) {
+      const { ok: _ok, ...failure } = policy
+      return { ...failure, messageRef }
+    }
+    // 上面等会话表的时候库可能被重建、删掉或关掉：放行后再看一次开关和状态，之后到取完段都不再让出
+    if (!deps.isDialogueEnabled?.()) return unavailable('原话检索没开')
+    const current = store.state()
+    if (current.status === 'none') return unavailable('原话暂不可用')
+    const { gen } = current.read
+    const includeTools = deps.dialogueToolResults?.() ?? false
+    const rows = store.segmentsOf(gen, target.sessionId, target.seq, target.seq)
+    const selected = rows.find(row => includeTools || row.speaker !== 'tool')
+    if (!selected) {
+      if (!current.read.isComplete || store.queued(gen, Number.MAX_SAFE_INTEGER).includes(target.sessionId)) return unavailable('这个会话的原话还在整理，稍后再试')
+      return missing()
+    }
+    const turns = store.turnsOf(gen, target.sessionId)
+    const index = turns.findIndex(turn => turn.turnSeq === selected.turnSeq)
+    if (index < 0) return missing()
+    const from = turns[Math.max(0, index - 1)]!.turnSeq
+    const next = turns[index + 2]?.turnSeq
+    const to = next === undefined ? Number.MAX_SAFE_INTEGER : next - 1
+    const all = store.segmentsOf(gen, target.sessionId, from, to)
+    const segments = all.filter(row => includeTools || row.speaker !== 'tool')
+    // 开关关着没给的工具消息数：开头的计数里如实写略过了几条
+    const skipped = new Set(all.filter(row => !segments.includes(row)).map(row => row.seq)).size
+    // 放行后可能被另一进程对账删除；空结果不重试，也不返回周边消息冒充成功。
+    if (!segments.some(row => row.seq === target.seq)) return missing()
+    const messages = new Map<number, (typeof segments)[number]>()
+    for (const row of segments) {
+      const message = messages.get(row.seq)
+      if (message) message.text += row.text
+      else messages.set(row.seq, { ...row })
+    }
+    const lines = [...messages.values()].map(message => {
+      const isSelected = message.seq === target.seq
+      const cap = isSelected ? MESSAGE_REF_TEXT_CAP : TEXT_CAP
+      const text = message.text.length <= cap ? message.text : message.text.slice(0, cap) + (isSelected ? `（已截断，共 ${message.text.length} 字）` : '…')
+      return (isSelected ? MESSAGE_REF_MARK : '') + renderDialogueLine({ speaker: message.speaker as DialogueSpeaker, at: message.at, text })
+    })
+    return { kind: 'ok', via: 'reference', messageRef, sessionId: target.sessionId, session: { title: await deps.host.sessionTitleOf(target.sessionId) }, counts: { total: lines.length + skipped, given: lines.length, skipped }, lines }
+  } catch (err) {
+    if (err instanceof DialogueStoreUnavailable) return unavailable('原话暂不可用')
+    throw err
   }
 }

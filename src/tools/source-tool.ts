@@ -19,9 +19,11 @@ export function createSourceTool(deps: SourceToolBindingDeps): ToolDefinition {
     description: [
       '回查一条长期记忆的全部出处，可选择出处、前后翻页、按关键词找、带上工具调用和结果、追溯父子会话。',
       '只读，只能回查当前项目和全局记忆；原始会话已不可读时会明确告知。',
+      '也能按原话检索结果里给的消息引用看那条消息的完整内容和前后各一轮。',
     ].join(''),
     parameters: {
-      memoryId: { type: 'string', required: true, description: '要回查的记忆 id（快照/搜索结果里的 mem_ 开头 id）' },
+      messageRef: { type: 'string', description: '原话检索结果里给的消息引用' },
+      memoryId: { type: 'string', description: '要回查的记忆 id（快照/搜索结果里的 mem_ 开头 id）' },
       anchor: { type: 'number', description: '出处清单中的编号，从 1 起，缺省 1（最新的）' },
       mode: { type: 'string', enum: ['window', 'page', 'find'], description: 'window 围绕出处开窗（缺省），page 接着翻，find 按关键词找' },
       cursor: { type: 'string', description: '上次返回的 before:<seq> 或 after:<seq>，find 只支持 after' },

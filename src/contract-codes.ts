@@ -164,6 +164,7 @@ export type ToolGateCode = 'subagent-readonly' // 子 agent 会话（delegationD
 
 /** memory_source 拒绝回查的原因（tools/source.ts）。 */
 export type SourceRejectCode =
+  | 'reference-not-found' // 引用对不上现有原话
   | 'invalid-args' // 下钻参数互斥或出处编号越界
   | Extract<RejectCode, 'subagent-restricted'> // 子 agent 会话只能回查出处是本会话的记录，码与写入门共用一处定义
 

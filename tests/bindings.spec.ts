@@ -475,10 +475,11 @@ describe('memory_source 绑定', () => {
     })
   }
 
-  it('(a) 合法参数过、缺必填（memoryId）拒', async () => {
+  it('(a) 合法参数过；记忆标识和消息引用都没给时由执行器拒', async () => {
     const tool = await makeTool()
     expect(validateJsonSchemaValue(schemaOf(tool), { memoryId: 'mem_s' })).toEqual([])
-    expect(validateJsonSchemaValue(schemaOf(tool), { window: 5 }).length).toBeGreaterThan(0)
+    expect(validateJsonSchemaValue(schemaOf(tool), { memoryId: 5 }).length).toBeGreaterThan(0)
+    expect(await tool.execute({ window: 5 }, exec)).toMatchObject({ kind: 'rejected', code: 'invalid-args' })
   })
 
   it('(b) 悬空锚（服务不可用）结果无损 JSON', async () => {

@@ -495,3 +495,14 @@ describe('用不了的时候', () => {
     expect(() => store.destroy()).toThrow()
   })
 })
+
+it('放行集合下推查询，空集合不打开库，两千个会话不超参数上限', () => {
+  const { store } = open()
+  const a = begin(store, 'allowed'); a.commit([seg(1, 'needle')], 1)
+  const b = begin(store, 'denied'); b.commit(Array.from({ length: 100 }, (_, i) => seg(i + 1, 'needle')), 100)
+  expect(store.search(a.gen, 'needle', { weights: WEIGHTS, limit: 60, sessionIds: ['allowed'] }).map(h => h.sessionId)).toEqual(['allowed'])
+  const ids = Array.from({ length: 2000 }, (_, i) => i === 0 ? 'allowed' : `s${i}`)
+  expect(store.search(a.gen, 'needle', { weights: WEIGHTS, limit: 60, sessionIds: ids })).toHaveLength(1)
+  const unavailable = open({ loadSqlite: () => { throw new Error('不该打开库') } }).store
+  expect(unavailable.search(a.gen, 'needle', { weights: WEIGHTS, limit: 60, sessionIds: [] })).toEqual([])
+})

@@ -5,7 +5,7 @@ import {
   DIALOGUE_AS_DATA_NOTE, DIALOGUE_BUDGET_DEFAULT, DIALOGUE_BUDGET_STEP, DIALOGUE_QUOTE_TAG, DIALOGUE_SECTION_HEADING,
   DIALOGUE_STORE_FILE, INFERRED_SOURCE_MARK, MAYBE_NOT_SOURCE_NOTE, MEMORY_SECTION_HEADING, TURN_NOT_INDEXED_NOTE,
   coverageNote, dialogueBudgetOf, dialogueNote, excerptNote, omittedNote, relatedMemoryNote, renderDialogueLine,
-  renderSearchSections, sameSourceNote, wrapDialogueQuote,
+  formatMessageRef, parseMessageRef, renderSearchSections, sameSourceNote, wrapDialogueQuote,
 } from '../src/search/dialogue-format.ts'
 import { SEGMENT_MAX_TOKENS } from '../src/search/segments.ts'
 
@@ -142,3 +142,8 @@ describe('契约标识符', () => {
     expect(DIALOGUE_NOTE_CODES).toEqual(['dialogue-source-off', 'dialogue-unavailable', 'dialogue-index-building', 'dialogue-tokenizer-basic', 'dialogue-search-limit'])
   })
 })
+
+it('引用格式往返一致且会话名保留井号', () => {
+  expect(parseMessageRef(formatMessageRef({ sessionId: 'a#b', seq: 0 }))).toEqual({ sessionId: 'a#b', seq: 0 })
+})
+it.each(['#1', 's', 's#-1', 's#+1', 's#1.2', 's#01', 's#x', 's#9007199254740992'])('非法引用 %s 解析不出', text => { expect(parseMessageRef(text)).toBeUndefined() })
