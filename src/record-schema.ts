@@ -132,6 +132,11 @@ export const memoryRecordSchema = z.object({
    * 锁到期时刻（毫秒），已过算没锁。写坏的（不是时间）原样保留、按不过期读，不进隔离：锁只管写，不能让记忆读不到。
    */
   lockedUntil: openValue.optional(),
+  /**
+   * 软删时记的去向：这条并进了哪条记忆（合并、并成版本）。开放取值，读取用 mergedIntoOf，形状不对的当没有。
+   * 它的历史版本在它物理删除时搬到去向那条名下；恢复时去掉这个字段。
+   */
+  mergedInto: openValue.optional(),
 })
 export type MemoryRecord = z.infer<typeof memoryRecordSchema>
 /** 待确认 = 子 agent 写入且还没有主会话或用户升档。只看这两个字段，状态（在用、已删除、过期）由调用处按各自口径过滤。 */
@@ -177,6 +182,18 @@ export function anchorSourceMode(anchor: Pick<SourceAnchor, 'sourceMode'>): Sour
 /** Date 能表示的毫秒数（ECMAScript 规定 ±8.64e15 以内）。 */
 export function isDateMs(v: unknown): v is number {
   return typeof v === 'number' && Math.abs(v) <= 8.64e15
+}
+
+/** 并进另一条的去向。as：merge 是内容融进了那条，version 是它成了那条的一个历史版本（endedAt 是它作为一版的结束时刻）。 */
+export interface MergedInto { id: string; scopeKey: string; as: 'merge' | 'version'; endedAt?: number }
+
+/** 读去向：形状不对的（手改坏的、以后版本的取值）当没有。 */
+export function mergedIntoOf(record: Pick<MemoryRecord, 'mergedInto'>): MergedInto | undefined {
+  const v = record.mergedInto
+  if (typeof v !== 'object' || v === null) return undefined
+  const { id, scopeKey, as, endedAt } = v as Record<string, unknown>
+  if (typeof id !== 'string' || id === '' || typeof scopeKey !== 'string' || (as !== 'merge' && as !== 'version')) return undefined
+  return { id, scopeKey, as, ...(isDateMs(endedAt) ? { endedAt } : {}) }
 }
 
 /** 这条记忆现在是否锁定。 */

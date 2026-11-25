@@ -1,5 +1,5 @@
 import { dirname } from 'node:path'
-import type { MemoryRecord } from './record-schema.ts'
+import type { MemoryRecord, MergedInto } from './record-schema.ts'
 import { RecordNotFoundError } from './errors.ts'
 import { expandQueryTerms, matchScore } from './text.ts'
 import {
@@ -43,6 +43,8 @@ export interface DeleteOptions {
   at?: Scope
   /** 软删的时刻（updatedAt、deletedAt）：调用方有注入的时钟时传它，缺省取当前时间。 */
   now?: number
+  /** 物理删除带去向的记忆时，历史先并到去向那条名下（最近删除里的彻底删除）。密钥硬删不给。 */
+  isHistoryCarried?: boolean
 }
 
 /**
@@ -152,7 +154,7 @@ export class MemoryStore {
    * skipIf：锁内对将被删的那份求值（位置即作用域，同 get），为真就不删、返回 false。
    */
   hardDelete(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, opts: DeleteOptions = {}, skipIf?: (current: MemoryRecord) => boolean): Promise<boolean> {
-    return this.table.delete(record.id, deleteTarget(record, opts), skipIf && (found => skipIf(byPosition(found))))
+    return this.table.delete(record.id, deleteTarget(record, opts), skipIf && (found => skipIf(byPosition(found))), undefined, opts.isHistoryCarried === true ? { isHistoryCarried: true } : undefined)
   }
 
   async softDelete(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, opts: DeleteOptions = {}): Promise<boolean> {
@@ -175,7 +177,7 @@ export class MemoryStore {
   async restoreArchived(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, opts: DeleteOptions = {}): Promise<boolean> {
     try {
       const now = opts.now ?? Date.now()
-      await this.table.update(record.id, deleteTarget(record, opts), ({ deletedAt, ...r }) => {
+      await this.table.update(record.id, deleteTarget(record, opts), ({ deletedAt, mergedInto: _mergedInto, ...r }) => {
         // 过了保留期的归档文件等维护点来清，清之前也不能复活：恢复的资格不看文件清没清
         if (deletedAt !== undefined && deletedAt < now - RETENTION_MS) throw new RecordNotFoundError(r.id)
         return { ...r, status: 'active', updatedAt: now }
@@ -195,7 +197,7 @@ export class MemoryStore {
    */
   async softDeleteUnlessSecret(
     record: Pick<MemoryRecord, 'id' | 'workspacePath'>,
-    opts: DeleteOptions & { isChanged?: (current: MemoryRecord) => boolean; isSecret?: (current: MemoryRecord) => boolean; op?: WriteOp } = {},
+    opts: DeleteOptions & { isChanged?: (current: MemoryRecord) => boolean; isSecret?: (current: MemoryRecord) => boolean; op?: WriteOp; /** 并进了哪条：记在软删的这一版上。 */ mergedInto?: MergedInto } = {},
   ): Promise<'deleted' | 'has-secret' | 'changed' | 'missing'> {
     const target = deleteTarget(record, opts)
     if (!(await this.table.locate(record.id, target, { isMissRechecked: true }))) return 'missing'
@@ -204,7 +206,7 @@ export class MemoryStore {
       let outcome: 'deleted' | 'has-secret' | 'changed' = 'deleted'
       await this.update(record, (r) => {
         outcome = opts.isChanged?.(r) === true ? 'changed' : (opts.isSecret ?? hasSecret)(r) ? 'has-secret' : 'deleted'
-        return outcome === 'deleted' ? markDeleted(r, opts.now) : r
+        return outcome === 'deleted' ? { ...markDeleted(r, opts.now), ...(opts.mergedInto !== undefined ? { mergedInto: opts.mergedInto } : {}) } : r
       }, target, opts.op)
       return outcome
     } catch (err) {

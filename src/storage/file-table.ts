@@ -23,7 +23,7 @@ import {
   isMemoryFileName, isCompanionLikeFileName, isWorkspaceDirName, deriveFileId,
 } from './paths.ts'
 import { linkExclusive } from './exclusive-link.ts'
-import { FileVersionHistory, type VersionHistory } from './history.ts'
+import { FileVersionHistory, carryMergedHistory, layerOf, type VersionHistory } from './history.ts'
 import { maskDiagnostic, maskSecrets } from '../secrets.ts'
 import { isPendingDelegated } from '../record-schema.ts'
 import { UNSORTED_PAGE, UNSORTED_TITLE, maskIndexText, memberKeys, memberLines, placeholderIds, readIndex, reconcileIndex, renderProjection, stampOf, withMemberLinesAppended, withMemberText, withStamp, withoutMember, withoutMemberKeys, withoutMemberText, type IndexFiles, type IndexedMemory } from '../topic-index.ts'
@@ -942,6 +942,10 @@ export class FileTable implements MemoryTable {
         if (isExpired(slot)) {
           if (!(await this.unchangedSince(slot))) continue
           // 历史先删、删干净了才删记忆文件，不留记忆没了、历史还在的样子；删不掉或拿不准就这条这次不清，下次维护再试
+          // 并进了另一条的：历史先搬到那条名下，搬不成这条这次不清
+          // 这一层读不全、又有它的历史时两样都不做：坏掉的可能就是同 id 还在用的那份，历史是那份的
+          if (!staying.has(record.id) && !(await this.isHistoryOwnerKnown(record.id, sd.dir, isLayerComplete))) continue
+          if (!staying.has(record.id) && !(await this.carryHistory(record, sd.dir))) continue
           if (!staying.has(record.id) && !(await this.removeExpiredHistory(record.id, sd.dir, isLayerComplete))) continue
           await this.removeFile(slot.filePath)
           purged.add(slot)
@@ -1060,15 +1064,37 @@ export class FileTable implements MemoryTable {
     return read.slots.some(slot => slot.record.id === id)
   }
 
+  /** 物理删除前把带去向的记忆的历史并过去（见 carryMergedHistory）。搬不成记一笔、返回 false。 */
+  private async carryHistory(record: MemoryRecord, dir: string): Promise<boolean> {
+    try {
+      await carryMergedHistory(this.history, record, dir, async (id, scope) => {
+        const slot = await this.locateSlot(id, scope)
+        if (slot !== undefined) return layerOf(this.toLocated(slot))
+        // 没找到：确认那一层读得全才算没有。读不全时去向那条可能就是读不出的那个文件，不能当它不在把历史删了
+        const layer = scope.kind === 'global' ? this.globalDir : (await this.hintDirs(scope.workspacePath))[0]?.dir
+        if (layer !== undefined && (await this.holdsCopy(layer, id)) !== false) throw new Error(`${layer} 读不全，分不出记忆 ${id} 还在不在`)
+        return undefined
+      })
+      return true
+    } catch (err) {
+      this.log.warn(`[plastic-memory] 一条并进别的记忆的历史版本没搬成，这条这次先不清（${describeError(err)}）`)
+      return false
+    }
+  }
+
+  /** 这一层的历史确实归这条到期的记忆：层读得全，或者这一层根本没有它的历史。拿不准记一笔、返回 false。 */
+  private async isHistoryOwnerKnown(id: string, dir: string, isLayerComplete: boolean): Promise<boolean> {
+    if (isLayerComplete || !(await this.history.memoryIds(dir).catch(() => [id])).includes(id)) return true
+    this.log.warn(`[plastic-memory] ${dir} 里有读不出的记忆文件，到期的一条记忆和它的历史这次先不清`)
+    return false
+  }
+
   /**
    * 到期清扫一条记忆前先删它的历史（这一层已没有同 id 的别的副本）。这一层有读不出、解析不了的文件时，坏掉的可能就是同 id 还在用的那份：
    * 这一层有它的历史就不删，返回 false，记忆文件也先留着。返回历史是否都删干净了。
    */
   private async removeExpiredHistory(id: string, dir: string, isLayerComplete: boolean): Promise<boolean> {
-    if (!isLayerComplete && (await this.history.memoryIds(dir).catch(() => [id])).includes(id)) {
-      this.log.warn(`[plastic-memory] ${dir} 里有读不出的记忆文件，到期的一条记忆和它的历史这次先不清`)
-      return false
-    }
+    if (!(await this.isHistoryOwnerKnown(id, dir, isLayerComplete))) return false
     return this.removeOwnedHistory(id, new Set(isLayerComplete ? [dir] : []), false)
   }
 
@@ -1860,7 +1886,7 @@ export class FileTable implements MemoryTable {
     }))
   }
 
-  async delete(id: string, at: LocateTarget, skipIf?: (current: LocatedFile) => boolean, given?: WriteOp): Promise<boolean> {
+  async delete(id: string, at: LocateTarget, skipIf?: (current: LocatedFile) => boolean, given?: WriteOp, opts: { isHistoryCarried?: boolean } = {}): Promise<boolean> {
     return this.locked(async () => {
       const found = await this.locateSlot(id, at)
       const slot = found && this.toLocated(found)
@@ -1873,6 +1899,7 @@ export class FileTable implements MemoryTable {
       // 历史版本先于记忆文件删：中途断掉最多是记忆还在、历史没了，不会留下记忆已删、旧内容（可能带密钥）还在的历史。
       // 要删的是这一层和（按会话定位时）全局里这个 id 的全部副本，这几层的历史直接删；它以前住过的层也删。
       // 有哪一层删不掉或拿不准就在这里报错，记忆文件不动
+      if (opts.isHistoryCarried === true && !(await this.carryHistory(slot.record, slot.dir))) throw new Error(`记忆 ${id} 的历史版本没能并到它并入的那条名下，未删除`)
       await this.removeOwnedHistory(id, new Set(isScopeTarget(at) ? [slot.dir] : [slot.dir, this.globalDir]), true)
       await this.removeFile(slot.filePath)
       // 彻底删除（密钥硬删、最近删除里的彻底删除）的承诺是「可见集合里再没有它」：global 与该记录目录里同 id 的其余副本

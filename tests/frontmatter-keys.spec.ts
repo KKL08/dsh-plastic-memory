@@ -32,7 +32,7 @@ const fullRecord: MemoryRecord = {
   delegation: { sessionId: 'child', depth: 2, parentSessionId: 'mid', rootSessionId: 'main', reviewed: { by: 'main', at: 9 } },
   sourceTrail: [{ sessionId: 's1', eventRange: [0, 42], sourceMode: 'user-explicit', at: 10, initiator: 'user', evidence: { user: true, tool: false }, change: 'refine', by: 'main' }],
   stateSince: 11, factTime: '2026-11', lastChange: { kind: 'refine', at: 12, op: 'op_1', by: 'main' }, lastWriteOp: 'op_1',
-  related: ['mem_rel'], premises: [{ id: 'mem_pre', digest: 'd1:abc' }], recall: 'unlisted', locked: true, lockedUntil: 13,
+  related: ['mem_rel'], premises: [{ id: 'mem_pre', digest: 'd1:abc' }], recall: 'unlisted', locked: true, lockedUntil: 13, mergedInto: { id: 'mem_keep', scopeKey: 'global', as: 'merge' },
 }
 
 const schemaKeys = Object.keys(memoryRecordSchema.shape)

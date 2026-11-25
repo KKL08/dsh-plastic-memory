@@ -10,6 +10,7 @@ export class InMemoryVersionHistory implements VersionHistory {
 
   async list(layer: HistoryLayer, memoryId: string): Promise<HistoryVersion[]> {
     return structuredClone(this.versions.get(this.key(layer, memoryId)) ?? []).sort(byVersionEnd)
+      .map(v => (v.mergedFrom !== undefined || v.record.id === memoryId ? v : { ...v, mergedFrom: v.record.id }))
   }
 
   async write(layer: HistoryLayer, version: HistoryVersion): Promise<void> {
@@ -40,6 +41,24 @@ export class InMemoryVersionHistory implements VersionHistory {
     }
     this.versions.set(to, kept)
     this.versions.delete(from)
+  }
+
+  async place(layer: HistoryLayer, ownerId: string, version: HistoryVersion): Promise<void> {
+    const key = this.key(layer, ownerId)
+    const kept = this.versions.get(key) ?? []
+    const same = (v: HistoryVersion) => JSON.stringify({ ...v, versionId: '' }) === JSON.stringify({ ...version, versionId: '' })
+    if (kept.some(same)) return
+    this.versions.set(key, [...kept, structuredClone({ ...version, versionId: freeVersionId(version.versionId, kept.map(v => v.versionId)) })])
+  }
+
+  async absorb(from: { dir: string; memoryId: string; scopeKey: string }, to: { dir: string; memoryId: string }): Promise<void> {
+    const source = this.key(from, from.memoryId)
+    const moving = this.versions.get(source)
+    if (source === this.key(to, to.memoryId) || moving === undefined) return
+    for (const version of moving) {
+      await this.place({ dir: to.dir, loc: { scope: 'global' } }, to.memoryId, { ...version, mergedFrom: version.mergedFrom ?? from.memoryId, mergedFromScope: version.mergedFromScope ?? from.scopeKey })
+    }
+    this.versions.delete(source)
   }
 
   async memoryIds(dir: string): Promise<string[]> {
