@@ -1,10 +1,11 @@
 import { sidecarSchemas } from './helpers/sidecar-schemas.ts'
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { FileTable, DELETED_RETENTION_MS } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
+import { DerivedIndex } from '../src/storage/derived-index.ts'
 import { computeDigest, encodeRecord, splitFrontmatter } from '../src/storage/frontmatter.ts'
 import { ARCHIVE_DIR, GLOBAL_DIR, INDEX_FILE, STATE_DIR, WORKSPACE_MARKER, deriveFileId, workspaceDirName } from '../src/storage/paths.ts'
 import { MemoryStore } from '../src/store.ts'
@@ -29,7 +30,11 @@ import { PROJECTION_NOTE, UNSORTED_PAGE, memberLine } from '../src/topic-index.t
 // 双后端一致的语义在 table-conformance.spec.ts。全部用真实目录，不 mock 自己的模块。
 // 「零写入」看 node:fs/promises 的写调用记录（透传，见 helpers/fs-writes.ts），不比 mtime。
 // renameFault：设了就让下一次改名到匹配路径的 rename 失败一次（维护点写盘失败），平时原样透传。
-const { renameFault } = vi.hoisted(() => ({ renameFault: { when: undefined as ((to: string) => boolean) | undefined } }))
+// listFault：设了就让列这个目录的下一次 readdir 失败一次（目录暂时列不出、随后恢复），平时原样透传。
+const { renameFault, listFault } = vi.hoisted(() => ({
+  renameFault: { when: undefined as ((to: string) => boolean) | undefined },
+  listFault: { dir: undefined as string | undefined },
+}))
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
   const rename = async (...args: Parameters<typeof actual.rename>) => {
@@ -39,7 +44,14 @@ vi.mock('node:fs/promises', async importOriginal => {
     }
     return actual.rename(...args)
   }
-  return (await import('./helpers/fs-writes.ts')).recordWrites({ ...actual, rename })
+  const readdir = (async (...args: Parameters<typeof actual.readdir>) => {
+    if (listFault.dir !== undefined && String(args[0]) === listFault.dir) {
+      listFault.dir = undefined
+      throw Object.assign(new Error('EACCES: injected failure, readdir'), { code: 'EACCES' })
+    }
+    return (actual.readdir as (...a: unknown[]) => Promise<unknown>)(...args)
+  }) as typeof actual.readdir
+  return (await import('./helpers/fs-writes.ts')).recordWrites({ ...actual, rename, readdir })
 })
 
 const DAY = 86_400_000
@@ -56,6 +68,7 @@ let root: string
 beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pm-maint-')) })
 afterEach(async () => {
   renameFault.when = undefined
+  listFault.dir = undefined
   await rm(root, { recursive: true, force: true })
 })
 
@@ -237,6 +250,89 @@ describe('维护点动作 ③：.archive/ 里 deletedAt 超 14 天的物理删�
     expect(await mds(archiveOf(globalDir()))).toEqual(['top.md'])   // 本轮只搬家
     await table.maintain([globalDir()])
     expect(await mds(archiveOf(globalDir()))).toEqual([])            // mtime 补的 deletedAt 已超窗
+  })
+})
+
+// 真实目录权限：顶层只留写和进入（0o311），列不出目录；.archive/、_index/ 和 MEMORY.md 照样能按路径读
+describe.each([
+  ['没有派生库', false],
+  ['有派生库', true],
+])('目录列不出时维护不清归档、不删召回统计、不重写索引（%s）', (_label, hasIndex) => {
+  const indexes: DerivedIndex[] = []
+  const locked: string[] = []
+  afterEach(async () => {
+    for (const dir of locked.splice(0)) await chmod(dir, 0o755)
+    for (const index of indexes.splice(0)) index.close()
+  })
+  const openTable = (opts: Partial<ConstructorParameters<typeof FileTable>[0]> = {}) => {
+    const index = hasIndex ? new DerivedIndex({ path: join(root, 'derived.sqlite'), log: { info() {}, warn() {}, error() {} } }) : undefined
+    if (index !== undefined) indexes.push(index)
+    return open({ ...(index === undefined ? {} : { index }), ...opts })
+  }
+  const lock = async (dir: string) => {
+    await chmod(dir, 0o311)
+    locked.push(dir)
+  }
+  const unlock = async (dir: string) => {
+    await chmod(dir, 0o755)
+    locked.splice(locked.indexOf(dir), 1)
+  }
+
+  it('顶层列不出、归档可读：同 id 到期的归档副本不清，在用那份的召回统计留着；目录恢复后照常清', async () => {
+    const now = Date.now()
+    await writeMem(globalDir(), 'live.md', record({ id: 'mem_a', name: '在用那份' }))
+    await writeMem(archiveOf(globalDir()), 'old.md', record({ id: 'mem_a', name: '归档那份', status: 'deleted', deletedAt: now - DELETED_RETENTION_MS - DAY }))
+    const { table, stats } = openTable()
+    await stats.put('mem_a', { id: 'mem_a', recallCount: 7, lastRecalledAt: now })
+    await lock(globalDir())
+    await table.maintain([globalDir()])
+    expect(await mds(archiveOf(globalDir()))).toEqual(['old.md'])
+    expect(await stats.get('mem_a')).toMatchObject({ recallCount: 7 })
+    await unlock(globalDir())
+    await table.maintain([globalDir()])
+    expect(await mds(archiveOf(globalDir()))).toEqual([])
+    expect(await stats.get('mem_a')).toMatchObject({ recallCount: 7 })
+  })
+
+  it('顶层列不出、索引可读：主题索引和 MEMORY.md 原样不动，久未确认的计数不丢', async () => {
+    await writeMem(globalDir(), 'old.md', record({ id: 'mem_a', name: '旧记忆' }))
+    const { table } = openTable({ isStale: () => true })
+    await table.maintain([globalDir()])
+    const projection = await readFile(join(globalDir(), INDEX_FILE), 'utf8')
+    const index = await indexText(globalDir())
+    expect(projection).toContain('久未确认')
+    await lock(globalDir())
+    expect(await writesDuring(() => table.maintain([globalDir()]))).toEqual([])
+    expect(await readFile(join(globalDir(), INDEX_FILE), 'utf8')).toBe(projection)
+    expect(await indexText(globalDir())).toBe(index)
+  })
+
+  it('按 id 找副本时别的作用域列不出、随后恢复：删召回统计只认找副本那一轮的结论，在用那份的统计留着', async () => {
+    const now = Date.now()
+    await writeMem(globalDir(), 'live.md', record({ id: 'mem_a', name: '全局在用那份' }))
+    await ensureDir(wsDir(), WS)
+    await writeMem(archiveOf(wsDir()), 'old.md', wsRecord({ id: 'mem_a', name: '项目归档那份', status: 'deleted', deletedAt: now - DELETED_RETENTION_MS - DAY }))
+    const { table, stats } = openTable()
+    await stats.put('mem_a', { id: 'mem_a', recallCount: 7, lastRecalledAt: now })
+    // 只有第一次列 global 失败：按 id 找副本时列不出，之后再列就恢复了
+    listFault.dir = globalDir()
+    await table.maintain([wsDir()])
+    expect(listFault.dir).toBeUndefined()
+    expect(await mds(archiveOf(wsDir()))).toEqual([])
+    expect(await stats.get('mem_a')).toMatchObject({ recallCount: 7 })
+  })
+
+  it('别的作用域列不出：这一层到期的归档照常清，召回统计留着（列不出的那一层里可能就有在用的同 id）', async () => {
+    const now = Date.now()
+    await writeMem(globalDir(), 'live.md', record({ id: 'mem_a', name: '全局在用那份' }))
+    await ensureDir(wsDir(), WS)
+    await writeMem(archiveOf(wsDir()), 'old.md', wsRecord({ id: 'mem_a', name: '项目归档那份', status: 'deleted', deletedAt: now - DELETED_RETENTION_MS - DAY }))
+    const { table, stats } = openTable()
+    await stats.put('mem_a', { id: 'mem_a', recallCount: 7, lastRecalledAt: now })
+    await lock(globalDir())
+    await table.maintain([wsDir()])
+    expect(await mds(archiveOf(wsDir()))).toEqual([])
+    expect(await stats.get('mem_a')).toMatchObject({ recallCount: 7 })
   })
 })
 

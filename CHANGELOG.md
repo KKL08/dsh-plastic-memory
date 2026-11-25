@@ -348,6 +348,12 @@ All notable changes to this project are documented here. The format follows
 - If a memory folder could not be listed during routine upkeep, a memory in
   it that also had a deleted copy could be looked up as the deleted copy
   until the folder changed. The folder now keeps what was known about it.
+- If a memory folder could not be listed during routine upkeep while its
+  archive and topic index still could, upkeep cleared the recall counts of a
+  memory that had an expired deleted copy, and rewrote `MEMORY.md` without
+  its count of memories not confirmed in a while. Upkeep now leaves the
+  archive, recall counts, topic index and `MEMORY.md` alone until every
+  folder involved can be listed.
 - Submitting a memory card on the memory page could undo tags edited in the
   file while the card was open. A card now asks for a refresh when the
   memory's name, type, tags, summary or content changed after it opened.
