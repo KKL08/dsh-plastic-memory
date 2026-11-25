@@ -464,6 +464,20 @@ describe('和 0.2.0 共存', () => {
     for (const [, entry] of await e.cache.list()) expect(old.scanCache.safeParse(entry).success).toBe(true)
   })
 
+  it('带各成员扫描指纹的待决条目（未决的、两边都留结清的）：0.2.0 照常解析', async () => {
+    const old = await loadRelease020Schemas()
+    const e = env()
+    await e.store.put(record({ id: 'mem_a', name: 'a', content: '用 pnpm' }))
+    await e.store.put(record({ id: 'mem_b', name: 'b', content: '用 npm' }))
+    await e.run({ target: GLOBAL, llm: stubModel({ findings: [{ type: 'conflict', ids: ['mem_a', 'mem_b'] }] }) })
+    const [open] = await e.decisions.list()
+    expect(open!.memberScanFingerprints).toBeDefined()
+    expect(old.pendingDecision.safeParse(open).success).toBe(true)
+    await e.decisions.settle(open!.id, 'keep-both', NOW, { memberScanFingerprints: open!.memberScanFingerprints! })
+    const [settled] = await e.decisions.listSettled()
+    expect(old.pendingDecision.safeParse(settled).success).toBe(true)
+  })
+
   it('0.2.0 写的、0.2.0 写回丢了覆盖字段的记录：这一版照常读，不加覆盖', async () => {
     const old = await loadRelease020Schemas()
     const e = env({ tokenCap: 1 })

@@ -17,7 +17,7 @@ import {
 } from '../governance/semantic-scan.ts'
 import {
   batchKey, batchMembers, carriedFindings, checkContext, closingRow, coverageOf, crossWsRows, findingsRows, instructionState, isBatchValid,
-  isCompletionRow, isHit, memberCopyKey, memberIdOf, planCheckup, publishedFindings, resolveTokenCap, roundOf, CROSS_WS_ROUND,
+  isCompletionRow, isHit, memberCopyKey, memberIdOf, memberScanFingerprints, planCheckup, publishedFindings, resolveTokenCap, roundOf, CROSS_WS_ROUND,
   type BatchMember, type ClosingRow, type CrossWsRow, type FindingsRow, type RunStop,
 } from '../governance/checkup-plan.ts'
 import type { CheckupCache } from '../storage/checkup-cache.ts'
@@ -440,6 +440,7 @@ async function recordConflicts(
       summary: f.summary,
       workspaces: f.memoryIds.map(id => workspaceLabel(byId.get(id))),
       ...(fingerprint !== undefined ? { fingerprint } : {}),
+      ...(members.every(m => m !== undefined) ? { memberScanFingerprints: memberScanFingerprints(members as MemoryRecord[]) } : {}),
     }, now, id => deps.store.get(id))
     // 条目正被裁决、或刚被裁决（败方已删）：不挂账也不进返回的发现
     if (r.isSkipped) {

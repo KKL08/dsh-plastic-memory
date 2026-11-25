@@ -529,6 +529,26 @@ describe('应用处理方案（plan-applied）', () => {
     expect(open).not.toHaveProperty('settled')
   })
 
+  it('撤销时各成员的内容指纹同指纹一样还原：上一版留下的没有成员指纹的条目，结清（记了改后的）再撤销后也没有', async () => {
+    const table = new InMemoryKvTable<PendingDecision>()
+    const s = new PendingDecisionsStore(table)
+    const { entry } = await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '包管理器', fingerprint: 'fp-before' }, 1)
+    expect(entry).not.toHaveProperty('memberScanFingerprints')
+    await s.settlePlan(entry.id, { writes, proposal, snapshotId: 'snap_1', fingerprint: 'fp-after', memberScanFingerprints: { a: 'after' } }, 10)
+    expect(await s.unsettle(entry.id)).toBe(true)
+    expect(await s.get(entry.id)).not.toHaveProperty('memberScanFingerprints')
+  })
+
+  it('结清时没换成员指纹：撤销后条目上原有的成员指纹还在', async () => {
+    const table = new InMemoryKvTable<PendingDecision>()
+    const s = new PendingDecisionsStore(table)
+    const { entry } = await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '包管理器', fingerprint: 'fp-before' }, 1)
+    await table.put(entry.id, { ...entry, memberScanFingerprints: { a: 'before' } })
+    await s.settlePlan(entry.id, { writes, proposal, snapshotId: 'snap_1', fingerprint: 'fp-after' }, 10)
+    expect(await s.unsettle(entry.id)).toBe(true)
+    expect(await s.get(entry.id)).toMatchObject({ memberScanFingerprints: { a: 'before' } })
+  })
+
   it('结清后同一对不被重报：有删除项的，败方不在用时挂账跳过；没有删除项的（垂直改写），按改后指纹再报算已结清', async () => {
     const { s } = await merged()
     const read = async (id: string) => (id === 'mem_a' ? kept : dropped)

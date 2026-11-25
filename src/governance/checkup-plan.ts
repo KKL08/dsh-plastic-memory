@@ -46,6 +46,14 @@ export function batchMembers(records: readonly MemoryRecord[]): BatchMember[] {
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
 }
 
+/**
+ * 一个冲突的各成员此刻的内容指纹（副本身份 → 指纹，同批的成员）：挂账和结清（两条都留、标记误报、纵向的保留记忆、按方案改写）时记在待决条目上，
+ * 再报同一冲突时它和冲突指纹都没变才算裁决过（见 governance/decisions.ts upsert）。只换出处、改动性质的补证不算变。
+ */
+export function memberScanFingerprints(records: readonly MemoryRecord[]): Record<string, string> {
+  return Object.fromEntries(batchMembers(records))
+}
+
 /** 一条记忆的副本身份。 */
 export function memberCopyKey(r: Pick<MemoryRecord, 'id' | 'scope' | 'workspacePath'>): string {
   return copyKey({ scopeKey: scopeKeyOf(r), memoryId: r.id })

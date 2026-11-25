@@ -167,7 +167,11 @@ async function holdsNow(entry: KindKeyed & { workspaces?: string[] }, read: Read
   return (await Promise.all(entry.memoryIds.map(read))).every(r => r?.status === 'active')
 }
 
-type UpsertInput = { kind?: PendingKind; memoryIds: string[]; baselineRef?: string; summary: string; workspaces?: string[]; fingerprint?: string }
+type UpsertInput = {
+  kind?: PendingKind; memoryIds: string[]; baselineRef?: string; summary: string; workspaces?: string[]; fingerprint?: string
+  /** 冲突：各成员此刻的扫描指纹（见 schema.ts PendingDecision.memberScanFingerprints）。 */
+  memberScanFingerprints?: Record<string, string>
+}
 type UpsertResult = { created: boolean; settled?: true; isSkipped?: true; entry: PendingDecision }
 
 /**
@@ -182,7 +186,21 @@ function mergeReport(existing: PendingDecision, input: UpsertInput): PendingDeci
     ...(input.baselineRef !== undefined ? { baselineRef: input.baselineRef } : {}),
     ...(workspaces !== undefined ? { workspaces } : {}),
     ...(input.fingerprint !== undefined ? { fingerprint: input.fingerprint } : {}),
+    ...(input.memberScanFingerprints !== undefined ? { memberScanFingerprints: input.memberScanFingerprints } : {}),
   }
+}
+
+/**
+ * 已裁决条目的结论对这次再报还算数：冲突指纹没变；条目记了各成员的扫描指纹的，这次报的也要一样（这次没带就只比冲突指纹）。
+ * 没有成员扫描指纹的旧条目照旧只比冲突指纹。
+ */
+function isSettledSame(existing: PendingDecision, input: UpsertInput): boolean {
+  if (input.fingerprint === undefined || existing.fingerprint !== input.fingerprint) return false
+  const was = existing.memberScanFingerprints
+  const now = input.memberScanFingerprints
+  if (was === undefined || now === undefined) return true
+  const keys = Object.keys(was)
+  return keys.length === Object.keys(now).length && keys.every(k => now[k] === was[k])
 }
 
 /**
@@ -301,6 +319,7 @@ export class PendingDecisionsStore {
       firstSeenAt: now,
       ...(input.workspaces !== undefined ? { workspaces: input.workspaces } : {}),
       ...(input.fingerprint !== undefined ? { fingerprint: input.fingerprint } : {}),
+      ...(input.memberScanFingerprints !== undefined ? { memberScanFingerprints: input.memberScanFingerprints } : {}),
     }
     const claimed = await this.withPairClaim(input, () => this.upsertClaimed(input, draft, read))
     return claimed.isClaimed ? claimed.value : { created: false, isSkipped: true, entry: draft }
@@ -320,7 +339,7 @@ export class PendingDecisionsStore {
         const existing = await this.table.get(id)
         if (existing === undefined || !samePair(existing, input)) return undefined
         if (existing.settled !== undefined) {
-          if (!isDeletionSettled(existing) && input.fingerprint !== undefined && existing.fingerprint === input.fingerprint) {
+          if (!isDeletionSettled(existing) && isSettledSame(existing, input)) {
             return { created: false, settled: true, entry: existing }
           }
           if (!(await holds())) return { created: false, isSkipped: true, entry: existing }
@@ -373,11 +392,15 @@ export class PendingDecisionsStore {
   /**
    * 记下裁决。两边都留的靠指纹判断以后变没变：没有指纹的旧条目无从判断，退回直接移除，返回 false。
    * 删一方的留账是为了撤销，不看指纹；snapshotId 是删败方前的快照。fingerprint 给出时换掉条目上的指纹
-   * （「留在本项目」按记忆此刻的内容记，不用上次体检时的）。isBornSettled、misplacedIgnore、proposal 见 schema。顺手清扫超出保留窗口的条目。
+   * （「留在本项目」按记忆此刻的内容记，不用上次体检时的）；memberScanFingerprints 给出时换掉条目上各成员的扫描指纹（冲突两边都留时按双方此刻的记）。
+   * isBornSettled、misplacedIgnore、proposal 见 schema。顺手清扫超出保留窗口的条目。
    */
   async settle(
     id: string, verdict: SettledVerdict, now: number,
-    opts: { snapshotId?: string; fingerprint?: string; isBornSettled?: true; misplacedIgnore?: MisplacedIgnore; proposal?: SettledProposal; droppedLinks?: LinkIds } = {},
+    opts: {
+      snapshotId?: string; fingerprint?: string; memberScanFingerprints?: Record<string, string>
+      isBornSettled?: true; misplacedIgnore?: MisplacedIgnore; proposal?: SettledProposal; droppedLinks?: LinkIds
+    } = {},
   ): Promise<boolean> {
     const entry = await this.table.get(id)
     if (!entry) return false
@@ -388,6 +411,7 @@ export class PendingDecisionsStore {
     await this.table.put(id, {
       ...entry,
       ...(opts.fingerprint !== undefined ? { fingerprint: opts.fingerprint } : {}),
+      ...(opts.memberScanFingerprints !== undefined ? { memberScanFingerprints: opts.memberScanFingerprints } : {}),
       settled: {
         verdict, at: now, ...(opts.snapshotId !== undefined ? { snapshotId: opts.snapshotId } : {}), ...(opts.isBornSettled ? { isBornSettled: true as const } : {}),
         ...(opts.misplacedIgnore !== undefined ? { misplacedIgnore: opts.misplacedIgnore } : {}),
@@ -416,17 +440,22 @@ export class PendingDecisionsStore {
    * 以后同一对（垂直的同一条）再被扫到时不再挂账。条目不存在或已结清返回 false。调用方持有条目认领。顺手清扫超出保留窗口的条目。
    */
   async settlePlan(
-    id: string, input: { writes: readonly PlanWrite[]; proposal: SettledProposal; snapshotId: string; fingerprint: string; changes?: ChangeReceipt[] }, now: number,
+    id: string,
+    input: { writes: readonly PlanWrite[]; proposal: SettledProposal; snapshotId: string; fingerprint: string; memberScanFingerprints?: Record<string, string>; changes?: ChangeReceipt[] },
+    now: number,
   ): Promise<boolean> {
     const entry = await this.table.get(id)
     if (entry === undefined || entry.settled !== undefined) return false
     await this.table.put(id, {
       ...entry, fingerprint: input.fingerprint,
+      // 各成员的内容指纹换成改后的，同冲突指纹：按改后内容再报时算已结清
+      ...(input.memberScanFingerprints !== undefined ? { memberScanFingerprints: input.memberScanFingerprints } : {}),
       // 按变更集落盘的：逐操作回执记在条目上，撤销按它们逐个还原
       ...(input.changes !== undefined ? { changes: input.changes } : {}),
       settled: {
         verdict: 'plan-applied', at: now, snapshotId: input.snapshotId, proposal: input.proposal, receipts: receiptsOf(input.writes),
         ...(entry.fingerprint !== undefined ? { priorFingerprint: entry.fingerprint } : {}),
+        ...(entry.memberScanFingerprints !== undefined ? { priorMemberScanFingerprints: entry.memberScanFingerprints } : {}),
       },
     })
     await this.sweep(now)
@@ -441,9 +470,12 @@ export class PendingDecisionsStore {
     const entry = await this.table.get(id)
     if (!entry?.settled) return false
     // 按变更集应用的：回执撤完才走到这里，空的回执清单一起去掉，条目回到没处理过的样子
-    const { settled, fingerprint, changes: _changes, ...open } = entry
-    const restored = settled.verdict === 'plan-applied' ? settled.priorFingerprint : fingerprint
-    await this.table.put(id, { ...open, ...(restored !== undefined ? { fingerprint: restored } : {}) })
+    const { settled, fingerprint, memberScanFingerprints, changes: _changes, ...open } = entry
+    const isPlanApplied = settled.verdict === 'plan-applied'
+    const restored = isPlanApplied ? settled.priorFingerprint : fingerprint
+    // 各成员的内容指纹同理：还原成结清前的，结清前没有的就不留（条目回到未决后，下次再报时照常刷新）
+    const members = isPlanApplied ? settled.priorMemberScanFingerprints : memberScanFingerprints
+    await this.table.put(id, { ...open, ...(restored !== undefined ? { fingerprint: restored } : {}), ...(members !== undefined ? { memberScanFingerprints: members } : {}) })
     // 垂直改写之后重报另挂的那条说的是改写后的记忆，撤销后记忆回到原样，它不再成立：收拢掉，同一条只留回到待处理的这条
     if (isRewriteSettled(entry)) {
       const others = (await this.table.list()).filter(([key, e]) => key !== id && e.settled === undefined && samePair(e, entry)).map(([key]) => key)

@@ -17,6 +17,7 @@ import { genId, kindOf, type LinkIds, type PendingDecision, type ProposalOp, typ
 import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import { baselineFor, type ReadInstructions } from '../governance/instructions.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
+import { memberScanFingerprints } from '../governance/checkup-plan.ts'
 import type { AutoCheckupSettingStore } from '../governance/auto-checkups.ts'
 import type { DreamsStore } from '../governance/dreams-records.ts'
 import { listModelChoices, type ModelSelectionStore } from '../governance/background-llm.ts'
@@ -720,6 +721,7 @@ async function dispatch(
         writes, changes,
         proposal: { source: plan.source, action: plan.action }, snapshotId,
         fingerprint: conflictFingerprint(entry.memoryIds.map(id => written.get(id)!), baseline),
+        memberScanFingerprints: memberScanFingerprints(entry.memoryIds.map(id => written.get(id)!)),
       }, now)
       if (!isSettled) throw new Error(`待决项 ${entry.id} 已不在待处理，这次${plan.action === 'rewrite' ? '改写' : '融合'}没有记上`)
       // 回执已经在冲突条目上：临时的整理记录不再留

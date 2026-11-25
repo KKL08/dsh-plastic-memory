@@ -4,7 +4,6 @@ import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { checkupEnv, bigRecord, stubModel, findingKeys, CHECKUP_NOW, DAY_MS, type CheckupEnv, type StubModel } from './helpers/checkup-env.ts'
-import { instructionsOf } from './helpers/instructions.ts'
 import { record } from './helpers/record.ts'
 import { ARCHIVE_DIR, CHECKUP_CACHE_FILE, GLOBAL_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
@@ -13,6 +12,11 @@ import { renderScanResult, runScan, type CheckupScanResult, type ScanToolResult,
 import { checkupKey, isFullyCovered } from '../src/gui/contract.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import type { Scope } from '../src/scope.ts'
+import { executeConfirm } from '../src/tools/confirm.ts'
+import { SnapshotStore } from '../src/governance/snapshots.ts'
+import type { MemorySnapshot } from '../src/governance/schema.ts'
+import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
+import { instructionsOf, noInstructions } from './helpers/instructions.ts'
 
 const GLOBAL: Scope = { kind: 'global' }
 const envs: CheckupEnv[] = []
@@ -605,6 +609,25 @@ describe('上限、沿用', () => {
     expect(ledgerAfter.find(d => d.id === pairOf(['mem_s2a']).id)).toEqual(pairOf(['mem_s2a']))
   })
 
+  it('沿用的冲突已被裁决过：视图里照旧有（读侧按账本核对），memory_scan 的返回里不再列出', async () => {
+    let rules = '规则一'
+    const e = await env({ instructions: instructionsOf({ global: () => rules }) })
+    await pairedBatches(e)
+    const m = stubModel({ findings: PAIR_FINDINGS })
+    await e.scan({ llm: m })
+    const settled = (await e.decisions.list()).find(d => d.memoryIds.includes('mem_s2a'))!
+    expect((await executeConfirm({ action: 'resolve', decisionId: settled.id, verdict: 'keep-both' }, { workspacePath: undefined }, {
+      store: e.store, decisions: e.decisions, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), instructions: noInstructions, now: () => e.clock.now,
+    })).kind).toBe('resolved')
+    // 指令文件改了、上限只够一批：s2 那一对所在的批没查到，它的冲突是沿用的
+    rules = '规则二'
+    e.tokenCap.value = 1
+    e.clock.now += 1000
+    const r = single(await e.scan({ llm: m }))
+    expect(findingKeys(await e.view(GLOBAL))).toContain('conflict:mem_s2a+mem_s2b')
+    expect(r.findings.filter(f => f.type === 'conflict').map(f => f.memoryIds.join('+'))).toEqual(['mem_s1a+mem_s1b'])
+  })
+
   it('更新的行已经查过同一组记忆、没有这条发现：更旧的行里的这条不再沿用', async () => {
     const e = await env()
     await threeBatches(e)
@@ -854,6 +877,90 @@ describe('全部重查', () => {
     await e.scan({ llm: m, isFullRecheck: true })
     expect(m.calls).toHaveLength(6)
     expect(e.logs.some(l => l.includes('全部重查记不下来'))).toBe(true)
+  })
+})
+
+describe('裁决过的冲突', () => {
+  const PAIR = [{ type: 'conflict' as const, ids: ['mem_x', 'mem_y'] }]
+  async function seed(e: CheckupEnv): Promise<void> {
+    await e.store.put(record({ id: 'mem_x', name: 'x', content: '用 pnpm' }))
+    await e.store.put(record({ id: 'mem_y', name: 'y', content: '用 npm' }))
+  }
+  const resolve = (e: CheckupEnv, decisionId: string, verdict: 'keep-both' | 'dismiss') =>
+    executeConfirm({ action: 'resolve', decisionId, verdict }, { workspacePath: undefined }, {
+      store: e.store, decisions: e.decisions, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), instructions: noInstructions, now: () => e.clock.now,
+    })
+
+  it('两条都留、标记误报：都没变时再报不重新挂账；一方改了事实时间后再报，重新挂成未决', async () => {
+    for (const verdict of ['keep-both', 'dismiss'] as const) {
+      const e = await env()
+      await seed(e)
+      const m = stubModel({ findings: PAIR })
+      await e.scan({ llm: m })
+      const [entry] = await e.decisions.list()
+      expect(entry!.memberScanFingerprints, verdict).toBeDefined()
+      expect((await resolve(e, entry!.id, verdict)).kind, verdict).toBe('resolved')
+      // 换个模型让这一批重查，同一冲突再报一次：结论仍成立
+      e.clock.now += 1000
+      await e.scan({ llm: stubModel({ model: 'model-b', findings: PAIR }) })
+      expect(await e.decisions.list(), verdict).toEqual([])
+      // 只改事实时间：冲突指纹不变，扫描指纹变了
+      const x = (await e.store.get('mem_x'))!
+      await e.store.put({ ...x, factTime: '2026-11' })
+      e.clock.now += 1000
+      await e.scan({ llm: m })
+      expect((await e.decisions.list()).map(d => d.memoryIds), verdict).toEqual([['mem_x', 'mem_y']])
+    }
+  })
+
+  it('两条都留之后其中一条被补证（只换出处和改动性质）：换个模型再报，不重新挂账', async () => {
+    const e = await env()
+    await seed(e)
+    await e.scan({ llm: stubModel({ findings: PAIR }) })
+    const [entry] = await e.decisions.list()
+    expect((await resolve(e, entry!.id, 'keep-both')).kind).toBe('resolved')
+    const x = (await e.store.get('mem_x'))!
+    await e.store.put({ ...x, source: { sessionId: 'sess_2', eventRange: [3, 4], sourceMode: 'user-explicit' }, lastChange: { kind: 'corroborate', at: e.clock.now, op: 'op_corroborate' } })
+    e.clock.now += 1000
+    await e.scan({ llm: stubModel({ model: 'model-b', findings: PAIR }) })
+    expect(await e.decisions.list()).toEqual([])
+  })
+
+  it('纵向冲突保留记忆：都没变时再报不重新挂账；改了有效期后再报，重新挂成未决', async () => {
+    const e = await env({ instructions: instructionsOf({ global: '用 npm' }) })
+    await e.store.put(record({ id: 'mem_v', name: 'v', content: '用 pnpm' }))
+    const vertical = [{ type: 'conflict' as const, ids: ['mem_v'], baselineRef: '指令文件说用 npm' }]
+    await e.scan({ llm: stubModel({ findings: vertical }) })
+    const [entry] = await e.decisions.list()
+    expect((await executeConfirm({ action: 'resolve', decisionId: entry!.id, verdict: 'keep-left' }, { workspacePath: undefined }, {
+      store: e.store, decisions: e.decisions, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), instructions: instructionsOf({ global: '用 npm' }), now: () => e.clock.now,
+    })).kind).toBe('resolved')
+    e.clock.now += 1000
+    await e.scan({ llm: stubModel({ model: 'model-b', findings: vertical }) })
+    expect(await e.decisions.list()).toEqual([])
+    const v = (await e.store.get('mem_v'))!
+    await e.store.put({ ...v, validTo: CHECKUP_NOW + 365 * DAY_MS })
+    e.clock.now += 1000
+    await e.scan({ llm: stubModel({ findings: vertical }) })
+    expect((await e.decisions.list()).map(d => d.memoryIds)).toEqual([['mem_v']])
+  })
+
+  it('没有扫描指纹的旧条目：照旧只按冲突指纹，改了事实时间也不重新挂账', async () => {
+    const e = await env()
+    await seed(e)
+    const m = stubModel({ findings: PAIR })
+    await e.scan({ llm: m })
+    const [entry] = await e.decisions.list()
+    await resolve(e, entry!.id, 'keep-both')
+    // 上一个发布版写回过：字段丢了
+    const settled = (await e.pending.get(entry!.id))!
+    const { memberScanFingerprints: _dropped, ...legacy } = settled
+    await e.pending.put(entry!.id, legacy)
+    const x = (await e.store.get('mem_x'))!
+    await e.store.put({ ...x, factTime: '2026-11' })
+    e.clock.now += 1000
+    await e.scan({ llm: m })
+    expect(await e.decisions.list()).toEqual([])
   })
 })
 

@@ -187,6 +187,12 @@ export const pendingDecisionSchema = z.object({
   /** 冲突：最近一次扫描时双方的内容指纹（垂直冲突含基线），见 conflictFingerprint；提升候选：记忆内容指纹；超限：档位号；
    *  直接改、移到项目：写完后的内容指纹。旧条目没有此字段。 */
   fingerprint: z.string().optional(),
+  /**
+   * 冲突：各成员的扫描指纹（副本身份 → 指纹，见 governance/checkup-plan.ts memberScanFingerprints），挂账和结清两边都留时写。
+   * 有它的已裁决条目，再报同一冲突时冲突指纹和各成员扫描指纹都没变才算裁决过（事实时间、有效期这类冲突指纹不含的改动也算变了）；
+   * 没有它的旧条目照旧只比冲突指纹。上一个发布版读到时丢掉它，写回后照旧只比冲突指纹。
+   */
+  memberScanFingerprints: z.record(z.string(), z.string()).optional(),
   /** 整理所选的应用（batch-edited）：逐项回执，与 memoryIds 同序。其余条目没有此字段。 */
   receipts: z.array(batchReceiptSchema).optional(),
   /** 整理索引（index-organize）、记忆梦境的一次运行（brewing-dreams-run）：这一次做过的索引操作。其余条目没有此字段。 */
@@ -227,6 +233,8 @@ export const pendingDecisionSchema = z.object({
     proposal: settledProposalSchema.optional(),
     receipts: z.array(batchReceiptSchema).optional(),
     priorFingerprint: z.string().optional(),
+    /** plan-applied：结清前各成员的内容指纹（撤销时还原）；结清前条目没有的不记。上一个发布版读到时丢掉它。 */
+    priorMemberScanFingerprints: z.record(z.string(), z.string()).optional(),
     droppedLinks: linkIdsSchema.optional(),
   }).optional(),
 })

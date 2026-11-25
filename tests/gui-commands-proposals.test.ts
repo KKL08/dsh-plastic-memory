@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { baselineFingerprint, conflictFingerprint, suggestionBasis, type PendingTable } from '../src/governance/decisions.ts'
 import { editFingerprint } from '../src/governance/snapshots.ts'
+import { memberScanFingerprints } from '../src/governance/checkup-plan.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { deletedViewSchema, pendingViewSchema, type MemoryCommand } from '../src/gui/contract.ts'
 import type { ReadEventFn } from '../src/tools/source.ts'
@@ -1142,6 +1143,26 @@ describe('垂直冲突（记忆和指令文件）用处理卡', () => {
       expect(await memoryNow(e)).toMatchObject({ content: '用 npm', name: '包管理器' })
       expect(await e.decisions.get(entry.id)).toMatchObject({ fingerprint: entry.fingerprint })
       expect((await verticalOf(e, entry.id)).suggestion?.id).toBe(suggestion.id)
+    })
+
+    it('改写后各成员的内容指纹换成改后的：同一条按改后内容再报不重新挂账；撤销后还原成改前的', async () => {
+      const { e, entry } = await seeded({ llm: scripted(said('rewrite', { draft: DRAFT })).llm })
+      const before = await memoryNow(e)
+      const report = (r: MemoryRecord, at: number) => e.decisions.upsert({
+        memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：包管理', summary: '再报', workspaces: [SESSION_WS],
+        fingerprint: conflictFingerprint([r], BASELINE), memberScanFingerprints: memberScanFingerprints([r]),
+      }, at)
+      await report(before, 3)
+      expect((await e.decisions.get(entry.id))!.memberScanFingerprints).toEqual(memberScanFingerprints([before]))
+      ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))
+      const suggestion = (await e.decisions.get(entry.id))!.suggestion!
+      ok(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id }))
+      const written = await memoryNow(e)
+      expect((await e.decisions.listSettled())[0]!.memberScanFingerprints).toEqual(memberScanFingerprints([written]))
+      expect((await report(written, LATER)).settled).toBe(true)
+      expect(await e.decisions.list()).toEqual([])
+      ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
+      expect((await e.decisions.get(entry.id))!.memberScanFingerprints).toEqual(memberScanFingerprints([before]))
     })
 
     it('两个标签页同时采纳改写：只成一次，只拍一份快照；另一次回 claimed 或 not-found', async () => {
