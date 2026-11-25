@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { assembleSnapshot, estimateTokens, overflowLevel, COLD_START_TEXT, MEMORY_AS_DATA_NOTE, COMPACTION_ENGINE_NOTE, TYPE_USAGE_HEADING } from '../src/snapshot.ts'
+import { assembleSnapshot, estimateTokens, overflowLevel, COLD_START_TEXT, MEMORY_AS_DATA_NOTE, COMPACTION_ENGINE_NOTE, TYPE_USAGE_HEADING, INDEX_NAV_NOTE, INDEX_USAGE_NOTE, USAGE_PRIORITY_NOTE } from '../src/snapshot.ts'
 import { EVIDENCE_GUIDANCE } from '../src/evidence-guidance.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { formatIndexLine } from '../src/index-line.ts'
@@ -60,7 +60,7 @@ describe('estimateTokens：按字符计价', () => {
 })
 
 describe('assembleSnapshot：超出上限两种模式', () => {
-  it('自动放宽：预算再小也全部带入，不截断、没有导航图，用量如实超过上限', () => {
+  it('自动放宽：预算再小也不截，用量如实超过上限', () => {
     const records = tenRecords()
     const r = assembleSnapshot({ ...base, records, budget: 20, overflow: 'relax' })
     for (const rec of records) expect(r.text).toContain(`[${rec.id}]`)
@@ -75,14 +75,14 @@ describe('assembleSnapshot：超出上限两种模式', () => {
     expect(r.omittedCount).toBe(0)
   })
 
-  it('严格：截断只作用于索引行，固定尾注照常带上；omittedCount 就是没带入的条数', () => {
+  it('严格：截断只作用于成员行，主题条数和固定尾注照常带上；omittedCount 就是因为上限没带入的条数', () => {
     const records = tenRecords()
     const budget = 60
     const r = assembleSnapshot({ ...base, records, budget, overflow: 'strict', memoryRoot: '/m', evidenceLookup: 'strict' })
     expect(r.usedTokens).toBeLessThanOrEqual(budget)
     expect(r.omittedCount).toBeGreaterThan(0)
     expect(r.omittedCount + r.injectedIds.length).toBe(records.length)
-    expect(r.text).toContain(`另有 ${r.omittedCount} 条记忆未列出`)
+    expect(r.text).toContain('### 未整理（5 条）')
     for (const id of r.injectedIds) expect(r.text).toContain(`[${id}]`)
     // 尾注不计预算、不被截
     expect(r.text).toContain(MEMORY_AS_DATA_NOTE)
@@ -98,15 +98,15 @@ describe('assembleSnapshot：超出上限两种模式', () => {
 })
 
 describe('assembleSnapshot：按作用域分段的 token', () => {
-  it('记忆行按作用域归本项目 / 全局，其余（标题、附注、尾注、取代句）归固定说明；三段之和 = 预算内用量 + 附注 + 固定尾注 + 取代句', () => {
+  it('记忆行按作用域归本项目 / 全局，其余（标题、附注、主题行、尾注、取代句）归固定说明；三段之和 = 预算内用量 + 附注 + 固定尾注 + 取代句', () => {
     const g = record({ id: 'mem_g', scope: 'global', name: '全局条目', summary: '全局摘要' })
     const w = record({ id: 'mem_w', scope: 'workspace', workspacePath: WS, name: '项目条目', summary: '项目摘要内容' })
     const r = assembleSnapshot({ ...base, records: [g, w], budget: 4000 })
     expect(r.tokens.global).toBe(estimateTokens(formatIndexLine(g, { passive: false, note: '' })))
     expect(r.tokens.workspace).toBe(estimateTokens(formatIndexLine(w, { passive: false, note: '' })))
     const def = registry.get(g.type)
-    const tail = estimateTokens('\n看记忆全文：用 memory_search 按 id 或关键词查。') + estimateTokens(`\n${TYPE_USAGE_HEADING}\n- ${def.label}：${def.howToUse}`)
-      + estimateTokens(`\n${MEMORY_AS_DATA_NOTE}`)
+    const tail = estimateTokens(`\n${INDEX_NAV_NOTE}${INDEX_USAGE_NOTE}`) + estimateTokens('\n看记忆全文：用 memory_search 按 id 或关键词查。')
+      + estimateTokens(`\n${TYPE_USAGE_HEADING}\n- ${def.label}：${def.howToUse}`) + estimateTokens(`\n${USAGE_PRIORITY_NOTE}\n${MEMORY_AS_DATA_NOTE}`)
     expect(r.tokens.workspace + r.tokens.global + r.tokens.fixed).toBe(r.usedTokens + estimateTokens(`\n> ${COMPACTION_ENGINE_NOTE}\n`) + tail + SUPERSEDE_TOKENS)
     expect(r.injectedIds.sort()).toEqual(['mem_g', 'mem_w'])
   })

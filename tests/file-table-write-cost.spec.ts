@@ -18,8 +18,10 @@ import { UNSORTED_PAGE } from '../src/topic-index.ts'
 
 // 写入路径的开销：写完不做整目录维护，也不碰主题索引和 MEMORY.md（留到维护点）；按 id 找文件先看派生库的提示。
 // 真文件系统、真 node:sqlite。reads：tracing 期间记下 readFile 读过的路径（看定位读了哪些文件的内容）。
-const { reads, hooks } = vi.hoisted(() => ({
+const { reads, unlistable, hooks } = vi.hoisted(() => ({
   reads: { tracing: false, paths: [] as string[], listed: [] as string[] },
+  // 列目录时抛 EACCES 的目录（精确到这一层）
+  unlistable: new Set<string>(),
   // afterRename：插件把一个文件改名落盘之后、接着往下做之前插进来的「别人的改动」（只触发一次）
   hooks: { afterRename: undefined as undefined | ((to: string) => Promise<void>) },
 }))
@@ -31,6 +33,7 @@ vi.mock('node:fs/promises', async importOriginal => {
   })
   const readdir = vi.fn(async (...args: Parameters<typeof actual.readdir>) => {
     if (reads.tracing) reads.listed.push(String(args[0]))
+    if (unlistable.has(String(args[0]))) throw Object.assign(new Error('权限不足'), { code: 'EACCES' })
     return (actual.readdir as (...a: unknown[]) => Promise<unknown>)(...args)
   })
   const rename = vi.fn(async (...args: Parameters<typeof actual.rename>) => {
@@ -59,6 +62,7 @@ afterEach(async () => {
   reads.paths = []
   reads.listed = []
   hooks.afterRename = undefined
+  unlistable.clear()
   for (const index of indexes.splice(0)) index.close()
   await rm(root, { recursive: true, force: true })
   await rm(stateDir, { recursive: true, force: true })
@@ -333,6 +337,19 @@ describe('按 id 找文件先看派生库的提示', () => {
     const t = withIndex()
     await t.maintain([globalDir()])
     expect(await contentReads(() => t.locate('mem_2', {}))).toEqual([`${GLOBAL_DIR}/m2.md`])
+  })
+
+  it('维护时某一层列不出目录：这一层原有的提示不动，恢复后同 id 在归档里也有一份时，顶层这份照样找得到', async () => {
+    await seed(globalDir(), 'live.md', record({ id: 'mem_a', name: '在用那份' }))
+    await seed(join(globalDir(), ARCHIVE_DIR), 'old.md', record({ id: 'mem_a', name: '归档那份', status: 'deleted', deletedAt: NOW }))
+    const t = withIndex()
+    await t.maintain([globalDir()])
+    unlistable.add(globalDir())
+    await t.maintain([globalDir()])
+    unlistable.clear()
+    const got = await t.locate('mem_a', { kind: 'global' })
+    expect(got?.filePath).toBe(join(globalDir(), 'live.md'))
+    expect(got?.record.status).toBe('active')
   })
 })
 

@@ -593,16 +593,16 @@ export const sessionViewSchema = z.object({
   compactedAt: z.number().optional(),
   budget: z.number().nonnegative(),
   overflowMode: z.enum(OVERFLOW_MODES),
-  /** 三段之和即总用量：本项目、全局、固定说明（标题、附注、导航图、固定尾注）。 */
+  /** 三段之和即总用量：本项目、全局、固定说明（标题、附注、主题目录、固定尾注）。 */
   tokens: z.object({ workspace: z.number(), global: z.number(), fixed: z.number() }),
-  /** 计入上限的部分（附注、固定尾注与导航图不计）：relax 下超过 budget 即已放宽，strict 下不超过 budget。 */
+  /** 计入上限的部分（附注、固定尾注不计）：relax 下超过 budget 即已放宽，strict 下除必留的主题目录几行外不超过 budget。 */
   usedTokens: z.number().int().nonnegative(),
   injectedIds: z.array(z.string()),
   /** injectedIds 里带入全文的（core 区）；其余只带了索引行。 */
   coreIds: z.array(z.string()),
   /** injectedIds 里索引行只带名称和标签、不带摘要的（passive 类型）；不在这两组里的是带摘要的索引行。 */
   titleOnlyIds: z.array(z.string()),
-  /** 没带入的条数（只有 strict 会截）：「已到上限，N 条没带入」。 */
+  /** 因为 strict 的上限完全没带入的条数（relax 恒为 0），和 injectedIds 不重叠：「已到上限，N 条没带入」。 */
   omittedCount: z.number().int().nonnegative(),
   /** 这次对话新记的（按写入先后）。冻结晚于写入的会同时出现在 injectedIds 里：界面只列在带入的记忆。 */
   savedIds: z.array(z.string()),

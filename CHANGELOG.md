@@ -212,6 +212,26 @@ All notable changes to this project are documented here. The format follows
   skipped.
 
 ### Changed
+- The memories loaded at the start of a chat now follow the topic index.
+  After the memories given in full, each topic gets one line with its
+  description, how many memories it holds and how many have not been
+  confirmed for a while, followed by up to five of its memories in index
+  order. Project topics come first, then global ones, and each scope ends
+  with its unsorted memories, whose count is always shown.
+- The topic list and memory lines loaded into a chat stay within about
+  2,000 tokens in both overflow modes, so they no longer grow with the
+  number of memories; the memories given in full keep following the
+  existing budget settings. When space runs out, memory lines of later
+  topics go first, then topic descriptions, then whole topics, noted as
+  "N more topics".
+- A memory's own injection setting now applies: `core` loads it in full,
+  `unlisted` keeps it out of the list while it still counts toward its topic
+  and stays searchable. If a scope's topic index cannot be read, that scope
+  lists its memories without topics and says so. A type's priority no
+  longer orders the loaded memories; it orders the content checkup, and the
+  memories of a scope listed without topics.
+- Testing: the scale check also asserts that the topic list and memory lines
+  stay within their token cap at 1,000 and 5,000 memories.
 - Refining a memory, recording a state change and other single-memory
   edits no longer reread every memory in the project to check their
   snapshot, so these writes slow down much less as a project grows.
@@ -325,6 +345,20 @@ All notable changes to this project are documented here. The format follows
   dismissed over-budget reminders came back. The chat is now told the
   memories could not be read, nothing is rewritten, and the next message
   reads the folder again.
+- If a memory folder could not be listed during routine upkeep, a memory in
+  it that also had a deleted copy could be looked up as the deleted copy
+  until the folder changed. The folder now keeps what was known about it.
+- If a memory folder could not be listed during routine upkeep while its
+  archive and topic index still could, upkeep cleared the recall counts of a
+  memory that had an expired deleted copy, and rewrote `MEMORY.md` without
+  its count of memories not confirmed in a while. Upkeep now leaves the
+  archive, recall counts, topic index and `MEMORY.md` alone until every
+  folder involved can be listed.
+- The note after the memories loaded into a chat said that a memory named in
+  a compacted summary but missing from the list had been deleted or
+  rewritten, though the list can leave memories out. The note now says the
+  list is partial, and asks the chat to look such a memory up first and to
+  treat it as unconfirmed if nothing is found.
 - Submitting a memory card on the memory page could undo tags edited in the
   file while the card was open. A card now asks for a refresh when the
   memory's name, type, tags, summary or content changed after it opened.

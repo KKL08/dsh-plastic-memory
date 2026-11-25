@@ -164,6 +164,8 @@ interface LocatedSlot extends Slot { copies: readonly Slot[] }
 interface Claim { path: string; ino: number }
 
 interface ScopeDir { dir: string; loc: FileLocation }
+/** 按 id 找副本的这一轮里，要看的各层是不是都列出来了：给了就由查找记下，有一层列不出就置 false。 */
+interface ListingCheck { isListed: boolean }
 
 function errnoCode(err: unknown): string | undefined {
   return (err as NodeJS.ErrnoException | undefined)?.code
@@ -172,6 +174,14 @@ function errnoCode(err: unknown): string | undefined {
 /** 读得不全的目录说明：目录读不了、项目目录缺标记，里面的记忆没读到。 */
 function isIncompleteNote(note: DirectoryNote): boolean {
   return note.code === 'dir-unreadable' || note.code === 'marker-missing'
+}
+
+/**
+ * 读到的这些目录都列出来了（说明里没有读得不全的）。列不出的目录里有什么不知道：在那里定位不到不等于没有。
+ * 维护里清归档、删召回统计、核对主题索引和重写 MEMORY.md 之前都看它，列不全就不做。
+ */
+function isListed(notes: readonly DirectoryNote[]): boolean {
+  return !notes.some(isIncompleteNote)
 }
 
 /** 一层（顶层或 .archive/）所属的记忆目录。 */
@@ -682,9 +692,10 @@ export class FileTable implements MemoryTable {
    *  - 提示指的文件对不上（不在了、id 变了）：那一层逐个读一遍。
    *  - 按提示哪一层都没找到：不算没有，这几层都逐个读一遍。找不到的情形（给错 id、彻底删除后的确认）开销和没有库时一样。
    * isExhaustive：不看提示，每一层都逐个读。要「这个 id 的全部副本」、漏一份就会做错决定的调用方用它（列副本所在的作用域、彻底删除时清副本）。
+   * listing：给了就记下这一轮有没有哪一层列不出（列不出的那层里可能就有这个 id）。
    * 按提示找到了就不再逐个读：同 id 的另一份副本若是原地改出来的（文件签名恰好没变），要等快照冻结时的维护点重记提示才看得到。
    */
-  private async scanForId(id: string, dirs: readonly ScopeDir[], isExhaustive = false): Promise<Slot[]> {
+  private async scanForId(id: string, dirs: readonly ScopeDir[], isExhaustive = false, listing?: ListingCheck): Promise<Slot[]> {
     const found: Slot[] = []
     const statsRows = new Map(await this.opts.stats.list())
     const hintedOnly: Array<{ level: string; dir: string; loc: FileLocation }> = []
@@ -696,7 +707,11 @@ export class FileTable implements MemoryTable {
       }
       return slots
     }
-    const rescan = async (level: string, dir: string, loc: FileLocation) => read(level, dir, loc, await this.scanLevel(level, id) ?? [])
+    const rescan = async (level: string, dir: string, loc: FileLocation) => {
+      const names = await this.scanLevel(level, id)
+      if (names === undefined && listing !== undefined) listing.isListed = false
+      return read(level, dir, loc, names ?? [])
+    }
     for (const { dir, loc } of dirs) {
       for (const level of [dir, join(dir, ARCHIVE_DIR)]) {
         const hinted = isExhaustive ? undefined : await this.hintedNames(level, id)
@@ -728,8 +743,9 @@ export class FileTable implements MemoryTable {
     return slot && this.toLocated(slot)
   }
 
-  /** locate 的内部形态：带磁盘原文与读到的全部副本，写路径据此在写盘前复核。缺省目标即不带当前项目的会话视角。 */
-  private async locateSlot(id: string, target: LocateTarget = {}): Promise<LocatedSlot | undefined> {
+  /** locate 的内部形态：带磁盘原文与读到的全部副本，写路径据此在写盘前复核。缺省目标即不带当前项目的会话视角。
+   *  listing：给了就记下这一轮要看的各层是不是都列出来了（只用在缺省目标的全盘查找）。 */
+  private async locateSlot(id: string, target: LocateTarget = {}, listing?: ListingCheck): Promise<LocatedSlot | undefined> {
     const global: ScopeDir = { dir: this.globalDir, loc: { scope: 'global' } }
     if (isScopeTarget(target)) {
       const own = target.kind === 'global' ? [global] : await this.hintDirs(target.workspacePath)
@@ -739,13 +755,15 @@ export class FileTable implements MemoryTable {
     // 先挑在用副本：别的作用域里更新的已删副本不遮住它，遗忘、刷新改的才是读路径上看得到的那份
     const pick = (copies: Slot[]) => copies.length > 0 ? { ...pickLiveFirst(copies, target)!, copies } : undefined
     const hinted = target.workspacePath === undefined ? [] : await this.hintDirs(target.workspacePath)
-    const first = await this.scanForId(id, [global, ...hinted])
+    const first = await this.scanForId(id, [global, ...hinted], false, listing)
     if (first.length > 0) return pick(first)
     const scanned = new Set([this.globalDir, ...hinted.map(d => d.dir)])
-    const rest = (await this.listWorkspaceDirs()).entries
+    const dirListing = await this.listWorkspaceDirs()
+    if (listing !== undefined && !isListed(dirListing.directoryNotes)) listing.isListed = false
+    const rest = dirListing.entries
       .filter(e => !scanned.has(e.dir))
       .map(e => ({ dir: e.dir, loc: { scope: 'workspace', workspacePath: e.workspacePath } as FileLocation }))
-    return pick(await this.scanForId(id, rest))
+    return pick(await this.scanForId(id, rest, false, listing))
   }
 
   async copiesOf(id: string): Promise<Scope[]> {
@@ -919,15 +937,18 @@ export class FileTable implements MemoryTable {
       const priorRevs = [sd.dir, archive].map(level => this.index?.levelScan(level)?.rev)
       const levelStats = await Promise.all([sd.dir, archive].map(level => stat(level).then(s => ({ mtimeMs: s.mtimeMs, ino: s.ino }), () => undefined)))
       const { slots, quarantined, directoryNotes } = await this.readDirs([sd], { includeArchive: true }, seen)
+      // 这一层（顶层和 .archive/）列不出来时，清归档、删召回统计、核对索引都不做：没读到的不能当没有
+      const isLayerListed = isListed(directoryNotes)
       // 这一层每个文件都读出来了：没读到某个 id 才能说明这一层没有它
-      const isLayerComplete = quarantined.length === 0 && !directoryNotes.some(isIncompleteNote)
+      const isLayerComplete = isLayerListed && quarantined.length === 0
       const isExpired = (slot: Slot) => dirname(slot.filePath) === archive && slot.record.status !== 'superseded'
         && (slot.record.deletedAt ?? slot.mtimeMs) < cutoff
       // 到期清扫之后这一层还留着的 id：同 id 还有别的副本，历史是那一份的
       const staying = new Set(slots.filter(s => !isExpired(s)).map(s => s.record.id))
       for (const [i, level] of [sd.dir, archive].entries()) {
         const at = levelStats[i]
-        if (at === undefined) continue
+        // 列不出目录的那一层没读到文件，不能记成「这一层没有文件」：原有的提示不动
+        if (at === undefined || directoryNotes.some(n => isIncompleteNote(n) && n.path === level)) continue
         const rows = slots.filter(s => dirname(s.filePath) === level).map(s => [basename(s.filePath), s.record.id, s.statSig] as const)
         // 文件名列表的摘要不知道（读目录时不留名单）：记空串，下次目录有变时逐个核对一遍再补上
         this.index?.replaceLevel(level, { ...at, scannedAt, listing: '' }, rows, priorRevs[i])
@@ -946,7 +967,7 @@ export class FileTable implements MemoryTable {
         if (inArchive && record.status === 'active') record = { ...record, status: 'deleted' }
         if (record.status === 'deleted' && record.deletedAt === undefined) record = { ...record, deletedAt: slot.mtimeMs }
         if (isExpired(slot)) {
-          if (!(await this.unchangedSince(slot))) continue
+          if (!isLayerListed || !(await this.unchangedSince(slot))) continue
           // 历史先删、删干净了才删记忆文件，不留记忆没了、历史还在的样子；删不掉或拿不准就这条这次不清，下次维护再试
           // 并进了另一条的：历史先搬到那条名下，搬不成这条这次不清
           // 这一层读不全、又有它的历史时两样都不做：坏掉的可能就是同 id 还在用的那份，历史是那份的
@@ -955,8 +976,10 @@ export class FileTable implements MemoryTable {
           if (!staying.has(record.id) && !(await this.removeExpiredHistory(record.id, sd.dir, isLayerComplete))) continue
           await this.removeFile(slot.filePath)
           purged.add(slot)
-          // 同 delete：别层还有这个 id 时统计行是它的。只在真删过期文件时全盘找一次，平常的维护不多读
-          if ((await this.locateSlot(record.id)) === undefined) await this.opts.stats.delete(record.id)
+          // 同 delete：别层还有这个 id 时统计行是它的。只在真删过期文件时全盘找一次，平常的维护不多读；
+          // 找的这一轮有哪一层列不出来时找不到也不算没有，统计行留着
+          const lookup: ListingCheck = { isListed: true }
+          if ((await this.locateSlot(record.id, {}, lookup)) === undefined && lookup.isListed) await this.opts.stats.delete(record.id)
           continue
         }
         if (digestMismatch(DIGEST_LINE_RE.exec(frontmatterOf(slot.raw))?.[1], record)) {
@@ -998,7 +1021,9 @@ export class FileTable implements MemoryTable {
       let located: readonly LocatedRecord[] = kept
       // 这一层有读不出来的文件时，索引里对不上清单的行先留着（见 reconcileIndex）
       let isComplete = isLayerComplete
-      for (let round = 1; round <= INDEX_ROUNDS; round++) {
+      // 顶层列不出来时读到的在用记忆是空的：按它核对会把索引和 MEMORY.md 写成缺了的样子，这一层不核对
+      let isTopListed = isLayerListed
+      for (let round = 1; isTopListed && round <= INDEX_ROUNDS; round++) {
         const outcome = await this.syncTopicIndex(sd.dir, located, now, isComplete)
         if (outcome === 'unchanged' || round === INDEX_ROUNDS) break
         // 索引文件在核对期间被改过的那一轮什么都没写，直接按现在的内容重来
@@ -1007,7 +1032,8 @@ export class FileTable implements MemoryTable {
         const reread = await this.readDirs([sd], {}, fresh)
         signature = signatureOf(fresh)
         located = reread.slots.filter(s => s.record.status === 'active')
-        isComplete = reread.quarantined.length === 0 && !reread.directoryNotes.some(isIncompleteNote)
+        isTopListed = isListed(reread.directoryNotes)
+        isComplete = isTopListed && reread.quarantined.length === 0
       }
       for (const level of [sd.dir, archive, join(sd.dir, INDEX_DIR), join(sd.dir, INDEX_DIR, INDEX_TOPICS_DIR)]) await this.cleanStaleTmp(level)
     }

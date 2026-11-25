@@ -75,16 +75,20 @@ describe('assembleSnapshot', () => {
     expect(withoutRoot.text).not.toContain('MEMORY.md')
   })
 
-  it('超过衰退期未确认的记忆，注入行尾带陈旧度标注；期内不带', async () => {
+  it('超过衰退期未确认的记忆：主题行上计数，成员行不逐行标；必读全文的行尾照旧带标注', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_p', type: 'project', lastConfirmedAt: 0, summary: '冻结到三月' }))          // project 衰减 7 天，now=10 天 → 超期
     await store.put(record({ id: 'mem_fresh', type: 'project', lastConfirmedAt: 9 * DAY, summary: '新决定' }))    // 1 天前确认 → 期内
     await store.put(record({ id: 'mem_core', type: 'preference', lastConfirmedAt: 0, content: '偏好内容' }))       // decayDays=null 永不标注
+    await store.put(record({ id: 'mem_commit', type: 'project', recall: 'core', lastConfirmedAt: 0, content: '全文给出的进度' }))
     const { text } = assembleSnapshot({ ...base, records: await visible(store) })
     const lineOf = (id: string) => text.split('\n').find(l => l.includes(id))!
-    expect(lineOf('mem_p')).toContain(STALENESS_NOTE(10))
-    // 任何天数的陈旧标注都不该出现在期内记录上：正则由模板常量派生，文案改了也跟着改
-    expect(lineOf('mem_fresh')).not.toMatch(new RegExp(STALENESS_NOTE(0).replace('0', '\\d+')))
+    // 任何天数的陈旧标注都不该出现在成员行上：正则由模板常量派生，文案改了也跟着改
+    const anyStaleness = new RegExp(STALENESS_NOTE(0).replace('0', '\\d+'))
+    expect(lineOf('mem_p')).not.toMatch(anyStaleness)
+    expect(lineOf('mem_fresh')).not.toMatch(anyStaleness)
+    expect(text).toContain('### 未整理（4 条，其中 2 条久未确认）')
+    expect(lineOf('mem_commit')).toContain(STALENESS_NOTE(10))
     expect(text).not.toMatch(/偏好内容.*未确认/)
   })
 
@@ -104,7 +108,7 @@ describe('assembleSnapshot', () => {
     expect(text).not.toBe(COLD_START_TEXT)
   })
 
-  it('超预算时丢弃低优先级组并注明剩余数量', async () => {
+  it('超预算时注明还有多少条没列出', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     for (let i = 0; i < 200; i++) {
       await store.put(record({ id: `mem_k${i}`, type: 'knowledge', summary: `知识条目${i}`.repeat(8) }))
@@ -162,88 +166,6 @@ describe('assembleSnapshot', () => {
       expect(text).toContain('memory_source') // 每段都要能独立指路到回查工具
     }
   })
-
-  it('体积相近时按 governancePriority 方向丢弃：只丢 low 组，保留 high 组', async () => {
-    // 上一个用例两组都远超预算、必然都被丢弃，排序方向写反也能过，是弱信号。
-    // 这里让两组体积严格相等（内容仅"高/低"一字之差），预算精确卡在"刚好放得下 high 组，
-    // 放不下再加 low 组"的临界点——如果排序方向写反（先丢 high 组），断言会失败。
-    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
-    const priorityRegistry = buildTypeRegistry({
-      template: 'coding',
-      customTypes: {
-        ztypeh: { label: '高优先级组', description: '', whenToSave: '', recall: 'search', decayDays: null, governancePriority: 'high' },
-        ztypel: { label: '低优先级组', description: '', whenToSave: '', recall: 'search', decayDays: null, governancePriority: 'low' },
-      },
-    })
-    const highRec = record({ id: 'mem_h01', type: 'ztypeh', name: '高优先级条目', summary: '高优先级组摘要内容占位文本' })
-    const lowRec = record({ id: 'mem_l01', type: 'ztypel', name: '低优先级条目', summary: '低优先级组摘要内容占位文本' })
-    await store.put(highRec)
-    await store.put(lowRec)
-
-    const now = 10 * DAY
-    const highDef = priorityRegistry.get('ztypeh')
-    // 逐条估算：预算 = 顶头 + high 组头 + high 单条行，恰好放下 high 组、放不下 low 组头。
-    const headerCost = estimateTokens('# 长期记忆')
-    const budget = headerCost
-      + estimateTokens(`\n## ${highDef.label}（ztypeh）`)
-      + estimateTokens(`- [${highRec.id}] ${highRec.name}（${highRec.summary}）`)
-
-    const { text } = assembleSnapshot({ registry: priorityRegistry, workspacePath: undefined, budget, now, records: await visible(store), overflow: 'strict' })
-
-    expect(text).toContain('高优先级条目')
-    expect(text).not.toContain('低优先级条目')
-    expect(text).toMatch(/另有 1 条记忆未列出（ztypel 1 条）/)
-  })
-
-  it('预算只够 high 组前几条：high 组部分装入并注明剩余，low 组整组进尾注', async () => {
-    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
-    const priorityRegistry = buildTypeRegistry({
-      template: 'coding',
-      customTypes: {
-        ztypeh: { label: '高优先级组', description: '', whenToSave: '', recall: 'search', decayDays: null, governancePriority: 'high' },
-        ztypel: { label: '低优先级组', description: '', whenToSave: '', recall: 'search', decayDays: null, governancePriority: 'low' },
-      },
-    })
-    // high 5 条、low 4 条，每条行体积一致（summary 等长）；置信度递减让装入顺序确定。
-    const highRecs = Array.from({ length: 5 }, (_, i) =>
-      record({ id: `mem_h${i}`, type: 'ztypeh', name: `高条目${i}`, summary: '高优先级组摘要占位文本', confidence: 0.9 - i * 0.1 }))
-    for (const r of highRecs) await store.put(r)
-    for (let i = 0; i < 4; i++) await store.put(record({ id: `mem_l${i}`, type: 'ztypel', name: `低条目${i}`, summary: '低优先级组摘要占位文本' }))
-
-    const now = 10 * DAY
-    // 预算 = 顶头 + high 组头 + 2 条 high 行，恰好装 2 条。
-    const budget = estimateTokens('# 长期记忆')
-      + estimateTokens(`\n## ${priorityRegistry.get('ztypeh').label}（ztypeh）`)
-      + 2 * estimateTokens(`- [mem_h0] ${highRecs[0].name}（${highRecs[0].summary}）`)
-
-    const { text } = assembleSnapshot({ registry: priorityRegistry, workspacePath: undefined, budget, now, records: await visible(store), overflow: 'strict' })
-
-    // high 组装入前 2 条（置信度最高的 mem_h0、mem_h1），其余进尾注
-    expect(text).toContain('[mem_h0]')
-    expect(text).toContain('[mem_h1]')
-    expect(text).not.toContain('[mem_h2]')
-    expect(text).toMatch(/另有 7 条记忆未列出（ztypeh 3 条、ztypel 4 条）/)   // high 5 - 2 = 3，low 整组 4
-    // low 组整组进尾注，一条都不出现在索引区
-    expect(text).not.toContain('低条目')
-  })
-
-  it('组内装入顺序按 confidence 降序（与 core 区一致）', async () => {
-    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
-    const priorityRegistry = buildTypeRegistry({
-      template: 'coding',
-      customTypes: {
-        ztypeh: { label: '高优先级组', description: '', whenToSave: '', recall: 'search', decayDays: null, governancePriority: 'high' },
-      },
-    })
-    await store.put(record({ id: 'mem_lo', type: 'ztypeh', name: '低置信', summary: 'x', confidence: 0.4 }))
-    await store.put(record({ id: 'mem_hi', type: 'ztypeh', name: '高置信', summary: 'x', confidence: 0.95 }))
-    await store.put(record({ id: 'mem_mid', type: 'ztypeh', name: '中置信', summary: 'x', confidence: 0.7 }))
-
-    const { text } = assembleSnapshot({ registry: priorityRegistry, workspacePath: undefined, budget: 4000, now: 10 * DAY, records: await visible(store) })
-
-    expect(text.indexOf('mem_hi')).toBeLessThan(text.indexOf('mem_mid'))
-    expect(text.indexOf('mem_mid')).toBeLessThan(text.indexOf('mem_lo'))
-  })
 })
 
 // 索引与引导。
@@ -259,14 +181,14 @@ describe('索引与引导', () => {
     },
   })
 
-  describe('注入索引行末尾带文件名（passive 不带 summary，久未确认的带陈旧度）', () => {
-    it('注入索引行以 · 相对记忆根目录的文件路径收尾；陈旧度在文件名之前', () => {
+  describe('注入成员行末尾带文件名（passive 不带 summary，久未确认的不逐行标）', () => {
+    it('注入成员行以 · 相对记忆根目录的文件路径收尾', () => {
       const stale = record({ id: 'mem_p', name: '冻结', type: 'project', lastConfirmedAt: 0, summary: '冻结到三月' })
       const ref = record({ id: 'mem_ref', name: '看板', type: 'link', summary: '团队看板的地址' })
       const files = new Map([['mem_p', 'myproj-1234abcd/冻结.md'], ['mem_ref', 'global/看板.md']])
       const lines = assembleSnapshot({ ...base, registry: withPassive, records: [stale, ref], files }).text.split('\n')
-      expect(lines).toContain(formatIndexLine(stale, { passive: false, file: 'myproj-1234abcd/冻结.md', note: STALENESS_NOTE(10) }))
-      expect(lines).toContain('- [mem_p] 冻结（冻结到三月）' + STALENESS_NOTE(10) + ' · myproj-1234abcd/冻结.md')
+      expect(lines).toContain(formatIndexLine(stale, { passive: false, file: 'myproj-1234abcd/冻结.md', note: '' }))
+      expect(lines).toContain('- [mem_p] 冻结（冻结到三月） · myproj-1234abcd/冻结.md')
       expect(lines).toContain('- [mem_ref] 看板 · global/看板.md')   // passive 不带 summary
     })
   })
@@ -350,36 +272,7 @@ describe('索引与引导', () => {
     })
   })
 
-  describe('截断尾注改导航图：被截掉总数、按类型条数、高频标签前 5、MEMORY.md 路径', () => {
-    it('预算只够顶头：全部记录进导航图，标签按频次取前 5', () => {
-      const tagSets = [
-        ['tag-a', 'tag-b', 'tag-c', 'tag-d', 'tag-e', 'tag-f'],
-        ['tag-a', 'tag-b', 'tag-c', 'tag-d', 'tag-e'],
-        ['tag-a', 'tag-b', 'tag-c', 'tag-d'],
-      ]
-      const recs = [
-        ...tagSets.map((tags, i) => record({ id: `mem_h${i}`, type: 'ztypeh', tags })),
-        ...[['tag-a', 'tag-b', 'tag-c'], ['tag-a', 'tag-b'], ['tag-a'], []].map((tags, i) => record({ id: `mem_l${i}`, type: 'ztypel', tags })),
-      ]
-      const budget = estimateTokens('# 长期记忆') + 1
-      const { text } = assembleSnapshot({ registry: zRegistry, workspacePath: WS, budget, now: 10 * DAY, records: recs, memoryRoot: ROOT, overflow: 'strict' })
-      const nav = text.split('\n\n').find(chunk => chunk.includes('另有 7 条记忆未列出'))
-      expect(nav).toBeDefined()
-      expect(nav).toContain('ztypeh 3 条')
-      expect(nav).toContain('ztypel 4 条')
-      expect(nav).toContain('高频标签：tag-a（6）、tag-b（5）、tag-c（4）、tag-d（3）、tag-e（2）')
-      expect(nav).not.toContain('tag-f')
-      expect(nav).toContain(`${ROOT}/global/MEMORY.md`)
-      expect(nav).toContain(`${ROOT}/${workspaceDirName(WS)}/MEMORY.md`)
-      expect(nav).toContain(`用 memory_search 查询；要浏览全部条目，从 ${ROOT}/global/MEMORY.md、${ROOT}/${workspaceDirName(WS)}/MEMORY.md 进各主题页。`)
-    })
-
-    it('没有记忆根目录时，导航行指向各记忆目录的 MEMORY.md', () => {
-      const { text } = assembleSnapshot({ ...base, records: [1, 2].map(i => record({ id: `mem_n${i}` })), budget: 5, overflow: 'strict' })
-      expect(text).toContain('索引未列全')
-      expect(text).toContain('用 memory_search 查询；要浏览全部条目，从各记忆目录的 MEMORY.md 进各主题页。')
-    })
-
+  describe('没有截断时不出「另有」', () => {
     it('没有被截掉的记录时不出导航图', () => {
       const { text } = assembleSnapshot({ ...base, records: [record({ type: 'knowledge', tags: ['x'] })], memoryRoot: ROOT })
       expect(text).not.toMatch(/另有 \d+ 条/)
@@ -387,7 +280,7 @@ describe('索引与引导', () => {
     })
   })
 
-  describe('core 区与索引区排序 confidence 降序 → lastConfirmedAt 降序，recallCount 退出', () => {
+  describe('必读全文排序 confidence 降序 → lastConfirmedAt 降序，recallCount 退出', () => {
     it('同 confidence 时 lastConfirmedAt 新的在前，recallCount 高也不提前', () => {
       const recs = [
         record({ id: 'mem_c_old', type: 'preference', confidence: 0.9, lastConfirmedAt: 1 * DAY, recallCount: 100 }),
@@ -399,10 +292,8 @@ describe('索引与引导', () => {
       ]
       const { text, coreIds } = assembleSnapshot({ ...base, registry: zRegistry, records: recs })
       expect(coreIds).toEqual(['mem_c_hi', 'mem_c_new', 'mem_c_old'])
-      const order = (ids: string[]) => ids.map(id => text.indexOf(`[${id}]`))
-      const idx = order(['mem_i_hi', 'mem_i_new', 'mem_i_old'])
-      expect(idx).toEqual([...idx].sort((a, b) => a - b))
-      expect(idx.every(i => i >= 0)).toBe(true)
+      // 成员行不按置信度排：按索引里的先后（这里都在「未整理」，按名称再按 id）
+      for (const id of ['mem_i_hi', 'mem_i_new', 'mem_i_old']) expect(text).toContain(`[${id}]`)
     })
   })
 })
@@ -440,9 +331,21 @@ describe('快照标题下的压缩引擎附注', () => {
     expect(MEMORY_AS_DATA_NOTE).toMatch(/以这里为准/)
   })
 
-  it('尾注还要盖住「摘要里有、这里没有」：那不是不一致，是已删除或已改写，模型不该把它当现存记忆', () => {
-    // 「不一致以这里为准」只管两边都有的条目；用户删掉的记忆在摘要里还可能留着转述，得明说它已不存在
-    expect(MEMORY_AS_DATA_NOTE).toMatch(/这里没有的记忆[^。；]*已删除/)
+  it('尾注盖住「摘要里有、这里没列出」：这里只列一部分，先按 id 或关键词查现状、以查到的为准，查不到的当作暂时无法确认', () => {
+    // 「不一致以这里为准」只管两边都有的条目。注入按主题截断，没列出的可能仍在库里；用户删掉的记忆在摘要里还可能留着转述，按 id 查得出来
+    expect(MEMORY_AS_DATA_NOTE).toMatch(/这里只列出一部分记忆/)
+    expect(MEMORY_AS_DATA_NOTE).toMatch(/这里没列出的[^。]*memory_search[^。]*按 id/)
+    expect(MEMORY_AS_DATA_NOTE).toMatch(/以查到的为准；查不到的，当作暂时无法确认。/)
+    // 目录暂时读不出时检索也查不到：查不到不等于删了或改了
+    expect(MEMORY_AS_DATA_NOTE).not.toMatch(/已删除或已改写/)
+  })
+
+  it('同主题超过成员行上限、只列出一部分时，尾注不把没列出的说成已删除', () => {
+    const records = Array.from({ length: 6 }, (_, i) => record({ id: `m${i}`, name: `条目${i}` }))
+    const { text } = assembleSnapshot({ ...base, records })
+    expect(text).toContain('另有 1 条')
+    expect(text).not.toMatch(/这里没有的记忆[^。；]*已删除/)
+    expect(text).toContain(MEMORY_AS_DATA_NOTE)
   })
 
   it('用量口径：附注与取代句只进 tokens.fixed，usedTokens 不计；core 区预算恰好够标题 + 一条 core 时仍装得下', () => {
@@ -451,15 +354,20 @@ describe('快照标题下的压缩引擎附注', () => {
     // core 区占预算一半：预算取两倍，core 区上限恰好等于标题 + 这一行
     const r = assembleSnapshot({ ...base, records: [core], budget: 2 * used, overflow: 'strict' })
     expect(r.injectedIds).toEqual(['mem_core'])
-    expect(r.usedTokens).toBe(used)
-    // 块：标题、附注、core 行、全文引导、各类怎么用、固定尾注；fixed 扣掉附注与取代句后等于两者都没有时的口径（标题 + 三段尾注）
+    // 计入上限的还有索引区：作用域标题和「未整理」那一行（条数照算必读全文给过的这一条）
+    const area = '\n\n## 全局记忆 · 主题目录\n### 未整理（1 条）'
+    expect(r.indexArea.tokens).toBe(estimateTokens(area))
+    expect(r.usedTokens).toBe(used + r.indexArea.tokens)
+    // 块：标题、附注、core 行、主题目录、尾部导航、全文引导、各类怎么用、固定尾注
     const blocks = r.text.split('\n\n')
     expect(blocks[2]).toBe(line)
-    expect(blocks[4]).toMatch(new RegExp(`^${TYPE_USAGE_HEADING}`))
-    // 按组装时各段的原样计：附注带前后换行，两段尾注带前导换行；取代句在消息里带两个换行接快照正文（换行也计价）
+    expect(blocks[3]).toBe('## 全局记忆 · 主题目录\n### 未整理（1 条）')
+    expect(blocks[6]).toMatch(new RegExp(`^${TYPE_USAGE_HEADING}`))
+    // 按组装时各段的原样计：附注带前后换行，尾注各段带前导换行；取代句在消息里带两个换行接快照正文（换行也计价）
     const noteTokens = estimateTokens(`\n> ${COMPACTION_ENGINE_NOTE}\n`)
     const supersedeTokens = estimateTokens(`${SNAPSHOT_SUPERSEDE_NOTE}\n\n`)
-    expect(r.tokens.fixed - noteTokens - supersedeTokens).toBe(estimateTokens('# 长期记忆') + estimateTokens(`\n${blocks[3]}`) + estimateTokens(`\n${blocks[4]}`) + estimateTokens(`\n${blocks[5]}`))
+    const tail = [4, 5, 6, 7].reduce((n, i) => n + estimateTokens(`\n${blocks[i]}`), 0)
+    expect(r.tokens.fixed - noteTokens - supersedeTokens).toBe(estimateTokens('# 长期记忆') + r.indexArea.tokens + tail)
     expect(r.tokens.workspace + r.tokens.global).toBe(estimateTokens(line))
   })
 
@@ -527,14 +435,6 @@ describe('assembleSnapshot × 密钥遮盖', () => {
     expect(text).not.toContain(FAKE_SECRET.aws)
     expect(text).toContain(`- [mem_named] key ${SECRET_MASK}（摘要）\n`)
     expect(text).toContain(`- [mem_hand] 手写（摘要） · global/备份-${SECRET_MASK}.md`)
-  })
-
-  it('截断导航图里的高频标签同样遮住', () => {
-    const records = [1, 2].map(i => record({ id: `mem_t${i}`, tags: [FAKE_SECRET.sk] }))
-    const { text } = assembleSnapshot({ ...base, records, budget: 5, overflow: 'strict' })
-    expect(text).toContain('索引未列全')
-    expect(text).toContain(`${SECRET_MASK}（2）`)
-    expect(text).not.toContain(FAKE_SECRET.sk)
   })
 
   it('PEM 私钥：core 正文与索引行摘要里整块遮住，正文的 base64 行一行都不出现', () => {

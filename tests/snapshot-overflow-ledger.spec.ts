@@ -210,22 +210,21 @@ describe('严格按上限：95% 提醒', () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await seed(store, 10)
     const used = (await freeze(store, undefined, 1e9)).usedTokens
-    // 每条索引行等长：量出单行与固定开销，预算恰好装下 5 条（用量 = 上限）
-    const nine = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
-    await seed(nine, 9)
-    const line = used - (await freeze(nine, undefined, 1e9)).usedTokens
-    const fiveLines = used - 5 * line
     const d = ledger()
 
     const loose = await freeze(store, d, used * 2, 'strict')
     expect(loose.omittedCount).toBe(0)
     expect(await overflowEntries(d)).toEqual({ open: [], settled: [] })
 
-    const tight = await freeze(store, d, fiveLines, 'strict')
+    // 先用一个小上限量出截断后的用量，再把上限设成恰好这个用量（用到 100%）：成员行的取舍不变
+    const probe = await freeze(store, undefined, 70, 'strict')
+    expect(probe.omittedCount).toBeGreaterThan(0)
+    const tight = await freeze(store, d, probe.usedTokens, 'strict')
     expect(tight.overflowMode).toBe('strict')
-    expect(tight.injectedIds).toHaveLength(5)
-    expect(tight.omittedCount).toBe(5)
-    expect(tight.usedTokens).toBe(fiveLines)
+    expect(tight.usedTokens).toBe(probe.usedTokens)
+    expect(tight.injectedIds).toEqual(probe.injectedIds)
+    // 「未整理」一组按每个主题的上限本来就只发 5 条：因为上限没带入的是这 5 条里没发出去的
+    expect(tight.omittedCount + tight.injectedIds.length).toBe(5)
     const { open } = await overflowEntries(d)
     expect(open.map(overflowLevelOf)).toEqual([{ mode: 'strict', tier: 0 }])
     // 指纹与放宽档位区分开

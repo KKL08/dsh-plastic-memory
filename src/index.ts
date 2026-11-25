@@ -307,7 +307,7 @@ export async function apply(ctx: Context, config: Config) {
     journal,
     index: derivedIndex,
     stats: sidecar.recallStats,
-    // MEMORY.md 里只数久未确认的条数；逐条的陈旧度标注由 snapshot.ts 在注入时算
+    // MEMORY.md 和注入的主题行只数久未确认的条数；逐条的陈旧度标注只出在注入的必读全文和检索结果上
     isStale: (r, now) => stalenessNote(r, registry.get(r.type).decayDays, now) !== '',
     log: ctx.logger,
   })

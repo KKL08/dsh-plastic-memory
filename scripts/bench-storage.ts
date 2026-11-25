@@ -10,7 +10,8 @@
  *   node scripts/bench-storage.ts --tier all             同一项目的 1 千、5 千、2 万条在用记忆
  *   node scripts/bench-storage.ts --tier 5k --rounds 3    CI：1 千与 5 千同机比较
  * 规模模式：选大档时自动先跑 1 千参照；各项报中位数和 p95。整条更新、补证、状态变化三种写入各自按同机比值判定，
- * 任何一项超门槛退出码非 0；新建照常计时、算比值，只报告不判定：新建的判重要读整个作用域给候选打分，
+ * 任何一项超门槛退出码非 0；每一档还核对注入的索引区（主题目录和成员行）在严格、放宽两种模式下都不超过绝对上限，
+ * 超了同样退出码非 0（项目记忆按 30 个主题加「未整理」写好主题索引）；新建照常计时、算比值，只报告不判定：新建的判重要读整个作用域给候选打分，
  * 随规模增长是已知的，等判重有了索引再加断言。
  * 历史、关联和侧表按固定比例生成；索引与日志放在临时目录中、记忆根之外，避免污染用户状态。
  *
@@ -47,7 +48,11 @@ import { resolveDuplicates, type MemoryLogger, type ScopeReadResult } from '../s
 import { CONFIDENCE_BY_SOURCE, type MemoryRecord } from '../src/record-schema.ts'
 import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
-import { SnapshotCache } from '../src/runtime.ts'
+import { SnapshotCache, prereadSnapshot } from '../src/runtime.ts'
+import { assembleSnapshot } from '../src/snapshot.ts'
+import { INDEX_AREA_TOKEN_CAP } from '../src/snapshot-index.ts'
+import { memberLine } from '../src/topic-index.ts'
+import { INDEX_DIR, INDEX_ENTRY_FILE, INDEX_TOPICS_DIR } from '../src/storage/index-store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../src/governance/schema.ts'
@@ -246,7 +251,25 @@ const VERSIONS_PER_MEMORY = 2
 const WRITE_LABELS = ['新建', '整条更新（refine）', '补证（corroborate）', '状态变化（state-change）'] as const
 /** 只报比值、不进退出码的写入（理由见头注释）。 */
 const REPORT_ONLY_LABELS: ReadonlySet<string> = new Set([WRITE_LABELS[0]])
+/** 规模模式给项目记忆写的主题数（另有「未整理」）。 */
+const SCALE_TOPICS = 30
 interface ScaleRow { tier: string; label: string; ms: number; p95: number }
+
+/** 给一个目录写主题索引：在用记忆按先后均分进 SCALE_TOPICS 个主题，余下的进「未整理」。 */
+async function writeTopicIndex(dir: string, records: readonly MemoryRecord[]): Promise<void> {
+  const root = join(dir, INDEX_DIR)
+  await mkdir(join(root, INDEX_TOPICS_DIR), { recursive: true })
+  const active = records.filter(r => r.status === 'active')
+  const per = Math.floor(active.length / (SCALE_TOPICS + 1))
+  const line = (r: MemoryRecord) => memberLine({ id: r.id, name: r.name, summary: r.summary, fileName: `${r.name}.md` })
+  let entry = '# 记忆索引\n'
+  for (let t = 0; t < SCALE_TOPICS; t++) {
+    entry += `\n## [规模主题 ${t}](topics/scale-${t}.md)\n这个主题收着同一类排查经验，用来量注入的索引区\n`
+    await writeFile(join(root, INDEX_TOPICS_DIR, `scale-${t}.md`), `# 规模主题 ${t}\n\n${active.slice(t * per, (t + 1) * per).map(line).join('\n')}\n`, 'utf8')
+  }
+  await writeFile(join(root, INDEX_TOPICS_DIR, '_unsorted.md'), `# 未整理\n\n${active.slice(SCALE_TOPICS * per).map(line).join('\n')}\n`, 'utf8')
+  await writeFile(join(root, INDEX_ENTRY_FILE), entry, 'utf8')
+}
 
 async function runScale(selected: string): Promise<void> {
   const names = selected === 'all' ? ['1k', '5k', '20k'] : selected === '1k' ? ['1k'] : ['1k', selected]
@@ -277,6 +300,7 @@ async function runScale(selected: string): Promise<void> {
       // 分批写文件，避免大档同时打开数万文件耗尽文件描述符。
       for (let i = 0; i < records.length; i += 100) await writeDir(dir, records.slice(i, i + 100))
       await writeFile(join(dir, WORKSPACE_MARKER), `${workspacePath}\n`, 'utf8')
+      await writeTopicIndex(dir, records)
       const globals = Array.from({ length: GLOBAL_COUNT }, (_, i) => ({
         ...makeRecord(`mem_scale_g_${i}`, `scale-global-${i}`, { scope: 'global' }, now),
         status: 'active' as const, deletedAt: undefined,
@@ -374,6 +398,15 @@ async function runScale(selected: string): Promise<void> {
         cache.setWorkspacePath(session, workspacePath)
         if (!(await cache.assemble(session))?.startsWith('# 长期记忆')) throw new Error('快照未组装')
       })
+      // 规模不变量：注入的索引区和记忆条数脱钩。冻结已做过维护，这里按冻结的同一套预读和组装量索引区
+      item = '注入索引区上限'
+      const preread = await prereadSnapshot(store, workspacePath)
+      for (const overflow of ['strict', 'relax'] as const) {
+        const { indexArea } = assembleSnapshot({ ...preread, registry, budget: 4000, now: Date.now(), workspacePath, memoryRoot: root, overflow })
+        const pass = indexArea.tokens <= INDEX_AREA_TOKEN_CAP
+        console.log(`${pass ? 'PASS' : 'FAIL'}：${name} / 注入索引区（${overflow}）约 ${indexArea.tokens} token，上限 ${INDEX_AREA_TOKEN_CAP}`)
+        if (!pass) process.exitCode = 1
+      }
       await measure('memory_search', async () => {
         const r = await executeSearch({ query: `${WORDS[0]} 部署流程` }, exec, { store, registry, host: { contextOf } })
         if (!r.hits.length) throw new Error('检索没有命中')

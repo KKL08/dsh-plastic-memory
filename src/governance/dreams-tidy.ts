@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { jsonObjectIn } from '../json-reply.ts'
-import { RECALL_TIERS, recallOverride, type MemoryRecord, type RecallTier } from '../record-schema.ts'
+import { RECALL_TIERS, effectiveRecall, recallOverride, type MemoryRecord, type RecallTier } from '../record-schema.ts'
 import { SECRET_MASK, maskSecretSurface, maskSecrets } from '../secrets.ts'
 import { UNSORTED_TITLE, readIndex, type IndexFiles } from '../topic-index.ts'
 import { basisOf, scopeKeyOf, type ChangeOp } from './changeset.ts'
@@ -48,14 +48,11 @@ export interface TidyGroup {
 /** 类型默认的注入档位（解析器判断「和现在生效的一样」用的是同一份）。 */
 export type TypeRecall = (type: string) => RecallTier
 
-/** 一条记忆实际生效的注入档位：单条设的，否则类型默认。 */
-const effectiveRecallOf = (r: MemoryRecord, typeRecall: TypeRecall): RecallTier => recallOverride(r) ?? typeRecall(r.type)
-
 function memberRow(r: MemoryRecord, typeRecall: TypeRecall): TidyGroup['members'][number] {
   const masked = maskSecretSurface(r, { severity: 'suspected' })
   return {
     id: r.id, type: r.type, name: masked.name, summary: masked.summary, tags: masked.tags, content: masked.content,
-    recall: recallOverride(r) ?? null, effectiveRecall: effectiveRecallOf(r, typeRecall), related: r.related ?? [],
+    recall: recallOverride(r) ?? null, effectiveRecall: effectiveRecall(r, typeRecall), related: r.related ?? [],
   }
 }
 
@@ -180,7 +177,7 @@ function toOp(o: ParsedOp, current: MemoryRecord, read: ReadonlyMap<string, Memo
     }
     case 'recall': {
       const recall = BACKGROUND_TIERS.find(tier => tier === o.recall)
-      const effective = effectiveRecallOf(current, opts.typeRecall)
+      const effective = effectiveRecall(current, opts.typeRecall)
       if (recall === undefined || recall === effective) return undefined
       return { ...base(), kind: 'set-recall', patch: { recall }, expect: { recall: current.recall ?? null } }
     }

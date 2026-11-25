@@ -347,3 +347,19 @@ describe('toPluginConfig：配置段 → 界面用到的几项', () => {
     expect(toPluginConfig(base)?.customTypes).toEqual({})
   })
 })
+
+describe('类型表单里的说明跟着注入的样子写', () => {
+  it('治理优先级：讲语义体检先查哪类、索引读不出时按它排，不再说带入时排在前面；中英文一致', async () => {
+    const { settingsZh, settingsEn } = await import('../locales/settings.ts')
+    expect(settingsZh['settings.type.priorityHint']).toMatch(/语义体检.*先查.*主题索引读不出/)
+    expect(settingsZh['settings.type.priorityHint']).not.toContain('带入时排在前面')
+    expect(settingsEn['settings.type.priorityHint']).toMatch(/semantic checkup.*first.*topic index cannot be read/)
+    expect(settingsEn['settings.type.priorityHint']).not.toMatch(/brought in first/)
+  })
+
+  it('确认周期：成员行不逐条标陈旧，说明不写「带入时」', async () => {
+    const { settingsZh } = await import('../locales/settings.ts')
+    expect(settingsZh['settings.type.decayDaysHint']).not.toContain('带入时')
+    expect(settingsZh['settings.type.decayDaysHintRequired']).not.toContain('带入时')
+  })
+})
