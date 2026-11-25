@@ -79,14 +79,22 @@ export function catchUpFor(context: SearchContext, deps: Pick<DialogueSearchDeps
   return deps.catchup.beforeSearch({ sessionId: context.session.id, cwd, isSubagent: context.delegation !== undefined }, CATCHUP_FOCUS_BUDGET_MS, deps.hasBackgroundTimer?.() ? 0 : CATCHUP_QUEUE_BUDGET_MS)
 }
 
-/** 一次检索里原话检索和附原话共用追库和会话表：各只做一次，先到的那路发起。 */
+/**
+ * 一次检索里原话检索和附原话共用追库和会话表：各只做一次，先到的那路发起。
+ * 追库这次对过账的话，会话表用对账列到的那份清单，不再列一次。
+ */
 export function shareDialogueReads(deps: DialogueSearchDeps): DialogueSearchDeps {
   let readiness: Promise<DialogueReadiness> | undefined
   let sessions: Promise<ListedSessions> | undefined
+  const tableOf = async () => {
+    const ready = await readiness
+    const listed = ready?.kind === 'ready' ? ready.listed : undefined
+    return listed !== undefined ? listSessionTable({ ...deps, host: { ...deps.host, listSessions: async () => listed } }) : deps.sessions?.() ?? listSessionTable(deps)
+  }
   return {
     ...deps,
     catchup: { beforeSearch: (...args) => readiness ??= deps.catchup.beforeSearch(...args), isOutOfScope: id => deps.catchup.isOutOfScope(id) },
-    sessions: () => sessions ??= deps.sessions?.() ?? listSessionTable(deps),
+    sessions: () => sessions ??= tableOf(),
   }
 }
 

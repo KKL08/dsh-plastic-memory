@@ -1879,11 +1879,14 @@ describe('配置热生效（loader/volatile-update）', () => {
     return { memoryRoot, defs, config, assembleOnce, snapshotCount, update, tool, exec, save, command, sessionView, putGlobal, endCompaction }
   }
 
+  /** 缺省设置（检索来源两者、记忆带原话开）下各档的下钻引导。 */
+  const defaultGuidance = (level: 'strict' | 'active') => evidenceGuidance(level, { memoryQuotes: true, searchSource: 'both' })
+
   it('改上限、超限处理、溯源档位后，同一会话下一次组装就按新值（不等压缩）', async () => {
     const t = await setup()
     await t.putGlobal({ id: 'mem_k', type: 'knowledge', name: '报销截止', content: '报销截止每月 25 日', summary: '报销截止日' })
     const first = await t.assembleOnce()
-    expect(first).toContain(EVIDENCE_GUIDANCE.strict)
+    expect(first).toContain(defaultGuidance('strict'))
     expect(first).toContain('mem_k')
     await t.sessionView(v => expect(v).toMatchObject({ budget: 4000, overflowMode: 'relax', injectedIds: ['mem_k'], omittedCount: 0 }))
     expect(await t.assembleOnce()).toBe(first) // 没改配置：冻结快照不动
@@ -1891,21 +1894,22 @@ describe('配置热生效（loader/volatile-update）', () => {
     const paths = await t.update({ snapshotTokenBudget: 1.5, snapshotOverflow: 'strict', evidenceLookup: 'active' })
     expect(paths).toEqual([['snapshotTokenBudget'], ['snapshotOverflow'], ['evidenceLookup']])
     const second = await t.assembleOnce()
-    expect(second).toContain(EVIDENCE_GUIDANCE.active)
-    expect(second).not.toContain(EVIDENCE_GUIDANCE.strict)
+    expect(second).toContain(defaultGuidance('active'))
+    expect(second).not.toContain(defaultGuidance('strict'))
     expect(second).not.toContain('- [mem_k]') // 严格按 1.5 token 的上限：这条装不下
     // 上限是 number（配置就是 number），会话视图原样带出
     await t.sessionView(v => expect(v).toMatchObject({ budget: 1.5, overflowMode: 'strict', injectedIds: [], omittedCount: 1 }))
   })
 
   it('改记忆带原话或检索来源后，下一次组装换下钻引导的文案；不改设置时冻结的快照不动', async () => {
-    const t = await setup()
+    // 从只查记忆、不带原话起步，逐个打开
+    const t = await setup({ search: { source: 'memory', memoryQuotes: false } })
     await t.putGlobal({ id: 'mem_k', type: 'knowledge', name: '报销截止', content: '报销截止每月 25 日', summary: '报销截止日' })
     const first = await t.assembleOnce()
     expect(first).toContain(EVIDENCE_GUIDANCE.strict)
     expect(await t.assembleOnce()).toBe(first)
 
-    expect(await t.update({ search: { memoryQuotes: true } })).toEqual([['search', 'memoryQuotes']])
+    expect(await t.update({ search: { source: 'memory', memoryQuotes: true } })).toEqual([['search', 'memoryQuotes']])
     const quoted = await t.assembleOnce()
     expect(quoted).toContain(evidenceGuidance('strict', { memoryQuotes: true, searchSource: 'memory' }))
     expect(quoted).not.toContain(EVIDENCE_GUIDANCE.strict)
@@ -1936,9 +1940,9 @@ describe('配置热生效（loader/volatile-update）', () => {
     expect(t.snapshotCount()).toBe(1)
 
     expect(await t.update({ snapshotTokenBudget: 8000, evidenceLookup: 'active' })).toEqual([['evidenceLookup']])
-    expect(await t.assembleOnce()).toContain(EVIDENCE_GUIDANCE.active)
+    expect(await t.assembleOnce()).toContain(defaultGuidance('active'))
     expect(t.snapshotCount()).toBe(2)
-    expect(await t.assembleOnce()).toContain(EVIDENCE_GUIDANCE.active)
+    expect(await t.assembleOnce()).toContain(defaultGuidance('active'))
     expect(t.snapshotCount()).toBe(2)
   })
 

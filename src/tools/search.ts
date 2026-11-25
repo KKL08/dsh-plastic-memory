@@ -37,10 +37,10 @@ export interface SessionRecall {
 
 /** memory_search 工具的依赖，纯逻辑层与框架绑定层共用。 */
 export interface SearchToolDeps {
-  /** 缺省仍只查记忆；配置热更新每次现读。 */
+  /** 没传时按只查记忆（配置的缺省是两者）；配置热更新每次现读。 */
   searchSource?: () => SearchSource
   dialogue?: DialogueSearchDeps
-  /** 记忆带原话：开着时带关键词的检索给排名靠前的记忆附出处那一轮的一问一答。缺省关；每次现读。 */
+  /** 记忆带原话：开着时带关键词的检索给排名靠前的记忆附出处那一轮的一问一答。没传时按关；每次现读。 */
   memoryQuotes?: () => boolean
   store: MemoryStore
   registry: TypeRegistry

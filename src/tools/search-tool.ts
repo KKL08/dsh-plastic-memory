@@ -4,6 +4,7 @@ import { executeSearch, renderSearchResult, type SearchHit, type SearchToolDeps 
 import { toToolOutput } from './output.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import { SEARCH_SOURCES } from '../contract-codes.ts'
+import { DIALOGUE_SECTION_HEADING, MEMORY_SECTION_HEADING } from '../search/dialogue-format.ts'
 
 /**
  * types 的参数说明：固定用法 + 当前场景的类型列表。类型可配置，名字全从类型表读；
@@ -38,8 +39,9 @@ export function createSearchTool(deps: SearchToolDeps): ToolDefinition {
     name: 'memory_search',
     description: [
       '查长期记忆用这个工具：想知道某件事有没有记过、记的是什么，或按 id 取一条。',
-      '范围是本项目和全局记忆。结果按相关性排好，密钥已遮盖，每条带出处、是否陈旧和记忆文件的绝对路径，要看原文就直接读这个文件；正文给全文或其中一段（节选）。代码和项目文件用 grep 搜；记忆目录不要用 grep 搜：那里还存着已删除和其他项目的记忆，grep 的结果也不排序，所以找记忆统一用这个工具。',
-      '能查本项目过往对话的原话，能找到没记成记忆的内容。',
+      '范围是本项目和全局记忆。结果按相关性排好，记忆条目里的密钥已遮盖，每条带出处、是否陈旧和记忆文件的绝对路径，要看原文就直接读这个文件；正文给全文或其中一段（节选）。代码和项目文件用 grep 搜；记忆目录不要用 grep 搜：那里还存着已删除和其他项目的记忆，grep 的结果也不排序，所以找记忆统一用这个工具。',
+      '能查本项目过往对话的原话，能找到没记成记忆的内容。原话照当时的原文给出，可能含密钥等敏感内容。',
+      `排在前面的记忆后面可能附着它出处的原话（看用户的设置）。记忆和原话都查时，结果分${MEMORY_SECTION_HEADING}${DIALOGUE_SECTION_HEADING}两段：其他原话是没附在记忆下面的原话，某一轮是某条记忆的出处时会注明对应哪条记忆。`,
       '原话结果里每条消息带引用，可以用 memory_source 看这条消息的更多内容；展开的内容有长度上限，超出会标明截断。',
       '查询写法：',
       '- 查询是空格分隔的关键词，中英文均可，版本号、路径这类原样文字可以直接搜。同时含全部关键词的记忆排在最前，所以一次查询里放预期会在同一条记忆里一起出现的词，排序最准。',

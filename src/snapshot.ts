@@ -129,9 +129,9 @@ export function assembleSnapshot(deps: {
   memoryRoot?: string
   /** 证据下钻档位：给出时在快照末尾拼对应引导文案；缺省不拼（纯测试场景）。 */
   evidenceLookup?: EvidenceLookupLevel
-  /** 记忆带原话（search.memoryQuotes）：决定下钻引导用哪套文案。缺省关。 */
+  /** 记忆带原话（search.memoryQuotes）：决定下钻引导用哪套文案。没传时按关。 */
   memoryQuotes?: boolean
-  /** 检索来源（search.source）：含原话或记忆带原话开着时，下钻引导补一句按消息引用看更多内容。缺省只查记忆。 */
+  /** 检索来源（search.source）：含原话或记忆带原话开着时，下钻引导补一句按消息引用看更多内容。没传时按只查记忆。 */
   searchSource?: SearchSource
   /** 超出上限时：relax（缺省）需要多少带多少，strict 按优先级装入、超出的截掉。 */
   overflow?: OverflowMode

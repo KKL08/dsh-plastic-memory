@@ -42,3 +42,9 @@ export async function openRelease020Pending(opts: { root: string; warnings: stri
     schemas: { snapshots: schema.memorySnapshotSchema, pending: schema.pendingDecisionSchema, scanCache: schema.scanCacheSchema, adviceIgnores: schema.adviceIgnoreSchema },
   }).pending
 }
+
+/** 0.2.0 的插件配置 schema：从它的入口模块取，构造出来就是宿主按它加载配置时拿到的值。 */
+export async function openRelease020Config(): Promise<new (raw: unknown) => { search: Record<string, unknown> }> {
+  const mod = await import(pathToFileURL(join(releaseDir, 'lib', 'index.js')).href) as { Config: new (raw: unknown) => { search: Record<string, unknown> } }
+  return mod.Config
+}

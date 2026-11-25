@@ -7,6 +7,7 @@ import { DialogueRecordStore } from '../src/storage/dialogue-records.ts'
 import { dialogueTokenizer, type DialogueTokenizer } from '../src/search/dialogue-tokenizer.ts'
 import { DialogueCatchup } from '../src/tools/dialogue-catchup.ts'
 import { executeSearch, renderSearchResult, type SearchContext, type SearchToolDeps } from '../src/tools/search.ts'
+import { Config } from '../src/index.ts'
 import { NoReviewList } from '../src/storage/no-review.ts'
 import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
@@ -184,13 +185,21 @@ describe('三个来源乘带原话开关', () => {
   })
 })
 
-describe('默认设置（两者、带原话）', () => {
+describe('默认设置', () => {
+  it('配置文件没写这两个键：检索来源是两者、记忆带原话开', () => {
+    const config = new Config({} as never)
+    expect(config.search.source.get()).toBe('both')
+    expect(config.search.memoryQuotes.get()).toBe(true)
+  })
+
   it('记忆段和升级前一致：条目、顺序、说明都不变，只多出附在后面的原话', async () => {
     const records = [
       anchored('a', [10, 12], { id: 'mem_a', name: '写锁时机', content: '写锁在提交前拿' }),
       anchored('b', [10, 12], { id: 'mem_b', name: '写锁日志', content: '写锁要打日志' }),
     ]
-    const { deps } = await setup(records)
+    const config = new Config({} as never)
+    const { deps: built } = await setup(records)
+    const deps = { ...built, searchSource: () => config.search.source.get(), memoryQuotes: () => config.search.memoryQuotes.get() }
     const baseline = await memoryOnly(deps)
     const { result, text } = await run(deps)
     expect(result.hits.map(({ quote: _quote, ...hit }) => hit)).toEqual(baseline.hits)
@@ -198,6 +207,28 @@ describe('默认设置（两者、带原话）', () => {
     expect(result.hits.every(h => h.quote?.includes(DIALOGUE_QUOTE_TAG))).toBe(true)
     expect(text.startsWith(`${MEMORY_SECTION_HEADING}\n`)).toBe(true)
     expect(text.indexOf(MEMORY_SECTION_HEADING)).toBeLessThan(text.indexOf(DIALOGUE_SECTION_HEADING))
+  })
+})
+
+describe('每次检索前的追库', () => {
+  it('开着的会话这次没有新事件：不写库、不动待建队列', async () => {
+    const { deps, host } = await setup([])
+    host.listSessions.mockResolvedValue(['a', 'b', 'c'].map(id => ({ id, cwd: '/proj', isSubagent: false, isLive: id === 'a' })))
+    await run(deps)
+    const commits = vi.spyOn(db, 'commitBatch'); const dequeues = vi.spyOn(db, 'dequeue')
+    host.readSessionLog.mockClear()
+    await run(deps)
+    expect(host.readSessionLog.mock.calls.map(c => c[0])).toContain('a')
+    expect(commits).not.toHaveBeenCalled()
+    expect(dequeues).not.toHaveBeenCalled()
+  })
+
+  it('这次要对账时，对账和原话放行共用同一次会话清单', async () => {
+    const { deps, host } = await setup([anchored('a', [10, 12], { id: 'mem_a', name: '写锁时机', content: '写锁在提交前拿' })])
+    const { result } = await run(deps)
+    expect(host.listSessions).toHaveBeenCalledTimes(1)
+    expect(result.hits[0]!.quote).toContain('写锁要在提交前拿')
+    expect(result.dialogueText).toContain('写锁超时设三十秒')
   })
 })
 
