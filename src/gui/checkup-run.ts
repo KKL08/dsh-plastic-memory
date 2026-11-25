@@ -99,7 +99,7 @@ export interface CheckupRunInput {
   signal?: AbortSignal
   /** 认领到之后、开跑之前再确认一次：返回 false 就放掉认领，结果算取消（自动体检传「仍到期」）。 */
   confirmHeld?: () => Promise<boolean>
-  /** 自动体检选的模型用不了、这次改用了默认模型：写进最近一次结果；缺省没有退回。 */
+  /** 体检选的模型用不了、这次改用了默认模型：写进最近一次结果；缺省没有退回。 */
   modelFallback?: CheckupResult['modelFallback']
   /** 全部重查（界面「全部重查」）：见 tools/scan.ts ScanInput.isFullRecheck。缺省为普通体检。 */
   isFullRecheck?: boolean

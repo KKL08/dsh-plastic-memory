@@ -160,6 +160,7 @@ function guiCommand(w: MemoryWorld, store: MemoryStore, now: number) {
   const sidecar = w.sidecar
   return createMemoryCommand({
     selections: new ModelSelectionStore(sidecar.modelSelections),
+    resolveCheckupLlm: async () => ({ llm: null, isSelected: false, fellBack: false }),
     memoryRoot: w.root, store, decisions: w.decisions, snapshots: w.snapshots, cache: sidecar.scanCache,
     checkups: new CheckupRecordStore(sidecar.checkups), autoCheckups: new AutoCheckupSettingStore(sidecar.autoCheckups), ignores: w.ignores, registry, views: w.views,
     agentsMd: createAgentsMdWriter(join(w.root, 'AGENTS.md')),

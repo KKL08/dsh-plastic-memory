@@ -448,7 +448,7 @@ describe('记忆文件位置「在访达中显示」', () => {
   })
 })
 
-describe('自动体检用的模型', () => {
+describe('体检用的模型', () => {
   const CHOICES: ModelChoices = [
     { id: 'deepseek-official', name: 'DeepSeek', models: [{ id: 'deepseek-pro', name: 'DeepSeek Pro', efforts: [{ id: 'high', name: '高' }] }] },
     { id: 'provider-x', name: 'Provider X', models: [{ id: 'model-x', name: 'Model X', efforts: [] }] },
@@ -463,14 +463,14 @@ describe('自动体检用的模型', () => {
     })
     const form = createFakeConfigForm(opts.value ? { value: opts.value } : {})
     renderInShell(<SettingsPage form={form} onOpenMemoryPage={() => {}} now={NOW} />, gateway)
-    return { gateway, form, picker: () => screen.getByRole('combobox', { name: '自动体检用的模型' }) }
+    return { gateway, form, picker: () => screen.getByRole('combobox', { name: '体检用的模型' }) }
   }
   const sent = (gateway: ReturnType<typeof createFakeGateway>, cmd: MemoryCommand['cmd']) => gateway.executed.filter(e => e.command.cmd === cmd).map(e => e.command)
 
   it('在「怎么管」里，按提供方分组列出 DeepSeek Harness 里能选的模型，当前跟随默认模型', async () => {
     const { gateway, picker } = setupModel()
     const manage = screen.getAllByRole('heading', { level: 2 }).find(h => h.textContent === '怎么管')!.closest('.pm-group') as HTMLElement
-    expect(within(manage).getByRole('combobox', { name: '自动体检用的模型' })).toBeInTheDocument()
+    expect(within(manage).getByRole('combobox', { name: '体检用的模型' })).toBeInTheDocument()
     await waitFor(() => { expect(picker().querySelectorAll('optgroup')).toHaveLength(2) })
     expect((picker() as HTMLSelectElement).selectedOptions[0]).toHaveTextContent('跟随默认模型')
     expect(sent(gateway, 'list-models')).toEqual([{ cmd: 'list-models' }])
@@ -483,7 +483,7 @@ describe('自动体检用的模型', () => {
       respond: command => command.cmd === 'list-models' ? { ok: true, cmd: command.cmd, providers: CHOICES } : { ok: true, cmd: command.cmd },
     })
     renderInShell(<SettingsPage form={createFakeConfigForm()} onOpenMemoryPage={() => {}} now={NOW} />, gateway)
-    const picker = screen.getByRole('combobox', { name: '自动体检用的模型' })
+    const picker = screen.getByRole('combobox', { name: '体检用的模型' })
     await waitFor(() => { expect(picker.querySelectorAll('optgroup')).toHaveLength(2) })
     expect((picker as HTMLSelectElement).selectedOptions[0]).toHaveTextContent('跟随默认模型')
     expect(picker).toBeEnabled()
@@ -491,7 +491,7 @@ describe('自动体检用的模型', () => {
 
   it('当前值取体检视图里存的选择，带推理强度', async () => {
     setupModel({ model: { provider: 'deepseek-official', model: 'deepseek-pro', reasoningEffort: 'high' } })
-    await waitFor(() => { expect((screen.getByRole('combobox', { name: '自动体检用的模型' }) as HTMLSelectElement).selectedOptions[0]).toHaveTextContent('DeepSeek Pro') })
+    await waitFor(() => { expect((screen.getByRole('combobox', { name: '体检用的模型' }) as HTMLSelectElement).selectedOptions[0]).toHaveTextContent('DeepSeek Pro') })
     expect((screen.getByRole('combobox', { name: '推理强度' }) as HTMLSelectElement).selectedOptions[0]).toHaveTextContent('高')
   })
 
@@ -730,7 +730,7 @@ describe('自动体检用的模型', () => {
 
   it('英文文案同一口径', () => {
     const enT = createTranslator(en)
-    expect(enT('settings.checkupModel.label')).toBe('Model for automatic checkups')
+    expect(enT('settings.checkupModel.label')).toBe('Model for checkups')
     expect(enT('settings.checkupModel.follow')).toBe('Follow the default model')
     expect(enT('settings.checkupModel.listPartial', { providers: 'Provider X' })).toBe("Couldn't load the models from Provider X. Reopen this page to try again.")
   })

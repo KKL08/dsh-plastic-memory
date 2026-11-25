@@ -332,7 +332,7 @@ function MigrationNote({ draft }: { draft: ReturnType<typeof useSettingsDraft> }
 }
 
 /**
- * 自动体检用的模型。改了立即存，不进保存行：存在插件的共享设置里（set-model-selection），几个 DeepSeek Harness 进程读同一份。
+ * 体检用的模型（自动体检和记忆页的立即体检都用它）。改了立即存，不进保存行：存在插件的共享设置里（set-model-selection），几个 DeepSeek Harness 进程读同一份。
  * 当前值取体检视图；能选的模型在打开设置页时问一次（list-models）。没有会话、配置文件关掉体检时置灰，说明换成原因；体检视图还没读到时也置灰。
  *
  * 连续选时保存一个接一个发：同一时刻只有一个在途，在途时再选的只记最后一次，等在途的回来再发，服务端收到的顺序就是选的顺序。

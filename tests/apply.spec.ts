@@ -38,6 +38,7 @@ import { GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_WORKSPACE_MAP_
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
+import { ModelSelectionStore } from '../src/governance/background-llm.ts'
 import { defaultJiebaLoader } from '../src/search/jieba-segmenter.ts'
 import { createRootLock } from '../src/storage/root-lock.ts'
 import { encodeMemoryCommand } from '../src/gui/contract.ts'
@@ -655,23 +656,45 @@ describe('自动体检接线', () => {
     expect(ctx.llmRequests).toEqual([])
   })
 
-  it('有会话的手动体检照旧用借用会话的模型：会话解析不出模型时回 llm-unavailable，不改用默认模型', async () => {
+  it('手动体检用设置里选的模型：没选时用宿主默认模型，都不借发命令那个会话的模型', async () => {
     const memoryRoot = await seedMemory(await makeTmpRoot())
     const defs: Array<{ handler(inv: { rawInput: string; agent: unknown }): Promise<{ text?: string }> }> = []
     const ctx = mockCtx({
       commands: { register: (def) => { defs.push(def as (typeof defs)[number]); return () => {} } },
       agentDefaultModel: { currentSelection: () => DEFAULT_ROUTE },
     })
-    await apply({ ...ctx, logger: { info() {}, warn() {}, error() {} } } as never, new Config({ memoryRoot } as never))
+    // 宿主 llm 服务带上列模型的部分：选的模型查得到才会用它
+    const models = [{ id: 'deepseek-v4-flash', name: 'flash' }, { id: 'deepseek-v4-pro', name: 'pro' }]
+    const hostLlm = { ...(ctx.get('llm') as object), listProviders: () => [{ id: 'deepseek', name: 'DeepSeek' }], listModels: async () => models, resolveModelInfo: async () => ({}) }
+    const get = (name: string) => (name === 'llm' ? hostLlm : ctx.get(name))
+    await apply({ ...ctx, get, logger: { info() {}, warn() {}, error() {} } } as never, new Config({ memoryRoot } as never))
     const scan = async (agent: unknown) => JSON.parse((await defs[0]!.handler({ rawInput: ' scan {"layer":{"kind":"global"}}', agent })).text!) as Record<string, unknown>
-    expect(await scan({ session: { header: { id: 'sess-x' }, seq: 1 } })).toMatchObject({ ok: false, code: 'llm-unavailable' })
-    expect(ctx.llmRequests).toEqual([])
-    const routed = { session: { header: { id: 'sess-x' }, seq: 1, requestHeader: () => undefined }, options: { provider: 'deepseek', model: 'deepseek-v4-flash' } }
+    const routed = { session: { header: { id: 'sess-x' }, seq: 1, requestHeader: () => undefined }, options: { provider: 'deepseek', model: 'session-model' } }
+    const modelsOf = (from: number) => ctx.llmRequests.slice(from).map(r => (r as { model?: string }).model)
+
     expect(await scan(routed)).toMatchObject({ ok: true, cmd: 'scan' })
-    expect(ctx.llmRequests[0]).toMatchObject({ provider: 'deepseek', model: 'deepseek-v4-flash' })
+    expect(modelsOf(0)).not.toHaveLength(0)
+    expect(new Set(modelsOf(0))).toEqual(new Set([DEFAULT_ROUTE.model]))
+
+    await new ModelSelectionStore(sidecarAt(memoryRoot).modelSelections).set('checkup', { provider: 'deepseek', model: 'deepseek-v4-flash' })
+    const before = ctx.llmRequests.length
+    expect(await scan(routed)).toMatchObject({ ok: true, cmd: 'scan' })
+    expect(modelsOf(before)).not.toHaveLength(0)
+    expect(new Set(modelsOf(before))).toEqual(new Set(['deepseek-v4-flash']))
   })
 
-  it('界面全库体检：两个会话各自路由到不同模型，用的是发命令那个会话的模型；全局与各项目的记忆都交给内容检查', async () => {
+  it('没选体检的模型、宿主也没有默认模型：手动体检回 llm-unavailable，不改用发命令那个会话的模型', async () => {
+    const memoryRoot = await seedMemory(await makeTmpRoot())
+    const defs: Array<{ handler(inv: { rawInput: string; agent: unknown }): Promise<{ text?: string }> }> = []
+    const ctx = mockCtx({ commands: { register: (def) => { defs.push(def as (typeof defs)[number]); return () => {} } } })
+    await apply({ ...ctx, logger: { info() {}, warn() {}, error() {} } } as never, new Config({ memoryRoot } as never))
+    const routed = { session: { header: { id: 'sess-x' }, seq: 1, requestHeader: () => undefined }, options: { provider: 'deepseek', model: 'session-model' } }
+    const r = JSON.parse((await defs[0]!.handler({ rawInput: ' scan {"layer":{"kind":"global"}}', agent: routed })).text!) as Record<string, unknown>
+    expect(r).toMatchObject({ ok: false, cmd: 'scan', code: 'llm-unavailable' })
+    expect(ctx.llmRequests).toEqual([])
+  })
+
+  it('界面全库体检：用体检的模型，不随发命令的会话变；全局与各项目的记忆都交给内容检查', async () => {
     const memoryRoot = await seedMemory(await makeTmpRoot())
     for (const [ws, id] of [['/tmp/pm-wire-proj-a', 'mem_wire_a'], ['/tmp/pm-wire-proj-b', 'mem_wire_b']] as const) {
       const dir = join(memoryRoot, workspaceDirName(ws))
@@ -689,23 +712,26 @@ describe('自动体检接线', () => {
       ({ session: { header: { id: sessionId }, seq: 1, requestHeader: () => undefined }, options: { provider: 'deepseek', model } })
     const scan = async (agent: unknown) => JSON.parse((await defs[0]!.handler({ rawInput: ' scan {}', agent })).text!) as Record<string, unknown>
 
-    expect(await scan(agentOn('sess-a', 'deepseek-v4-flash'))).toMatchObject({ ok: true, cmd: 'scan' })
+    expect(await scan(agentOn('sess-a', 'session-model'))).toMatchObject({ ok: true, cmd: 'scan' })
     expect(ctx.llmRequests.length).toBeGreaterThan(0)
-    expect(ctx.llmRequests.every(r => (r as { model?: string }).model === 'deepseek-v4-flash')).toBe(true)
+    expect(ctx.llmRequests.every(r => (r as { model?: string }).model === DEFAULT_ROUTE.model)).toBe(true)
     const sent = JSON.stringify(ctx.llmRequests)
     for (const id of ['mem_seed', 'mem_wire_a', 'mem_wire_b']) expect(sent).toContain(id)
 
+    // 换一个路由到别的模型的会话再体检：添一条记忆，免得内容检查全走缓存、一次请求都不发
+    await writeFile(join(memoryRoot, 'global', 'mem_wire_new.md'), encodeRecord(record({ id: 'mem_wire_new' }), {}), 'utf8')
     const before = ctx.llmRequests.length
-    expect(await scan(agentOn('sess-b', 'deepseek-v4-pro'))).toMatchObject({ ok: true, cmd: 'scan' })
+    expect(await scan(agentOn('sess-b', 'other-session-model'))).toMatchObject({ ok: true, cmd: 'scan' })
     expect(ctx.llmRequests.length).toBeGreaterThan(before)
-    expect(ctx.llmRequests.slice(before).every(r => (r as { model?: string }).model === 'deepseek-v4-pro')).toBe(true)
+    expect(ctx.llmRequests.slice(before).every(r => (r as { model?: string }).model === DEFAULT_ROUTE.model)).toBe(true)
   })
 })
 
 /** 体检后续段：手动体检之后在后台给新冲突生成处理建议；插件卸载时取消它，视图文件里不留「正在生成」。 */
 describe('体检后续段接线', () => {
   type CommandDef = { handler(inv: { rawInput: string; agent: unknown }): Promise<{ text?: string }> }
-  const routed = { session: { header: { id: 'sess-x' }, seq: 1, requestHeader: () => undefined }, options: { provider: 'deepseek', model: 'deepseek-v4-flash' } }
+  const routed = { session: { header: { id: 'sess-x' }, seq: 1, requestHeader: () => undefined }, options: { provider: 'deepseek', model: 'session-model' } }
+  const CHECKUP_ROUTE = { provider: 'deepseek', model: 'deepseek-v4-flash' }
   const conflictFound: StreamChunk[] = [
     { type: 'text-delta', index: 0, text: JSON.stringify({ findings: [{ type: 'conflict', memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', suggestedAction: '裁决' }] }) },
     { type: 'finish', reason: { kind: 'stop' } },
@@ -723,7 +749,11 @@ describe('体检后续段接线', () => {
       await writeFile(join(memoryRoot, 'global', `${id}.md`), encodeRecord(record({ id, name: id, content, ...source }), {}), 'utf8')
     }
     const defs: CommandDef[] = []
-    const ctx = mockCtx({ commands: { register: (def) => { defs.push(def as CommandDef); return () => {} } }, ...(o.sessionQuery !== undefined ? { sessionQuery: o.sessionQuery } : {}) })
+    // 体检用宿主默认模型（没选体检模型）：和下面借来的会话的模型不是同一个
+    const ctx = mockCtx({
+      commands: { register: (def) => { defs.push(def as CommandDef); return () => {} } }, agentDefaultModel: { currentSelection: () => CHECKUP_ROUTE },
+      ...(o.sessionQuery !== undefined ? { sessionQuery: o.sessionQuery } : {}),
+    })
     const get = (name: string) => (name === 'llm' && llm !== undefined ? llm : ctx.get(name))
     const tools = new Map<string, { execute(args: unknown, exec: unknown): Promise<unknown> }>()
     const register = (def: { name: string; execute(args: unknown, exec: unknown): Promise<unknown> }) => { tools.set(def.name, def); return ctx.tools.register(def) }
@@ -776,7 +806,7 @@ describe('体检后续段接线', () => {
     expect(prompt).toContain('sess-mem_b 里的原话')
   })
 
-  it('对话里 agent 调 memory_scan 扫出冲突：不跟着生成建议；之后在记忆页手动体检才生成，用的是记忆页借来的会话的模型', async () => {
+  it('对话里 agent 调 memory_scan 扫出冲突：不跟着生成建议；之后在记忆页手动体检才生成，用的是体检的模型', async () => {
     /** 生成建议的那几次调用各用了哪个模型；体检的内容检查一律回一条横向冲突。 */
     const suggestionModels: string[] = []
     const llm = {
@@ -800,7 +830,7 @@ describe('体检后续段接线', () => {
     const [entry] = await t.ledger()
     expect(entry).toMatchObject({ memoryIds: ['mem_a', 'mem_b'] })
     expect(entry!.suggestion).toBeUndefined()
-    // 对话里那次如果也跟出一段，会先于下面这段用对话的模型生成；这里只该有记忆页这一段、用记忆页的模型
+    // 对话里那次如果也跟出一段，会先于下面这段用对话的模型生成；这里只该有记忆页这一段、用体检的模型
     expect(await t.scanGlobal()).toMatchObject({ ok: true, cmd: 'scan' })
     await vi.waitFor(async () => {
       expect((await t.ledger())[0]).toMatchObject({ id: entry!.id, suggestion: { action: 'keep-a' } })

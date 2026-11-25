@@ -134,11 +134,13 @@ All notable changes to this project are documented here. The format follows
   period, and Edit opens the form where you change it. A memory left
   unconfirmed for longer shows up as not confirmed in a while, so the
   reminder can follow how quickly each kind of information goes out of date.
-- Automatic checkups can use a model of your choice: the settings page lists
+- Checkups can use a model of your choice: the settings page lists
   the models available in DeepSeek Harness by provider, with reasoning effort
   where the model offers it, and the choice applies right away in every
-  window. If the chosen model becomes unavailable, the checkup runs on the
-  default model and says so in its result.
+  window, to automatic checkups and to Check now on the memory page alike.
+  Without a choice, both use the default model. If the chosen model becomes
+  unavailable, the checkup runs on the default model and says so in its
+  result.
 - Memory files can hold new optional keys that upcoming features will use:
   when a fact took effect, which sessions a memory came from and how it last
   changed, related memories, the memories a decision depends on, a

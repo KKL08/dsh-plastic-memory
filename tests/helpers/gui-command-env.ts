@@ -12,7 +12,7 @@ import { buildTypeRegistry } from '../../src/type-registry.ts'
 import { type PendingTable } from '../../src/governance/decisions.ts'
 import { AdviceIgnoreStore } from '../../src/governance/advice-ignores.ts'
 import type { SemanticLlm } from '../../src/governance/semantic-scan.ts'
-import { ModelSelectionStore, type HostModelCatalog } from '../../src/governance/background-llm.ts'
+import { ModelSelectionStore, type HostModelCatalog, type ResolvedLlm } from '../../src/governance/background-llm.ts'
 import { RETENTION_MS } from '../../src/retention.ts'
 import { ViewWriter, collectCheckupView, collectGlobalViews } from '../../src/gui/view-writer.ts'
 import { createMemoryCommand } from '../../src/gui/commands.ts'
@@ -41,6 +41,8 @@ interface EnvOpts {
   workspacePath?: string
   delegationDepth?: number
   llm?: SemanticLlm | null
+  /** 手动体检按体检设置解析出的模型；缺省用 llm，当作没选模型、用的是默认模型。 */
+  checkupLlm?: ResolvedLlm
   /** Instructions keyed by global or workspace path; workspace entries include both layers. */
   instructions?: Parameters<typeof instructionsOf>[0]
   now?: number
@@ -97,6 +99,7 @@ function env(opts: EnvOpts = {}) {
     agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')),
     host: { contextOf: async () => ({ workspacePath: 'workspacePath' in opts ? opts.workspacePath : SESSION_WS, delegationDepth: opts.delegationDepth ?? 0, session: { id: 'sess-1' } }), llmOf: () => (opts.llm === undefined ? null : opts.llm), modelCatalog: () => opts.catalog },
     instructions,
+    resolveCheckupLlm: async () => opts.checkupLlm ?? { llm: opts.llm ?? null, isSelected: false, fellBack: false },
     ...(opts.governanceEnabled !== undefined ? { isGovernanceEnabled: () => opts.governanceEnabled! } : {}),
     ...(opts.readEvent !== undefined ? { getReadEvent: () => opts.readEvent! } : {}),
     isLegacyImportSettled: () => sidecar.isLegacyImportSettled(),

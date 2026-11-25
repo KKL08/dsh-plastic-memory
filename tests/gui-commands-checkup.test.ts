@@ -41,6 +41,30 @@ describe('scan', () => {
     expect(await e.cache.list()).toEqual([])
   })
 
+  it('手动体检用体检设置解析出的模型，不用借用会话的模型', async () => {
+    let sessionCalls = 0
+    const session: SemanticLlm = { complete: async () => { sessionCalls++; return JSON.stringify({ findings: [] }) } }
+    const e = env({ llm: session, checkupLlm: { llm: conflictLlm, isSelected: true, fellBack: false } })
+    await seedPair(e)
+    ok(await e.run({ cmd: 'scan' }))
+    expect(sessionCalls).toBe(0)
+    expect((await e.decisions.list()).map(d => d.summary)).toContain('包管理器矛盾')
+  })
+
+  it('体检选的模型用不了、退回了默认模型：最近一次结果注明退回的原因', async () => {
+    const e = env({ llm: null, checkupLlm: { llm: conflictLlm, isSelected: false, fellBack: true, reason: 'model-gone' } })
+    await seedPair(e)
+    ok(await e.run({ cmd: 'scan', layer: { kind: 'global' } }))
+    expect((await e.checkups.list()).find(r => r.id === 'global')?.lastResult?.modelFallback).toEqual({ reason: 'model-gone' })
+  })
+
+  it('选的和默认模型都拿不到：llm-unavailable，借用的会话有模型也不用', async () => {
+    const e = env({ llm: conflictLlm, checkupLlm: { llm: null, isSelected: false, fellBack: false } })
+    await seedPair(e)
+    expect(err(await e.run({ cmd: 'scan' })).code).toBe('llm-unavailable')
+    expect(await e.cache.list()).toEqual([])
+  })
+
   it('全库体检：冲突进账本、视图重写', async () => {
     const e = env({ llm: conflictLlm })
     await e.store.create(record({ id: 'mem_a', name: '甲', content: '用 pnpm' }))

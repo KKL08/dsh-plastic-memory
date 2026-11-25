@@ -20,7 +20,7 @@ import type { CheckupRecordStore } from '../governance/checkup-records.ts'
 import { memberScanFingerprints } from '../governance/checkup-plan.ts'
 import type { AutoCheckupSettingStore } from '../governance/auto-checkups.ts'
 import type { DreamsStore } from '../governance/dreams-records.ts'
-import { listModelChoices, type ModelSelectionStore } from '../governance/background-llm.ts'
+import { listModelChoices, type ModelSelectionStore, type ResolvedLlm } from '../governance/background-llm.ts'
 import { executeConfirm, type ConfirmOptions } from '../tools/confirm.ts'
 import { executeForget } from '../tools/forget.ts'
 import { executePromote, type PromoteResult } from '../tools/promote.ts'
@@ -69,6 +69,8 @@ export interface MemoryCommandDeps {
   autoCheckups: AutoCheckupSettingStore
   /** 后台模型的选择表（set-model-selection 写它）。 */
   selections: Pick<ModelSelectionStore, 'set'>
+  /** 手动体检用哪个模型：和自动体检同一条解析链（设置里选的 → 宿主默认模型），每次体检现解析。 */
+  resolveCheckupLlm: () => Promise<ResolvedLlm>
   /** delete-dialogue-records 调它删对话记录库，删不掉要抛；缺省什么都不做（没接对话记录库）。 */
   deleteDialogueRecords?: () => void
   /** set-auto-checkup 写完设置表、重写体检视图后调用：本进程的自动体检调度立刻重算。缺省不通知（没有调度器）。 */
@@ -1187,15 +1189,18 @@ async function dispatch(
       return { ok: true, cmd, memoryIds: [...command.memoryIds].sort() }
 
     case 'scan': {
-      // 在借来的会话的 agent 上解析模型，拿不到就不扫（只跑规则层会让界面以为体检做完了）
-      const llm = deps.host.llmOf(exec)
-      if (llm === null) return fail(cmd, 'llm-unavailable', '借用的会话拿不到模型，可在对话里让 agent 体检')
+      // 和自动体检用同一个模型（设置里说的是「体检用的模型」，不分手动自动）；拿不到就不扫（只跑规则层会让界面以为体检做完了）
+      const { llm, fellBack, reason } = await deps.resolveCheckupLlm()
+      if (llm === null) return fail(cmd, 'llm-unavailable', '拿不到体检用的模型，可在设置里选一个可用模型，或在对话里让 agent 体检')
+      if (fellBack) (deps.log ?? console).warn('[plastic-memory] 体检选的模型现在用不了，这次改用默认模型', reason)
       const target = command.layer !== undefined ? { kind: 'global' as const }
         : command.workspacePath !== undefined ? { kind: 'workspace' as const, workspacePath: command.workspacePath } : { kind: 'all' as const }
       const { workspacePath: currentWorkspace } = await deps.host.contextOf(exec)
       // 开跑前认领要查的范围（和自动体检共用一套认领）：正在体检就回 busy；「全部」要认领全局和每个项目，有一个认领不到整个回 busy
       const r = await runCheckup({
         target, by: 'manual', llm,
+        // 选的模型用不了、改用了默认模型：结果里说明
+        ...(fellBack ? { modelFallback: { reason: reason ?? 'provider-gone' } } : {}),
         ...(currentWorkspace !== undefined ? { currentWorkspace } : {}),
         ...(command.isFullRecheck === true ? { isFullRecheck: true } : {}),
       }, {
