@@ -5,6 +5,8 @@ import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import type { MemorySnapshot, PendingDecision } from '../src/governance/schema.ts'
 import { basisOf, scopeKeyOf, type ChangeOp } from '../src/governance/changeset.ts'
 import { receiptsOfEntry } from '../src/tools/changeset.ts'
+import { mergePlan } from '../src/governance/changeset-plans.ts'
+import { executeUndo } from '../src/tools/undo.ts'
 import { DREAMS_DEFAULTS, dreamContentFingerprint } from '../src/governance/dreams-gate.ts'
 import { DreamsStore } from '../src/governance/dreams-records.ts'
 import { DreamsModelUnavailable, maintainStep, readDreamMarks, runDreams, type DreamsRunDeps, type DreamsRunOptions, type DreamsStep } from '../src/tools/dreams-run.ts'
@@ -45,6 +47,8 @@ function world(plan?: (w: { store: MemoryStore }) => DreamsStep[]) {
     runSeq: 0,
     // 变化数的门槛在门槛的单测里验；这里缺省放开，专门验它的用例自己设
     minChanges: 0,
+    // 改动量上限在专门的用例里验；这里缺省放开
+    maxChangeRatio: 1,
     polls: [] as Array<() => void>,
   }
   const deps: DreamsRunDeps = {
@@ -57,7 +61,7 @@ function world(plan?: (w: { store: MemoryStore }) => DreamsStep[]) {
     },
     activity: async (): Promise<ActivityView> => ({ isComplete: state.isActivityComplete, workspaces: state.activity }),
     resolveLlm: async () => { state.resolveCalls++; return state.resolved },
-    config: () => ({ ...DREAMS_DEFAULTS, minChanges: state.minChanges }),
+    config: () => ({ ...DREAMS_DEFAULTS, minChanges: state.minChanges, maxChangeRatio: state.maxChangeRatio }),
     isGovernanceEnabled: () => state.isEnabled,
     plan: plan?.({ store }) ?? [maintainStep(store)],
     interval: (callback) => { state.polls.push(callback); return () => { state.polls.splice(state.polls.indexOf(callback), 1) } },
@@ -738,5 +742,161 @@ describe('上次没做完的收尾', () => {
     const b = record({ id: 'mem_a', content: '乙' })
     vi.spyOn(w.store, 'readRaw').mockResolvedValue({ records: [{ record: a }, { record: b }, { record: record({ id: 'mem_c', status: 'deleted' }) }], listedCount: 3, quarantined: [], directoryNotes: [] } as never)
     expect(await readDreamMarks(w.store, GLOBAL)).toEqual({ mem_a: [dreamContentFingerprint(a), dreamContentFingerprint(b)].sort().join('+') })
+  })
+})
+
+describe('批次条目与改动量上限', () => {
+  const ids = Array.from({ length: 10 }, (_, i) => `mem_${String.fromCharCode(97 + i)}`)
+  const recallOp = (read: MemoryRecord, id: string): ChangeOp =>
+    ({ id, memoryId: read.id, scopeKey: scopeKeyOf(read), basis: [basisOf(read)], kind: 'set-recall', patch: { recall: 'passive' }, expect: { recall: null } })
+
+  it('这次运行的批次条目是记忆梦境自己的种类，带两种回执的位置', async () => {
+    let w!: World
+    w = world(() => [{ name: 'edit', needsChanges: false, run: async (ctx) => { await ctx.apply([editOp((await w.store.get('mem_a', {}))!, 'o1', '梦境改的')]) } }])
+    await enable(w)
+    await seed(w)
+    await runDreams(GLOBAL, auto, w.deps)
+    expect((await w.decisions.listSettled()).find(d => d.id === 'run_1')).toMatchObject({ kind: 'brewing-dreams-run', settled: { verdict: 'batch-edited' }, indexRun: { receipts: [] } })
+  })
+
+  it('上限是在用条数乘比例（10 条、0.2 是 2 条）：各步按先后共用，同一条做几个操作算一条，超出的跳过并列进结果', async () => {
+    let w!: World
+    const left: number[] = []
+    const seen: string[][] = []
+    const step = (name: string, targets: string[]): DreamsStep => ({
+      name, needsChanges: false,
+      run: async (ctx) => {
+        left.push(ctx.quotaLeft())
+        const reads = await Promise.all(targets.map(async id => (await w.store.get(id, {}))!))
+        const ops = reads.map((read, i) => (i === 1 && targets[1] === targets[0] ? recallOp(read, `${name}${i}`) : editOp(read, `${name}${i}`, `${name}改${i}`)))
+        const r = await ctx.apply(ops)
+        seen.push(r.outcomes.map(o => (o.kind === 'skipped' ? o.reason : o.kind)))
+      },
+    })
+    w = world(() => [step('甲', ['mem_a', 'mem_a', 'mem_b', 'mem_c']), step('乙', ['mem_d', 'mem_b'])])
+    w.state.maxChangeRatio = 0.2
+    await enable(w)
+    for (const id of ids) await seed(w, { id })
+    const r = await runDreams(GLOBAL, auto, w.deps)
+    expect(r.kind).toBe('completed')
+    expect(left).toEqual([2, 0])
+    expect(seen).toEqual([['applied', 'applied', 'applied', 'quota'], ['quota', 'applied']])
+    expect((await w.store.get('mem_c', {}))?.content).toBe('旧正文')
+    expect((await w.store.get('mem_d', {}))?.content).toBe('旧正文')
+    expect((await w.store.get('mem_b', {}))?.content).toBe('乙改1')
+    expect((await rec(w)).lastResult?.skipped).toEqual({
+      items: [{ step: '甲', kind: 'edit', target: 'mem_c', reason: 'quota' }, { step: '乙', kind: 'edit', target: 'mem_d', reason: 'quota' }], total: 2,
+    })
+  })
+
+  it('只算做成了的：前一个操作对不上没写，后一个照样放得下', async () => {
+    let w!: World
+    const seen: string[] = []
+    w = world(() => [{
+      name: 'edit', needsChanges: false,
+      run: async (ctx) => {
+        const a = (await w.store.get('mem_a', {}))!
+        const b = (await w.store.get('mem_b', {}))!
+        await w.store.updateIfLive({ id: 'mem_a' }, cur => ({ ...cur, content: '前台改的', updatedAt: T0 + 5 }))
+        const r = await ctx.apply([editOp(a, 'o1', '梦境改甲'), editOp(b, 'o2', '梦境改乙')])
+        seen.push(...r.outcomes.map(o => (o.kind === 'skipped' ? o.reason : o.kind)))
+      },
+    }])
+    w.state.maxChangeRatio = 0.2
+    await enable(w)
+    for (const id of ids.slice(0, 5)) await seed(w, { id })
+    expect((await runDreams(GLOBAL, auto, w.deps)).kind).toBe('completed')
+    expect(seen).toEqual(['basis-changed', 'applied'])
+    expect((await rec(w)).lastResult?.skipped).toEqual({ items: [{ step: 'edit', kind: 'edit', target: 'mem_a', reason: 'basis-changed' }], total: 1 })
+  })
+
+  it('一组放不进剩下的名额：整组跳过', async () => {
+    let w!: World
+    const seen: string[] = []
+    w = world(() => [{
+      name: 'merge', needsChanges: false,
+      run: async (ctx) => {
+        const [keeper, merged] = [(await w.store.get('mem_a', {}))!, (await w.store.get('mem_b', {}))!]
+        const r = await ctx.apply(mergePlan({ group: 'g1', keeper, merged: [merged], fused: { content: '合并稿' } }))
+        seen.push(...r.outcomes.map(o => (o.kind === 'skipped' ? o.reason : o.kind)))
+      },
+    }])
+    w.state.maxChangeRatio = 0.25
+    await enable(w)
+    for (const id of ids.slice(0, 4)) await seed(w, { id })
+    expect((await runDreams(GLOBAL, auto, w.deps)).kind).toBe('completed')
+    expect(new Set(seen)).toEqual(new Set(['quota']))
+    expect((await w.store.get('mem_b', {}))?.status).toBe('active')
+  })
+
+  it('让路之后的续跑接着扣上次用掉的名额，做完清掉', async () => {
+    let w!: World
+    let round = 0
+    const seen: string[][] = []
+    w = world(() => [
+      {
+        name: 'edit', needsChanges: false,
+        run: async (ctx) => {
+          round++
+          const targets = round === 1 ? ['mem_a'] : ['mem_b', 'mem_c']
+          const reads = await Promise.all(targets.map(async id => (await w.store.get(id, {}))!))
+          const r = await ctx.apply(reads.map((read, i) => editOp(read, `r${round}_${i}`, `第${round}次改`)))
+          seen.push(r.outcomes.map(o => (o.kind === 'skipped' ? o.reason : o.kind)))
+          // 第一次做完这一步有会话开始跑：下一步之前让路
+          if (round === 1) w.state.activity.set('/proj/a', running(w.state.now))
+        },
+      },
+      { name: 'after', needsChanges: false, run: async () => {} },
+    ])
+    w.state.maxChangeRatio = 0.2
+    await enable(w)
+    for (const id of ids) await seed(w, { id })
+    expect((await runDreams(GLOBAL, { by: 'manual' }, w.deps)).kind).toBe('yielded')
+    expect((await rec(w)).unfinished?.quotaUsed).toBe(1)
+    w.state.activity.clear()
+    expect((await runDreams(GLOBAL, { by: 'manual' }, w.deps)).kind).toBe('completed')
+    expect(seen).toEqual([['applied'], ['applied', 'quota']])
+    expect((await rec(w)).unfinished).toBeUndefined()
+  })
+
+  it('跳过的操作在结果里只列前若干条，总数照记', async () => {
+    let w!: World
+    w = world(() => [{
+      name: 'edit', needsChanges: false,
+      run: async (ctx) => {
+        const a = (await w.store.get('mem_a', {}))!
+        for (let i = 0; i < 3; i++) await ctx.apply(Array.from({ length: 20 }, (_, j) => editOp({ ...a, content: '不是现在的' }, `o${i}_${j}`, '改')))
+      },
+    }])
+    await enable(w)
+    await seed(w)
+    await runDreams(GLOBAL, auto, w.deps)
+    const skipped = (await rec(w)).lastResult?.skipped
+    expect(skipped?.total).toBe(60)
+    expect(skipped?.items).toHaveLength(50)
+  })
+})
+
+describe('单条撤销一组', () => {
+  it('撤一组里的一条回执：同组的一起撤，组不留半个；条目里不剩回执时移出账本', async () => {
+    let w!: World
+    w = world(() => [{
+      name: 'merge', needsChanges: false,
+      run: async (ctx) => {
+        const [keeper, merged] = [(await w.store.get('mem_a', {}))!, (await w.store.get('mem_b', {}))!]
+        await ctx.apply(mergePlan({ group: 'g1', keeper, merged: [merged], fused: { content: '合并稿' } }))
+      },
+    }])
+    await enable(w)
+    await seed(w)
+    await seed(w, { id: 'mem_b' })
+    expect((await runDreams(GLOBAL, auto, w.deps)).kind).toBe('completed')
+    const receipts = await receiptsOfEntry(w.decisions, 'run_1')
+    expect(receipts).toHaveLength(2)
+    const undoDeps = { store: w.store, decisions: w.decisions, snapshots: w.snapshots, ignores: { unignoreIfSame: async () => false } }
+    expect(await executeUndo({ decisionId: 'run_1', op: receipts[1]!.op }, { workspacePath: undefined }, undoDeps)).toMatchObject({ kind: 'undone' })
+    expect(await w.store.get('mem_a', {})).toMatchObject({ content: '旧正文', status: 'active' })
+    expect(await w.store.get('mem_b', {})).toMatchObject({ status: 'active' })
+    expect((await w.decisions.listSettled()).find(d => d.id === 'run_1')).toBeUndefined()
   })
 })

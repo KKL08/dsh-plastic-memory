@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { UNSORTED_TITLE, readIndex } from '../src/topic-index.ts'
 import { env, ok, err, SESSION_WS } from './helpers/gui-command-env.ts'
+import { indexReceiptStep, ledgerSteps } from '../src/governance/op-steps.ts'
 import { record } from './helpers/record.ts'
 
 // organize-index 命令：借会话的模型整理一个范围的主题索引，结果交给 undo 整批撤销。模型换成按顺序回复的桩，其余是真的。
@@ -85,5 +86,40 @@ describe('organize-index', () => {
     expect(project.topics.map(t => [t.name, t.memberIds])).toEqual([['项目约定', ['mem_w']]])
     expect((await e.decisions.listSettled())[0]!.workspaces).toEqual([SESSION_WS])
     expect((await e.store.readIndex(global)) === undefined || readIndex((await e.store.readIndex(global))!).topics.length === 0).toBe(true)
+  })
+})
+
+describe('撤销记忆梦境的批次', () => {
+  /** 记一条梦境批次：把甲归进「发版」，回执记在批次上。 */
+  async function dreamEntry(e: ReturnType<typeof env>) {
+    e.store.registerSteps(ledgerSteps(e.decisions))
+    await e.decisions.addDreamsRun('run_1', { summary: '记忆梦境', workspace: 'global' }, 1)
+    const r = await e.store.writeSection(() => e.store.applyIndexOp(global, { kind: 'assign', memoryIds: ['mem_a'], from: UNSORTED_TITLE, to: '发版', about: '发版的步骤。' }, {
+      maxTopics: 30,
+      prepare: async (op, plan) => { await e.decisions.appendIndexReceipt('run_1', { op, plan }); return [indexReceiptStep('run_1')] },
+    }))
+    expect(r.kind).toBe('applied')
+    await e.store.writeSection(() => e.decisions.finishChangeRun('run_1', { writes: [] }))
+  }
+
+  it('治理升级的总开关关着：梦境的批次照样能撤', async () => {
+    const e = env({ governanceEnabled: false })
+    await seed(e)
+    await e.store.maintain(global)
+    await dreamEntry(e)
+    ok(await e.run({ cmd: 'undo', decisionId: 'run_1' }))
+    expect(await topics(e)).toEqual({ [UNSORTED_TITLE]: ['mem_a', 'mem_b'] })
+  })
+
+  it('这个范围正在整理、体检或做梦：回忙，什么都不动；放开之后能撤', async () => {
+    const e = env()
+    await seed(e)
+    await e.store.maintain(global)
+    await dreamEntry(e)
+    const held = await e.checkups.claim([global])
+    expect(err(await e.run({ cmd: 'undo', decisionId: 'run_1' })).code).toBe('busy')
+    expect(await topics(e)).toMatchObject({ 发版: ['mem_a'] })
+    if ('claims' in held) for (const c of held.claims) await c.release()
+    ok(await e.run({ cmd: 'undo', decisionId: 'run_1' }))
   })
 })

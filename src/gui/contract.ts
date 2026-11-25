@@ -871,8 +871,9 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   /** 撤销一条已裁决条目：去掉 settled，记了快照的按它恢复败方（提升为全局则恢复原位）；直接改、移到项目的撤销后条目移出账本；
    *  模型改写、替代（全部记忆视图的 modelChanges）按改前快照恢复，撤销后条目标已撤销留着。
    *  六类撤销遇到目标之后又被改过（或已不在原处）一律回 stale、条目留着；合并的撤销不会只恢复一半：要么都不动，要么写回的那条中途被第三方改过、停在第三方的版本。
-   *  snapshotId 可选：界面看到的那次结清的改前快照（最近删除里来源的 snapshotId），条目期间撤销后又重新裁决过、对不上的回 stale、什么都不动。 */
-  z.object({ cmd: z.literal('undo'), decisionId: z.string(), snapshotId: z.string().optional(), allowCrossWorkspace }),
+   *  snapshotId 可选：界面看到的那次结清的改前快照（最近删除里来源的 snapshotId），条目期间撤销后又重新裁决过、对不上的回 stale、什么都不动。
+   *  op 可选：只撤记忆梦境批次条目里的这一条回执（回执上的 op；属于一组的连同同组的），之后整批撤销只撤剩下的；别的条目给了回 not-found。 */
+  z.object({ cmd: z.literal('undo'), decisionId: z.string(), snapshotId: z.string().optional(), op: z.string().optional(), allowCrossWorkspace }),
   z.object({ cmd: z.literal('promote'), decisionId: z.string(), target: z.enum(['global', 'agents-md']), allowCrossWorkspace }),
   z.object({ cmd: z.literal('keep-local'), decisionId: z.string(), allowCrossWorkspace }),
   /**
@@ -1118,7 +1119,8 @@ export const GUI_ERROR_CODES = [
   'secret-suspected',   // 直接改、直接合并、整理所选的应用、按要求应用的新内容含疑似密钥：什么都没动，用户确认后带 allowSecret 重发
   'claimed',            // 待决项正被另一次操作（别的标签页、宿主进程或体检）认领：什么都没动
   'busy',               // 体检：范围正在体检（别的体检认领着、没过期；「全部」有一个范围认领不到也算），或体检中途认领被别的进程接手。
-                        // 没认领到时什么都没动；中途被接手的这次不再提交。和待决项的 claimed 是两回事
+                        // 没认领到时什么都没动；中途被接手的这次不再提交。和待决项的 claimed 是两回事。
+                        // 撤销整理索引、记忆梦境的批次：那个范围正在整理、体检或做梦，或这批的索引操作还没记完账，什么都没动
   'target-taken',       // 移到项目：目标项目已有同 id 的记忆；撤销移到项目、提升为全局：全局已有同 id 的记忆（含最近删除）。什么都没动
   'failed',             // 真失败：执行器或读写报错，detail 带原话。撤销遇到「之后又被改过」不走这里，回 stale；最近删除的普通恢复（不等同撤销）快照后被改过仍回它
 ] as const

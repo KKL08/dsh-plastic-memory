@@ -207,10 +207,10 @@ function candidateCopy(entry: PendingDecision): { target?: Scope } {
   return scope?.kind === 'workspace' ? { target: scope } : {}
 }
 
-/** 撤销的是直接改、直接合并、模型改写与替代、只挂关联：改本身不受体检开关影响，撤销也不受。 */
+/** 撤销的是直接改、直接合并、模型改写与替代、只挂关联、整理索引、记忆梦境的批次：改本身不受体检开关影响，撤销也不受。 */
 async function isEditUndo(decisions: PendingDecisionsStore, command: MemoryCommand): Promise<boolean> {
   return command.cmd === 'undo' && (await decisions.listSettled()).some(d => d.id === command.decisionId
-    && (kindOf(d) === 'edit' || kindOf(d) === 'index-organize' || kindOf(d) === 'link' || isModelChange(d)))
+    && (kindOf(d) === 'edit' || kindOf(d) === 'index-organize' || kindOf(d) === 'brewing-dreams-run' || kindOf(d) === 'link' || isModelChange(d)))
 }
 
 /** 命令结果里的 droppedLinks：没去掉的时候不带这个字段。 */
@@ -784,11 +784,11 @@ async function dispatch(
     }
 
     case 'undo': {
-      // 整理索引还在跑的时候不撤它那一条：回执还在往上记
-      const run = (await deps.decisions.listSettled()).find(d => d.id === command.decisionId && kindOf(d) === 'index-organize')
+      // 整理索引、记忆梦境还在跑的时候不撤它那一条：回执还在往上记（两者和体检共用一个范围认领）
+      const run = (await deps.decisions.listSettled()).find(d => d.id === command.decisionId && (kindOf(d) === 'index-organize' || kindOf(d) === 'brewing-dreams-run'))
       const organizing = run?.workspaces?.[0]
       if (organizing !== undefined && await deps.checkups.isInProgress(scopeOfLedger(organizing))) return fail(cmd, 'busy', '这个范围正在整理或体检，做完再撤')
-      return fromUndo(await executeUndo({ decisionId: command.decisionId, snapshotId: command.snapshotId, allowCrossWorkspace: command.allowCrossWorkspace }, gov, undoDeps))
+      return fromUndo(await executeUndo({ decisionId: command.decisionId, snapshotId: command.snapshotId, op: command.op, allowCrossWorkspace: command.allowCrossWorkspace }, gov, undoDeps))
     }
 
     case 'restore': {

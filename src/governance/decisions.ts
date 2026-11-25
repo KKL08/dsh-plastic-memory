@@ -193,6 +193,14 @@ export type PendingTable = ClaimKvTable<PendingDecision> & Pick<CasKvTable<Pendi
 /** 不跨进程的表（内存表）用：认领段不另拿锁。 */
 const NO_ROOT_LOCK: RootLock = { run: fn => fn() }
 
+/** 批次条目还有记忆的回执等着补记：这次收不了尾（见 finishChangeRun）。 */
+export class RunReceiptsPending extends Error {
+  constructor(id: string) {
+    super(`条目 ${id} 还有回执等着补记，这次没有收尾`)
+    this.name = 'RunReceiptsPending'
+  }
+}
+
 export class PendingDecisionsStore {
   private table: PendingTable
   private readonly lock: RootLock
@@ -674,6 +682,14 @@ export class PendingDecisionsStore {
     return this.addSettled({ ...input, changes: [] }, verdict, now, { id })
   }
 
+  /**
+   * 记忆梦境一次运行的批次条目（id 是运行 id，重复调用不多记）：记忆的改动回执同变更集（appendChange），索引操作的回执同整理索引
+   * （appendIndexReceipt、confirmIndexReceipt），做完调 finishChangeRun。workspace 是这次整理的范围的账本标签。
+   */
+  addDreamsRun(id: string, input: { summary: string; workspace: string }, now: number) {
+    return this.addSettled({ kind: 'brewing-dreams-run', memoryIds: [], summary: input.summary, workspaces: [input.workspace], changes: [], indexRun: { receipts: [] } }, 'batch-edited', now, { id })
+  }
+
   /** 一个操作提交了：把它的回执记到条目上（同一次写入只记一次）。条目已不在返回 false。在写入段里调用。 */
   async appendChange(id: string, receipt: ChangeReceipt): Promise<boolean> {
     const entry = await this.table.get(id)
@@ -713,31 +729,52 @@ export class PendingDecisionsStore {
     return (await this.table.list()).map(([, e]) => e).filter(e => (e.openGroups?.length ?? 0) > 0)
   }
 
-  /** 一条变更集条目上的组都撤干净之后：一条回执都没剩的整条移出账本（只对 addChangeRun 记的条目）。在写入段里调用。 */
-  async removeEmptyRun(id: string): Promise<void> {
+  /**
+   * 一条变更集条目上的组都撤干净之后：一条回执都没剩的整条移出账本（只对 addChangeRun、addDreamsRun 记的条目）。在写入段里调用。
+   * hasPendingChanges 为真：还有记忆的回执等着补记（文件已提交），条目留着。
+   */
+  async removeEmptyRun(id: string, hasPendingChanges: () => boolean = () => false): Promise<void> {
     const entry = await this.table.get(id)
     if (entry?.settled === undefined || entry.changes === undefined || entry.changes.length > 0 || (entry.openGroups?.length ?? 0) > 0) return
+    if ((entry.indexRun?.receipts.length ?? 0) > 0 || hasPendingChanges()) return
     await this.table.delete(id)
   }
 
   /**
    * 一次变更集收尾：一个操作都没做成（或都撤掉了）的整条移出账本；做成了的补上给视图和旧版本读的整条指纹回执（receipts）、
-   * 涉及的记忆和改前快照（取第一条回执的）。返回留下的条目。只用在 addChangeRun 记的条目上。
+   * 涉及的记忆和改前快照（取第一条回执的）。返回留下的条目。只用在 addChangeRun、addDreamsRun 记的条目上。
+   * 带索引操作回执的（记忆梦境）：同整理索引的收尾，清掉没确认的（isPending 说还在等补做的留着）；还有索引回执的不移出账本。
+   * hasPendingChanges 为真：有记忆文件已提交、回执还等着补记，这时收尾会把它的撤销入口丢掉。条目原样留着，抛 RunReceiptsPending，
+   * 调用方这次不算收尾完成、下次再收。不传按没有算。
+   * 在写入段里调用：补做确认索引回执和这里的读改写不能交错。
    */
-  async finishChangeRun(id: string, input: { writes: readonly PlanWrite[]; summary?: string; workspaces?: string[] }): Promise<PendingDecision | undefined> {
-    const entry = await this.table.get(id)
-    if (entry?.changes === undefined || entry.settled === undefined) return undefined
-    if (entry.changes.length === 0) {
+  async finishChangeRun(
+    id: string, input: { writes: readonly PlanWrite[]; summary?: string; workspaces?: string[] },
+    isPending: (op: string) => boolean = () => false, hasPendingChanges: () => boolean = () => false,
+  ): Promise<PendingDecision | undefined> {
+    const stored = await this.table.get(id)
+    if (stored?.changes === undefined || stored.settled === undefined) return undefined
+    // 补记由操作日志在每次进写入段时重做；同一个进程里连着失败到重试上限后就不再试，要等重启（或换一个存储实例）才补得上，
+    // 在那之前每次收尾都停在这里，这个范围的梦境按出错收、不会往下跑
+    if (hasPendingChanges()) throw new RunReceiptsPending(id)
+    const { changes } = stored
+    const entry = stored.indexRun === undefined ? stored : { ...stored, indexRun: { receipts: stored.indexRun.receipts.filter(r => r.isConfirmed === true || isPending(r.op)) } }
+    if (changes.length === 0 && (entry.indexRun?.receipts.length ?? 0) > 0) {
+      const done: PendingDecision = { ...entry, receipts: [], ...(input.summary !== undefined ? { summary: input.summary } : {}) }
+      await this.table.put(id, done)
+      return done
+    }
+    if (changes.length === 0) {
       // 还有没做完的组：提交了、回执还没补上的那一步要靠这条条目，留着
       if ((entry.openGroups?.length ?? 0) > 0) return entry
       await this.table.delete(id)
       return undefined
     }
-    const snapshotId = entry.changes.find(r => r.snapshotId !== undefined)?.snapshotId
+    const snapshotId = changes.find(r => r.snapshotId !== undefined)?.snapshotId
     const done: PendingDecision = {
-      ...entry, memoryIds: [...new Set(entry.changes.map(r => r.memoryId))], receipts: receiptsOf(input.writes),
+      ...entry, memoryIds: [...new Set(changes.map(r => r.memoryId))], receipts: receiptsOf(input.writes),
       ...(input.summary !== undefined ? { summary: input.summary } : {}), ...(input.workspaces !== undefined ? { workspaces: input.workspaces } : {}),
-      settled: { ...entry.settled, ...(snapshotId !== undefined ? { snapshotId } : {}) },
+      settled: { ...stored.settled, ...(snapshotId !== undefined ? { snapshotId } : {}) },
     }
     await this.table.put(id, done)
     return done

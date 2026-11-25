@@ -54,6 +54,7 @@ import { ModelSelectionStore, createBackgroundLlmResolver } from './governance/b
 import { DREAMS_DEFAULTS, resolveDreamsConfig } from './governance/dreams-gate.ts'
 import { DreamsStore } from './governance/dreams-records.ts'
 import { maintainStep } from './tools/dreams-run.ts'
+import { organizeIndexStep, tidyMemoriesStep } from './tools/dreams-tidy.ts'
 import { DreamsScheduler } from './tools/dreams-scheduler.ts'
 import { ActivityBoard } from './governance/session-activity.ts'
 import { adviceIgnoreSchema, genId, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from './governance/schema.ts'
@@ -131,6 +132,8 @@ export interface Config {
     idleMinutes: Volatile<number>
     /** 最近七天后台用量的上限（token）：到了就不再开始新的一次；0 为不限。 */
     weeklyTokenCap: Volatile<number>
+    /** 一次运行最多改动本范围在用记忆的比例（0 到 1）；整理的各步共用这一份，同一条记忆做几个操作只算一条。 */
+    maxChangeRatio: Volatile<number>
   }
   index: {
     /** 一个作用域（全局、每个项目各算）里主题数的上限；到了上限不再新建主题。设置页不露，配置文件可改；改了下一次整理生效。 */
@@ -194,6 +197,7 @@ export const Config = z.object({
     minNewMessages: z.number().default(DREAMS_DEFAULTS.minNewMessages).volatile(),
     idleMinutes: z.number().default(DREAMS_DEFAULTS.idleMinutes).volatile(),
     weeklyTokenCap: z.number().default(DREAMS_DEFAULTS.weeklyTokenCap).volatile(),
+    maxChangeRatio: z.number().default(DREAMS_DEFAULTS.maxChangeRatio).volatile(),
   }),
   index: z.object({
     maxTopics: z.natural().min(1).default(INDEX_MAX_TOPICS_DEFAULT).volatile(),
@@ -316,6 +320,7 @@ export async function apply(ctx: Context, config: Config) {
   const dreamsConfig = () => resolveDreamsConfig({
     minIntervalDays: config.brewingDreams.minIntervalDays.get(), minChanges: config.brewingDreams.minChanges.get(), minNewMessages: config.brewingDreams.minNewMessages.get(),
     idleMinutes: config.brewingDreams.idleMinutes.get(), weeklyTokenCap: config.brewingDreams.weeklyTokenCap.get(),
+    maxChangeRatio: config.brewingDreams.maxChangeRatio.get(),
   })
   // 后台模型的选择表：自动体检、梦境各一个键，设置页经 /memory set-model-selection 改，几个宿主进程共用一份
   const selections = new ModelSelectionStore(sidecar.modelSelections)
@@ -593,7 +598,7 @@ export async function apply(ctx: Context, config: Config) {
       },
     })
     void board.start().catch((err: unknown) => { ctx.logger.warn('[plastic-memory] 活动表启动失败，记忆梦境不会自动运行', err) })
-    // 记忆梦境：接在自动体检每一轮之后查门槛；这一版的运行计划只有维护一步
+    // 记忆梦境：接在自动体检每一轮之后查门槛；运行计划：维护 → 整理主题索引 → 逐条整理记忆
     const dreamsCreated = new DreamsScheduler({
       run: {
         store, snapshots, decisions, dreams, log: ctx.logger,
@@ -604,7 +609,9 @@ export async function apply(ctx: Context, config: Config) {
         resolveLlm: () => resolveBackgroundLlm('dreams'),
         config: () => dreamsConfig().config,
         isGovernanceEnabled: () => config.governance.enabled.get(),
-        plan: [maintainStep(store)],
+        plan: [maintainStep(store), ...[organizeIndexStep, tidyMemoriesStep].map(step => step({
+          store, maxTopics: () => config.index.maxTopics.get(), now: () => Date.now(), typeRecall: type => registry.get(type).recall,
+        }))],
         interval: (callback, delayMs) => timer.interval(callback, delayMs),
         now: () => Date.now(),
         // 运行 id 同时是这次运行在账本里的条目 id，和别的条目同一种写法

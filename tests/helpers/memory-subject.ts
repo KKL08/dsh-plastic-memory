@@ -27,6 +27,11 @@ import { runSavePipeline, type PipelineResult } from '../../src/pipeline.ts'
 import { applyChangeset } from '../../src/tools/changeset.ts'
 import { mergePlan } from '../../src/governance/changeset-plans.ts'
 import { DREAMS_INITIATOR } from '../../src/governance/write-gate.ts'
+import { DREAMS_DEFAULTS } from '../../src/governance/dreams-gate.ts'
+import { DreamsStore } from '../../src/governance/dreams-records.ts'
+import type { SemanticLlm } from '../../src/governance/semantic-scan.ts'
+import { maintainStep, runDreams } from '../../src/tools/dreams-run.ts'
+import { tidyMemoriesStep } from '../../src/tools/dreams-tidy.ts'
 import { buildTypeRegistry } from '../../src/type-registry.ts'
 import { ViewWriter, collectGlobalViews } from '../../src/gui/view-writer.ts'
 import { createMemoryCommand } from '../../src/gui/commands.ts'
@@ -71,6 +76,8 @@ export type MemOp =
   | { kind: 'groupMerge' }
   /** 用户给一条记忆上锁。 */
   | { kind: 'lock'; id: Key }
+  /** 记忆梦境逐条整理这个项目的记忆：先读、再问模型（桩，给两条都换摘要）、再逐条落盘。 */
+  | { kind: 'dreamTidy' }
   | { kind: 'hardDelete'; id: Key; layer?: 'workspace' | 'global' }
   | { kind: 'modelRewrite'; id: Key; allowsSecret: boolean }
   | { kind: 'external'; id: Key; isTwoStep: boolean }
@@ -289,6 +296,31 @@ async function runMemOp(w: MemoryWorld, op: MemOp, index: number, hooks: OpHooks
       await store.writeSection(() => w.decisions.finishChangeRun(entryId, { writes: [] }))
       return { group: r.groups?.[0], reasons: r.outcomes.flatMap(o => (o.kind === 'skipped' ? [o.reason] : [])) }
     }
+    case 'dreamTidy': {
+      const store = withCommitPoint(w.store, hooks)
+      const scope = { kind: 'workspace', workspacePath: W } as const
+      const checkups = new CheckupRecordStore(w.sidecar.checkups)
+      const llm: SemanticLlm = {
+        complete: async () => JSON.stringify({ operations: (['a', 'b'] as const).map(key => ({ op: 'refresh', id: IDS[key], summary: `梦境摘要 ${index}` })) }),
+      }
+      const r = await runDreams(scope, { by: 'manual' }, {
+        store, snapshots: w.snapshots, decisions: w.decisions, dreams: new DreamsStore(w.sidecar.dreams, w.sidecar.dreamMarks), log: silent,
+        claimScope: async () => {
+          const claimed = await checkups.claim([scope])
+          return 'busy' in claimed ? claimed : { release: async () => { for (const claim of claimed.claims) await claim.release() } }
+        },
+        activity: async () => ({ isComplete: true, workspaces: new Map() }),
+        resolveLlm: async () => ({ llm, isSelected: true, fellBack: false }),
+        config: () => ({ ...DREAMS_DEFAULTS, maxChangeRatio: 1 }),
+        isGovernanceEnabled: () => true,
+        // 先做例行维护（建主题索引），整理按索引里的主题分批
+        plan: [maintainStep(store), tidyMemoriesStep({ store, maxTopics: () => 30, now: () => t, typeRecall: () => 'search' })],
+        interval: () => () => {},
+        now: () => t,
+        newRunId: () => `pd_tidy_${index}`,
+      })
+      return { kind: r.kind, skipped: (await w.sidecar.dreams.get(W))?.lastResult?.skipped?.items.map(x => `${x.target}:${x.reason}`) ?? [] }
+    }
     case 'lock': {
       const store = withCommitPoint(w.store, hooks)
       return (await store.updateIfLive(at(op.id), cur => ({ ...cur, locked: true }))) === undefined ? 'absent' : 'locked'
@@ -353,7 +385,7 @@ export const labelOf = (op: MemOp) => {
     case 'hardDelete': return `hardDelete(${op.id}${op.layer === undefined ? '' : `,${op.layer}`})`
     case 'recall': return `recall(${op.ids.join('+')})`
     case 'snapshot': return `snapshot(${op.ids.length === 0 ? '可见' : op.ids.join('+')})`
-    case 'guiBatch': case 'groupMerge': case 'restoreSnapshot': case 'undo': return op.kind
+    case 'guiBatch': case 'groupMerge': case 'dreamTidy': case 'restoreSnapshot': case 'undo': return op.kind
     case 'resolve': return `resolve(${op.verdict})`
     default: return `${op.kind}(${op.id})`
   }
@@ -379,6 +411,11 @@ function splitTag(value: unknown, op: MemOp): string | undefined {
     const r = value as { group?: { state: string }; reasons?: string[] }
     if (r.group?.state === 'rolled-back') return 'race'
     return r.group?.state === 'skipped' && r.reasons?.some(reason => reason !== 'group' && reason !== 'locked' && reason !== 'has-secret') === true ? 'race' : undefined
+  }
+  if (op.kind === 'dreamTidy') {
+    // 问模型之前读到的那一版，落盘时被别处改过（核对没过、落盘前一刻被改）：串行重放复现不出
+    const r = value as { skipped: string[] }
+    return r.skipped.some(x => /:(basis-changed|field-changed|changed|gone|moved)$/.test(x)) ? 'race' : undefined
   }
   if (op.kind === 'promote') {
     const r = value as PromoteResult

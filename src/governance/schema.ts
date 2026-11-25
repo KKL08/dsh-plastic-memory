@@ -16,8 +16,10 @@ export function genId(prefix: string): string {
  * 对话卡与右侧栏据此显示「已撤销」。
  * index-organize 是一次「整理索引」留的撤销记录：同样生来就已结清，memoryIds 为空，做过的每个索引操作各有一条回执（indexRun），撤销时逐条倒着撤。
  * link 是一次只挂关联、前提的保存（只改元数据，不拍快照）留的回执：生来就已结清，links 记这次新加的 id，撤销时只去掉这些，撤后标 isUndone。
+ * brewing-dreams-run 是记忆梦境一次运行的批次条目：生来就已结清（裁决记 batch-edited），记忆的改动回执在 changes、索引操作的回执在 indexRun，
+ * 可以整批撤，也可以按回执单条撤；一条回执都不剩时移出账本。0.2.0 不认识这个种类，读到时跳过。
  */
-export const PENDING_KINDS = ['conflict', 'promote-candidate', 'overflow', 'edit', 'move', ...MODEL_CHANGE_KINDS, 'index-organize', 'link'] as const
+export const PENDING_KINDS = ['conflict', 'promote-candidate', 'overflow', 'edit', 'move', ...MODEL_CHANGE_KINDS, 'index-organize', 'link', 'brewing-dreams-run'] as const
 export type PendingKind = (typeof PENDING_KINDS)[number]
 
 /** 条目种类，缺省即冲突（旧条目）。 */
@@ -34,7 +36,7 @@ export function kindOf(entry: { kind?: PendingKind }): PendingKind {
  * moved：全局记忆移到了项目（memoryIds 是那条，workspaces 是目标项目），snapshotId 是移动前的快照，fingerprint 同直接改。
  * rewritten / superseded：模型改写了 memoryIds 那条、模型把那条标成了已取代，snapshotId 是改前的快照，fingerprint 是改完后那条的内容（同直接改）。
  * batch-edited：整理所选一次应用（种类 edit，memoryIds 是这次写下的全部，按计划顺序），snapshotId 是整批改前的快照，
- * 不记 fingerprint，改记逐项回执 receipts。
+ * 不记 fingerprint，改记逐项回执 receipts；记忆梦境的一次运行（种类 brewing-dreams-run）也记它。
  * plan-applied：冲突按处理方案改写了记忆（融合、垂直改写），记在冲突条目自己身上：settled 里有改前快照 snapshotId、逐项回执 receipts、
  * 依据和结论代码 proposal、改前的冲突指纹 priorFingerprint；条目 fingerprint 换成改后的。
  * index-organized：一次整理索引（种类 index-organize），回执在条目的 indexRun 里。
@@ -187,7 +189,7 @@ export const pendingDecisionSchema = z.object({
   fingerprint: z.string().optional(),
   /** 整理所选的应用（batch-edited）：逐项回执，与 memoryIds 同序。其余条目没有此字段。 */
   receipts: z.array(batchReceiptSchema).optional(),
-  /** 整理索引（index-organize）：这一次做过的索引操作。其余条目没有此字段。 */
+  /** 整理索引（index-organize）、记忆梦境的一次运行（brewing-dreams-run）：这一次做过的索引操作。其余条目没有此字段。 */
   indexRun: indexRunSchema.optional(),
   /** 按变更集应用的条目：逐个操作的回执，按做的先后，一个操作提交后记一条、撤掉后拿掉（见 changeset.ts）。有它的条目撤销按它逐个还原字段。 */
   changes: z.array(changeReceiptSchema).optional(),

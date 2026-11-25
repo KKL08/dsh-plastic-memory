@@ -3,14 +3,14 @@ import type { PendingDecisionsStore } from '../governance/decisions.ts'
 import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import { editFingerprint, isConflicting, type SnapshotStore } from '../governance/snapshots.ts'
 import { asUndoable, expectedFingerprints, isStillOwnWrite, undoRuleOf, undoStateOf, undoStateOfAll, type TargetCopies, type UndoableEntry, type UndoRule } from '../governance/undo-rules.ts'
-import { snapshotIdFor, verdictLoser, type MemorySnapshot, type SnapshotRecord } from '../governance/schema.ts'
+import { snapshotIdFor, verdictLoser, type IndexReceipt, type MemorySnapshot, type SnapshotRecord } from '../governance/schema.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { RecordNotFoundError } from '../errors.ts'
 import { scopeAt, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
 import { LINK_UNDONE_STEP, indexReceiptUndoneStep, ledgerSteps, linkUndoneStep } from '../governance/op-steps.ts'
 import { newWriteOp } from '../storage/table.ts'
 import { hasDropped, linksOutside, restoreLinks, withoutLinks, type DroppedLinks } from '../links.ts'
-import { receiptsOfEntry, revertChange, settleOpenGroups, withdrawVersion } from './changeset.ts'
+import { hasPendingReceipts, receiptsOfEntry, revertChange, settleOpenGroups, withdrawVersion } from './changeset.ts'
 import { firstRevertBlock, type ChangeReceipt } from '../governance/changeset.ts'
 import { crossWorkspaceNote, gateRecords, isCopyOf, isVisible, locateCopy, type CrossWorkspaceRejection, type GovernanceContext } from './workspace-gate.ts'
 
@@ -24,8 +24,11 @@ export interface UndoDeps {
   now?: () => number
 }
 
-/** stale：之后又被改过（六种撤销共用），什么都没动，或停在第三方的版本。真失败（读写出错）直接抛出，由调用方回 failed。 */
-export type UndoErrorCode = 'not-found' | 'claimed' | 'cross-workspace' | 'stale' | 'target-taken'
+/**
+ * stale：之后又被改过（六种撤销共用），什么都没动，或停在第三方的版本。busy：记忆梦境的批次里要一并撤的索引操作还没记完账，
+ * 什么都没动，稍后再撤。真失败（读写出错）直接抛出，由调用方回 failed。
+ */
+export type UndoErrorCode = 'not-found' | 'claimed' | 'cross-workspace' | 'stale' | 'target-taken' | 'busy'
 /**
  * 内部子码，只给测试和日志用，不进界面契约。no-entry：条目不在、未结清或已换了裁决；undone：已撤销过；
  * resettled：条目撤销后又重新结清过，已不是调用方看到的那次（改前快照对不上）；expired：改前快照已过保留窗口；
@@ -37,7 +40,8 @@ export type UndoReason = 'no-entry' | 'undone' | 'resettled' | 'expired' | 'chan
 export type UndoError = { kind: 'error'; code: UndoErrorCode; reason?: UndoReason; rejected?: CrossWorkspaceRejection[]; message: string }
 /** skipped：整理索引的撤销里，之后又被改过、没撤的操作数；它们的回执留在条目上。 */
 /** droppedLinks：撤销换作用域时，放回原作用域后仍越界、去掉的关联和前提（撤销提升、撤销移到项目时才有，没去掉的不列）。 */
-export type UndoResult = { kind: 'undone'; decisionId: string; restored: string[]; snapshotId?: string; skipped?: number; droppedLinks?: Array<{ id: string } & DroppedLinks> } | UndoError
+/** alsoUndone：记忆梦境单撤一条索引回执时，排在它后面、一并撤掉的索引回执数。 */
+export type UndoResult = { kind: 'undone'; decisionId: string; restored: string[]; snapshotId?: string; skipped?: number; alsoUndone?: number; droppedLinks?: Array<{ id: string } & DroppedLinks> } | UndoError
 
 /** 最近删除的普通恢复（没有裁决条目覆盖）多一种 failed：快照后被修改过而跳过。 */
 export type RestoreDeletedResult =
@@ -62,8 +66,11 @@ export function executeUndo(args: UndoArgs, context: GovernanceContext, deps: Un
   return claimAndUndo(args, context, deps)
 }
 
-/** snapshotId：调用方看到的那次结清的改前快照，给了就在认领后核对，对不上（期间撤销后又重新裁决过）回 stale、什么都不动。 */
-type UndoArgs = { decisionId: string; snapshotId?: string; allowCrossWorkspace?: boolean }
+/**
+ * snapshotId：调用方看到的那次结清的改前快照，给了就在认领后核对，对不上（期间撤销后又重新裁决过）回 stale、什么都不动。
+ * op：只撤条目里的这一条回执（回执上的 op，记忆梦境的批次条目才有）；属于一组的连同同组的一起撤。撤过之后整批只撤剩下的。
+ */
+type UndoArgs = { decisionId: string; snapshotId?: string; allowCrossWorkspace?: boolean; op?: string }
 
 /** isExpected：认领后重读的条目还得是调用方看到的那条（最近删除的恢复：期间被撤销或重新裁决过的不再按旧裁决动手）。 */
 async function claimAndUndo(
@@ -79,8 +86,10 @@ async function claimAndUndo(
       return error('stale', `待决项 ${entry.id} 在你看到之后撤销过、又重新处理了，未做任何改动`, 'resettled')
     }
     const rule = undoRuleOf(entry)
-    if (rule.mechanism === 'undo-index') return await undoIndexRun(entry, deps)
     const allow = args.allowCrossWorkspace
+    if (rule.mechanism === 'undo-dreams') return await undoDreamsRun(entry, args.op, allow, context, deps)
+    if (args.op !== undefined) return notFound(`${entry.id} 里的单条回执`, 'no-entry')
+    if (rule.mechanism === 'undo-index') return await undoIndexRun(entry, deps)
     if (rule.mechanism === 'unlink') return await unlink(entry, allow, context, deps)
     if (rule.mechanism === 'revert-changes') return await revertChanges(entry, rule, allow, context, deps)
     if (rule.mechanism === 'relocate') return await relocate(entry, rule, allow, context, deps)
@@ -107,11 +116,7 @@ async function undoIndexRun(entry: UndoableEntry, deps: UndoDeps): Promise<UndoR
   const receipts = all.filter(r => r.isConfirmed === true)
   if (label === undefined || receipts.length === 0) return notFound(entry.id, 'no-entry')
   const scope = scopeOfLedger(label)
-  let skipped = 0
-  for (const receipt of [...receipts].reverse()) {
-    const r = await deps.store.undoIndexPlan(scope, receipt.plan, { steps: () => [indexReceiptUndoneStep(entry.id, receipt.op)] })
-    if (r.kind === 'stale') skipped++
-  }
+  let skipped = await undoIndexReceipts(entry.id, scope, receipts, deps)
   if (skipped === receipts.length) return error('stale', '这次整理动过的主题之后又被改过，撤销会冲掉之后的改动，未做任何改动', 'changed')
   // 还没确认的回执（操作提交了、等着补做确认）这次没撤：算在没撤的个数里，记录留着
   skipped += all.length - receipts.length
@@ -119,6 +124,72 @@ async function undoIndexRun(entry: UndoableEntry, deps: UndoDeps): Promise<UndoR
   // 入口投影（MEMORY.md）跟着索引重新生成
   await deps.store.maintain(scope)
   return { kind: 'undone', decisionId: entry.id, restored: [], ...(skipped > 0 ? { skipped } : {}) }
+}
+
+/** 按索引操作的回执从后往前各撤一次，撤掉的回执随即拿掉。返回效果已经不在、没撤的个数。 */
+async function undoIndexReceipts(entryId: string, scope: Scope, receipts: readonly IndexReceipt[], deps: UndoDeps): Promise<number> {
+  let skipped = 0
+  for (const receipt of [...receipts].reverse()) {
+    const r = await deps.store.undoIndexPlan(scope, receipt.plan, { steps: () => [indexReceiptUndoneStep(entryId, receipt.op)] })
+    if (r.kind === 'stale') skipped++
+  }
+  return skipped
+}
+
+/**
+ * 撤销记忆梦境的一次运行：先按回执逆序还原记忆字段（整批推演，有一条撤不了就都不动），再倒着撤索引操作（效果已经不在的跳过、回执留着）。
+ * op 给了只撤那一条回执：记忆字段的回执属于一组的连同同组的；索引回执连同这一批里排在它后面的索引回执，从最后一条倒着撤到它
+ * （索引操作的撤销按严格逆序才还原得准），一并撤了几条记在 alsoUndone；它后面有还没确认的索引回执（提交了、账还没记完）时回忙、什么都不动。
+ * 撤过的回执拿掉，之后整批撤销只撤剩下的。一条可撤的回执都没有时回不存在。一条回执都不剩时移出账本；还有记忆的回执等着补记
+ * （文件已提交）时条目留着，整批撤销的结果里把它算进没撤的（skipped）。记忆的改动过跨项目门，索引不属于哪条记忆、不过。
+ */
+async function undoDreamsRun(entry: UndoableEntry, op: string | undefined, allow: boolean | undefined, context: GovernanceContext, deps: UndoDeps): Promise<UndoResult> {
+  // 中断留下的半个组先撤掉，撤完再按剩下的回执算
+  if ((entry.openGroups?.length ?? 0) > 0) await settleOpenGroups(deps, { by: 'undo', own: entry.id })
+  const current = (await deps.decisions.listSettled()).find(d => d.id === entry.id)
+  if (current === undefined) return notFound(entry.id, 'no-entry')
+  let changes = current.changes ?? []
+  const allIndex = current.indexRun?.receipts ?? []
+  let indexReceipts = allIndex.filter(r => r.isConfirmed === true)
+  if (op !== undefined) {
+    const change = changes.find(r => r.op === op)
+    const at = allIndex.findIndex(r => r.op === op && r.isConfirmed === true)
+    if (change === undefined && at < 0) return notFound(`${entry.id} 里的这一条`, 'no-entry')
+    // 后面的索引操作还没记完账：跳过它先撤这一条会打乱逆序，等它记完
+    if (at >= 0 && allIndex.slice(at + 1).some(r => r.isConfirmed !== true)) return error('busy', `${entry.id} 这批的索引操作还没记完，稍后再撤，未做任何改动`)
+    changes = change === undefined ? [] : change.group === undefined ? [change] : changes.filter(r => r.group === change.group)
+    indexReceipts = at < 0 ? [] : allIndex.slice(at)
+  }
+  if (changes.length === 0 && indexReceipts.length === 0) return notFound(`${entry.id}（没有可撤的）`, 'no-entry')
+  const label = entry.workspaces?.[0]
+  const restored: string[] = []
+  if (changes.length > 0) {
+    const r = await revertReceipts(entry, changes, allow, context, deps)
+    if (!Array.isArray(r)) return r
+    restored.push(...r)
+  }
+  let skipped = 0
+  if (indexReceipts.length > 0 && label !== undefined) {
+    const scope = scopeOfLedger(label)
+    skipped = await undoIndexReceipts(entry.id, scope, indexReceipts, deps)
+    if (skipped === indexReceipts.length && changes.length === 0) return error('stale', '这次整理动过的主题之后又被改过，撤销会冲掉之后的改动，未做任何改动', 'changed')
+    // 入口投影（MEMORY.md）跟着索引重新生成
+    if (skipped < indexReceipts.length) await deps.store.maintain(scope)
+  }
+  // 还没确认的索引回执（提交了、等着补做确认）不撤也不拿掉：留着条目，补做确认之后还能撤。
+  // 回执都撤空了也先在写入段里看一眼有没有记忆的回执等着补记：有就留着条目，不然那次改动就没了撤销入口
+  const { left, isPending } = await deps.store.writeSection(async () => {
+    const found = (await deps.decisions.listSettled()).find(d => d.id === entry.id)
+    const isEmpty = found !== undefined && (found.changes?.length ?? 0) === 0 && (found.indexRun?.receipts.length ?? 0) === 0
+    const pending = isEmpty && hasPendingReceipts(deps.store, entry.id)
+    if (isEmpty && !pending) await deps.decisions.remove(entry.id)
+    return { left: found, isPending: pending }
+  })
+  if (isPending && op === undefined) skipped++
+  // 单撤一条索引回执时，排在它后面一并撤掉的
+  const remaining = new Set((left?.indexRun?.receipts ?? []).map(r => r.op))
+  const alsoUndone = op === undefined ? 0 : indexReceipts.slice(1).filter(r => !remaining.has(r.op)).length
+  return { kind: 'undone', decisionId: entry.id, restored, ...(skipped > 0 ? { skipped } : {}), ...(alsoUndone > 0 ? { alsoUndone } : {}) }
 }
 
 /**
@@ -134,6 +205,14 @@ async function revertChanges(entry: UndoableEntry, rule: UndoRule, allow: boolea
   }
   // 上一次已经全部撤完、只差条目的去向：这次补上
   if (receipts.length === 0) return settleUndo(entry, rule, deps, [])
+  const r = await revertReceipts(entry, receipts, allow, context, deps)
+  return Array.isArray(r) ? settleUndo(entry, rule, deps, r) : r
+}
+
+/** 按这几条回执逆序还原（见 revertChanges）。成了返回还原过的记忆 id，撤不了返回错误。 */
+async function revertReceipts(
+  entry: UndoableEntry, receipts: readonly ChangeReceipt[], allow: boolean | undefined, context: GovernanceContext, deps: UndoDeps,
+): Promise<string[] | UndoError> {
   await deps.snapshots.sweep(deps.now?.() ?? Date.now())
   const keyOf = (r: ChangeReceipt) => JSON.stringify([r.scopeKey, r.memoryId])
   const currents = new Map<string, MemoryRecord | undefined>()
@@ -159,7 +238,7 @@ async function revertChanges(entry: UndoableEntry, rule: UndoRule, allow: boolea
     if (r.error !== undefined) throw r.error
     if (!restored.includes(receipt.memoryId)) restored.push(receipt.memoryId)
   }
-  return settleUndo(entry, rule, deps, restored)
+  return restored
 }
 
 /** 撤后条目的去向：回到待处理、移出账本、标已撤销留到保留窗口结束。 */

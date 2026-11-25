@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  DREAMS_DEFAULTS, countChanges, dreamContentFingerprint, dreamsGate, resolveDreamsEnabled, usageWithin,
+  DREAMS_DEFAULTS, changeQuota, countChanges, dreamContentFingerprint, dreamsGate, resolveDreamsConfig, resolveDreamsEnabled, usageWithin,
   type DreamsGateInput,
 } from '../src/governance/dreams-gate.ts'
 import { record } from './helpers/record.ts'
@@ -138,5 +138,22 @@ describe('四道门槛', () => {
     const usageRuns = [{ at: NOW - DAY, tokens: DREAMS_DEFAULTS.weeklyTokenCap }]
     expect(gate({ isManual: true, changes: 0, isIdle: false, record: { completed: { runId: 'r', startedAt: NOW - 1, endedAt: NOW } } })).toEqual({ pass: true })
     expect(gate({ isManual: true, usageRuns })).toMatchObject({ pass: false, gate: 4 })
+  })
+})
+
+describe('一次运行的改动量上限', () => {
+  it('上限条数是本范围在用条数乘比例取整，小库不算成 0', () => {
+    expect(changeQuota(100, 0.2)).toBe(20)
+    expect(changeQuota(11, 0.2)).toBe(2)
+    expect(changeQuota(4, 0.2)).toBe(1)
+    expect(changeQuota(0, 0.2)).toBe(1)
+  })
+
+  it('比例默认 0.2；不在 (0, 1] 里的用默认值并报出来', () => {
+    expect(DREAMS_DEFAULTS.maxChangeRatio).toBe(0.2)
+    expect(resolveDreamsConfig({ maxChangeRatio: 1 })).toEqual({ config: { ...DREAMS_DEFAULTS, maxChangeRatio: 1 }, badKeys: [] })
+    for (const bad of [0, -0.1, 1.5, Number.NaN, '0.3']) {
+      expect(resolveDreamsConfig({ maxChangeRatio: bad })).toEqual({ config: DREAMS_DEFAULTS, badKeys: ['maxChangeRatio'] })
+    }
   })
 })

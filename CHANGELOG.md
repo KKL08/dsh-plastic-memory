@@ -11,9 +11,18 @@ All notable changes to this project are documented here. The format follows
   memories while no chat is running. It is off and has no switch yet. Once on
   for a scope (all memories, or one project), a pass starts only when enough
   has changed since the last one and the project folders it covers are idle,
-  and it stops at the next step when a chat starts. For now a pass only does
-  the routine index and history maintenance; the start conditions are in the
-  config file under `brewingDreams`.
+  and it stops at the next step when a chat starts. The start conditions are
+  in the config file under `brewingDreams`.
+- A Brewing Dreams pass now tidies the memories that changed since the last
+  pass: it files unsorted memories into topics and organizes the topic index,
+  refreshes summaries and tags, links related memories and adjusts how each
+  memory is injected, though never to core, the level that injects the full
+  text into every chat.
+  Locked memories are left alone, and a change is skipped when the memory was
+  edited after the model read it. One pass changes at most a share of the
+  scope's active memories (`brewingDreams.maxChangeRatio`, 20% by default);
+  what is left over is picked up by the next pass. The changes of a pass can
+  be undone together or one at a time, also while governance is turned off.
 - The plugin records which project folders have a chat running in
   `.state/activity/` inside the memory folder, so several DeepSeek Harness
   windows that share a memory folder can tell when a project is idle. A

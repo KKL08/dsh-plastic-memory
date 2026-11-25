@@ -20,8 +20,11 @@ export function isModelChange(entry: { kind?: PendingKind }): boolean {
   return (MODEL_CHANGE_KINDS as readonly PendingKind[]).includes(kindOf(entry))
 }
 
-/** 撤销的机制：按改前快照恢复、把记忆搬回原作用域、放回清掉的标记、按回执倒着撤索引操作、去掉这次挂上的关联和前提、按变更集的回执逆序逐个还原字段。 */
-export type UndoMechanism = 'restore-snapshot' | 'relocate' | 'reflag' | 'undo-index' | 'unlink' | 'revert-changes'
+/**
+ * 撤销的机制：按改前快照恢复、把记忆搬回原作用域、放回清掉的标记、按回执倒着撤索引操作、去掉这次挂上的关联和前提、按变更集的回执逆序逐个还原字段、
+ * 记忆梦境的一次运行（先按回执逆序还原记忆字段，再倒着撤索引操作；也可以只撤其中一条回执）。
+ */
+export type UndoMechanism = 'restore-snapshot' | 'relocate' | 'reflag' | 'undo-index' | 'unlink' | 'revert-changes' | 'undo-dreams'
 /** 撤后条目的去向：回到待处理、移出账本、标已撤销留到保留窗口结束。 */
 export type UndoFate = 'reopen' | 'remove' | 'mark-undone'
 
@@ -43,6 +46,8 @@ export interface UndoRule {
  */
 export function undoRuleOf(entry: UndoableEntry): UndoRule {
   const { verdict, isBornSettled } = entry.settled
+  // 记忆梦境的一次运行：记忆改动和索引操作两种回执，一条都不剩时移出账本
+  if (entry.kind === 'brewing-dreams-run') return { targets: [...new Set((entry.changes ?? []).map(r => r.memoryId))], mechanism: 'undo-dreams', fate: 'remove' }
   // 按变更集应用的（带逐操作回执）：不管是哪一种条目，都按回执逆序还原；撤后的去向仍按种类
   if (entry.changes !== undefined) {
     const targets = [...new Set(entry.changes.map(r => r.memoryId))]
@@ -131,13 +136,14 @@ export function undoStateOfAll(entry: UndoableEntry, copies: ReadonlyMap<string,
   return 'undoable'
 }
 
-/** 留作撤销的已结清条目（删一方、提升为全局、直接改与直接合并、整理所选的应用、移到项目、模型改写与替代、整理索引、只挂关联）：快照过了保留窗口就无从撤销。 */
+/** 留作撤销的已结清条目（删一方、提升为全局、直接改与直接合并、整理所选的应用、移到项目、模型改写与替代、整理索引、只挂关联、记忆梦境）：快照过了保留窗口就无从撤销。 */
 export function isUndoable(entry: PendingDecision): boolean {
   const undoable = asUndoable(entry)
   if (undoable === undefined) return false
   const rule = undoRuleOf(undoable)
   return verdictLoser(undoable, undoable.settled.verdict) !== undefined || undoable.settled.verdict === 'promoted'
     || rule.expectedStatus !== undefined || rule.receipts !== undefined || rule.mechanism === 'undo-index' || rule.mechanism === 'unlink' || rule.mechanism === 'revert-changes'
+    || rule.mechanism === 'undo-dreams'
 }
 
 /** 账本清理的截止线（与快照、最近删除同一个 RETENTION_MS）：留作撤销的条目结清超过保留窗口就清掉。 */

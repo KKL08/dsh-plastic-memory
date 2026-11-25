@@ -266,6 +266,14 @@ for (const kind of ['preciseEdit', 'guiBatch'] as const) it(`共享记忆：${un
   })
 }, 30_000)
 
+// 记忆梦境逐条整理，调模型期间用户上锁、界面改了另一条：锁定的那条跳过，改过的那条按读到的依据对不上跳过，结果仍与某个串行顺序一致
+for (const seed of seeds) it(`种子 ${seed}：梦境整理与上锁、界面编辑交错仍与串行一致`, async () => {
+  const [ops, turns] = sequenceCase(seed, fc.shuffledSubarray<MemOp>([{ kind: 'dreamTidy' }, { kind: 'lock', id: 'b' }, { kind: 'guiEdit', id: 'a' }], { minLength: 3, maxLength: 3 }), 3)
+  await checkSequence(seed, ops, turns, async (xs, scheduler) => {
+    await assertSerialEquivalent(base, scheduler, xs)
+  })
+}, 30_000)
+
 // 成组方案和单条写入、上锁交错：组要么全做成、要么撤干净，结果仍与某个串行顺序一致
 for (const [name, rival] of [
   ['单条写入', [{ kind: 'modelRewrite', id: 'a', allowsSecret: true }, { kind: 'preciseEdit', id: 'b' }]],

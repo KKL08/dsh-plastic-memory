@@ -36,7 +36,7 @@ describe('Config schema', () => {
       governance: { enabled: true, health: { sensitivity: 'normal' }, globalPromoteTarget: 'plugin-global' },
       search: { source: 'memory', dialogueTokenBudget: 1500, memoryQuotes: false, queryExpansion: true, dialogueToolResults: true },
       history: { mergeWindowMinutes: 60 },
-      brewingDreams: { minIntervalDays: 7, minChanges: 30, minNewMessages: 50, idleMinutes: 30, weeklyTokenCap: 2_000_000 },
+      brewingDreams: { minIntervalDays: 7, minChanges: 30, minNewMessages: 50, idleMinutes: 30, weeklyTokenCap: 2_000_000, maxChangeRatio: 0.2 },
       index: { maxTopics: 30 },
       subagent: { maxSavesPerSession: 10 },
       accent: 'ella',
