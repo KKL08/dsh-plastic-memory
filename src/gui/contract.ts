@@ -919,7 +919,7 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   /** 借来的会话用哪个模型（「让模型改」的按钮与提示）：拿不到回 llm-unavailable；拿到了但不知道名字时 model 缺省。只读。 */
   z.object({ cmd: z.literal('model-info') }),
   /**
-   * 「补上建议」：给一条未决的冲突生成处理建议，写到账本条目上（视图随后带出）。单次调用借来的会话的模型，不重新扫描、不写记忆。
+   * 「补上建议」：给一条未决的冲突生成处理建议，写到账本条目上（视图随后带出）。调用借来的会话的模型（选了融合或改写却没给稿时自动再问一次），不重新扫描、不写记忆。
    * 条目已有依据版本对得上的建议时直接回成功、不调用模型。条目不在待处理回 not-found；不是冲突回 invalid-args；
    * 垂直冲突按这条记忆对应的指令文件生成（项目记忆是它所在项目的，全局记忆是全局层的），取不到或不存在回 no-baseline，不调用模型、不记在条目上；
    * 一方已不在用回 not-found（带 memoryIds）；任一条含高危密钥回 has-secret，原文不发给模型。
@@ -929,7 +929,7 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
    */
   z.object({ cmd: z.literal('suggest'), decisionId: z.string() }),
   /**
-   * 「补充要求」的生成：给一条未决的冲突（横向两条，或垂直一条记忆和它对应的指令文件），按用户的要求单次调用借来的会话的模型，回一份处理方案（结果的 proposal，带依据版本）
+   * 「补充要求」的生成：给一条未决的冲突（横向两条，或垂直一条记忆和它对应的指令文件），按用户的要求调用借来的会话的模型（选了融合或改写却没给稿时自动再问一次），回一份处理方案（结果的 proposal，带依据版本）
    * 或做不到（结果的 infeasible，只有一句说明）。只读：不写记忆、不入账本，模型调用不在认领里。同 suggest 回查出处。
    * bases 是涉及记忆的卡片版本（条目记忆的顺序，横向两条、垂直一条；条数对不上回 invalid-args），对不上回 stale；生成期间被改过也回 stale，这一份丢弃。
    * 垂直冲突的指令文件同 suggest，取不到或不存在回 no-baseline。
