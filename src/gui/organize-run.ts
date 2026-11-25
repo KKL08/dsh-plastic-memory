@@ -5,6 +5,7 @@ import { isAbort, type SemanticLlm } from '../governance/semantic-scan.ts'
 import { buildOrganizePrompt, organizeBatches, organizeDirectory, organizeGroups, parseOrganizeOutput, type OrganizeMember } from '../governance/index-organize.ts'
 import { INDEX_RECEIPT_STEP, indexReceiptStep, ledgerSteps } from '../governance/op-steps.ts'
 import { genId } from '../governance/schema.ts'
+import { JSON_RETRY_HINT } from '../json-reply.ts'
 import { maskDiagnostic } from '../secrets.ts'
 import { ledgerLabel, type Scope } from '../scope.ts'
 import type { IndexFiles } from '../topic-index.ts'
@@ -33,8 +34,6 @@ export type OrganizeOutcome =
    * decisionId 是这次整理的记录（交给 undo 整批撤销），一个操作都没做成时没有。isPartial：中途停下了（模型出错、被取消、认领被接手）。
    */
   | { kind: 'done'; decisionId?: string; applied: number; skipped: number; dropped: number; unreadBatches: number; isPartial?: true }
-
-const RETRY_HINT = '\n\n上一次的回复没有按输出格式给出 JSON 对象。这次只回复那个 JSON 对象。'
 
 /**
  * 整理一次一个范围的主题索引：认领范围 → 整份核对 → 先问模型怎么调主题目录（已有主题时）、再按批问成员怎么归 → 每个操作各进一次写入段落盘
@@ -83,7 +82,7 @@ export async function runOrganize(input: { scope: Scope; llm: SemanticLlm; signa
       for (let attempt = 0; attempt < 2 && parsed === undefined; attempt++) {
         let raw: string
         try {
-          raw = await llm.complete(attempt === 0 ? prompt : { ...prompt, user: prompt.user + RETRY_HINT }, signal)
+          raw = await llm.complete(attempt === 0 ? prompt : { ...prompt, user: prompt.user + JSON_RETRY_HINT }, signal)
         } catch (err) {
           if (!isAbort(err, signal)) failure = maskDiagnostic(err instanceof Error ? err.message : String(err))
           return false

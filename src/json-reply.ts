@@ -27,6 +27,9 @@ export function readJsonObject(raw: string): { ok: true; value: unknown } | { ok
   return { ok: false, stage: parsed.length === 0 ? 'syntax' : 'shape' }
 }
 
+/** 模型的回复不是要求的 JSON 对象时，重问一次附在后面的话（整理索引、记忆梦境共用）。 */
+export const JSON_RETRY_HINT = '\n\n上一次的回复没有按输出格式给出 JSON 对象。这次只回复那个 JSON 对象。'
+
 /** 同 readJsonObject，只要对象；读不出为 undefined。 */
 export function jsonObjectIn(raw: string): unknown {
   const read = readJsonObject(raw)
