@@ -29,3 +29,18 @@ describe('出处读取策略', () => {
     expect(source.match(/(?:import|export)[\s\S]*?from\s*['"][^'"]*['"]/g)?.filter(line => /['"][^'"]*(?:review|dialogue|search)[^'"]*['"]/.test(line)) ?? []).toEqual([])
   })
 })
+
+it('会话表一次列举且相同工作目录只解析一次并保留子会话标记', async () => {
+  const { sessionTable, sessionReadPolicy } = await import('../src/tools/session-access.ts')
+  let listed = 0
+  let resolved = 0
+  const table = await sessionTable({ listSessions: async () => {
+    listed++
+    return ['s', 'child'].map(id => ({ id, cwd: '/proj/sub', isSubagent: id === 'child', isLive: false }))
+  } }, { sessionIds: async () => new Set<string>() }, async () => { resolved++; return '/proj' })
+  expect(listed).toBe(1)
+  expect(resolved).toBe(1)
+  expect(table.get('child')).toEqual({ workspacePath: '/proj', isSubagent: true })
+  expect(sessionReadPolicy(table, 's', { workspacePath: '/proj' })).toEqual({ ok: true })
+  expect(sessionReadPolicy(table, 's', { workspacePath: undefined })).toEqual({ ok: false, kind: 'forbidden' })
+})

@@ -7,6 +7,9 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- `memory_source` can expand a message reference from conversation search,
+  showing that message and the preceding and following turns. The selected
+  message includes up to 8,000 characters; longer messages show a truncation note.
 - Groundwork for Brewing Dreams, an experimental background pass that tidies
   memories while no chat is running. It is off and has no switch yet. Once on
   for a scope (all memories, or one project), a pass starts only when enough

@@ -458,7 +458,8 @@ export async function apply(ctx: Context, config: Config) {
       return null
     }
   }
-  ctx.tools.register(createSourceTool({ store, host }))
+  ctx.tools.register(createSourceTool({ store, host, noReview, workspaceOf: cwd => resolveWorkspacePath(ctx, cwd),
+    dialogueStore: dialogueCatchup.readStore, isDialogueEnabled, dialogueToolResults: () => config.search.dialogueToolResults.get() }))
   // 体检、健康分、裁决、提升四个工具随体检开关注册 / 注销（开关热更新时再同步一次）。
   // 灵敏度与提升目标不必重注册：工具执行时经 getter 现读配置。
   let governanceTools: Array<() => void> = []

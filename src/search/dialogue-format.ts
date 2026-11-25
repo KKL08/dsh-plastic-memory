@@ -118,3 +118,25 @@ const DIALOGUE_NOTES: Record<Exclude<DialogueNoteCode, 'dialogue-index-building'
 export function dialogueNote(code: DialogueNoteCode, coveredSessions = 0): string {
   return code === 'dialogue-index-building' ? `索引还在建，已覆盖 ${coveredSessions} 个会话。` : DIALOGUE_NOTES[code]
 }
+
+/** 消息引用只由会话和消息序号决定，删库重建后仍可复用。 */
+export interface MessageRef { sessionId: string; seq: number }
+
+/** 生成可往返的引用；调用方必须传入非空会话和安全非负整数序号。 */
+export function formatMessageRef(ref: MessageRef): string {
+  if (!ref.sessionId || !Number.isSafeInteger(ref.seq) || ref.seq < 0) throw new Error('消息引用需要会话和非负整数序号')
+  return `${ref.sessionId}#${ref.seq}`
+}
+
+/** 按最后一个井号解析；格式错误或序号不能精确表示时返回 undefined。 */
+export function parseMessageRef(text: string): MessageRef | undefined {
+  const separator = text.lastIndexOf('#')
+  if (separator <= 0) return undefined
+  const suffix = text.slice(separator + 1)
+  if (!/^(0|[1-9][0-9]*)$/.test(suffix)) return undefined
+  const seq = Number(suffix)
+  return Number.isSafeInteger(seq) ? { sessionId: text.slice(0, separator), seq } : undefined
+}
+
+/** 标记本次指定的消息，与周围仅作上下文的消息区分。 */
+export const MESSAGE_REF_MARK = '【指定消息】'

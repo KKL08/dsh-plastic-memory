@@ -383,6 +383,14 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       return { ok: names.length === 9, detail: `memory_* ${names.length}: ${names.join(',')}` }
     })
 
+    // 引用入口需要两个可选标识，由执行器校验二选一。
+    await attempt('SOURCE-MESSAGE-REF-SCHEMA', async () => {
+      const schema = tools.schemas().find(s => s.name === 'memory_source') as
+        { name: string; parameters?: { properties?: Record<string, unknown>; required?: string[] } } | undefined
+      const parameters = schema?.parameters
+      return { ok: parameters?.properties?.messageRef !== undefined && !(parameters.required ?? []).includes('memoryId'), detail: JSON.stringify(parameters) }
+    })
+
     // H2 无 cwd 会话 create 拒存（Ungrouped 会话不落 global）
     await attempt('H2-NO-CWD-REJECTED', async () => {
       const r = await call('memory_save', { action: 'create', name: 'no-cwd', summary: 's', content: 'c', ...MEMORY_BASE }, mkExec(undefined)) as { kind: string; code?: string }

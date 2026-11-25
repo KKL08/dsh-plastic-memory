@@ -105,6 +105,11 @@ export class DialogueCatchup {
   /** 已经警告过的故障：后台每几秒跑一次，同一个故障只记一条。 */
   private readonly warned = new Set<string>()
 
+  /** 共享同一个对话记录库，只向读取入口提供查询方法。 */
+  get readStore(): Pick<DialogueRecordStore, 'state' | 'segmentsOf' | 'turnsOf' | 'queued'> {
+    return this.deps.store
+  }
+
   constructor(deps: DialogueCatchupDeps) {
     this.deps = deps
     this.now = deps.now ?? Date.now

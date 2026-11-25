@@ -23,7 +23,7 @@ async function storeWith(r = record()) {
 }
 const args = { memoryId: 'mem_a' }
 function ok(result: Awaited<ReturnType<typeof executeSource>>) {
-  if (result.kind !== 'ok') throw new Error(JSON.stringify(result))
+  if (result.kind !== 'ok' || result.via !== 'anchor') throw new Error(JSON.stringify(result))
   return result
 }
 
@@ -251,10 +251,10 @@ describe('返回开头和模型入参', () => {
     expect(text.indexOf('记忆 mem_a')).toBeLessThan(text.indexOf('会话「标题」'))
     expect(text.indexOf('会话「标题」')).toBeLessThan(text.indexOf('- [1]'))
   })
-  it('入参都是普通类型字段且只有记忆标识必填', async () => {
+  it('入参都是普通类型字段，没有必填项（记忆标识和消息引用二选一由执行器查）', async () => {
     const tool = createSourceTool({ store: await storeWith(), host: { ...sourceHost(), contextOf: async () => ctx } })
     const schema = tool.parameters as { properties: Record<string, unknown>; required: string[] }
-    expect(schema.required).toEqual(['memoryId'])
+    expect(schema.required ?? []).toEqual([])
     for (const parameter of Object.values(schema.properties)) {
       expect(parameter).toHaveProperty('type')
       expect(parameter).not.toHaveProperty('union')
