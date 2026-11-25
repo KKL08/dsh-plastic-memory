@@ -14,6 +14,17 @@ import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
 import { DREAMS_DEFAULTS } from '../src/governance/dreams-gate.ts'
 import { DreamsStore } from '../src/governance/dreams-records.ts'
 import { runDreams } from '../src/tools/dreams-run.ts'
+import { promises as fsp } from 'node:fs'
+import { checkupEnv, bigRecord, findingKeys, type CheckupEnv } from './helpers/checkup-env.ts'
+import { instructionsOf, noInstructions } from './helpers/instructions.ts'
+import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
+import { batchMembers, findingsRows, memberIdOf, roundOf } from '../src/governance/checkup-plan.ts'
+import { isSemanticAdmitted, planSemanticBatches, type SemanticLlm } from '../src/governance/semantic-scan.ts'
+import type { ReadInstructions } from '../src/governance/instructions.ts'
+import { executeConfirm } from '../src/tools/confirm.ts'
+import { SnapshotStore } from '../src/governance/snapshots.ts'
+import type { MemorySnapshot } from '../src/governance/schema.ts'
+import { isFullyCovered } from '../src/gui/contract.ts'
 
 vi.mock('node:fs/promises', async () => (await import('./helpers/interleave.ts')).interleavedFs)
 
@@ -286,3 +297,264 @@ for (const [name, rival] of [
     })
   }, 30_000)
 }
+
+// —— 增量体检：带小上限的体检和前台写入、界面裁决交错 ——
+
+const PROJECT = '/work/proj'
+const PROJECT_SCOPE = { kind: 'workspace', workspacePath: PROJECT } as const
+const UNCAPPED = Number.MAX_SAFE_INTEGER
+/** 小记忆的垫字：一批装得下一条长记忆加两条小记忆，三条长记忆把小记忆分到不同的批。 */
+const PADDING = '字'.repeat(10_000)
+const findingKey = (f: { type: string; memoryIds: readonly string[] }) => `${f.type}:${[...f.memoryIds].sort().join('+')}`
+
+/**
+ * 按内容出结论的模型桩：正文带「模糊」的报一条说不清；同一批里带同一个冲突标记的两两报冲突。结论只由批成员和上下文决定。
+ * 带「新指令」的指令文件进了提示词时，说不清的结论只报带「新」的记忆。gate 给了时每次调用先等它（插入前台写入、卡住一次体检）。
+ */
+interface ContentModel extends SemanticLlm { calls: number; gate?: () => Promise<void> }
+function contentModel(): ContentModel {
+  const m: ContentModel = {
+    provider: 'stub', model: 'model-a', calls: 0,
+    complete: async ({ system, user }) => {
+      if (system.includes('多个项目（workspace）')) return '{"duplicates":[]}'
+      m.calls++
+      await m.gate?.()
+      const at = user.indexOf('## 记忆列表')
+      const isNew = user.slice(0, at).includes('新指令')
+      const blocks = [...user.slice(at).matchAll(/^- id=(\S+)[^\n]*\n((?: {2}[^\n]*(?:\n|$))*)/gm)]
+        .map(x => ({ id: x[1]!, text: x[2]! }))
+        .sort((a, b) => (a.id < b.id ? -1 : 1))
+      const findings: object[] = []
+      for (const b of blocks) {
+        if (b.text.includes('模糊') && (!isNew || b.text.includes('新'))) findings.push({ type: 'unclear', memoryIds: [b.id], summary: '说得含糊', suggestedAction: '处理' })
+      }
+      for (const mark of ['冲突甲', '冲突乙']) {
+        const tagged = blocks.filter(b => b.text.includes(mark))
+        for (let i = 0; i < tagged.length; i++) for (let j = i + 1; j < tagged.length; j++) {
+          findings.push({ type: 'conflict', memoryIds: [tagged[i]!.id, tagged[j]!.id], summary: `${mark}互相矛盾`, suggestedAction: '处理' })
+        }
+      }
+      return JSON.stringify({ findings })
+    },
+  }
+  return m
+}
+
+/** 项目范围里的全部记录（含删掉的）。体检开始前读一次，判定用的就是这一份。 */
+async function projectRecords(e: CheckupEnv): Promise<MemoryRecord[]> {
+  return (await e.store.readRaw(PROJECT_SCOPE)).records.map(x => x.record)
+}
+const scanProject = (e: CheckupEnv, llm: SemanticLlm) => e.scan({ llm, layers: 'semantic', target: { kind: 'scope', scope: PROJECT_SCOPE } })
+
+/**
+ * 视图里的每条发现，要么来自当前有有效结果的批（库里有成员对得上、没被全部重查作废的行），要么满足沿用的条件：
+ * 出自过时或作废的行，引用的每条记忆现在的扫描指纹等于那一行记的，并且至少有一条在没有有效结果的批里。
+ */
+async function expectViewExplained(e: CheckupEnv, read: readonly MemoryRecord[], now: number): Promise<void> {
+  const batches = planSemanticBatches(read.filter(r => isSemanticAdmitted(r, now))).map(batchMembers)
+  const round = e.db.readRound(roundOf(PROJECT_SCOPE))
+  if (round === undefined) throw new Error('读不到这一轮的库')
+  const rows = findingsRows(round.rows)
+  const same = (a: readonly (readonly [string, string])[], b: readonly (readonly [string, string])[]) => JSON.stringify(a) === JSON.stringify(b)
+  const validRows = rows.filter(r => r.checkedAt >= round.recheckBefore && batches.some(b => same(b, r.members)))
+  const unresolved = new Set(batches.filter(b => !validRows.some(r => same(b, r.members))).flat().map(([copy]) => copy))
+  const current = new Map(batches.flat())
+  const valid = new Set(validRows.flatMap(r => r.result.map(findingKey)))
+  const carried = new Set(rows.filter(r => !validRows.includes(r)).flatMap(r => r.result.filter(f => {
+    const refs = f.memoryIds.map(id => r.members.find(([copy]) => memberIdOf(copy) === id)!)
+    return refs.every(([copy, fp]) => current.get(copy) === fp) && refs.some(([copy]) => unresolved.has(copy))
+  }).map(findingKey)))
+  for (const k of findingKeys(await e.view(PROJECT_SCOPE))) expect(valid.has(k) || carried.has(k), k).toBe(true)
+}
+
+/** 冷热两路：先从热的这份拍快照（记忆文件和待决账本）给一份空缓存的环境，再各自不设上限查一遍，发现集合相等。 */
+async function expectHotEqualsCold(hot: CheckupEnv, instructions: ReadInstructions = noInstructions): Promise<void> {
+  const cold = await checkupEnv({ instructions, tokenCap: UNCAPPED })
+  try {
+    await fsp.cp(hot.memoryRoot, cold.memoryRoot, { recursive: true })
+    for (const [key, value] of await hot.pending.list()) await cold.pending.put(key, value)
+    cold.clock.now = hot.clock.now = hot.clock.now + 1000
+    hot.tokenCap.value = UNCAPPED
+    const warm = await scanProject(hot, contentModel())
+    if (warm.kind !== 'single') throw new Error(warm.kind)
+    expect(isFullyCovered(warm.rounds![0]!.coverage)).toBe(true)
+    await scanProject(cold, contentModel())
+    expect(findingKeys(await hot.view(PROJECT_SCOPE))).toEqual(findingKeys(await cold.view(PROJECT_SCOPE)))
+  } finally {
+    await cold.close()
+  }
+}
+
+type ForegroundOp =
+  | { kind: 'save'; mark: string }
+  | { kind: 'edit'; target: number; mark: string }
+  | { kind: 'delete'; target: number }
+  | { kind: 'resolve'; verdict: 'keep-both' | 'dismiss' }
+type CheckupStep = ForegroundOp | { kind: 'checkup'; cap: number; during: ForegroundOp[] }
+
+const markArb = fc.constantFrom('', '模糊', '冲突甲', '冲突乙', '模糊 冲突甲')
+const foregroundArb: fc.Arbitrary<ForegroundOp> = fc.oneof(
+  fc.record({ kind: fc.constant('save' as const), mark: markArb }),
+  fc.record({ kind: fc.constant('edit' as const), target: fc.nat(), mark: markArb }),
+  fc.record({ kind: fc.constant('delete' as const), target: fc.nat() }),
+  fc.record({ kind: fc.constant('resolve' as const), verdict: fc.constantFrom('keep-both' as const, 'dismiss' as const) }),
+)
+const checkupStepArb: fc.Arbitrary<CheckupStep> = fc.oneof(
+  { arbitrary: fc.record({ kind: fc.constant('checkup' as const), cap: fc.constantFrom(1, 30_000, 60_000), during: fc.array(foregroundArb, { maxLength: 2 }) }), weight: 2 },
+  { arbitrary: foregroundArb, weight: 1 },
+)
+
+/** 三条长记忆各起一批，四条小记忆两两跟着前两条；两对冲突各在一批里，还有一条说不清。 */
+async function seedCheckupWorld(e: CheckupEnv): Promise<void> {
+  const rows: Array<[string, number, string | undefined]> = [
+    ['mem_b1', 1, undefined], ['mem_s1', 2, '冲突甲'], ['mem_s2', 3, '冲突甲 模糊'], ['mem_b2', 4, undefined], ['mem_s3', 5, '冲突乙'], ['mem_s4', 6, '冲突乙'], ['mem_b3', 7, undefined],
+  ]
+  for (const [id, createdAt, mark] of rows) {
+    const at = { scope: 'workspace' as const, workspacePath: PROJECT, createdAt }
+    await e.store.put(mark === undefined ? bigRecord({ id, ...at }) : record({ id, name: id, content: `${id} 的正文 ${mark} ${PADDING}`, ...at }))
+  }
+}
+
+async function runForeground(e: CheckupEnv, op: ForegroundOp, index: number): Promise<void> {
+  const now = e.clock.now
+  const pipelineDeps = { store: e.store, registry: e.deps.registry, workspacePath: PROJECT, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), session: { id: '前台会话', lastSeq: index + 1 }, now: () => now }
+  // 只改、只删小记忆：长记忆留着撑出分批
+  const small = (await projectRecords(e)).filter(r => r.status === 'active' && !r.id.startsWith('mem_b')).sort((a, b) => (a.id < b.id ? -1 : 1))
+  const target = 'target' in op ? small[op.target % Math.max(small.length, 1)] : undefined
+  switch (op.kind) {
+    case 'save': {
+      const saved = await runSavePipeline(candidate({ name: `前台新记忆${index}`, type: 'knowledge', scope: 'workspace', content: `第 ${index} 次保存的正文 ${op.mark}`, summary: `第 ${index} 次保存`, allowSecret: true }), pipelineDeps)
+      expect(saved.kind).toBe('saved')
+      return
+    }
+    case 'edit': {
+      if (target === undefined) return
+      const edited = await runSavePipeline(candidate({ action: 'update', change: 'correct', id: target.id, name: target.name, content: `${target.id} 第 ${index} 次改 ${op.mark} ${PADDING}`, allowSecret: true }), pipelineDeps)
+      expect(edited.kind).toBe('updated')
+      return
+    }
+    case 'delete':
+      if (target !== undefined) await e.store.softDelete({ id: target.id, workspacePath: PROJECT }, { now })
+      return
+    case 'resolve': {
+      const open = (await e.decisions.list()).find(d => (d.kind ?? 'conflict') === 'conflict')
+      if (open === undefined) return
+      const resolved = await executeConfirm({ action: 'resolve', decisionId: open.id, verdict: op.verdict }, { workspacePath: PROJECT }, {
+        store: e.store, decisions: e.decisions, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), instructions: noInstructions, now: () => now,
+      })
+      expect(resolved.kind).toBe('resolved')
+    }
+  }
+}
+
+const checkupSeeds = Array.from({ length: interleaveRuns(60) }, (_, index) => firstSeed + index)
+describe('增量体检随机序列', () => {
+  for (const seed of checkupSeeds) it(`种子 ${seed}：带小上限的体检与前台保存、编辑、删除、界面裁决交错，视图里的发现都有来处；最后冷热两路发现相同`, async () => {
+    const [steps, turns] = sequenceCase(seed, fc.array(checkupStepArb, { minLength: 3, maxLength: 6 }))
+    await checkSequence(seed, steps, turns, async xs => {
+      const e = await checkupEnv()
+      try {
+        await seedCheckupWorld(e)
+        for (const [index, step] of xs.entries()) {
+          e.clock.now += 1000
+          if (step.kind !== 'checkup') {
+            await runForeground(e, step, index)
+            continue
+          }
+          e.tokenCap.value = step.cap
+          const read = await projectRecords(e)
+          const model = contentModel()
+          // 前台写入插在这次体检读完记忆、调模型的时候；一批都没发（全命中）时体检完再做
+          let during: ForegroundOp[] = [...step.during]
+          model.gate = async () => {
+            const ops = during
+            during = []
+            for (const op of ops) await runForeground(e, op, index)
+          }
+          await scanProject(e, model)
+          await expectViewExplained(e, read, e.clock.now)
+          for (const op of during) await runForeground(e, op, index)
+        }
+        await expectHotEqualsCold(e)
+      } finally {
+        await e.close()
+      }
+    })
+  }, 30_000)
+
+  it('并发：先开始的体检读了旧指令文件、晚到，视图仍是后开始那次的', async () => {
+    const instruction = { text: '旧指令：用 npm' }
+    const instructions = instructionsOf({ [PROJECT]: () => instruction.text })
+    const e = await checkupEnv({ instructions })
+    try {
+      const at = { scope: 'workspace' as const, workspacePath: PROJECT }
+      await e.store.put(record({ id: 'mem_old', name: 'old', content: '旧的说法 模糊', ...at }))
+      await e.store.put(record({ id: 'mem_new', name: 'new', content: '新的说法 模糊', ...at }))
+      const early = contentModel()
+      let release!: () => void
+      const reached = new Promise<void>(resolve => {
+        early.gate = () => { resolve(); return new Promise<void>(r => { release = r }) }
+      })
+      const first = scanProject(e, early)
+      await reached
+      instruction.text = '新指令：用 pnpm'
+      e.clock.now += 1000
+      await scanProject(e, contentModel())
+      const later = await e.view(PROJECT_SCOPE)
+      expect(findingKeys(later)).toEqual(['unclear:mem_new'])
+      release()
+      await first
+      // 晚到的那一刻：视图还是后开始那次的
+      expect(await e.view(PROJECT_SCOPE)).toEqual(later)
+      // 晚到的那次按它读到的算全覆盖，清理可能删掉后开始那次的行（下次重查，不承诺命中）；再跑一次，结果按新指令
+      e.clock.now += 1000
+      await scanProject(e, contentModel())
+      expect(findingKeys(await e.view(PROJECT_SCOPE))).toEqual(['unclear:mem_new'])
+      await expectHotEqualsCold(e, instructions)
+    } finally {
+      await e.close()
+    }
+  })
+
+  for (const seed of checkupSeeds) it(`种子 ${seed}：两个体检同时查同一轮、按随机先后放行，再跑一次满足冷热等式`, async () => {
+    const [[caps, order, edit], turns] = sequenceCase(seed, fc.tuple(
+      fc.tuple(fc.constantFrom(1, 30_000, UNCAPPED), fc.constantFrom(1, 30_000, UNCAPPED)),
+      fc.constantFrom([0, 1], [1, 0]),
+      fc.option(fc.tuple(fc.nat(), markArb), { nil: undefined }),
+    ))
+    await checkSequence(seed, [order], turns, async xs => {
+      const e = await checkupEnv()
+      try {
+        await seedCheckupWorld(e)
+        const models = [contentModel(), contentModel()]
+        const releases: Array<() => void> = []
+        const reached = models.map((m, i) => new Promise<void>(resolve => {
+          let isFirst = true
+          m.gate = () => {
+            if (!isFirst) return Promise.resolve()
+            isFirst = false
+            resolve()
+            return new Promise<void>(r => { releases[i] = r })
+          }
+        }))
+        // 先后开始，都在读完记忆、调第一批模型时卡住：两次都没看到对方的结果
+        const runs: Array<Promise<unknown>> = []
+        for (const [i, m] of models.entries()) {
+          e.tokenCap.value = caps[i]
+          runs.push(scanProject(e, m))
+          await reached[i]
+          e.clock.now += 1000
+        }
+        // 这时前台改一条，再按种子定的先后放行
+        if (edit !== undefined) await runForeground(e, { kind: 'edit', target: edit[0], mark: edit[1] }, 0)
+        for (const i of xs[0] ?? order) {
+          releases[i]!()
+          await runs[i]
+        }
+        await expectHotEqualsCold(e)
+      } finally {
+        await e.close()
+      }
+    })
+  }, 30_000)
+})
