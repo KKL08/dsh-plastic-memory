@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { isSameAsMemory } from '../src/search/memory-quotes.ts'
 import { intakeOf } from '../src/search/dialogue-intake.ts'
 import { isOwnEvent, messageText, sourceKindOf, turnOf } from '../src/session-log.ts'
 import { estimateTokens } from '../src/snapshot.ts'
@@ -54,7 +55,7 @@ describe('中文原话评测夹具', () => {
 
   it('每类至少五题且总量合规，答案和干扰项都指向收录消息', () => {
     const rows = collected()
-    expect(queries.length).toBeGreaterThanOrEqual(60)
+    expect(queries.length).toBe(68)
     expect(queries.length).toBeLessThanOrEqual(80)
     expect(new Set(queries.map(query => query.id)).size).toBe(queries.length)
     for (const category of categories) expect(queries.filter(query => query.category === category).length).toBeGreaterThanOrEqual(5)
@@ -91,12 +92,30 @@ describe('中文原话评测夹具', () => {
           const distance = turnOf(memory.eventRange[0], turns)! - turnOf(answer.seq, turns)!
           expect(distance).toBeGreaterThanOrEqual(1)
           expect(distance).toBeLessThanOrEqual(4)
-        } else {
+        } else if (!query.id.startsWith('near-verbatim-boundary-')) {
           const text = messageText(log.events.find(event => event.seq === answer.seq)!)!.text
           const normalize = (value: string) => value.replace(/[，。！、；\s]/gu, '')
           expect(normalize(text)).toBe(normalize(memory.body))
         }
       }
+    }
+  })
+
+  it('四道临界负例只差指定值或独有句，原话不能判成重复', () => {
+    const cases = [
+      ['120', '121'], ['林舟', '林周'], ['staging', 'production'], ['另须保留纸质签收单。', ''],
+    ]
+    const boundary = queries.filter(q => q.id.startsWith('near-verbatim-boundary-'))
+    expect(boundary).toHaveLength(4)
+    expect(memories).toHaveLength(14)
+    expect(queries.filter(q => q.category === 'near-verbatim')).toHaveLength(9)
+    for (const [i, query] of boundary.entries()) {
+      const ref = query.answers[0]!
+      const text = messageText(sessionOf(ref.sessionId).events.find(e => e.seq === ref.seq)!)!.text
+      const memory = memories.find(m => m.id === query.anchorMemoryId)!
+      expect(text).toContain(cases[i]![0])
+      expect(text.replace(cases[i]![0], cases[i]![1])).toBe(memory.body)
+      expect(isSameAsMemory(text, memory.body)).toBe(false)
     }
   })
 
