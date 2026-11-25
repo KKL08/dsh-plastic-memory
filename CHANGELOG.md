@@ -165,6 +165,9 @@ All notable changes to this project are documented here. The format follows
   test instead of hanging the run.
 
 ### Changed
+- Refining a memory, recording a state change and other single-memory
+  edits no longer reread every memory in the project to check their
+  snapshot, so these writes slow down much less as a project grows.
 - Memories whose effective time is still in the future no longer enter conversations
   or search results, and are not reported as expired.
 - Merging two memories now records which memory the removed one went into.

@@ -25,6 +25,7 @@ import { writesDuring } from './helpers/fs-writes.ts'
 import { indexedIds, isIndexPath } from './helpers/topic-index.ts'
 import { INDEX_DIR } from '../src/storage/index-store.ts'
 import { SECRET_MASK } from '../src/secrets.ts'
+import { scopeAt } from '../src/scope.ts'
 import { InMemoryTable } from './helpers/in-memory-table.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 import { userTurnLog } from './helpers/session-log.ts'
@@ -622,5 +623,127 @@ describe('SnapshotStore.redact', () => {
     table.put = async (k, v) => { writes++; return put(k, v) }
     await snapshots.redact(new Set(['mem_v']))
     expect(writes).toBe(0)
+  })
+})
+
+describe('goneCopies：快照复核先按 id 查，少量记录不整读作用域', () => {
+  /** 给 store 包一层：readRaw 每次调用记下读的是哪个作用域。 */
+  function counted(store: MemoryStore) {
+    const reads: string[] = []
+    const wrapped: Pick<MemoryStore, 'get' | 'readRaw' | 'copiesOf'> = {
+      get: (...args) => store.get(...args),
+      copiesOf: id => store.copiesOf(id),
+      readRaw: (scope, opts) => { reads.push(JSON.stringify(scope)); return store.readRaw(scope, opts) },
+    }
+    return { findGone: goneCopies(wrapped), reads }
+  }
+  const ids = (set: ReadonlySet<MemoryRecord>) => [...set].map(r => `${r.id}@${r.scope}`)
+
+  it('一条在盘上的记录：不整读作用域，判还在', async () => {
+    const h = harness()
+    const rec = wsRec({ id: 'mem_here', name: '构建命令', content: '用 pnpm build' })
+    await h.store.create(rec)
+    const { findGone, reads } = counted(h.store)
+    expect(ids(await findGone([rec]))).toEqual([])
+    expect(reads).toEqual([])
+  })
+
+  it('两条在盘上、分属全局和项目：都不整读作用域', async () => {
+    const h = harness()
+    const g = baseRecord({ id: 'mem_g', name: '全局约定', content: '回复用中文' })
+    const w = wsRec({ id: 'mem_w', name: '构建命令', content: '用 pnpm build' })
+    await h.store.create(g)
+    await h.store.create(w)
+    const { findGone, reads } = counted(h.store)
+    expect(ids(await findGone([g, w]))).toEqual([])
+    expect(reads).toEqual([])
+  })
+
+  it('正好八条、都在盘上：还在逐条定位的上限内，不整读作用域', async () => {
+    const h = harness()
+    const records = [
+      ...Array.from({ length: 3 }, (_, i) => baseRecord({ id: `mem_g${i}`, name: `全局 ${i}`, content: `全局内容 ${i}` })),
+      ...Array.from({ length: 5 }, (_, i) => wsRec({ id: `mem_w${i}`, name: `项目 ${i}`, content: `项目内容 ${i}` })),
+    ]
+    for (const r of records) await h.store.create(r)
+    const { findGone, reads } = counted(h.store)
+    expect(ids(await findGone(records))).toEqual([])
+    expect(reads).toEqual([])
+  })
+
+  it('一条软删进本作用域归档的记录：先查就找得到，判还在，不整读作用域', async () => {
+    const h = harness()
+    const rec = wsRec({ id: 'mem_archived', name: '构建命令', content: '用 pnpm build' })
+    await h.store.create(rec)
+    expect(await h.store.softDelete(rec)).toBe(true)
+    expect((await readdir(join(wsDir(), ARCHIVE_DIR))).some(f => f.endsWith('.md'))).toBe(true)
+    const { findGone, reads } = counted(h.store)
+    expect(ids(await findGone([rec]))).toEqual([])
+    expect(reads).toEqual([])
+  })
+
+  it('九条记录：超过逐条定位的上限，每个作用域整读一次', async () => {
+    const h = harness()
+    const records = [
+      ...Array.from({ length: 4 }, (_, i) => baseRecord({ id: `mem_g${i}`, name: `全局 ${i}`, content: `全局内容 ${i}` })),
+      ...Array.from({ length: 5 }, (_, i) => wsRec({ id: `mem_w${i}`, name: `项目 ${i}`, content: `项目内容 ${i}` })),
+    ]
+    for (const r of records) await h.store.create(r)
+    const { findGone, reads } = counted(h.store)
+    expect(ids(await findGone(records))).toEqual([])
+    expect(reads).toHaveLength(2)
+    expect(new Set(reads).size).toBe(2)
+  })
+
+  it('一条已被彻底删除：先查没找到，回到整读作用域，判不在', async () => {
+    const h = harness()
+    const rec = wsRec({ id: 'mem_gone', name: '构建命令', content: '用 pnpm build' })
+    await h.store.create(rec)
+    expect(await h.store.hardDelete(rec)).toBe(true)
+    const { findGone, reads } = counted(h.store)
+    expect(ids(await findGone([rec]))).toEqual(['mem_gone@workspace'])
+    expect(reads).toHaveLength(1)
+  })
+
+  describe('同 id 在全局和项目各一份、只删了项目那份，快照里是项目那份', () => {
+    async function setup(projectContent: string, globalContent: string) {
+      const h = harness()
+      // 两份除内容、所在作用域外都一样：内容相同时就是「换作用域搬过去」的样子
+      const { workspacePath: _ws, ...global } = wsRec({ id: 'mem_dup', name: '部署说明', content: globalContent })
+      await h.store.create({ ...global, scope: 'global' })
+      await h.store.create(wsRec({ id: 'mem_dup', name: '部署说明', content: projectContent }))
+      const snapped = (await h.store.get('mem_dup', scopeAt(WS)))!
+      expect(snapped.scope).toBe('workspace')
+      expect(await h.store.hardDelete(snapped, { at: scopeAt(WS) })).toBe(true)
+      return { h, snapped }
+    }
+
+    it('内容不同：全局那份不让它豁免，判不在', async () => {
+      const { h, snapped } = await setup('用 CI 部署', '手动部署')
+      expect(ids(await counted(h.store).findGone([snapped]))).toEqual(['mem_dup@workspace'])
+    })
+
+    it('内容相同、不含密钥：当作搬去了全局，判还在', async () => {
+      const { h, snapped } = await setup('用 CI 部署', '用 CI 部署')
+      expect(ids(await counted(h.store).findGone([snapped]))).toEqual([])
+    })
+
+    it('内容相同、含密钥：不认搬家豁免，判不在', async () => {
+      const text = `token ${FAKE_SECRET.sk}`
+      const { h, snapped } = await setup(text, text)
+      expect(ids(await counted(h.store).findGone([snapped]))).toEqual(['mem_dup@workspace'])
+    })
+  })
+
+  it('作用域里有读不出的文件、记录没找到、不含密钥：说不准，不判不在', async () => {
+    const h = harness()
+    const rec = wsRec({ id: 'mem_gone', name: '构建命令', content: '用 pnpm build' })
+    await h.store.create(rec)
+    await h.store.create(wsRec({ id: 'mem_other', name: '测试命令', content: '用 pnpm test' }))
+    expect(await h.store.hardDelete(rec)).toBe(true)
+    await writeFile(join(wsDir(), 'bad.md'), '---\nname: [没闭合\n---\n')
+    const { findGone, reads } = counted(h.store)
+    expect(ids(await findGone([rec]))).toEqual([])
+    expect(reads).toHaveLength(1)
   })
 })
