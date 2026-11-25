@@ -310,6 +310,14 @@ All notable changes to this project are documented here. The format follows
   the change was reported as saved but went to a memory that is no longer
   used and could not be undone. `memory_save` now refuses it and tells the
   model which memory replaced it, so the update goes there instead.
+- When the list in the side panel refreshed while deleting a new memory or
+  undoing that delete, the row could vanish and keyboard focus jumped to
+  another control or was lost. The row now stays in place until the action
+  finishes, also when it was the only memory, and focus stays on that row.
+- After a delete in the side panel failed, or the confirmation for a memory
+  with a secret was cancelled, deleting that memory elsewhere made the side
+  panel show it as deleted there, sometimes with the warning meant for
+  secrets. It is now simply removed, like other memories deleted elsewhere.
 
 ## [0.2.0] - 2026-11-21
 

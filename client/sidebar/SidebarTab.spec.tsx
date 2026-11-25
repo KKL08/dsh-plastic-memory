@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import {
   GUI_VIEW_VERSION,
-  type HealthView, type LibraryView, type MemoryCard, type ModelChange, type PendingItem, type PendingView, type ProposalAction, type ProposalOp, type SessionView,
+  type HealthView, type LibraryView, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type ModelChange, type PendingItem, type PendingView, type ProposalAction, type ProposalOp, type SessionView,
 } from '../../src/gui/contract.ts'
 import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
 import type { PluginConfig } from '../gateway.ts'
@@ -1211,6 +1211,298 @@ describe('SidebarTab 确认收起后的键盘焦点', () => {
     await press(keepBoth)
     await press(screen.getByRole('button', { name: '继续处理' }))
     await waitFor(() => { expect(screen.getByRole('button', { name: '撤销' })).toHaveFocus() })
+  })
+})
+
+describe('SidebarTab 删除在途时的键盘焦点（视图刷新和回执先后不定）', () => {
+  const NOTE = '已彻底删除。如果它是真的凭证，记得去换一个新的。'
+  const one = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
+  const two = memory({ id: 'n2', type: 'knowledge', content: '周报周五发。' })
+  const press = async (button: HTMLElement) => {
+    button.focus()
+    await act(async () => { fireEvent.click(button) })
+  }
+  /** 扣住 hold 选中的命令，由测试逐条放行（缺省回成功）；forget 回 has-secret（含密钥），其余立即成功。 */
+  function heldReplies(hold: (command: MemoryCommand) => boolean, secret = true) {
+    const held = new Map<string, (result?: MemoryCommandResult) => void>()
+    const ok = (command: MemoryCommand): MemoryCommandResult => ({ ok: true, cmd: command.cmd, ...('memoryId' in command ? { memoryIds: [command.memoryId] } : {}) })
+    const respond = (command: MemoryCommand): MemoryCommandResult | Promise<MemoryCommandResult> => {
+      if (hold(command)) {
+        return new Promise((resolve) => {
+          held.set('memoryId' in command ? command.memoryId : command.cmd, (result) => { resolve(result ?? ok(command)) })
+        })
+      }
+      return secret && command.cmd === 'forget' ? { ok: false, cmd: command.cmd, code: 'has-secret' } : ok(command)
+    }
+    /** 放行这一条的回执。 */
+    const release = async (id: string, result?: MemoryCommandResult) => {
+      const resolve = held.get(id)!
+      held.delete(id)
+      await act(async () => { resolve(result) })
+    }
+    return { respond, release }
+  }
+  const isHardDelete = (command: MemoryCommand) => command.cmd === 'hard-delete'
+  /** 点垃圾桶 → 确认删除 → 含密钥确认里点「彻底删除」，hard-delete 发出后停在在途。 */
+  const purge = async (saved: ReturnType<typeof within>, index = 0) => {
+    await press(saved.getAllByRole('button', { name: '删除这条记忆' })[index]!)
+    await press(saved.getByRole('button', { name: '删除' }))
+    await press(saved.getByRole('button', { name: '彻底删除' }))
+  }
+
+  it('库视图先刷新（已经没有这一条）、回执后到：这一行留到回执，说明出来后焦点在说明上', async () => {
+    const { respond, release } = heldReplies(isHardDelete)
+    const { gateway } = setup({ library: library(pref, proj, glob, one), session: snapshot({ savedIds: ['n1'] }), pending: pending() }, respond)
+    const saved = within(screen.getByRole('region', { name: '这次新写入的' }))
+    await purge(saved)
+    act(() => { gateway.setView('library', library(pref, proj, glob)) })
+    expect(saved.getByText('报销截止每月 25 日。')).toBeInTheDocument()
+    await release('n1')
+    await waitFor(() => { expect(saved.getByText(NOTE)).toHaveFocus() })
+  })
+
+  it('回执先到、库视图后刷新：说明出来后焦点在说明上，视图刷新后焦点仍在说明上', async () => {
+    const { respond, release } = heldReplies(isHardDelete)
+    const { gateway } = setup({ library: library(pref, proj, glob, one), session: snapshot({ savedIds: ['n1'] }), pending: pending() }, respond)
+    const saved = within(screen.getByRole('region', { name: '这次新写入的' }))
+    await purge(saved)
+    await release('n1')
+    await waitFor(() => { expect(saved.getByText(NOTE)).toHaveFocus() })
+    act(() => { gateway.setView('library', library(pref, proj, glob)) })
+    await waitFor(() => { expect(screen.getByText(NOTE)).toHaveFocus() })
+  })
+
+  it('删的是最后一条、回执先到：页面换成空状态后说明留在原来的节点上，焦点仍在说明上', async () => {
+    const { respond, release } = heldReplies(isHardDelete)
+    const { gateway } = setup({ library: library(one), session: snapshot({ injectedIds: [], savedIds: ['n1'] }), pending: pending() }, respond)
+    await purge(within(screen.getByRole('region', { name: '这次新写入的' })))
+    await release('n1')
+    const note = screen.getByText(NOTE)
+    await waitFor(() => { expect(note).toHaveFocus() })
+    act(() => { gateway.setView('library', library()) })
+    await act(async () => {})
+    expect(screen.getByText('还没有记忆')).toBeInTheDocument()
+    expect(screen.getByText(NOTE)).toBe(note)
+    expect(note).toHaveFocus()
+  })
+
+  it('删的是最后一条、库视图先刷新成空：空状态上面留着这一行，回执到了换成说明，焦点在说明上', async () => {
+    const { respond, release } = heldReplies(isHardDelete)
+    const { gateway } = setup({ library: library(one), session: snapshot({ injectedIds: [], savedIds: ['n1'] }), pending: pending() }, respond)
+    await purge(within(screen.getByRole('region', { name: '这次新写入的' })))
+    act(() => { gateway.setView('library', library()) })
+    expect(screen.getByText('还没有记忆')).toBeInTheDocument()
+    expect(screen.getByText('报销截止每月 25 日。')).toBeInTheDocument()
+    await release('n1')
+    expect(screen.queryByText('报销截止每月 25 日。')).toBeNull()
+    await waitFor(() => { expect(screen.getByText(NOTE)).toHaveFocus() })
+  })
+
+  it('彻底删除失败：这一行恢复原样、删除按钮可以再点，焦点回到删除按钮，不掉到 body', async () => {
+    const { respond, release } = heldReplies(isHardDelete)
+    const { gateway } = setup({ library: library(pref, proj, glob, one), session: snapshot({ savedIds: ['n1'] }), pending: pending() }, respond)
+    const saved = within(screen.getByRole('region', { name: '这次新写入的' }))
+    await purge(saved)
+    // 回执前视图刷新了一次，这一条还在
+    act(() => { gateway.setView('library', library(pref, proj, glob, one)) })
+    await release('n1', { ok: false, cmd: 'hard-delete', code: 'failed', detail: '磁盘满了' })
+    expect(saved.getByText('报销截止每月 25 日。')).toBeInTheDocument()
+    expect(saved.getByRole('alert')).toHaveTextContent('磁盘满了')
+    expect(screen.queryByText(NOTE)).toBeNull()
+    const trash = saved.getByRole('button', { name: '删除这条记忆' })
+    expect(trash).not.toHaveAttribute('aria-disabled')
+    await waitFor(() => { expect(trash).toHaveFocus() })
+    expect(document.activeElement).not.toBe(document.body)
+  })
+
+  it('两条同时在途、回执乱序到：各自换成说明，焦点在最后操作的那条的说明上', async () => {
+    const { respond, release } = heldReplies(isHardDelete)
+    const { gateway } = setup({ library: library(pref, proj, glob, one, two), session: snapshot({ savedIds: ['n1', 'n2'] }), pending: pending() }, respond)
+    const saved = within(screen.getByRole('region', { name: '这次新写入的' }))
+    await purge(saved, 0)
+    await purge(saved, 1)
+    act(() => { gateway.setView('library', library(pref, proj, glob)) })
+    expect(saved.getByText('报销截止每月 25 日。')).toBeInTheDocument()
+    expect(saved.getByText('周报周五发。')).toBeInTheDocument()
+    await release('n2')
+    expect(saved.getByText('报销截止每月 25 日。')).toBeInTheDocument()
+    expect(saved.getAllByText(NOTE)).toHaveLength(1)
+    await release('n1')
+    const notes = saved.getAllByText(NOTE)
+    expect(notes).toHaveLength(2)
+    await waitFor(() => { expect(notes[1]).toHaveFocus() })
+  })
+
+  it('在途时这一行的删除按钮不可用：库视图先刷新后也点不开确认，不会再发命令', async () => {
+    const { respond, release } = heldReplies(isHardDelete)
+    const { gateway } = setup({ library: library(pref, proj, glob, one), session: snapshot({ savedIds: ['n1'] }), pending: pending() }, respond)
+    const saved = within(screen.getByRole('region', { name: '这次新写入的' }))
+    await purge(saved)
+    act(() => { gateway.setView('library', library(pref, proj, glob)) })
+    const trash = saved.getByRole('button', { name: '删除这条记忆' })
+    expect(trash).toHaveAttribute('aria-disabled', 'true')
+    await act(async () => { fireEvent.click(trash) })
+    expect(saved.queryByRole('group', { name: '删除这条？' })).toBeNull()
+    expect(gateway.executed.map(e => e.command.cmd)).toEqual(['forget', 'hard-delete'])
+    await release('n1')
+    expect(saved.getByText(NOTE)).toBeInTheDocument()
+  })
+
+  it('一条软删留着「撤销」、另一条彻底删除后视图刷新成空：那条的说明留在原来的节点上，焦点仍在它上面，不跳到另一条的「撤销」', async () => {
+    // A 含密钥（forget 回 has-secret），B 是普通记忆
+    const { respond } = heldReplies(() => false, false)
+    const { gateway } = setup(
+      { library: library(one, two), session: snapshot({ injectedIds: [], savedIds: ['n1', 'n2'] }), pending: pending() },
+      command => command.cmd === 'forget' && command.memoryId === 'n1' ? { ok: false, cmd: command.cmd, code: 'has-secret' } : respond(command),
+    )
+    const saved = within(screen.getByRole('region', { name: '这次新写入的' }))
+    await press(saved.getAllByRole('button', { name: '删除这条记忆' })[1]!)
+    await press(saved.getByRole('button', { name: '删除' }))
+    act(() => { gateway.setView('library', library(one)) })
+    await purge(saved)
+    const note = saved.getByText(NOTE)
+    await waitFor(() => { expect(note).toHaveFocus() })
+    act(() => { gateway.setView('library', library()) })
+    await act(async () => {})
+    expect(screen.getByText('还没有记忆')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '撤销' })).not.toHaveFocus()
+    expect(screen.getByText(NOTE)).toHaveFocus()
+    expect(screen.getByText(NOTE)).toBe(note)
+  })
+
+  it('两条同时在途、视图先刷新成空：在途的行留在空状态上面，回执乱序到后焦点在最后操作的那条的说明上', async () => {
+    const { respond, release } = heldReplies(isHardDelete)
+    const { gateway } = setup({ library: library(one, two), session: snapshot({ injectedIds: [], savedIds: ['n1', 'n2'] }), pending: pending() }, respond)
+    const saved = within(screen.getByRole('region', { name: '这次新写入的' }))
+    await purge(saved, 0)
+    await purge(saved, 1)
+    const second = saved.getAllByRole('button', { name: '删除这条记忆' })[1]!
+    await waitFor(() => { expect(second).toHaveFocus() })
+    act(() => { gateway.setView('library', library()) })
+    await act(async () => {})
+    expect(screen.getByText('还没有记忆')).toBeInTheDocument()
+    expect(second).toHaveFocus()
+    expect(screen.getAllByRole('button', { name: '删除这条记忆' })[1]).toBe(second)
+    await release('n2')
+    await release('n1')
+    await act(async () => {})
+    const notes = screen.getAllByText(NOTE)
+    expect(notes).toHaveLength(2)
+    expect(notes[1]).toHaveFocus()
+    expect(screen.queryAllByRole('button', { name: '删除这条记忆' })).toHaveLength(0)
+  })
+
+  it('普通删除同样：库视图先刷新、回执后到，焦点落在原位的「撤销」', async () => {
+    const { respond, release } = heldReplies(command => command.cmd === 'forget', false)
+    const { gateway } = setup({ library: library(pref, proj, glob, one), session: snapshot({ savedIds: ['n1'] }), pending: pending() }, respond)
+    const saved = within(screen.getByRole('region', { name: '这次新写入的' }))
+    await press(saved.getByRole('button', { name: '删除这条记忆' }))
+    await press(saved.getByRole('button', { name: '删除' }))
+    act(() => { gateway.setView('library', library(pref, proj, glob)) })
+    expect(saved.getByText('报销截止每月 25 日。')).toBeInTheDocument()
+    await release('n1')
+    await waitFor(() => { expect(saved.getByRole('button', { name: '撤销' })).toHaveFocus() })
+  })
+
+  /** 这一行（按记忆 id）。 */
+  const rowOf = (id: string) => within(document.querySelector<HTMLElement>(`[data-memory-id="${id}"]`)!)
+  /** 软删这一行，等焦点落到原位的「撤销」。 */
+  const softDelete = async (id: string) => {
+    await press(rowOf(id).getByRole('button', { name: '删除这条记忆' }))
+    await press(rowOf(id).getByRole('button', { name: '删除' }))
+    await waitFor(() => { expect(rowOf(id).getByRole('button', { name: '撤销' })).toHaveFocus() })
+  }
+  /** 不包 act 点「撤销」：同浏览器里一样，网关记恢复和本组件的成功回调各提交一次。 */
+  const undoUnbatched = (id: string) => {
+    const undo = rowOf(id).getByRole('button', { name: '撤销' })
+    undo.focus()
+    fireEvent.click(undo)
+  }
+
+  it('撤销删除：库视图已经没有这一条时点「撤销」，回执和成功回调分两次提交，焦点回到这一行的删除按钮', async () => {
+    const { gateway } = setup({ library: library(pref, proj, glob, one, two), session: snapshot({ savedIds: ['n1', 'n2'] }), pending: pending() })
+    await softDelete('n1')
+    act(() => { gateway.setView('library', library(pref, proj, glob, two)) })
+    undoUnbatched('n1')
+    await waitFor(() => { expect(rowOf('n1').getByRole('button', { name: '删除这条记忆' })).toHaveFocus() })
+  })
+
+  it('撤销删除的是唯一一条（空状态上面）：视图还没带回它时照原样画这一行，焦点在它的删除按钮上，视图带回后不动', async () => {
+    const { gateway } = setup({ library: library(one), session: snapshot({ injectedIds: [], savedIds: ['n1'] }), pending: pending() })
+    await softDelete('n1')
+    act(() => { gateway.setView('library', library()) })
+    undoUnbatched('n1')
+    await waitFor(() => { expect(rowOf('n1').getByRole('button', { name: '删除这条记忆' })).toHaveFocus() })
+    expect(screen.getByText('报销截止每月 25 日。')).toBeInTheDocument()
+    const trash = rowOf('n1').getByRole('button', { name: '删除这条记忆' })
+    act(() => { gateway.setView('library', library(one)) })
+    await act(async () => {})
+    expect(screen.queryByText('还没有记忆')).toBeNull()
+    expect(trash).toHaveFocus()
+  })
+
+  it('写进 AGENTS.md 的是唯一一条：页面换成空状态后这一行仍留着结果', async () => {
+    const cand = memory({ id: 'n1', type: 'knowledge', content: '所有项目都用 vitest。', promotion: 'candidate' })
+    const { gateway } = setup({ library: library(cand), session: snapshot({ injectedIds: [], savedIds: ['n1'] }), pending: pending() }, undefined, configWith('agents-md'))
+    await act(async () => { fireEvent.click(rowOf('n1').getByRole('button', { name: '写进 AGENTS.md' })) })
+    act(() => { gateway.setView('library', library()) })
+    expect(screen.getByText('还没有记忆')).toBeInTheDocument()
+    expect(rowOf('n1').getByText('已写进 AGENTS.md')).toBeInTheDocument()
+  })
+
+  it('空状态上面那一段不带标题，也不作为「这次新写入的」区域出现', async () => {
+    const { gateway } = setup({ library: library(one), session: snapshot({ injectedIds: [], savedIds: ['n1'] }), pending: pending() })
+    await softDelete('n1')
+    act(() => { gateway.setView('library', library()) })
+    expect(screen.getByText('已删除。14 天内也能在最近删除里找回。')).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '这次新写入的' })).toBeNull()
+  })
+
+  it('含密钥确认里点了「取消」、之后别处彻底删除这条：这里直接去掉，不写「已彻底删除」', async () => {
+    const { gateway } = setup(
+      { library: library(pref, proj, glob, one), session: snapshot({ savedIds: ['n1'] }), pending: pending() },
+      command => command.cmd === 'forget' ? { ok: false, cmd: command.cmd, code: 'has-secret' } : { ok: true, cmd: command.cmd, memoryIds: ['n1'] },
+    )
+    await press(rowOf('n1').getByRole('button', { name: '删除这条记忆' }))
+    await press(rowOf('n1').getByRole('button', { name: '删除' }))
+    await press(rowOf('n1').getByRole('button', { name: '取消' }))
+    await act(async () => { await gateway.execute('s1', { cmd: 'hard-delete', memoryId: 'n1', layer: { kind: 'workspace', workspacePath: WS } }) })
+    act(() => { gateway.setView('library', library(pref, proj, glob)) })
+    expect(screen.queryByText(NOTE)).toBeNull()
+    expect(screen.queryByRole('region', { name: '这次新写入的' })).toBeNull()
+  })
+
+  it('普通记忆在这里删除失败、之后别处软删再彻底删除：这里不留「已删除 · 撤销」，也不写含密钥那句', async () => {
+    const { gateway } = setup(
+      { library: library(pref, proj, glob, one), session: snapshot({ savedIds: ['n1'] }), pending: pending() },
+      command => command.cmd === 'forget' && gateway.executed.length === 1 ? { ok: false, cmd: command.cmd, code: 'failed', detail: '磁盘满了' } : { ok: true, cmd: command.cmd, memoryIds: ['n1'] },
+    )
+    await press(rowOf('n1').getByRole('button', { name: '删除这条记忆' }))
+    await press(rowOf('n1').getByRole('button', { name: '删除' }))
+    expect(rowOf('n1').getByRole('alert')).toHaveTextContent('磁盘满了')
+    const layer = { kind: 'workspace' as const, workspacePath: WS }
+    await act(async () => { await gateway.execute('s1', { cmd: 'forget', memoryId: 'n1', layer }) })
+    act(() => { gateway.setView('library', library(pref, proj, glob)) })
+    expect(screen.queryByText('已删除。14 天内也能在最近删除里找回。')).toBeNull()
+    await act(async () => { await gateway.execute('s1', { cmd: 'hard-delete', memoryId: 'n1', layer }) })
+    expect(screen.queryByText(NOTE)).toBeNull()
+    expect(screen.queryByRole('region', { name: '这次新写入的' })).toBeNull()
+  })
+
+  it('删除在途时这一行的「留在本项目」「提升为全局」也不可用，点了不发命令', async () => {
+    const cand = memory({ id: 'n1', type: 'knowledge', content: '所有项目都用 vitest。', promotion: 'candidate' })
+    const { respond, release } = heldReplies(isHardDelete)
+    const { gateway } = setup({ library: library(pref, proj, glob, cand), session: snapshot({ savedIds: ['n1'] }), pending: pending() }, respond)
+    await purge(rowOf('n1'))
+    act(() => { gateway.setView('library', library(pref, proj, glob)) })
+    for (const name of ['留在本项目', '提升为全局']) {
+      const button = rowOf('n1').getByRole('button', { name })
+      expect(button).toHaveAttribute('aria-disabled', 'true')
+      await act(async () => { fireEvent.click(button) })
+    }
+    expect(gateway.executed.map(e => e.command.cmd)).toEqual(['forget', 'hard-delete'])
+    await release('n1')
+    expect(screen.getByText(NOTE)).toBeInTheDocument()
   })
 })
 
