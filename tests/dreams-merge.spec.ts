@@ -495,6 +495,17 @@ describe('落盘前的核对', () => {
     expect(await entryOf('run_1')).toBeUndefined()
   })
 
+  it('存活那条锁着、模型给的合并稿和它一模一样：整组跳过，被合并方不删，原因是锁定', async () => {
+    await seed(THREE)
+    await store.updateIfLive({ id: 'mem_a' }, cur => ({ ...cur, locked: true }))
+    const [a, b] = [await get('mem_a'), await get('mem_b')]
+    replies = [[{ keep: 'mem_a', merge: ['mem_b'], name: a.name, summary: a.summary, tags: a.tags, content: a.content }]]
+    expect((await dream()).kind).toBe('completed')
+    expect(stable(await get('mem_b'))).toEqual(stable(b))
+    expect((await lastResult())?.skipped?.items).toContainEqual({ step: 'merge-fragments', kind: 'edit', target: 'mem_a', reason: 'locked' })
+    expect(await entryOf('run_1')).toBeUndefined()
+  })
+
   it('调模型期间前台改了其中一条：整组跳过，前台的改动留着', async () => {
     const [a] = await seed(THREE)
     replies = [async () => {

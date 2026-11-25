@@ -229,6 +229,7 @@ async function applyGroup(
 
 /**
  * 一组第一步之前的核对：一个写入段里把组内每个操作的目标和依据读齐，过同一个核对（checkOp）、写入许可、软删的密钥检查。
+ * 补丁和现状一样、不用写的那一步也要过写入许可：它锁着时同组别的几步照做，等于绕开了锁。
  * 返回第一个不过的；都过返回 undefined。同一条记忆在组里的第二个操作不在这里查（它要按前一步写完的样子比）。
  */
 async function precheck(ops: readonly ChangeOp[], opts: ApplyOptions, deps: ChangesetDeps, progress: BatchProgress): Promise<OpOutcome | undefined> {
@@ -239,10 +240,7 @@ async function precheck(ops: readonly ChangeOp[], opts: ApplyOptions, deps: Chan
       seen.add(copyKey(op))
       const { target, check } = await readAndCheck(op, opts, deps, cloneProgress(progress))
       const skipped = (reason: ApplySkipReason, memoryId = op.memoryId): OpOutcome => ({ kind: 'skipped', opId: op.id, memoryId, reason })
-      if (check.kind === 'skip') {
-        if (check.reason !== 'no-change') return skipped(check.reason, check.memoryId)
-        continue
-      }
+      if (check.kind === 'skip' && check.reason !== 'no-change') return skipped(check.reason, check.memoryId)
       if (target === undefined) continue
       if (writeGate(opts.by, target, opts.at) !== undefined) return skipped('locked')
       if (check.kind === 'forget' && (opts.isSecret ?? hasSecret)(target)) return skipped('has-secret')
@@ -393,6 +391,8 @@ async function applyInSection(
     ({ kind: 'skipped', opId: op.id, memoryId, reason, ...(detail !== undefined ? { detail } : {}) })
   return store.writeSection(async (): Promise<OpOutcome> => {
     const { scope, target, basis, check } = await readAndCheck(op, opts, deps, progress)
+    // 组里不用写的一步同样按刚读到的这一版过写入许可：第一步之前的核对之后才上的锁，也不能让同组别的几步照做
+    if (check.kind === 'skip' && check.reason === 'no-change' && op.group !== undefined && target !== undefined && writeGate(opts.by, target, opts.at) !== undefined) return skipped('locked')
     if (check.kind === 'skip') return skipped(check.reason, check.memoryId)
     if (check.kind === 'create') return create(op, check.from, opts, deps, skipped, landed)
     if (target === undefined) return { kind: 'checked', opId: op.id, memoryId: op.memoryId }
