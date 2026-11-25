@@ -366,7 +366,7 @@ describe('scan：上次体检与完成记录', () => {
     expect(after.scopes.map(s => [s.failure, s.modelUnavailable])).toEqual([[null, null], [null, null], [null, null]])
   })
 
-  it('写完缓存、挂账挂到一半时进程退出：不写完成记录，上次体检仍是之前那次；重跑后每个冲突只有一张卡', async () => {
+  it('挂账挂到一半时进程退出：视图和完成记录都不写，上次体检仍是之前那次；重跑后每个冲突只有一张卡', async () => {
     let dying = false
     let puts = 0
     const e = env({
@@ -392,7 +392,7 @@ describe('scan：上次体检与完成记录', () => {
     dying = true
     e.clock.now = NOW + 1000
     expect(err(await e.run({ cmd: 'scan', workspacePath: SESSION_WS })).code).toBe('failed')
-    expect((await e.cache.get(scopeCacheKey({ kind: 'workspace', workspacePath: SESSION_WS })))?.scannedAt).toBe(NOW + 1000)
+    expect((await e.cache.get(scopeCacheKey({ kind: 'workspace', workspacePath: SESSION_WS })))?.scannedAt).toBe(NOW)
     expect(await completedOf(e, SESSION)).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual' })
     ok(await e.run({ cmd: 'refresh-views' }))
     expect((await lastCheckups(e))[SESSION_WS]).toBe(NOW)
@@ -484,7 +484,7 @@ describe('scan：最近一次结果', () => {
   const resultOf = async (e: ReturnType<typeof env>, layer: Parameters<typeof checkupKey>[0]) => (await recordOf(e, checkupKey(layer)))?.lastResult
 
   it('全部体检的说明码按范围给：一个范围内容检查没做完，别的范围不带；指令文件被截断只记在那个范围；整次的合并记在 all', async () => {
-    // 输入里有别的项目的记忆就输出无法解析（这个项目的内容检查和跨项目重复都没做成），其余照常
+    // 输入里有别的项目的记忆就输出无法解析（这个项目的内容检查没做成，体检就此停下，跨项目重复不再比），其余照常
     const llm: SemanticLlm = { complete: async (input) => JSON.stringify(input).includes('mem_o') ? 'not json' : '{"findings":[]}' }
     const e = env({ llm, instructions: { [OTHER_WS]: { kind: 'found', texts: ['用 pnpm'], isTruncated: true } } })
     await seed(e)
@@ -494,7 +494,7 @@ describe('scan：最近一次结果', () => {
     expect(await codes(GLOBAL)).toEqual([])
     expect((await codes(OTHER)).sort()).toEqual(['baseline-truncated', 'semantic-failed'])
     expect((await recordOf(e, 'all'))!.lastResult!.notes.map(n => n.code).sort())
-      .toEqual(['baseline-truncated', 'cross-ws-failed', 'semantic-failed'])
+      .toEqual(['baseline-truncated', 'semantic-failed'])
   })
 
   it('agent 体检（memory_scan）只写完成记录、不写结果：之前的最近一次结果原样留着', async () => {

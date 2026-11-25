@@ -130,7 +130,15 @@ export function scanFieldValue(r: MemoryRecord, field: ScanContentField): unknow
 }
 
 /**
- * 扫描指纹：交给模型判断的全部字段（SCAN_CONTENT_FIELDS：类型、名称、正文、摘要、事实时间、有效期），加上来源方式、最近一次改动的性质、取代关系。
+ * 内容指纹：只含发给体检模型的内容字段（SCAN_CONTENT_FIELDS）。体检的批键、已裁决冲突各成员的指纹用它：
+ * 模型看不到的出处、改动性质、取代关系变了，按旧内容做的判断照样算数。
+ */
+export function scanContentFingerprint(r: MemoryRecord): string {
+  return sha1(Object.fromEntries(SCAN_CONTENT_FIELDS.map(field => [field, scanFieldValue(r, field)])))
+}
+
+/**
+ * 扫描指纹（变更集核对依据用）：交给模型判断的全部字段（SCAN_CONTENT_FIELDS：类型、名称、正文、摘要、事实时间、有效期），加上来源方式、最近一次改动的性质、取代关系。
  * 这些任一项变了，按旧内容做的判断就不算数。标签、注入档位、关联、锁、确认时间不在里面。
  */
 export function scanFingerprint(r: MemoryRecord): string {
@@ -151,6 +159,18 @@ export function scopeKeyOf(r: Pick<MemoryRecord, 'scope' | 'workspacePath'>): st
 /** 一份副本的身份：同一个 id 在不同作用域里是不同的副本，依据、进度都按它认。 */
 export function copyKey(at: { scopeKey: string; memoryId: string }): string {
   return JSON.stringify([at.scopeKey, at.memoryId])
+}
+
+/** 从副本身份解析回作用域键和 id；不是 copyKey 写的形状为 undefined。 */
+export function parseCopyKey(copy: string): { scopeKey: string; memoryId: string } | undefined {
+  try {
+    const parsed: unknown = JSON.parse(copy)
+    return Array.isArray(parsed) && parsed.length === 2 && typeof parsed[0] === 'string' && typeof parsed[1] === 'string'
+      ? { scopeKey: parsed[0], memoryId: parsed[1] }
+      : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /** 这一条记忆此刻当依据用的版本。 */

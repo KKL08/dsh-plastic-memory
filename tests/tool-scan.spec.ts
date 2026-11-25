@@ -111,6 +111,8 @@ describe('executeScan 单层模式', () => {
   it('LLM 抛异常时 layers=full 仍返回规则层结果', async () => {
     const deps = makeDeps({ host: { llmOf: (_exec: unknown) => ({ complete: async () => { throw new Error('boom') } }) } })
     await deps.store.put(record({ id: 'mem_exp', validTo: 100 }))
+    // 过期的记忆不进内容检查，另放一条在有效期内的，内容检查才有要发的批
+    await deps.store.put(record({ id: 'mem_live' }))
     const r = await scanSingle({}, deps)
     expect(r.findings.map(f => f.type)).toContain('expired')
     expect(r.notes.map(n => n.code)).toContain('semantic-failed')
@@ -728,7 +730,7 @@ describe('executeScan 完成记录（上次体检）', () => {
     expect(await checkups.list()).toEqual([])
   })
 
-  it('写完缓存后取消：抛出取消，不写完成记录', async () => {
+  it('写完视图后取消：提交点已过，完成记录照写，仍抛出取消', async () => {
     const controller = new AbortController()
     const cache = new InMemoryKvTable<ScanCacheEntry>()
     const aborting: CasKvTable<ScanCacheEntry> = {
@@ -739,7 +741,7 @@ describe('executeScan 完成记录（上次体检）', () => {
     await deps.store.put(record({ id: 'mem_g' }))
     await expect(executeScan({}, deps, fakeExec({ signal: controller.signal }))).rejects.toThrow()
     expect(await cache.list()).toHaveLength(1)
-    expect(await checkups.list()).toEqual([])
+    expect((await checkups.list()).map(r => r.id)).toEqual(['global'])
   })
 })
 

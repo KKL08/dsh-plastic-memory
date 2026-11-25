@@ -99,6 +99,12 @@ export function pairKey(entry: { memoryIds: string[]; baselineRef?: string }): s
   return dedupKey(entry.memoryIds) + (entry.baselineRef !== undefined ? '#baseline' : '')
 }
 
+/** 发现还没被裁决掉：冲突要仍在待决账本里（pairKey 匹配，不看 baselineRef 措辞），不是冲突的都算。体检的读侧计分和工具返回同一口径。 */
+export function isConflictOpen(pending: readonly { memoryIds: string[]; baselineRef?: string }[]): (f: { type: string; memoryIds: string[]; baselineRef?: string }) => boolean {
+  const keys = new Set(pending.map(pairKey))
+  return f => f.type !== 'conflict' || keys.has(pairKey(f))
+}
+
 /** 两个条目是否同一种类、指同一组记忆、同一类冲突（横向 / 垂直），不看 baselineRef 措辞。 */
 function samePair(a: KindKeyed, b: KindKeyed): boolean {
   return kindOf(a) === kindOf(b) && pairKey(a) === pairKey(b)

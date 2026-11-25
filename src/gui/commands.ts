@@ -42,6 +42,7 @@ import type { ReadEventFn } from '../tools/source.ts'
 import { generatePlan } from './model-plan.ts'
 import { generatePlanDrafts } from './model-draft-plan.ts'
 import { processInterval, runCheckup, type IntervalTimer } from './checkup-run.ts'
+import type { ScanCoreDeps } from '../tools/scan.ts'
 import type { CheckupSuggestions } from './checkup-suggestions.ts'
 import { runOrganize } from './organize-run.ts'
 import { INDEX_MAX_TOPICS_DEFAULT } from '../topic-index.ts'
@@ -89,6 +90,8 @@ export interface MemoryCommandDeps {
   host: ContextHost<{ workspacePath: string | undefined; delegationDepth: number; session: { id: string } }> & Pick<HostSession, 'llmOf'> & Partial<Pick<HostSession, 'modelCatalog'>>
   /** 按作用域取指令文件（AGENTS.md / CLAUDE.md）：体检、垂直冲突的建议与采纳都按记忆对应的那份，和借来的会话在哪个项目无关。 */
   instructions: ReadInstructions
+  /** 增量体检：体检结果库和整次的 token 上限（见 tools/scan.ts ScanToolDeps）。缺省每次整批重查、用默认上限。 */
+  incremental?: Pick<ScanCoreDeps, 'checkupCache' | 'tokenCap'>
   /** 体检开关（用时读配置）；关闭时治理类子命令返回 governance-disabled。缺省视为开启。 */
   isGovernanceEnabled?: () => boolean
   /** 旧 KV 导入是否已结清（导完且旧行已删）；缺省视为已结清。没结清时彻底删除回 failed：续传会把旧快照里的明文放回来。 */
@@ -1193,7 +1196,7 @@ async function dispatch(
         target, by: 'manual', llm,
         ...(currentWorkspace !== undefined ? { currentWorkspace } : {}),
       }, {
-        scan: { store: deps.store, registry: deps.registry, decisions: deps.decisions, cache: deps.cache, ignores: deps.ignores, instructions: deps.instructions },
+        scan: { store: deps.store, registry: deps.registry, decisions: deps.decisions, cache: deps.cache, ignores: deps.ignores, instructions: deps.instructions, ...deps.incremental },
         checkups: deps.checkups, views: deps.views,
         interval: deps.heartbeat ?? processInterval,
         onClaimChanged: () => deps.views.requestCheckups(),

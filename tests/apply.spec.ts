@@ -83,6 +83,15 @@ async function seedMemory(memoryRoot: string): Promise<string> {
   return memoryRoot
 }
 
+/** 给会话所在的项目放一条它自己的记忆：没有自己记忆的项目，体检不查内容。 */
+async function seedProjectMemory(memoryRoot: string, cwd: string): Promise<void> {
+  const workspacePath = await realpath(cwd)
+  const dir = join(memoryRoot, workspaceDirName(workspacePath))
+  await mkdir(dir, { recursive: true })
+  await writeFile(join(dir, WORKSPACE_MARKER), workspacePath + '\n')
+  await writeFile(join(dir, 'seed.md'), encodeRecord(record({ id: 'mem_project_seed', scope: 'workspace', workspacePath }), {}), 'utf8')
+}
+
 /** 本文件建出的全部替身 ctx 的卸载入口：afterEach 先卸载插件、等它的写入收尾，再删临时目录。 */
 const liveCtxs: Array<() => Promise<void>> = []
 
@@ -722,7 +731,7 @@ describe('体检后续段接线', () => {
     const scanGlobal = async () => JSON.parse((await defs[0]!.handler({ rawInput: ' scan {"layer":{"kind":"global"}}', agent: routed })).text!) as Record<string, unknown>
     const pendingView = async () => pendingViewSchema.parse(JSON.parse(await readFile(join(memoryRoot, GUI_VIEW_DIR, GUI_VIEW_FILES.pending), 'utf8')))
     const ledger = () => new PendingDecisionsStore(sidecarAt(memoryRoot).pending).list()
-    return { ctx, tools, scanGlobal, pendingView, ledger }
+    return { ctx, tools, scanGlobal, pendingView, ledger, memoryRoot }
   }
 
   it('手动体检扫出横向冲突后，后续段在后台用同一个模型生成建议：账本条目记上建议，待处理视图带着它', async () => {
@@ -782,8 +791,10 @@ describe('体检后续段接线', () => {
       },
     }
     const t = await boot(llm)
+    const cwd = await makeTmpRoot()
+    await seedProjectMemory(t.memoryRoot, cwd)
     const exec = fakeExec({
-      agent: { session: { header: { id: 'sess-chat', cwd: await makeTmpRoot() }, seq: 0, requestHeader: () => undefined }, options: { provider: 'deepseek', model: 'chat-model' } } as unknown as ToolRunContext['agent'],
+      agent: { session: { header: { id: 'sess-chat', cwd }, seq: 0, requestHeader: () => undefined }, options: { provider: 'deepseek', model: 'chat-model' } } as unknown as ToolRunContext['agent'],
     })
     await t.tools.get('memory_scan')!.execute({ layers: 'semantic' }, exec)
     const [entry] = await t.ledger()
@@ -1464,6 +1475,7 @@ describe('语义扫描请求形状', () => {
     const memoryRoot = await seedMemory(await makeTmpRoot())
     await apply(ctx as never, new Config({ memoryRoot } as never))
     const cwd = await makeTmpRoot()
+    await seedProjectMemory(memoryRoot, cwd)
     const session = { header: { id: 'sess-1', cwd }, seq: 0, requestHeader: () => undefined }
     const exec = fakeExec({
       agent: { session, options: { provider: 'deepseek', model: 'deepseek-chat' } } as unknown as ToolRunContext['agent'],
@@ -1490,6 +1502,7 @@ describe('语义扫描请求形状', () => {
     }
     const memoryRoot = await seedMemory(await makeTmpRoot())
     const cwd = await makeTmpRoot()
+    await seedProjectMemory(memoryRoot, cwd)
     const cacheId = scopeCacheKey({ kind: 'workspace', workspacePath: await realpath(cwd) }) // 无 workspaceRegistry 时规范化 cwd 即目录作用域
     const prior: ScanCacheEntry = {
       id: cacheId, scannedAt: 1, scope: await realpath(cwd),
@@ -1535,6 +1548,7 @@ describe('语义扫描请求形状', () => {
     const memoryRoot = await seedMemory(await makeTmpRoot())
     await apply(ctx as never, new Config({ memoryRoot } as never))
     const cwd = await makeTmpRoot()
+    await seedProjectMemory(memoryRoot, cwd)
     const session = { header: { id: 'sess-1', cwd }, seq: 0, requestHeader: () => undefined }
     const exec = fakeExec({
       agent: { session, options: { provider: 'deepseek', model: 'deepseek-chat' } } as unknown as ToolRunContext['agent'],
@@ -1571,6 +1585,7 @@ describe('语义扫描请求形状', () => {
     const memoryRoot = await seedMemory(await makeTmpRoot())
     await apply(ctx as never, new Config({ memoryRoot } as never))
     const cwd = await makeTmpRoot()
+    await seedProjectMemory(memoryRoot, cwd)
     const session = { header: { id: 'sess-1', cwd }, seq: 0, requestHeader: () => undefined }
     const exec = fakeExec({
       agent: { session, options: { provider: 'deepseek', model: 'deepseek-chat' } } as unknown as ToolRunContext['agent'],
@@ -1757,7 +1772,8 @@ describe('指令文件：体检按项目读宿主的指令文件', () => {
     await writeFile(join(dshHome, 'AGENTS.md'), '全局：注释用英文')
     const project = await realpath(await makeTmpRoot())
     await writeFile(join(project, 'AGENTS.md'), '项目：不要 mock 数据库')
-    const { scan, llmRequests } = await boot()
+    const { scan, llmRequests, memoryRoot } = await boot()
+    await seedProjectMemory(memoryRoot, project)
     const out = await scan(project)
     const { loadBaselineInstructions } = await import('@deepseek-ai/dsh-agent-instructions')
     const direct = await loadBaselineInstructions({ cwd: project, maxBytes: INSTRUCTION_MAX_BYTES })

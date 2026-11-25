@@ -31,6 +31,9 @@ export const OP_JOURNAL_FILE = 'op-journal.sqlite'
 /** 派生索引库的文件名（在 localStateDir 下）。 */
 export const DERIVED_INDEX_FILE = 'derived-index.sqlite'
 
+/** 体检结果库的文件名（在 localStateDir 下）：增量体检按批存下的结论，和派生索引库分开。 */
+export const CHECKUP_CACHE_FILE = 'checkup-cache.sqlite'
+
 /** 对话记录库的文件名（在 localStateDir 下）。 */
 export const DIALOGUE_RECORDS_FILE = 'dialogue-records.sqlite'
 

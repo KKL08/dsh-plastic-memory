@@ -592,6 +592,50 @@ export function resolveAutoCheckup(settings: ReadonlyMap<string, AutoCheckupFreq
   return own === undefined ? { frequency: fallback, isOwn: false } : { frequency: own, isOwn: true }
 }
 
+/** 覆盖里指令文件的状态：没有指令文件、读到了、取不到、读到了但被截断。 */
+export const COVERAGE_BASELINES = ['none', 'read', 'unavailable', 'truncated'] as const
+/** 覆盖里这一轮停在哪：查完了、到了上限、有批失败、模型用不了、取消了、这次没轮到。 */
+export const COVERAGE_STOPS = ['done', 'cap', 'batch-failed', 'model-unavailable', 'cancelled', 'not-reached'] as const
+
+/**
+ * 一次体检对一个范围的覆盖（内容检查）。落在体检记录的完成记录和最近一次结果里，透传到健康视图、体检视图。
+ * - total：这个范围过了语义检查准入（在用、没过期）的记忆数，项目含全局记忆，其中全局几条记在 globalTotal；口径和健康视图的条数不同。
+ * - checkedNow：这次发给模型并查成功的记忆数。
+ * - 这次没有有效结果的那些批里的记忆分三种：never 从没查过、changed 改过还没重查、awaiting 内容没变、等着重查（换了模型或指令文件、点了全部重查）。
+ *   isHistoryUnknown：查过的记录这次读不了，三种分不出，都记在 never（文字统称「还没查」）。
+ * - oldestCheckedAt：这次直接用上次结果（命中）的批里最早的一次检查时间；没有为 null。
+ * 新增字段都可选；枚举在读的一侧放开：以后加了取值，这一版读到不认识的按最保守的意思处理，整条记录照常解析。
+ */
+export const checkupCoverageSchema = z.object({
+  isReadComplete: z.boolean(),
+  baseline: z.enum(COVERAGE_BASELINES).catch('unavailable'),
+  total: z.number().int().nonnegative(),
+  globalTotal: z.number().int().nonnegative().optional(),
+  checkedNow: z.number().int().nonnegative(),
+  never: z.number().int().nonnegative(),
+  changed: z.number().int().nonnegative(),
+  awaiting: z.number().int().nonnegative(),
+  oldestCheckedAt: z.number().nullable(),
+  stopped: z.enum(COVERAGE_STOPS).catch('not-reached'),
+  isHistoryUnknown: z.literal(true).optional(),
+})
+export type CheckupCoverage = z.infer<typeof checkupCoverageSchema>
+
+/** 覆盖全了：范围读全、指令文件读到了或本来没有、每条都有有效结果。只有这时才能说「没有发现问题」「记忆库健康」「状态良好」。 */
+export function isFullyCovered(c: CheckupCoverage): boolean {
+  return c.isReadComplete && (c.baseline === 'read' || c.baseline === 'none') && c.never + c.changed + c.awaiting === 0
+}
+
+/** 能不能说「没有问题」：有覆盖按 isFullyCovered；没有覆盖的记录（上一个发布版写的）照旧可以说。 */
+export function isCoverageClear(c: CheckupCoverage | undefined): boolean {
+  return c === undefined || isFullyCovered(c)
+}
+
+/** 还没查的条数（三种合计）：界面和工具返回的「N 条还没查」。 */
+export function uncheckedCount(c: CheckupCoverage): number {
+  return c.never + c.changed + c.awaiting
+}
+
 /**
  * 自动体检这次没做完、或模型用不了的原因（体检记录表与体检视图共用）。kind 见 CHECKUP_CAUSE_KINDS；
  * hostCode 是宿主给的错误码（如 ACCOUNT_SIGN_IN_REQUIRED、RATE_LIMIT），宿主给了才有；message 是宿主或体检的原话，界面按 kind 和 hostCode 写说明，原话只作补充。

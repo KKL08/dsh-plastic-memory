@@ -1,7 +1,7 @@
 import { isAbsolute } from 'node:path'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { MemoryRecord } from '../record-schema.ts'
-import { pairKey } from './decisions.ts'
+import { isConflictOpen } from './decisions.ts'
 import type { AdviceIgnore, Finding, PendingDecision, ScanCacheEntry } from './schema.ts'
 import { FINDING_TYPES } from './schema.ts'
 import { runRuleScan, buildMalformedFindings } from './rule-scan.ts'
@@ -88,6 +88,8 @@ export interface ScopePreread {
   ignores: readonly AdviceIgnore[]
   /** 体检记录表，键为范围键（checkupKey）：上次体检取它的完成记录。 */
   checkups: ReadonlyMap<string, CheckupRecord>
+  /** 这次没读全的作用域（键为 scopeCacheKey）：有读不出的文件、读不了的目录，或读取抛错（体检容忍时）。缺省都读全了。 */
+  unreadScopes?: ReadonlySet<string>
 }
 
 export interface ScopeHealthResult {
@@ -132,7 +134,7 @@ export function scoreScope(deps: ScopeHealthDeps, data: ScopePreread, scope: Sco
   ruleScan.push(...buildMalformedFindings(data.quarantined.get(scopeCacheKey(scope)) ?? []))
 
   const cached = data.cache.get(scopeCacheKey(scope))
-  const pendingKeys = new Set(data.pending.map(pairKey))
+  const isOpen = isConflictOpen(data.pending)
   const alive = (id: string) => data.byId.get(id)?.status === 'active'
   // 体检之后改过的记忆，缓存里关于它的结论（重复、放错层、表述不清）已不作数，下次体检再说；冲突走账本指纹，不在此列。
   // 手改文件不动 updatedAt，靠体检时记下的指纹认出；旧缓存没有指纹，只看 updatedAt
@@ -145,7 +147,7 @@ export function scoreScope(deps: ScopeHealthDeps, data: ScopePreread, scope: Sco
   const semanticScan = (cached?.findings ?? []).filter(f => {
     if (f.memoryIds.length === 0) return false
     if (!f.memoryIds.every(alive) || !f.memoryIds.some(id => liveIds.has(id))) return false
-    if (f.type === 'conflict') return pendingKeys.has(pairKey(f))
+    if (f.type === 'conflict') return isOpen(f)
     return !f.memoryIds.some(editedSinceScan)
   })
   const rule = applyIgnores(ruleScan, data.ignores, data.byId)

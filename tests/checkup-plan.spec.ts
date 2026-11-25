@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
-import { SCAN_CONTENT_FIELDS, scanFingerprint } from '../src/governance/changeset.ts'
+import { SCAN_CONTENT_FIELDS, scanContentFingerprint, scanFingerprint } from '../src/governance/changeset.ts'
 import { buildSemanticPrompt, semanticMemoryLine, SEMANTIC_PROMPT_VERSION } from '../src/governance/semantic-scan.ts'
-import { batchKey, batchMembers, checkContext, instructionState, type InstructionState } from '../src/governance/checkup-plan.ts'
+import { batchKey, batchMembers, checkContext, crossWsRows, instructionState, planCheckup, REFRESH_AFTER_MS, type InstructionState, type PlannedRound } from '../src/governance/checkup-plan.ts'
 import { hostSemanticLlm } from '../src/governance/host-llm.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record } from './helpers/record.ts'
@@ -28,11 +28,13 @@ describe('键与上下文', () => {
       // 行里写了这个字段，就一定进了指纹：两者一起变
       expect(semanticMemoryLine(changed), field).not.toBe(semanticMemoryLine(base))
       expect(scanFingerprint(changed), field).not.toBe(scanFingerprint(base))
+      expect(scanContentFingerprint(changed), field).not.toBe(scanContentFingerprint(base))
     }
     // 只改标签：行和指纹都不变
     const tagged = { ...base, tags: ['新标签'] }
     expect(semanticMemoryLine(tagged)).toBe(semanticMemoryLine(base))
     expect(scanFingerprint(tagged)).toBe(scanFingerprint(base))
+    expect(scanContentFingerprint(tagged)).toBe(scanContentFingerprint(base))
   })
 
   it('批的键：成员和上下文一样、批内顺序不同 → 键一样；任一成员的指纹变了、上下文任一项变了 → 键不一样', () => {
@@ -86,5 +88,51 @@ describe('键与上下文', () => {
     expect([llm?.provider, llm?.model, llm?.reasoningEffort]).toEqual(['p', 'm', 'high'])
     const borrowed = hostSemanticLlm({ stream: async function* () {} }, { provider: 'p', model: 'm' })
     expect(borrowed).not.toHaveProperty('reasoningEffort')
+  })
+})
+
+describe('跨项目比较的行', () => {
+  const members = [['/a', 'x'], ['/b', 'y'], ['global', 'z']] as const
+  const row = (result: unknown) => ({ key: 'k', checkedAt: 1, members: members.map(m => [...m] as const), result })
+  it('结构校验：主题为空、项目不到两个、项目不在这一行的成员里 → 这一行不要；合规的照常读出', () => {
+    const good = { topic: '主题', workspaces: ['/a', '/b'], suggestion: '' }
+    expect(crossWsRows([row([good])])).toHaveLength(1)
+    for (const bad of [{ ...good, topic: '' }, { ...good, workspaces: ['/a'] }, { ...good, workspaces: ['/a', '/elsewhere'] }]) {
+      expect(crossWsRows([row([good, bad])]), JSON.stringify(bad)).toEqual([])
+    }
+  })
+})
+
+describe('计划：顺序和上限', () => {
+  const NOW = 100 * REFRESH_AFTER_MS
+  const hitAt = (checkedAt: number) => ({ key: 'k', checkedAt, members: [], result: [] })
+  const round = (key: string, lastCompletedAt: number | null, batches: PlannedRound['batches']): PlannedRound =>
+    ({ round: key, scope: key === 'global' ? { kind: 'global' } : { kind: 'workspace', workspacePath: key }, lastCompletedAt, batches })
+  const label = (steps: ReturnType<typeof planCheckup>['steps']) =>
+    steps.map(s => (s.kind === 'cross-ws' ? 'cross' : `${s.round}#${s.index}${s.isRefresh ? '刷新' : ''}`))
+
+  it('没命中的批轮流取：没完成过的轮最前，相同时全局在前、项目按路径；之后跨项目比较，最后按检查时间从旧到新刷新', () => {
+    const old = NOW - REFRESH_AFTER_MS - 1
+    const plan = planCheckup({
+      rounds: [
+        round('/b', 5, [{ cost: 1, hit: undefined }, { cost: 1, hit: hitAt(old - 10) }]),
+        round('/a', null, [{ cost: 1, hit: undefined }, { cost: 1, hit: undefined }]),
+        round('global', null, [{ cost: 1, hit: hitAt(old) }, { cost: 1, hit: undefined }]),
+      ],
+      crossWs: { cost: 1, isHit: false }, cap: 100, now: NOW,
+    })
+    expect(label(plan.steps)).toEqual(['global#1', '/a#0', '/b#0', '/a#1', 'cross', '/b#1刷新', 'global#0刷新'])
+    expect(plan.isCapped).toBe(false)
+  })
+
+  it('累计超过上限就停：整次第一批不受上限限制（只这一批）；刷新批不享受豁免，放不下就不发', () => {
+    const old = NOW - REFRESH_AFTER_MS - 1
+    expect(planCheckup({ rounds: [round('global', null, [{ cost: 50, hit: undefined }, { cost: 50, hit: undefined }])], cap: 10, now: NOW }))
+      .toEqual({ steps: [{ kind: 'batch', round: 'global', index: 0, isRefresh: false }], isCapped: true })
+    expect(planCheckup({ rounds: [round('global', null, [{ cost: 50, hit: hitAt(old) }])], cap: 10, now: NOW }))
+      .toEqual({ steps: [], isCapped: false })
+    // 没命中的批发完后预算有余才刷新；不到 30 天的不刷新
+    expect(label(planCheckup({ rounds: [round('global', null, [{ cost: 5, hit: undefined }, { cost: 5, hit: hitAt(old) }, { cost: 5, hit: hitAt(NOW - 1) }])], cap: 10, now: NOW }).steps))
+      .toEqual(['global#0', 'global#1刷新'])
   })
 })

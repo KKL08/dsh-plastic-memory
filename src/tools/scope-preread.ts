@@ -25,14 +25,26 @@ export async function prereadScopes(
   scopes: readonly Scope[],
   /** 当前 workspace：同 id 取舍与跨作用域定位的提示。 */
   workspacePath?: string,
+  /** 一个作用域读取抛错时记成没读全、接着读别的（体检用）；缺省照旧抛出。 */
+  opts: { isReadErrorTolerated?: boolean } = {},
 ): Promise<ScopePreread> {
   const read: LocatedRecord[] = []
   const quarantined = new Map<string, QuarantineEntry[]>()
   const directoryNotes: DirectoryNote[] = []
+  const unread = new Set<string>()
   for (const scope of scopes) {
-    const r = await deps.store.readRaw(scope, { includeArchive: true })
+    let r: Awaited<ReturnType<MemoryStore['readRaw']>>
+    try {
+      r = await deps.store.readRaw(scope, { includeArchive: true })
+    } catch (err) {
+      if (opts.isReadErrorTolerated !== true) throw err
+      unread.add(scopeCacheKey(scope))
+      continue
+    }
     read.push(...r.records)
     quarantined.set(scopeCacheKey(scope), r.quarantined)
+    // 有读不了的目录：这个作用域这次没读全。读不出的文件（坏文件）规则层另有提示，不算没读全，否则这个范围永远查不全
+    if (r.directoryNotes.some(n => n.code === 'dir-unreadable')) unread.add(scopeCacheKey(scope))
     const byPath = new Map(r.records.map(l => [l.filePath, l]))
     directoryNotes.push(...r.directoryNotes.map(n => maskNote(n, byPath.get(n.path))))
   }
@@ -68,7 +80,7 @@ export async function prereadScopes(
 
   const ignores = (await deps.ignores?.list()) ?? []
   const checkups = new Map(((await deps.checkups?.list()) ?? []).map(r => [r.id, r]))
-  return { byId, filePaths, pending, cache, quarantined, directoryNotes, shadowedDeleted, ignores, checkups }
+  return { byId, filePaths, pending, cache, quarantined, directoryNotes, shadowedDeleted, ignores, checkups, unreadScopes: unread }
 }
 
 /** 记忆文件路径与注入同口径（exposedPath）：name 含密钥的那份只给所在目录、文件名换成占位，其余路径遮一遍。 */

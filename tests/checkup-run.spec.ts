@@ -271,7 +271,7 @@ describe('取消', () => {
     expect([r.kind, rewrites]).toEqual(['done', 1])
   })
 
-  it('全部体检各范围内容检查都没做成、跨项目分析时取消：照样重写视图（账本和提升候选已经写下）', async () => {
+  it('全部体检有一批内容检查没做成：就此停下，不再做跨项目比较；不写完成记录，照样重写视图', async () => {
     const controller = new AbortController()
     let rewrites = 0
     const e = env({ views: w => ({ collectViews: () => w.collectViews(), rewriteAll: () => { rewrites++; return w.rewriteAll() } }) })
@@ -279,14 +279,19 @@ describe('取消', () => {
     await e.store.create(record({ id: 'mem_g2', name: '全局二', content: '回答简短' }))
     await e.store.create(record({ id: 'mem_s2', name: '本项目二', content: '用 yarn', scope: 'workspace', workspacePath: SESSION_WS }))
     await e.store.create(record({ id: 'mem_o2', name: '别的项目二', content: '用 bun', scope: 'workspace', workspacePath: OTHER_WS }))
+    const systems: string[] = []
     const llm: SemanticLlm = {
       complete: async (input) => {
+        systems.push(input.system)
         if (input.system.includes('多个项目（workspace）')) controller.abort(new DOMException('plugin unloaded', 'AbortError'))
         return '不是 JSON'
       },
     }
-    await e.run({ target: { kind: 'all' }, llm, signal: controller.signal })
-    expect([await e.recordOf(checkupKey(GLOBAL)), rewrites]).toEqual([undefined, 1])
+    expect(await e.run({ target: { kind: 'all' }, llm, signal: controller.signal })).toMatchObject({ kind: 'done' })
+    // 一批没做成（重试一次），不再发别的批，也不做跨项目比较
+    expect(systems.some(s => s.includes('多个项目（workspace）'))).toBe(false)
+    expect(systems).toHaveLength(2)
+    expect([(await e.recordOf(checkupKey(GLOBAL)))?.completed, rewrites]).toEqual([undefined, 1])
   })
 
   it('取消后刷新视图出错（视图目录不可写）：体检照样回做完，不往外抛，记一条日志', async () => {
@@ -481,7 +486,7 @@ describe('没做成', () => {
     expect(await e.checkups.list()).toEqual([])
   })
 
-  it('PA-57 自动：模型出错时失败记录在放掉认领之前已写下，返回失败；不写完成记录和结果', async () => {
+  it('PA-57 自动：模型出错时失败记录在放掉认领之前已写下，返回失败；不写完成记录，最近一次结果照写', async () => {
     const e = env()
     await seedScopes(e)
     let isHeldWhenFailed: boolean | undefined
@@ -496,7 +501,7 @@ describe('没做成', () => {
     const rec = (await e.recordOf(checkupKey(SESSION)))!
     expect(rec.failure).toMatchObject({ count: 1, cause: expect.objectContaining({ hostCode: 'RATE_LIMIT' }) })
     expect(rec.completed).toBeUndefined()
-    expect(rec.lastResult).toBeUndefined()
+    expect(rec.lastResult).toMatchObject({ by: 'auto', notes: [{ code: 'semantic-failed', cause: { hostCode: 'RATE_LIMIT' } }] })
   })
 
   it('PA-57 自动：模型出错时这个范围已有更晚开始、先做完的 agent 体检：不给它记失败', async () => {
@@ -513,12 +518,14 @@ describe('没做成', () => {
     expect([rec.completed?.by, rec.failure]).toEqual(['agent', undefined])
   })
 
-  it('PA-57 自动：宿主报模型用不了，返回原因，一次体检不写任何记录', async () => {
+  it('PA-57 自动：宿主报模型用不了，返回原因；一次体检只写最近一次结果，不写完成记录和失败', async () => {
     const e = env()
     await seedScopes(e)
     const r = await e.run({ target: SESSION, llm: hostError('ACCOUNT_SIGN_IN_REQUIRED'), by: 'auto' })
     expect(r).toMatchObject({ kind: 'model-unavailable', cause: { kind: 'model-error', hostCode: 'ACCOUNT_SIGN_IN_REQUIRED' } })
-    expect(await e.checkups.list()).toEqual([])
+    const records = await e.checkups.list()
+    expect(records.map(rec => [rec.id, rec.completed, rec.failure, rec.lastResult?.notes.map(n => n.code)]))
+      .toEqual([[checkupKey(SESSION), undefined, undefined, ['model-unavailable']]])
   })
 })
 
