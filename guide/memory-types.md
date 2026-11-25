@@ -78,7 +78,7 @@ scenes:
 template: scene-mh2k9x
 ```
 
-`description`、`whenToSave` 写给模型看：保存记忆时，模型按它们判断这条该归哪一类、怎么写。`howToUse` 选填，写这类记忆带入对话后怎么用，和记忆一起交给模型。`governancePriority` 决定上限吃紧时哪类先被截掉。`decayDays` 是确认周期（天）：超过这个天数没确认的记忆只标为可能过时，不会失效；`null` 表示不用定期确认。
+`description`、`whenToSave` 写给模型看：保存记忆时，模型按它们判断这条该归哪一类、怎么写。`howToUse` 选填，写这类记忆带入对话后怎么用，和记忆一起交给模型。`governancePriority` 决定语义体检时哪类先查。`decayDays` 是确认周期（天）：超过这个天数没确认的记忆只标为可能过时，不会失效；`null` 表示不用定期确认。
 
 手写 `scenes` 时要列全所有场景，漏掉的编码、办公会消失。建议优先在设置页里改。
 

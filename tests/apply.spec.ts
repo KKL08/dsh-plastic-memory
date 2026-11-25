@@ -1995,11 +1995,11 @@ describe('配置热生效（loader/volatile-update）', () => {
     expect(resaved).not.toBe(saveDef)
     expect(resaved.parameters.properties.type!.enum).toEqual(['preference', 'decision', 'regulation'])
     expect(resaved.description).toContain('regulation（合规要求）')
-    // 自定义类型是全文（core）：下一次组装就以完整正文带入；旧场景独有类型的记忆照常带入，分组名不退化
+    // 自定义类型是全文（core）：下一次组装就以完整正文带入；旧场景独有类型的记忆照常带入成员行
     await t.putGlobal({ id: 'mem_proc', type: 'procedure', name: '发版流程', summary: '发版步骤' })
     const switched = await t.assembleOnce()
     expect(switched).toContain('【记忆·合规要求】数据出境要先过安全评估')
-    expect(switched).toContain('## 可复用流程（procedure）\n- [mem_proc] 发版流程（发版步骤）')
+    expect(switched).toMatch(/^- \[mem_proc\] 发版流程（发版步骤）/m)
     await expect(t.save({ type: 'procedure', name: '流程', content: '旧场景的类型' })).rejects.toThrow(/type/)
     await expect(t.save({ type: 'profile', name: '画像', content: '场景去掉的通用类型' })).rejects.toThrow(/type/)
     expect(await t.save({ type: 'decision', name: '定了用 A', content: '周会定了选型用 A 方案' })).toMatchObject({ kind: 'saved' })
@@ -2039,13 +2039,13 @@ describe('配置热生效（loader/volatile-update）', () => {
     expect(t.tool('memory_search')).toBe(searchDef)
   })
 
-  it('删掉预设类型：memory_save 重注册、不能再新增；已有记忆照常带入，分组名按出厂定义', async () => {
+  it('删掉预设类型：memory_save 重注册、不能再新增；已有记忆照常带入', async () => {
     const t = await setup({ template: 'coding' })
     await t.putGlobal({ id: 'mem_proc', type: 'procedure', name: '发版流程', summary: '发版步骤' })
     expect(await t.update({ template: 'coding', removedPresetTypes: ['procedure'] })).toEqual([['removedPresetTypes']])
     expect(t.tool('memory_save').parameters.properties.type!.enum).not.toContain('procedure')
     await expect(t.save({ type: 'procedure', name: '流程', content: '删掉的预设' })).rejects.toThrow(/type/)
-    expect(await t.assembleOnce()).toContain('## 可复用流程（procedure）\n- [mem_proc] 发版流程（发版步骤）')
+    expect(await t.assembleOnce()).toMatch(/^- \[mem_proc\] 发版流程（发版步骤）/m)
     await t.update({ template: 'coding', removedPresetTypes: [] })
     expect(t.tool('memory_save').parameters.properties.type!.enum).toContain('procedure')
   })
@@ -2066,7 +2066,7 @@ describe('配置热生效（loader/volatile-update）', () => {
     await t.update({ template: 'scene-1', scenes: { ...PRESET_SCENES, 'scene-1': { label: '写作', types: ['preference', 'decision'] } } })
     expect(t.tool('memory_save').parameters.properties.type!.enum).not.toContain('procedure')
     await expect(t.save({ type: 'procedure', name: '流程', content: '旧场景的类型' })).rejects.toThrow(/type/)
-    expect(await t.assembleOnce()).toContain('## 可复用流程（procedure）\n- [mem_proc] 发版流程（发版步骤）')
+    expect(await t.assembleOnce()).toMatch(/^- \[mem_proc\] 发版流程（发版步骤）/m)
     expect(await searchHits(t, { query: '发版', types: ['procedure'] })).toEqual(before)
     expect(await searchHits(t, { query: '打包' })).toEqual(before)
   })
@@ -2095,7 +2095,7 @@ describe('配置热生效（loader/volatile-update）', () => {
     await expect(t.save({ type: 'regulation', name: '合规', content: '删掉的类型' })).rejects.toThrow(/type/)
     const after = await t.assembleOnce()
     expect(after).not.toContain('合规要求')
-    expect(after).toMatch(/## regulation[^\n]*\n- \[mem_reg\] 数据出境/)
+    expect(after).toMatch(/^- \[mem_reg\] 数据出境/m)
     expect(await searchHits(t, { query: '出境', types: ['regulation'] })).toEqual([{ id: 'mem_reg', type: 'regulation', stalenessNote: expect.stringMatching(/\S/) }])
   })
 
@@ -2376,8 +2376,8 @@ describe('配置热生效（loader/volatile-update）', () => {
     const t = await setup()
     await t.putGlobal({ id: 'mem_proj', type: 'project', name: '答辩提前', content: '答辩提前到 12 月 10 日', summary: '答辩提前', lastConfirmedAt: Date.now() - 10 * DAY_MS })
     const staleIds = (v: PendingView) => v.items.flatMap(i => i.kind === 'advice' && i.type === 'stale' ? i.memories.map(m => m.id) : [])
-    // 出厂 7 天：10 天没确认就算很久没确认
-    expect(await t.assembleOnce()).toMatch(new RegExp(`\\[mem_proj\\][^\\n]*${STALENESS_NOTE(10)}`))
+    // 出厂 7 天：10 天没确认就算很久没确认（注入里在主题行上计数）
+    expect(await t.assembleOnce()).toContain('### 未整理（1 条，其中 1 条久未确认）')
     expect(await searchHits(t, { query: '答辩' })).toEqual([{ id: 'mem_proj', type: 'project', stalenessNote: STALENESS_NOTE(10) }])
     await t.command('/memory refresh-views')
     await globalView(t, 'pending', pendingViewSchema, v => expect(staleIds(v)).toEqual(['mem_proj']))
@@ -2385,7 +2385,7 @@ describe('配置热生效（loader/volatile-update）', () => {
     expect(await t.update({ builtinDecayDays: { project: 30 } })).toEqual([['builtinDecayDays']])
     const after = await t.assembleOnce()
     expect(after).toContain('[mem_proj]')
-    expect(after).not.toContain(STALENESS_NOTE(10))
+    expect(after).toContain('### 未整理（1 条）')
     expect(await searchHits(t, { query: '答辩' })).toEqual([{ id: 'mem_proj', type: 'project', stalenessNote: '' }])
     await globalView(t, 'pending', pendingViewSchema, v => expect(staleIds(v)).toEqual([]))
 

@@ -1,13 +1,14 @@
-import { isPendingDelegated, type MemoryRecord } from './record-schema.ts'
+import { effectiveRecall, isPendingDelegated, type MemoryRecord, type RecallTier } from './record-schema.ts'
 import type { TypeRegistry } from './type-registry.ts'
 import { sourceNote, formatIndexLine, unattendedNote } from './index-line.ts'
 import { workspaceDirName, GLOBAL_DIR, INDEX_FILE, ARCHIVE_DIR } from './storage/paths.ts'
 import { evidenceGuidance, type EvidenceLookupLevel } from './evidence-guidance.ts'
 import { stalenessNote, withinValidity } from './record-freshness.ts'
-import { exposedPath, maskSecretSurface } from './secrets.ts'
+import { exposedPath, maskSecrets, maskSecretSurface } from './secrets.ts'
+import { readIndex, UNSORTED_TITLE, type IndexFiles } from './topic-index.ts'
+import { INDEX_AREA_TOKEN_CAP, TOPIC_MEMBER_LIMIT, estimateTokens, indexAreaLimit, injectionText, planIndexArea, type PlanScope } from './snapshot-index.ts'
 import type { OverflowLevel, OverflowMode, SearchSource } from './contract-codes.ts'
 import { relaxedTier } from './gui/contract.ts'
-import { CJK } from './search/tokenizer.ts'
 import { SNAPSHOT_MESSAGE_PREFIX } from './snapshot-message.ts'
 
 export type { OverflowMode }
@@ -38,59 +39,29 @@ export const TYPE_USAGE_HEADING = '各类记忆怎么用：'
  */
 export const COMPACTION_ENGINE_NOTE = '**压缩说明**：当 compaction engine 压缩对话时，下面的记忆条目不要写进摘要，因为压缩后会重新注入最新的记忆；对话中发生的记忆操作（新增、删除、提升、确认）照常记录。平时对话照常使用这些记忆。'
 
-/** 按中文计价的字符：CJK 文字（与检索同一口径）加全角标点（CJK 符号与标点 U+3000–303F、全角形式 U+FF00–FFEF）。 */
-const CJK_PRICED = new RegExp(String.raw`[${CJK}\u3000-\u303f\uff00-\uffef]`, 'u')
-
-/**
- * token 估算，快照组装、超限档位、会话视图用量都只走这一个函数。按码点计价：中文字符每个 0.6，
- * 其余字符（字母、数字、空白、半角标点等）每个 0.3，合计向上取整。系数按 DeepSeek 实际分词校准，
- * 默认上限 4,000 约合 6,700 个中文字。按十分之一 token 的整数累加，避免 0.6 × 5 这类浮点误差多进一。
- */
-export function estimateTokens(text: string): number {
-  return Math.ceil(tokenTenths(text) / 10)
-}
-
-/** estimateTokens 取整前的值，单位是十分之一 token。按码点边界分段时可以累加：各段之和除以十向上取整，等于整段的估算。 */
-export function tokenTenths(text: string): number {
-  let tenths = 0
-  for (const ch of text) tenths += CJK_PRICED.test(ch) ? 6 : 3
-  return tenths
-}
+export { estimateTokens, tokenTenths } from './snapshot-index.ts'
 
 /** 注入排序：confidence 降序 → lastConfirmedAt 降序。recallCount 不参与：被宽泛查询扫到的记忆不该越排越前。 */
 export function byConfidenceThenConfirmed(a: MemoryRecord, b: MemoryRecord): number {
   return b.confidence - a.confidence || b.lastConfirmedAt - a.lastConfirmedAt
 }
 
-/** 截断导航图里列出的高频标签数。 */
-const NAV_TOP_TAGS = 5
-
-/** 被截掉记录的导航图：总数、按类型条数、高频标签前 5（频次降序、同频按字典序）、完整索引入口。 */
-function truncationNav(omitted: ReadonlyArray<{ type: string; records: readonly MemoryRecord[] }>, indexPaths: readonly string[]): string {
-  const total = omitted.reduce((n, o) => n + o.records.length, 0)
-  const tagCounts = new Map<string, number>()
-  for (const o of omitted) for (const r of o.records) for (const t of r.tags) tagCounts.set(t, (tagCounts.get(t) ?? 0) + 1)
-  const topTags = [...tagCounts].sort(([ta, a], [tb, b]) => b - a || (ta < tb ? -1 : ta > tb ? 1 : 0)).slice(0, NAV_TOP_TAGS)
-  const lines = [`\n索引未列全：另有 ${total} 条记忆未列出（${omitted.map(o => `${o.type} ${o.records.length} 条`).join('、')}）。`]
-  if (topTags.length > 0) lines.push(`高频标签：${topTags.map(([t, n]) => `${t}（${n}）`).join('、')}。`)
-  lines.push(indexPaths.length > 0
-    ? `用 memory_search 查询；要浏览全部条目，从 ${indexPaths.join('、')} 进各主题页。`
-    : '用 memory_search 查询；要浏览全部条目，从各记忆目录的 MEMORY.md 进各主题页。')
-  return lines.join('\n')
-}
-
 /** 一次组装的用量。token 是 estimateTokens 的逐段估算。 */
 export interface SnapshotUsage {
-  /** 按作用域分段：记忆行（core 区正文、索引行）归 workspace / global，其余（标题、附注、组头、导航图、固定尾注、冷启动文案、
-   *  快照消息开头的取代句）归 fixed。 */
+  /** 按作用域分段：记忆行（必读全文、成员行）归 workspace / global，其余（标题、附注、作用域标题、主题行、「另有」、尾部说明、
+   *  冷启动文案、快照消息开头的取代句）归 fixed。 */
   tokens: { workspace: number; global: number; fixed: number }
-  /** 计入上限的用量：标题、core 区、组头、索引行；附注、导航图、固定尾注与取代句不计。三段之和 = usedTokens + 附注 + 导航图 + 固定尾注 + 取代句。 */
+  /** 计入上限的用量：标题、必读全文、索引区（主题目录和成员行）；附注、尾部说明与取代句不计。三段之和 = usedTokens + 附注 + 尾部说明 + 取代句。 */
   usedTokens: number
-  /** 带入的记忆 id（core 区在前，再按索引区顺序）。 */
+  /** 带入的记忆 id（必读全文在前，再按成员行的顺序）。 */
   injectedIds: string[]
-  /** injectedIds 里索引行只带名称和标签、不带摘要的（passive 类型，同 formatIndexLine 的 passive）。 */
+  /** injectedIds 里成员行只带名称和标签、不带摘要的（生效档位是 passive，同 formatIndexLine 的 passive）。 */
   titleOnlyIds: string[]
-  /** 有效记忆里没带入的条数（只有 strict 会截）。 */
+  /**
+   * 因为严格模式的上限完全没带入的条数（放宽模式恒为 0）：不受严格上限时会带入的（全文档的都给全文、索引区按绝对上限排）里，
+   * 这次既没给全文、也没出成员行的，同一条只算一次。全文档的降成成员行、挤掉别的成员的，被挤掉的那条也算；
+   * 出了成员行的算带入，和 injectedIds 不重叠。每个主题的成员行上限、索引区绝对上限截掉的不算：那是索引区本来的样子，调大上限也不会多带。
+   */
   omittedCount: number
 }
 
@@ -114,12 +85,72 @@ function usageNote(registry: TypeRegistry, types: readonly string[]): string | u
   return lines.length > 0 ? `\n${TYPE_USAGE_HEADING}\n${lines.join('\n')}` : undefined
 }
 
-/** 纯函数：吃调用方预读的可见记录（global + 当前 workspace 的 active 记录），不读存储。 */
+
+/** 一个作用域的主题索引这次读成什么样：读到了（还没有索引时 files 为空，全部按「未整理」处理），或读不出。 */
+export type IndexRead = { kind: 'read'; files: IndexFiles | undefined } | { kind: 'unreadable' }
+
+/** 某个作用域的主题索引读不出时，这一层那一组的标题。 */
+export const INDEX_UNREADABLE_TEXT = '这一层的主题索引这次读不出，记忆没按主题分组'
+/** 使用优先级：和别的信息说法不一样时先看谁。 */
+export const USAGE_PRIORITY_NOTE = '信息有出入时依次以这些为准：用户当前的要求、指令文件、现读到的文件和工具结果、记忆里的做法和决定、记忆里的偏好；历史版本和事件只作背景，仓库和看板里现读得到的状态优先于记忆里记的状态。'
+/** 尾部导航：找具体内容、「另有 N 条」里没列出的，都用关键词检索。 */
+export const INDEX_NAV_NOTE = '要找具体内容或主题里没列出的记忆，用 memory_search 按关键词查。'
+/** 使用指引一句。 */
+export const INDEX_USAGE_NOTE = '摘要够回答就直接用；细节会改变做法时，再读相关那几条的全文。'
+/** 手改的主题页名字和固定在最后的「未整理」撞上时，注入里加在主题名后面的区分。 */
+export const SAME_NAME_TOPIC_MARK = '（同名主题）'
+/** 有解析不了的记忆文件时，索引区开头的说明：主题里的条数是按解析得出的记忆数的。 */
+export const unparseableIndexNote = (n: number) => `有 ${n} 个记忆文件这次解析不了，下面的条数可能偏少。`
+/** 宿主的会话搜索工具启用时补的一句。 */
+export const SESSION_SEARCH_NOTE = '记忆里没有、要找过去会话里说过的话时，可以接着用会话搜索工具查。'
+
+const SCOPE_HEADING = { workspace: '\n## 本项目记忆 · 主题目录', global: '\n## 全局记忆 · 主题目录' } as const
+const moreMembersLine = (n: number) => `- 另有 ${n} 条`
+const moreTopicsLine = (n: number) => `另有 ${n} 个主题没列出。`
+const byText = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
+const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 } as const
+
+type ScopeKey = keyof typeof SCOPE_HEADING
+/** 一个作用域里的一组：索引里的一个主题、「未整理」，或索引读不出时平铺的那一组。members 是索引行对上的记录，含已过期、还没生效的。 */
+interface TopicGroup { name: string; about: string; members: MemoryRecord[]; isPinned: boolean }
+
+/**
+ * 一个作用域按索引分组。索引行按「作用域 + id」对上这次读到的记录才算：别的作用域里同 id 的那份、这次没读到的，跳过这一行。
+ * 同一条在索引里出现两次取先出现的（各主题按先后，「未整理」最后）；索引里还没有行的记录按核对的规则排进「未整理」末尾（名称序，再按 id）。
+ * 索引读不出时，这一层的记录平铺成一组，顺序同原来的平铺注入（类型按治理优先级，组内置信度、确认时间降序）。
+ */
+function groupsOf(read: IndexRead, records: readonly MemoryRecord[], registry: TypeRegistry): TopicGroup[] {
+  if (read.kind === 'unreadable') {
+    const priority = (r: MemoryRecord) => PRIORITY_ORDER[registry.get(r.type).governancePriority]
+    return [{ name: INDEX_UNREADABLE_TEXT, about: '', members: [...records].sort((a, b) => priority(a) - priority(b) || byConfidenceThenConfirmed(a, b)), isPinned: true }]
+  }
+  const { topics, unsorted } = readIndex(read.files ?? { entry: '', pages: {} })
+  const byId = new Map(records.map(r => [r.id, r]))
+  const placed = new Set<string>()
+  const take = (ids: readonly string[]) => ids.flatMap((id) => {
+    const r = byId.get(id)
+    if (r === undefined || placed.has(id)) return []
+    placed.add(id)
+    return [r]
+  })
+  const groups = topics.map((t) => {
+    const name = injectionText(maskSecrets(t.name))
+    // 手改的主题页也叫「未整理」：加区分，免得和固定在最后的那组看成一组
+    return { name: name === UNSORTED_TITLE ? `${name}${SAME_NAME_TOPIC_MARK}` : name, about: injectionText(maskSecrets(t.about)), members: take(t.memberIds), isPinned: false }
+  })
+  const listed = take(unsorted)
+  const missing = records.filter(r => !placed.has(r.id)).sort((a, b) => byText(a.name, b.name) || byText(a.id, b.id))
+  return [...groups, { name: UNSORTED_TITLE, about: '', members: [...listed, ...missing], isPinned: true }]
+}
+
+/** 纯函数：吃调用方预读的可见记录（global + 当前 workspace 的 active 记录）和两个作用域的主题索引，不读存储。 */
 export function assembleSnapshot(deps: {
   records: readonly MemoryRecord[]
-  /** id → 索引行末尾的文件路径（相对记忆根目录，如 global/看板.md）；缺省不带（纯测试场景）。 */
+  /** id → 成员行末尾的文件路径（相对记忆根目录，如 global/看板.md）；缺省不带（纯测试场景）。 */
   files?: ReadonlyMap<string, string>
-  /** 同一次读取里解析失败的文件数（global + 当前 workspace）；可见集合为空时决定冷启动文案。 */
+  /** 两个作用域的主题索引；缺省的作用域按还没有索引处理（全部在「未整理」）。 */
+  indexes?: { workspace?: IndexRead; global?: IndexRead }
+  /** 同一次读取里解析失败的文件数（global + 当前 workspace）：可见集合为空时决定冷启动文案，不空时索引区开头说明条数可能偏少。 */
   quarantinedCount?: number
   registry: TypeRegistry
   workspacePath: string | undefined
@@ -133,13 +164,15 @@ export function assembleSnapshot(deps: {
   memoryQuotes?: boolean
   /** 检索来源（search.source）：含原话或记忆带原话开着时，下钻引导补一句按消息引用看更多内容。没传时按只查记忆。 */
   searchSource?: SearchSource
-  /** 超出上限时：relax（缺省）需要多少带多少，strict 按优先级装入、超出的截掉。 */
+  /** 宿主的会话搜索工具已启用：尾部说明补一句。缺省不提（宿主目前不告诉插件这个工具是否启用，先不提）。 */
+  sessionSearch?: boolean
+  /** 超出上限时：relax（缺省）必读全文需要多少带多少，strict 按优先级装入、超出的截掉。索引区两种模式都有绝对上限。 */
   overflow?: OverflowMode
   /** 持久型子会话自己的会话 id：它创建的待确认记录照常注入。缺省（主会话、一次性子会话）一条待确认记录都不带。 */
   ownSessionId?: string
   /** 本次可见目录中有目录读取失败。 */
   unreadable?: boolean
-}): { text: string; coreIds: string[] } & SnapshotUsage {
+}): { text: string; coreIds: string[]; indexArea: { tokens: number; limit: number } } & SnapshotUsage {
   const { registry, now } = deps
   // 待确认记录（子 agent 写入、还没升档）不归这次注入：在这里滤掉，不进预算、不进省略数，冷启动也按滤后的判
   const visible = deps.records.filter(r => !isPendingDelegated(r) || r.delegation!.sessionId === deps.ownSessionId)
@@ -147,15 +180,19 @@ export function assembleSnapshot(deps: {
     const broken = deps.quarantinedCount ?? 0
     const text = deps.unreadable ? UNREADABLE_MEMORY_TEXT : broken > 0 ? coldStartUnparseableText(broken) : COLD_START_TEXT
     const fixed = estimateTokens(text) + estimateTokens(SNAPSHOT_MESSAGE_PREFIX)
-    return { text, coreIds: [], tokens: { workspace: 0, global: 0, fixed }, usedTokens: 0, injectedIds: [], titleOnlyIds: [], omittedCount: 0 }
+    return { text, coreIds: [], indexArea: { tokens: 0, limit: 0 }, tokens: { workspace: 0, global: 0, fixed }, usedTokens: 0, injectedIds: [], titleOnlyIds: [], omittedCount: 0 }
   }
+  // 注入档位：单条设过、认得的优先，否则跟类型。必读全文、不列入、只列名称都按它判
+  const tierOf = (r: MemoryRecord): RecallTier => effectiveRecall(r, type => registry.get(type).recall)
+  // 这次注入可用的成员：已生效且没过期。条数、成员行、久未确认的计数都只看它们
+  const usable = visible.filter(r => withinValidity(r, now))
   // 疑似密钥不跳过、不加提示：四个面只把命中片段遮成占位，整条照常注入（id 不动，coreIds 与文件路径照常对应）
-  const valid = visible.filter(r => withinValidity(r, now))
-  const all = valid.map(r => maskSecretSurface(r))
-  const typeOf = new Map(all.map(r => [r.id, r.type]))
+  const masked = new Map(usable.map(r => [r.id, maskSecretSurface(r)]))
+  const shown = (r: MemoryRecord) => masked.get(r.id) ?? r
+  const typeOf = new Map(usable.map(r => [r.id, r.type]))
   // 路径口径见 exposedPath：name 被遮的不给路径（看全文走 memory_search），其余遮一遍
   const files = new Map<string, string>()
-  for (const r of valid) {
+  for (const r of usable) {
     const file = deps.files?.get(r.id)
     const path = file === undefined ? undefined : exposedPath(r, file)
     if (path !== undefined) files.set(r.id, path)
@@ -175,88 +212,85 @@ export function assembleSnapshot(deps: {
   const compactionNote = `\n> ${COMPACTION_ENGINE_NOTE}\n`
   parts.push(compactionNote)
   tokens.fixed += estimateTokens(compactionNote)
-  const scopeOf = (r: MemoryRecord) => (r.scope === 'global' ? 'global' : 'workspace')
-  const injectedIds: string[] = []
-  const titleOnlyIds: string[] = []
-  // strict 才有上限；relax 需要多少装多少（core 区、索引区都不截）
-  const limit = deps.overflow === 'strict' ? deps.budget : Infinity
+  const scopeOf = (r: MemoryRecord): ScopeKey => (r.scope === 'global' ? 'global' : 'workspace')
+  const mode = deps.overflow ?? 'relax'
+  // strict 才截必读全文；relax 需要多少装多少
+  const limit = mode === 'strict' ? deps.budget : Infinity
 
-  // core 区：完整正文，占预算一半以内
+  // 必读全文：生效档位是全文的，完整正文，占预算一半以内
   const coreBudget = limit * 0.5
-  const coreRecords = all
-    .filter(r => registry.get(r.type).recall === 'core')
-    .sort(byConfidenceThenConfirmed)
+  const coreRecords = usable.filter(r => tierOf(r) === 'core').sort(byConfidenceThenConfirmed)
   const coreIncluded: MemoryRecord[] = []
   for (const r of coreRecords) {
+    const m = shown(r)
     // 归属前缀：模型不信来路不明的裸句，标出这是长期记忆及其类型，减少"全文在手仍重搜"
-    const line = `- [${r.id}]【记忆·${registry.get(r.type).label}】${r.content}${sourceNote(r)}${unattendedNote(r)}${stalenessNote(r, registry.get(r.type).decayDays, now)}`
+    const line = `- [${m.id}]【记忆·${registry.get(m.type).label}】${m.content}${sourceNote(m)}${unattendedNote(m)}${stalenessNote(m, registry.get(m.type).decayDays, now)}`
     const cost = estimateTokens(line)
     if (used + cost > coreBudget) break
     parts.push(line)
     used += cost
     tokens[scopeOf(r)] += cost
     coreIncluded.push(r)
-    injectedIds.push(r.id)
   }
+  const coreIds = new Set(coreIncluded.map(r => r.id))
 
-  // 索引区：全部记忆按类型分组（含 core 区已出现的）。组按治理优先级 high → low 顺序申领预算，
-  // 组内逐条估算逐条装（排序与 core 区一致：confidence 降序、再 lastConfirmedAt 降序）。预算耗尽即停：
-  // 当前组截断、后续各组整组进截断导航图——避免只出孤组头。整组丢弃改成部分装入，让临界预算
-  // 也能带上高优先级组的前几条，而不是差一点就丢掉整组几十条。
-  // core 类型的正文已在 core 区（带 id），索引区不再重复列它们——避免同一条记忆两处冗余。
-  const groups = new Map<string, MemoryRecord[]>()
-  for (const r of all) {
-    if (registry.get(r.type).recall === 'core') continue
-    const list = groups.get(r.type) ?? []
-    list.push(r)
-    groups.set(r.type, list)
+  // 索引区：两个作用域（项目在前、全局在后），各自按主题分组；同名主题不合并，两个「未整理」分开列
+  const scopeKeys: ScopeKey[] = deps.workspacePath !== undefined || visible.some(r => scopeOf(r) === 'workspace') ? ['workspace', 'global'] : ['global']
+  // 有解析不了的记忆文件：主题里的条数可能偏少，索引区开头说一句（必留）
+  const broken = deps.quarantinedCount ?? 0
+  const planOpts = { memberLimit: TOPIC_MEMBER_LIMIT, moreMembers: moreMembersLine, moreTopics: moreTopicsLine, ...(broken > 0 ? { preface: `\n${unparseableIndexNote(broken)}` } : {}) }
+  /** 给出已给全文的 id 和索引区上限，排出主题目录，连同发出去的成员行和它们的记录（按发的先后）。 */
+  const planIndex = (fullIds: ReadonlySet<string>, areaLimit: number) => {
+    const layout = scopeKeys.map((key) => {
+      const groups = groupsOf(deps.indexes?.[key] ?? { kind: 'read', files: undefined }, visible.filter(r => scopeOf(r) === key), registry)
+      return groups.map((g) => {
+        const available = g.members.filter(r => withinValidity(r, now))
+        const stale = available.filter(r => stalenessNote(r, registry.get(r.type).decayDays, now) !== '').length
+        // 成员行：不列入的不出；必读全文给过全文的不重复（全文档没放进必读全文的照常出成员行）
+        const listed = available.filter(r => tierOf(r) !== 'unlisted' && !fullIds.has(r.id))
+        const head = `### ${g.name}（${available.length} 条${stale > 0 ? `，其中 ${stale} 条久未确认` : ''}）`
+        return {
+          listed,
+          topic: {
+            line: g.about === '' ? head : `${head}：${g.about}`, bareLine: head, isPinned: g.isPinned,
+            hidden: available.filter(r => tierOf(r) === 'unlisted').length,
+            // 久未确认只在主题行上计数，成员行不逐行标；无人值守的标注留在行上
+            members: listed.map(r => formatIndexLine(shown(r), { passive: tierOf(r) === 'passive', file: files.get(r.id), note: unattendedNote(r) })),
+          },
+        }
+      })
+    })
+    const planScopes: PlanScope[] = scopeKeys.map((key, si) => ({ heading: SCOPE_HEADING[key], topics: layout[si]!.map(t => t.topic) }))
+    const plan = planIndexArea(planScopes, areaLimit, planOpts)
+    const members = layout.flatMap((topics, si) => topics.flatMap((t, ti) => {
+      const n = plan.scopes[si]!.topics[ti]!.shownMembers
+      return t.listed.slice(0, n).map((r, i) => ({ r, line: t.topic.members[i]! }))
+    }))
+    return { plan, members }
   }
-  const priorityOrder = { high: 0, medium: 1, low: 2 } as const
-  const sortedGroups = [...groups.entries()]
-    .sort((a, b) => priorityOrder[registry.get(a[0]).governancePriority] - priorityOrder[registry.get(b[0]).governancePriority])
+  const areaLimit = indexAreaLimit(mode, deps.budget, used)
+  const { plan, members } = planIndex(coreIds, areaLimit)
+  const memberRecords = members.map(m => m.r)
+  parts.push(...plan.lines)
+  const areaTokens = Math.ceil(plan.tenths / 10)
+  used += areaTokens
+  const memberTokens = { workspace: 0, global: 0 }
+  for (const m of members) memberTokens[scopeOf(m.r)] += estimateTokens(m.line)
+  tokens.workspace += memberTokens.workspace
+  tokens.global += memberTokens.global
+  tokens.fixed += Math.max(0, areaTokens - memberTokens.workspace - memberTokens.global)
+  const injectedIds = [...coreIncluded, ...memberRecords].map(r => r.id)
+  const titleOnlyIds = memberRecords.filter(r => tierOf(r) === 'passive').map(r => r.id)
+  // 没带入的 = 基准名单减这次带入的。基准名单不受严格上限限制：全文档的都给全文，索引区按绝对上限排；
+  // 全文档的降成成员行、占掉别人名额的也就算上了。放宽模式两份相同，恒为 0
+  const injected = new Set(injectedIds)
+  const allCoreIds = new Set(coreRecords.map(r => r.id))
+  const baseline = mode === 'strict' ? [...allCoreIds, ...planIndex(allCoreIds, INDEX_AREA_TOKEN_CAP).members.map(m => m.r.id)] : []
+  const omitted = new Set(baseline.filter(id => !injected.has(id)))
 
-  const omitted: Array<{ type: string; records: MemoryRecord[] }> = []
-  let exhausted = false
-  for (const [type, records] of sortedGroups) {
-    const def = registry.get(type)
-    // 索引行带不带摘要：格式器与 titleOnlyIds 共用这一个判据
-    const passive = def.recall === 'passive'
-    const sorted = [...records].sort(byConfidenceThenConfirmed)
-    // 预算已耗尽：剩余各组不再尝试，整组计入 omitted
-    if (exhausted) {
-      omitted.push({ type, records: sorted })
-      continue
-    }
-    const groupLines = [`\n## ${def.label}（${type}）`]
-    const headerCost = estimateTokens(groupLines[0])
-    let groupCost = headerCost
-    const groupTokens = { workspace: 0, global: 0 }
-    for (const r of sorted) {
-      const line = formatIndexLine(r, { passive, file: files.get(r.id), note: `${unattendedNote(r)}${stalenessNote(r, def.decayDays, now)}` })
-      const cost = estimateTokens(line)
-      if (used + groupCost + cost > limit) { exhausted = true; break }
-      groupLines.push(line)
-      groupCost += cost
-      groupTokens[scopeOf(r)] += cost
-    }
-    // 只剩组头（组头本身放不下，或首条正文就放不下）：不留孤组头，整组进 omitted
-    if (groupLines.length === 1) {
-      exhausted = true
-      omitted.push({ type, records: sorted })
-      continue
-    }
-    parts.push(...groupLines)
-    used += groupCost
-    tokens.fixed += headerCost
-    tokens.workspace += groupTokens.workspace
-    tokens.global += groupTokens.global
-    const included = sorted.slice(0, groupLines.length - 1).map(r => r.id)
-    injectedIds.push(...included)
-    if (passive) titleOnlyIds.push(...included)
-    if (groupLines.length - 1 < sorted.length) omitted.push({ type, records: sorted.slice(groupLines.length - 1) })
-  }
   const tailStart = parts.length
-  if (omitted.length > 0) parts.push(truncationNav(omitted, indexPaths))
+  // 尾部导航、使用指引各一句；宿主的会话搜索工具启用时补一句
+  parts.push(`\n${INDEX_NAV_NOTE}${deps.sessionSearch === true ? SESSION_SEARCH_NOTE : ''}${INDEX_USAGE_NOTE}`)
   // 固定尾注：完整索引入口、全文引导、.archive/ 说明。**只透 global + 当前项目两处**——
   // 所有 workspace 记忆都在同一 memories 根下当兄弟目录，若透整根会让模型 grep 到别项目的
   // 私有记忆（跨项目泄漏）。跨项目透明可读的只应是 global；别项目记忆除非用户明确给路径才访问。
@@ -277,14 +311,14 @@ export function assembleSnapshot(deps: {
   // 怎么用写在读的这一侧、贴着记忆；存的指引（记什么、什么时候记）在 memory_save 里
   const usage = usageNote(registry, injectedIds.map(id => typeOf.get(id)!))
   if (usage !== undefined) parts.push(usage)
-  parts.push(`\n${MEMORY_AS_DATA_NOTE}`)
+  parts.push(`\n${USAGE_PRIORITY_NOTE}\n${MEMORY_AS_DATA_NOTE}`)
   // 证据下钻引导：固定尾注不计预算（与磁盘路径行同待遇，预算是软约束）
   if (deps.evidenceLookup) parts.push(`\n${evidenceGuidance(deps.evidenceLookup, { memoryQuotes: deps.memoryQuotes ?? false, searchSource: deps.searchSource ?? 'memory' })}`)
-  // 导航图与固定尾注：不计上限，归固定说明
+  // 尾部说明：不计上限，归固定说明
   for (const part of parts.slice(tailStart)) tokens.fixed += estimateTokens(part)
 
   return {
-    text: parts.join('\n'), coreIds: coreIncluded.map(r => r.id),
-    tokens, usedTokens: used, injectedIds, titleOnlyIds, omittedCount: all.length - injectedIds.length,
+    text: parts.join('\n'), coreIds: coreIncluded.map(r => r.id), indexArea: { tokens: areaTokens, limit: areaLimit },
+    tokens, usedTokens: used, injectedIds, titleOnlyIds, omittedCount: omitted.size,
   }
 }

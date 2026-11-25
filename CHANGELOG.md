@@ -212,6 +212,24 @@ All notable changes to this project are documented here. The format follows
   skipped.
 
 ### Changed
+- The memories loaded at the start of a chat now follow the topic index.
+  After the memories given in full, each topic gets one line with its
+  description, how many memories it holds and how many have not been
+  confirmed for a while, followed by up to five of its memories in index
+  order. Project topics come first, then global ones, and each scope ends
+  with its unsorted memories, whose count is always shown.
+- The topic list and memory lines loaded into a chat stay within about
+  2,000 tokens in both overflow modes, so they no longer grow with the
+  number of memories; the memories given in full keep following the
+  existing budget settings. When space runs out, memory lines of later
+  topics go first, then topic descriptions, then whole topics, noted as
+  "N more topics".
+- A memory's own injection setting now applies: `core` loads it in full,
+  `unlisted` keeps it out of the list while it still counts toward its topic
+  and stays searchable. If a scope's topic index cannot be read, that scope
+  lists its memories without topics and says so. A type's priority no
+  longer orders the loaded memories; it orders the content checkup, and the
+  memories of a scope listed without topics.
 - Refining a memory, recording a state change and other single-memory
   edits no longer reread every memory in the project to check their
   snapshot, so these writes slow down much less as a project grows.

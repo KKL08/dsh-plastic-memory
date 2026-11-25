@@ -7,7 +7,7 @@ import { resolveLiveFirst, type DirectoryNote } from './storage/table.ts'
 import { memoryRelativePath } from './storage/paths.ts'
 import type { TypeRegistry } from './type-registry.ts'
 import type { EvidenceLookupLevel } from './evidence-guidance.ts'
-import { assembleSnapshot, overflowLevel, type OverflowMode, type SnapshotUsage } from './snapshot.ts'
+import { assembleSnapshot, overflowLevel, type IndexRead, type OverflowMode, type SnapshotUsage } from './snapshot.ts'
 import type { OverflowLevel, SearchSource } from './contract-codes.ts'
 import { relaxedCap, type SessionView, type SnapshotOrigin } from './gui/contract.ts'
 import { ledgerLabel, scopeOfLedger, type Scope } from './scope.ts'
@@ -19,24 +19,40 @@ const SNAPSHOT_SWEEP_BATCH = 50
  * 快照的预读：global + 当前 workspace 顶层的 active 记录（同 id 按取舍规则留一份，口径同 queryScope 的默认查询），
  * 外加 id → 文件路径（相对记忆根目录：`<目录名>/<文件名>`），索引行末尾用它。走 readRaw 是为了拿到文件路径——
  * queryScope 只回记录。同一次读取的隔离文件数给冷启动文案用；读不出的目录（unreadableNotes）给注入说明和日志用。
+ * 再读两个作用域的主题索引（只读，不核对、不写）：读不出的那一层记下原因，注入里这一层不按主题分组。
  */
 export async function prereadSnapshot(store: MemoryStore, workspacePath: string | undefined): Promise<{
   records: MemoryRecord[]; files: Map<string, string>; quarantinedCount: number; unreadable: boolean; unreadableNotes: DirectoryNote[]
+  indexes: { global: IndexRead; workspace?: IndexRead }; indexErrors: unknown[]
 }> {
   const read = await store.readRaw({ kind: 'visible', workspacePath })
   const unreadableNotes = read.directoryNotes.filter(note => note.code === 'dir-unreadable')
   const located = resolveLiveFirst(read.records, { workspacePath }).filter(l => l.record.status === 'active')
+  const indexErrors: unknown[] = []
+  const readIndexOf = async (scope: Scope): Promise<IndexRead> => {
+    try {
+      return { kind: 'read', files: await store.readIndex(scope) }
+    } catch (err) {
+      indexErrors.push(err)
+      return { kind: 'unreadable' }
+    }
+  }
+  const indexes = {
+    global: await readIndexOf({ kind: 'global' }),
+    ...(workspacePath === undefined ? {} : { workspace: await readIndexOf({ kind: 'workspace', workspacePath }) }),
+  }
   return {
     records: located.map(l => l.record),
     files: new Map(located.map(l => [l.record.id, memoryRelativePath(l.dir, l.filePath)])),
-    quarantinedCount: read.quarantined.length, unreadable: unreadableNotes.length > 0, unreadableNotes,
+    quarantinedCount: read.quarantined.length, unreadable: unreadableNotes.length > 0, unreadableNotes, indexes, indexErrors,
   }
 }
 
 /**
  * session 内冻结的 snapshot 缓存，按 session 隔离（WeakMap）。
  * 构建只发生在 assemble（index.ts 的发送点调用：pre-step、request-error 重试）：等 workspace 解析落定或超时 →
- * 缓存缺失或已过期则预读可见记录、组装、冻结 → 带入全文的 core 记忆计召回（每会话每条一次）→ 维护点（global + 当前 workspace）。
+ * 缓存缺失或已过期则先做维护点（global + 当前 workspace，含整份核对主题索引；同一个冻结点最多一次）→
+ * 预读可见记录和两层主题索引、组装、冻结 → 带入全文的 core 记忆计召回（每会话每条一次）。
  * 冷启动文案由组装在可见集合为空时产出。发送点只在需要时调 assemble，冻结即等于模型可见。
  * compaction 成功结束只标过期（markCompacted）不清空，失败的不标；过期的冻结内容留到下一次组装覆盖，期间 injectedCore 照常可读，
  * 中途被作废的构建也不会覆盖它（见 build 的代次核对）。
@@ -82,6 +98,8 @@ export interface SnapshotCacheDeps {
   searchSource?: SearchSource
   /** 超出上限的处理，缺省 relax（与配置默认一致）。 */
   overflow?: OverflowMode
+  /** 宿主的会话搜索工具已启用：注入说明补一句。宿主目前不告诉插件这个工具是否启用，先不提：index.ts 不传，恒为缺省。 */
+  sessionSearch?: boolean
   /** 给出时，每次冻结按会话所属项目（无项目为 'global'）同步超限提醒。 */
   overflowLedger?: OverflowLedger
   /** 改前快照的清扫口：每次冻结清一批过了保留窗口的。 */
@@ -120,6 +138,9 @@ export class SnapshotCache {
   /** 本运行期记过日志、还没恢复的读不出目录：路径 → 当时的说明、哪些读取范围（账本标签）看到过它。
    *  同一目录同一原因不重复记；看到过它的范围再读时它不在了，记一行恢复。 */
   private unreadableDirs = new Map<string, { text: string; scopes: Set<string> }>()
+  /** 会话 → 这个冻结点（首次、压缩后、配置变化之间）的那次维护：代次和它的 Promise。同代次的组装共用它，进行中的等它做完；
+   *  做完了就算维护过，有目录读不出、文本没冻结时后面的发送点重读重组但不再维护。失败的清掉，下一次构建再试；代次一变就又可以维护。 */
+  private maintenance = new WeakMap<object, { generation: number; run: Promise<void> }>()
 
   private deps: SnapshotCacheDeps
   private readonly log: MemoryLogger
@@ -167,7 +188,7 @@ export class SnapshotCache {
   /** 发送点的入口，返回本次的快照文本（原文）。
    *  解析落定：缓存存在且未过期直接用；否则读盘组装、冻结、计召回（每会话每条一次）。
    *  解析超时（或未注入 resolver 且未显式喂）：global-only 临时文本，只给本次用，不冻结、不计召回。
-   *  有目录读不出：同样只给本次用，不冻结、不计召回、不做维护和超限同步，下一个发送点重读。
+   *  有目录读不出：同样只给本次用，不冻结、不计召回、不做超限同步，下一个发送点重读；这个冻结点维护过就不再维护。
    *  组装失败只记日志、回 undefined（这次不发），已冻结的旧快照不动，不拖垮宿主这一步。
    *  构建期间被标过期就按新代次重建，连续作废到上限回 undefined（这次不发），保证发出去的都冻结过。 */
   async assemble(session: object, timeoutMs = 1500): Promise<string | undefined> {
@@ -185,7 +206,7 @@ export class SnapshotCache {
     return (this.generations.get(session) ?? 0) + this.epoch
   }
 
-  private async build(session: object, retries = 2): Promise<string | undefined> {
+  private async build(session: object, retries = 2, isRebuild = false): Promise<string | undefined> {
     const generation = this.generationOf(session)
     const cached = this.cache.get(session)
     if (cached && cached.generation === generation) return cached.text
@@ -193,16 +214,22 @@ export class SnapshotCache {
     const workspacePath = isResolved ? this.workspacePaths.get(session) : undefined
     // 上限、超限处理、溯源档位可能是用时读配置的 getter：一次构建只取一次值，组装与冻结后的超限同步用同一份
     const deps = { ...this.deps }
-    // 预读范围：只读 active，global + 当前 workspace（未解析时 global-only）；同一次读取的隔离文件数给冷启动文案用
     const now = deps.now?.() ?? Date.now()
+    // 快照冻结是维护点（写入只处理自己动到的文件，读路径不写盘；手编回写、归档搬家、过期清扫、整份核对索引都在这里做）：
+    // 先对 global + 当前 workspace 做维护，再读索引和记忆组装，注入看到的是刚核对过的索引。工作目录没解析出来时不维护；
+    // 维护失败只记日志，照常读索引组装。同一个冻结点的并发组装等同一次维护做完；这个冻结点已经维护过
+    // （目录读不出没冻结、下一个发送点重建）时不再维护。作废重建不另起维护，但等这一代已经在跑的那次做完再读
+    if (isResolved) await (isRebuild ? this.maintenanceOf(session, generation) : this.maintainOnce(session, generation, workspacePath))
+    // 预读范围：只读 active，global + 当前 workspace（未解析时 global-only）；同一次读取的隔离文件数给冷启动文案用
     const preread = await prereadSnapshot(deps.store, workspacePath)
     this.reportUnreadable(workspacePath, preread.unreadableNotes)
-    const { text, coreIds, ...usage } = assembleSnapshot({ ...deps, ...preread, workspacePath, now, ownSessionId: deps.host?.ownSessionIdOf(session) })
-    // 有目录读不出时这份不完整：冻结了会一直挂在会话里，维护会按缺了的清单重写索引，计召回、超限同步也会按缺了的用量算
+    this.reportIndexErrors(preread.indexErrors)
+    const { text, coreIds, indexArea: _indexArea, ...usage } = assembleSnapshot({ ...deps, ...preread, workspacePath, now, ownSessionId: deps.host?.ownSessionIdOf(session) })
+    // 有目录读不出时这份不完整：冻结了会一直挂在会话里，计召回、超限同步也会按缺了的用量算
     if (!isResolved || preread.unreadable) return text
     // 构建期间被标过期（压缩、配置热更新）：这份作废，按新代次重建，冻结后再交出去，模型看到的就是冻结的那份。
     // 连续作废到上限还不稳定，这次不给文本，下一个发送点再来；不交出没冻结的文本
-    if (this.generationOf(session) !== generation) return retries > 0 ? this.build(session, retries - 1) : undefined
+    if (this.generationOf(session) !== generation) return retries > 0 ? this.build(session, retries - 1, true) : undefined
     // 同代次的并发构建：先落定的那份为准，保证冻结内容一致
     const landed = this.cache.get(session)
     if (landed && landed.generation === generation) return landed.text
@@ -216,13 +243,7 @@ export class SnapshotCache {
     this.compactions.delete(session)
     this.cache.set(session, { text, generation, core: new Map(coreIds.map(id => [id, contentOf.get(id)!])), origin })
     await this.markRecalled(session, coreIds)
-    // 快照冻结是维护点（写入只处理自己动到的文件，读路径不写盘；手编回写、归档搬家、过期清扫、整份重写索引都在这里做）：
-    // 对 global + 当前 workspace 做维护，再清一批过期的改前快照；失败只记日志，不拖垮注入
-    try {
-      await this.deps.store.maintain({ kind: 'visible', workspacePath })
-    } catch (err) {
-      this.log.error('[plastic-memory] 记忆目录维护失败:', err)
-    }
+    // 冻结之后清一批过期的改前快照；失败只记日志，不拖垮注入
     try {
       await this.deps.snapshots?.sweep(now, SNAPSHOT_SWEEP_BATCH)
     } catch (err) {
@@ -230,6 +251,24 @@ export class SnapshotCache {
     }
     await this.afterFreeze(deps, session, workspacePath, now, { ...usage, ...origin, coreIds })
     return text
+  }
+
+  /** 这一代已经开始的那次维护（在跑的等它，跑完的立即返回）；这一代还没有维护时立即返回。 */
+  private maintenanceOf(session: object, generation: number): Promise<void> {
+    const current = this.maintenance.get(session)
+    return current?.generation === generation ? current.run : Promise.resolve()
+  }
+
+  /** 这个冻结点的维护：同会话同代次只跑一次，并发的组装等同一次做完。失败只记日志，并清掉记录，下一次构建再试。 */
+  private maintainOnce(session: object, generation: number, workspacePath: string | undefined): Promise<void> {
+    const current = this.maintenance.get(session)
+    if (current?.generation === generation) return current.run
+    const run = this.deps.store.maintain({ kind: 'visible', workspacePath }).catch((err: unknown) => {
+      this.log.error('[plastic-memory] 记忆目录维护失败:', err)
+      if (this.maintenance.get(session)?.run === run) this.maintenance.delete(session)
+    })
+    this.maintenance.set(session, { generation, run })
+    return run
   }
 
   /** 冻结之后：同步超限提醒、交出会话视图的原料。都是旁路，失败只记日志。 */
@@ -267,14 +306,21 @@ export class SnapshotCache {
     for (const scope of new Set(scopes)) {
       const own = scopeOfLedger(scope)
       const workspacePath = own.kind === 'global' ? undefined : own.workspacePath
+      // 同一套组装：只读，不维护
       const preread = await prereadSnapshot(deps.store, workspacePath)
       this.reportUnreadable(workspacePath, preread.unreadableNotes)
+      this.reportIndexErrors(preread.indexErrors)
       // 读不出时用量不准：不动这个范围的提醒，等目录恢复后的下一次冻结或重算
       if (preread.unreadable) continue
-      const { text: _text, coreIds: _coreIds, ...usage } = assembleSnapshot({ ...deps, ...preread, workspacePath, now })
+      const { text: _text, coreIds: _coreIds, indexArea: _indexArea, ...usage } = assembleSnapshot({ ...deps, ...preread, workspacePath, now })
       const level = overflowLevel(mode, usage.usedTokens, deps.budget)
       await deps.overflowLedger.syncOverflow(scope, level, now, level ? overflowSummary(level, usage, deps.budget) : '')
     }
+  }
+
+  /** 主题索引读不出：记一行日志（遮盖密钥），注入里那一层不按主题分组。 */
+  private reportIndexErrors(errors: readonly unknown[]): void {
+    for (const err of errors) this.log.warn('[plastic-memory] 主题索引读取失败，这一层的注入没按主题分组:', maskDiagnostic(String(err)).replace(/[\r\n]+/g, ' '))
   }
 
   /** 读不出的目录记日志（遮盖密钥）：新出现或原因变了的记一行失败；这个读取范围看到过、这次不在了的记一行恢复。 */

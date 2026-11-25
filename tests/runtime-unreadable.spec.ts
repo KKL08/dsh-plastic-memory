@@ -93,7 +93,7 @@ describe('快照目录读取', () => {
     expect(text.split('\n')).toContain(PARTIAL_MEMORY_TEXT)
     expect(text).toContain('项目回答约定')
     expect(text).not.toContain(COLD_START_TEXT)
-    expect(log.warn).toHaveBeenCalledTimes(1)
+    expect(dirLogs(log)).toEqual(['warn'])
   })
 
   it('目录可读时注入文本逐字节保持一致', async () => {
@@ -115,7 +115,7 @@ describe('快照目录读取', () => {
     cache.setWorkspacePath(session, undefined)
     const text = await cache.assemble(session)
     expect(text).toBe(UNREADABLE_MEMORY_TEXT)
-    expect(log.warn).toHaveBeenCalledTimes(1)
+    expect(dirLogs(log)).toEqual(['warn'])
     expect(JSON.stringify(log.warn.mock.calls)).not.toContain(FAKE_SECRET.sk)
     fault.dir = ''
     expect(await cache.assemble(session)).toContain('全局回答约定')

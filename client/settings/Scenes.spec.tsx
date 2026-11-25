@@ -930,7 +930,7 @@ describe('确认周期', () => {
   it('出厂有周期的通用类型不能留空：说明里不提留空，清空就提示、确定置灰', () => {
     setup()
     const f = openGeneral('项目信息')
-    expect(periodBox(f)).toHaveAccessibleDescription('超过这么多天没确认，带入时标为可能过时。')
+    expect(periodBox(f)).toHaveAccessibleDescription('超过这么多天没确认，标为可能过时。')
     fireEvent.change(periodBox(f), { target: { value: '' } })
     expect(periodBox(f)).toHaveAccessibleDescription('填 1 到 365 的整数。')
     expect(button('确定', f)).toBeDisabled()
@@ -939,7 +939,7 @@ describe('确认周期', () => {
   it('能留空的类型：说明写留空表示不用定期确认，填错时提示里写可以留空', () => {
     setup()
     const f = openGeneral('用户画像')
-    expect(periodBox(f)).toHaveAccessibleDescription('超过这么多天没确认，带入时标为可能过时。留空表示不用定期确认。')
+    expect(periodBox(f)).toHaveAccessibleDescription('超过这么多天没确认，标为可能过时。留空表示不用定期确认。')
     fireEvent.change(periodBox(f), { target: { value: '0' } })
     expect(periodBox(f)).toHaveAccessibleDescription('填 1 到 365 的整数，或者留空。')
   })

@@ -173,6 +173,10 @@ export function recallOverride(record: Pick<MemoryRecord, 'recall'>): RecallTier
   const v = record.recall
   return typeof v === 'string' && (RECALL_TIERS as readonly string[]).includes(v) ? v as RecallTier : undefined
 }
+/** 一条记忆实际生效的注入档位：单条设过、认得的优先，否则跟类型。注入、记忆梦境都按它判。 */
+export function effectiveRecall(record: Pick<MemoryRecord, 'recall' | 'type'>, typeRecall: (type: string) => RecallTier): RecallTier {
+  return recallOverride(record) ?? typeRecall(record.type)
+}
 
 /** 锚的来源方式。以后的版本加的、这一版不认识的，按模型推断读（最弱的一档）。 */
 export function anchorSourceMode(anchor: Pick<SourceAnchor, 'sourceMode'>): SourceMode {

@@ -31,7 +31,7 @@ export function unattendedNote(r: MemoryRecord): string {
 /**
  * 索引行：MEMORY.md 与注入索引同一个格式器，两处写法保持一致。
  * file：行末的文件引用，MEMORY.md 给同目录文件名，注入给相对记忆根目录的路径（注入混排 global 与本项目两个目录）。
- * note：注入侧的陈旧度标注，放在文件名之前，让文件名始终在行末；磁盘索引不传。
+ * note：注入侧的附加标注（成员行上是无人值守的说明，陈旧度只在主题行上计数），放在文件名之前，让文件名始终在行末；磁盘索引不传。
  */
 export function formatIndexLine(r: MemoryRecord, opts: { passive: boolean; file?: string; note?: string }): string {
   const tags = r.tags.length > 0 ? ` — ${r.tags.join(', ')}` : ''
