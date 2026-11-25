@@ -1,12 +1,13 @@
 import type { SearchSource } from '../contract-codes.ts'
-import { searchDialogue, renderDialogueSearch, runPath, DIALOGUE_PATH_BUDGET_MS, type DialogueSearchDeps } from './dialogue-search.ts'
-import { dialogueNote, renderSearchSections, DIALOGUE_QUERY_REQUIRED } from '../search/dialogue-format.ts'
+import { searchDialogue, renderDialogueSearch, runPath, catchUpFor, listSessionTable, shareDialogueReads, DIALOGUE_PATH_BUDGET_MS, type DialogueSearchDeps } from './dialogue-search.ts'
+import { dialogueNote, renderSearchSections, DIALOGUE_QUERY_REQUIRED, MEMORY_QUOTES_UNAVAILABLE } from '../search/dialogue-format.ts'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { MemoryStore, QueryScope } from '../store.ts'
 import type { SearchNoteCode } from '../contract-codes.ts'
 import type { QueryTokenizerOptions } from '../search/jieba-segmenter.ts'
 import type { SearchTier } from '../search/ranking.ts'
-import { findMemoryCandidates } from '../search/memory-candidates.ts'
+import { findMemoryCandidates, type MemoryCandidate } from '../search/memory-candidates.ts'
+import { quoteMemories } from './memory-quotes.ts'
 import { matchWindow } from '../search/window.ts'
 import { judgeTopHit, matchedTerms, type TermHitCount } from '../search/coverage.ts'
 import type { TypeRegistry } from '../type-registry.ts'
@@ -37,6 +38,8 @@ export interface SearchToolDeps {
   /** 缺省仍只查记忆；配置热更新每次现读。 */
   searchSource?: () => SearchSource
   dialogue?: DialogueSearchDeps
+  /** 记忆带原话：开着时带关键词的检索给排名靠前的记忆附出处那一轮的一问一答。缺省关；每次现读。 */
+  memoryQuotes?: () => boolean
   store: MemoryStore
   registry: TypeRegistry
   host: ContextHost<SearchContext>
@@ -75,6 +78,8 @@ export interface SearchHit {
   isExcerpt?: boolean
   /** 节选条目才有：遮盖密钥后的正文总字符数，头行据此标「正文共 N 字符」。 */
   contentChars?: number
+  /** 记忆带原话开着时才有：接在正文后面的出处原话或说明（原话不遮盖）。 */
+  quote?: string
 }
 
 // 结果分级的门槛（字符数按遮盖密钥后的正文取字符串长度）。一次检索往上下文里放的正文要有个可预期的上限：
@@ -190,15 +195,15 @@ export function truncationNote(total: number, shown: number, atCap: boolean): st
  * 把命中结果渲染成给模型看的一段文本：有说明先写说明，再列命中（头行末尾带文件绝对路径）。纯函数。
  * 节选条目在头行路径前标字数，路径保持在行末；有节选条目时开头说明最后接节选说明。
  */
-export function renderSearchResult(result: { hits: SearchHit[]; note?: string; moreNote?: string; dialogueText?: string; onlyDialogue?: boolean; pathNote?: string }): string {
+export function renderSearchResult(result: { hits: SearchHit[]; note?: string; moreNote?: string; quoteNote?: string; dialogueText?: string; onlyDialogue?: boolean; pathNote?: string }): string {
   if (result.dialogueText !== undefined) {
-    const memories = result.onlyDialogue ? undefined : renderSearchResult({ hits: result.hits, note: result.note, moreNote: result.moreNote })
+    const memories = result.onlyDialogue ? undefined : renderSearchResult({ hits: result.hits, note: result.note, moreNote: result.moreNote, quoteNote: result.quoteNote })
     return result.onlyDialogue ? result.dialogueText : renderSearchSections({ memories, dialogue: result.dialogueText })
   }
-  if (result.pathNote) return result.pathNote + '\n' + renderSearchResult({ hits: result.hits, note: result.note, moreNote: result.moreNote })
-  const blocks = result.hits.map(h => `[${h.id}] ${h.type}｜${h.summary}${h.sourceNote}${h.stalenessNote}${h.matchNote}${h.isExcerpt ? ` · 节选，正文共 ${h.contentChars} 字符` : ''}${h.path !== undefined ? ` · ${h.path}` : ''}\n${h.content}`)
+  if (result.pathNote) return result.pathNote + '\n' + renderSearchResult({ hits: result.hits, note: result.note, moreNote: result.moreNote, quoteNote: result.quoteNote })
+  const blocks = result.hits.map(h => `[${h.id}] ${h.type}｜${h.summary}${h.sourceNote}${h.stalenessNote}${h.matchNote}${h.isExcerpt ? ` · 节选，正文共 ${h.contentChars} 字符` : ''}${h.path !== undefined ? ` · ${h.path}` : ''}\n${h.content}${h.quote !== undefined ? `\n${h.quote}` : ''}`)
   const excerptNote = result.hits.some(h => h.isExcerpt) ? EXCERPT_NOTE : undefined
-  const head = [result.note, result.moreNote, excerptNote].filter((x): x is string => x !== undefined).join('\n')
+  const head = [result.note, result.moreNote, excerptNote, result.quoteNote].filter((x): x is string => x !== undefined).join('\n')
   if (head !== '') blocks.unshift(head)
   return blocks.length === 0 ? '没有匹配的记忆。' : blocks.join('\n\n')
 }
@@ -221,9 +226,11 @@ async function executeMemorySearch(
   args: SearchArgs,
   exec: ToolRunContext,
   deps: SearchToolDeps,
+  onListed?: (listed: MemoryListing) => void,
 ): Promise<{ hits: SearchHit[]; note?: string; noteCode?: SearchNoteCode; moreNote?: string }> {
   const a = args
-  const { workspacePath, session } = await deps.host.contextOf(exec)
+  const context = await deps.host.contextOf(exec)
+  const { workspacePath, session } = context
   // 明确要"只看本项目"而当前会话没有工作目录：显式说明而非静默落回 global-only——
   // 用户要项目范围时给他全局结果是误导
   if (a.scope === 'workspace' && workspacePath === undefined) {
@@ -328,29 +335,77 @@ async function executeMemorySearch(
   const topIds = top.map(e => e.record.id)
   if (sessionRecall && handle) await sessionRecall.markRecalled(handle, topIds)
   else await deps.store.markRecalled(topIds, now)
+  onListed?.({ top, context })
   return result
 }
 
-/** 保留记忆执行器的行为，仅在外层解析来源并隔离原话故障。 */
-export async function executeSearch(args: SearchArgs, exec: ToolRunContext, deps: SearchToolDeps): Promise<Awaited<ReturnType<typeof executeMemorySearch>> & { dialogueText?: string; onlyDialogue?: boolean; pathNote?: string }> {
+/** 记忆一路这次返回的候选（和 hits 逐条对应）和会话上下文：记忆带原话从这里取锚，不再按 id 读记忆。 */
+interface MemoryListing { top: readonly MemoryCandidate[]; context: SearchContext }
+
+type SearchOutcome = Awaited<ReturnType<typeof executeMemorySearch>> & { dialogueText?: string; onlyDialogue?: boolean; pathNote?: string; quoteNote?: string }
+
+/**
+ * 记忆带原话：先走和原话检索同一个追库入口，再给排名靠前的记忆接上出处原话。用检索开头定下的截止时间剩下的部分，
+ * 原话检索已经用完就不再取；库这次用不了、这一路超时或出故障都只说明一次，记忆照常返回。
+ * 等待期间开关被关掉（包括追库回来说功能关了），就当没开过。
+ */
+async function withMemoryQuotes(outcome: SearchOutcome, listing: MemoryListing, query: string, deps: SearchToolDeps & { dialogue: DialogueSearchDeps }, deadline: number): Promise<SearchOutcome> {
+  const now = deps.now ?? Date.now
+  const { dialogue } = deps
+  const remaining = deadline - now()
+  const path = remaining <= 0 ? { ok: false as const } : await runPath('memory-quotes', async () => {
+    const readiness = await catchUpFor(listing.context, dialogue)
+    // 库这次用不了或功能关了：不查会话表、不加载分词器、不读库
+    if (readiness.kind !== 'ready') return { kind: readiness.kind }
+    const sessionTable = async () => (await (dialogue.sessions?.() ?? listSessionTable(dialogue))).table
+    return { kind: 'ready' as const, ...await quoteMemories(listing.top, query, listing.context, { store: dialogue.store, tokenizer: dialogue.tokenizer, sessionTable }) }
+  }, remaining, now)
+  if (deps.memoryQuotes?.() !== true) return outcome
+  if (!path.ok) return { ...outcome, quoteNote: MEMORY_QUOTES_UNAVAILABLE }
+  if (path.value.kind !== 'ready') return path.value.kind === 'off' ? outcome : { ...outcome, quoteNote: MEMORY_QUOTES_UNAVAILABLE }
+  const { quotes, note } = path.value
+  return {
+    ...outcome,
+    hits: outcome.hits.map((hit, i) => quotes[i] === undefined ? hit : { ...hit, quote: quotes[i] }),
+    ...(note !== undefined ? { quoteNote: note } : {}),
+  }
+}
+
+/**
+ * 解析来源、分路检索；记忆带原话开着且带关键词时，在结果定了以后给记忆接上出处原话。
+ * 这时开头定一个截止时间，原话检索和附原话都用它剩下的部分，追库和会话表两边共用、各只做一次。
+ */
+export async function executeSearch(args: SearchArgs, exec: ToolRunContext, deps: SearchToolDeps): Promise<SearchOutcome> {
+  const dialogue = deps.dialogue
+  if (deps.memoryQuotes?.() !== true || dialogue === undefined || !args.query.trim()) return searchSources(args, exec, deps)
+  const deadline = (deps.now ?? Date.now)() + DIALOGUE_PATH_BUDGET_MS
+  const shared = { ...deps, dialogue: shareDialogueReads(dialogue) }
+  let listing: MemoryListing | undefined
+  const outcome = await searchSources(args, exec, shared, listed => { listing = listed }, deadline)
+  // 记忆一条都没命中：没有要附原话的，结果照常（含「没有匹配的记忆。」）
+  return listing === undefined || listing.top.length === 0 ? outcome : withMemoryQuotes(outcome, listing, args.query, shared, deadline)
+}
+
+/** 保留记忆执行器的行为，仅在外层解析来源并隔离原话故障。deadline 缺省时原话检索从现在起算两秒。 */
+async function searchSources(args: SearchArgs, exec: ToolRunContext, deps: SearchToolDeps, onListed?: (listed: MemoryListing) => void, deadline?: number): Promise<SearchOutcome> {
   const configured = deps.searchSource?.() ?? 'memory'
   const source = args.source ?? configured
   if (configured === 'memory' || source === 'memory') {
-    const memories = await executeMemorySearch(args, exec, deps)
+    const memories = await executeMemorySearch(args, exec, deps, onListed)
     return configured === 'memory' && source !== 'memory' ? { ...memories, pathNote: dialogueNote('dialogue-source-off') } : memories
   }
-  if (!args.query.trim()) return source === 'dialogue' ? { hits: [], dialogueText: DIALOGUE_QUERY_REQUIRED, onlyDialogue: true } : executeMemorySearch(args, exec, deps)
+  if (!args.query.trim()) return source === 'dialogue' ? { hits: [], dialogueText: DIALOGUE_QUERY_REQUIRED, onlyDialogue: true } : executeMemorySearch(args, exec, deps, onListed)
   // 两路共享同一次宿主快照；记忆执行器仍按原来的接口读取上下文。
   let context: Promise<SearchContext> | undefined
   const contextOf = () => context ??= deps.host.contextOf(exec)
   const sharedDeps = { ...deps, host: { contextOf } }
   let memoryTask: ReturnType<typeof executeMemorySearch> | undefined
-  const memories = () => memoryTask ??= executeMemorySearch(args, exec, sharedDeps)
+  const memories = () => memoryTask ??= executeMemorySearch(args, exec, sharedDeps, onListed)
   const dialogueTask = runPath('dialogue', async () => {
     if (!deps.dialogue) throw new Error('缺少原话依赖')
     const result = await searchDialogue(args, await contextOf(), { ...deps.dialogue, isEnabled: () => deps.searchSource?.() !== 'memory' })
     return { result, text: renderDialogueSearch(result) }
-  }, DIALOGUE_PATH_BUDGET_MS, deps.now ?? Date.now)
+  }, deadline === undefined ? DIALOGUE_PATH_BUDGET_MS : deadline - (deps.now ?? Date.now)(), deps.now ?? Date.now)
   // 只查原话时不提前召回记忆；两路同时查时也立即接住记忆的失败。
   const [path] = await Promise.all([dialogueTask, source === 'both' ? memories() : undefined])
   if (deps.searchSource?.() === 'memory') return { ...await memories(), pathNote: dialogueNote('dialogue-source-off') }

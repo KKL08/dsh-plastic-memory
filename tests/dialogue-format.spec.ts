@@ -3,7 +3,7 @@ import { DIALOGUE_NOTE_CODES, DIALOGUE_SPEAKERS, SEARCH_SOURCES } from '../src/c
 import { SEARCH_SOURCE_PARAMETER } from '../src/tools/search-tool.ts'
 import {
   DIALOGUE_AS_DATA_NOTE, DIALOGUE_BUDGET_DEFAULT, DIALOGUE_BUDGET_STEP, DIALOGUE_QUOTE_TAG, DIALOGUE_SECTION_HEADING,
-  DIALOGUE_STORE_FILE, INFERRED_SOURCE_MARK, MAYBE_NOT_SOURCE_NOTE, MEMORY_SECTION_HEADING, TURN_NOT_INDEXED_NOTE,
+  DIALOGUE_STORE_FILE, MEMORY_SECTION_HEADING, TURN_NOT_INDEXED_NOTE,
   coverageNote, dialogueBudgetOf, dialogueNote, excerptNote, omittedNote, relatedMemoryNote, renderDialogueLine,
   formatMessageRef, parseMessageRef, renderSearchSections, sameSourceNote, wrapDialogueQuote,
 } from '../src/search/dialogue-format.ts'
@@ -67,15 +67,13 @@ describe('结果的两段结构', () => {
 })
 
 describe('标注的固定写法', () => {
-  it('出处的四种标注', () => {
-    expect(INFERRED_SOURCE_MARK).toBe('推测出处')
-    expect(MAYBE_NOT_SOURCE_NOTE).toBe('这一轮可能不是内容的出处')
+  it('出处的两种标注', () => {
     expect(TURN_NOT_INDEXED_NOTE).toBe('这一轮暂无原话')
     expect(sameSourceNote('数据库选型')).toBe('出处同「数据库选型」')
   })
 
-  it('节选：写明这条消息共几段，并带上看全文要用的引用', () => {
-    expect(excerptNote(4, 'ref-1')).toBe('（节选，这条消息共 4 段，可用 memory_source 带上引用 ref-1 看完整内容）')
+  it('节选：写明这条消息共几段，并带上看更多内容要用的引用', () => {
+    expect(excerptNote(4, 'ref-1')).toBe('（节选，这条消息共 4 段，可用 memory_source 带上引用 ref-1 看更多内容）')
   })
 
   it('对应记忆', () => {
@@ -87,7 +85,7 @@ describe('标注的固定写法', () => {
   })
 
   it('预算装不下：写明几轮没放、几轮只放了一部分，以及怎么接着看', () => {
-    const how = '。要接着看：换更具体的关键词再搜，或用 memory_source 带上引用看某条消息的完整内容。'
+    const how = '。要接着看：换更具体的关键词再搜，或用 memory_source 带上引用看某条消息的更多内容。'
     expect(omittedNote(3, 2)).toBe(`还有 3 轮完全没放进来、2 轮只放了一部分${how}`)
     expect(omittedNote(3, 0)).toBe(`还有 3 轮完全没放进来${how}`)
     expect(omittedNote(0, 1)).toBe(`还有 1 轮只放了一部分${how}`)

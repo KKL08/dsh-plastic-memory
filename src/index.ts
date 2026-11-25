@@ -441,6 +441,7 @@ export async function apply(ctx: Context, config: Config) {
   const registerSearch = () => ctx.tools.register(createSearchTool({
     store, registry, host, sessionRecall: snapshotCache,
     searchSource: () => config.search.source.get(),
+    memoryQuotes: () => config.search.memoryQuotes.get(),
     dialogue: {
       store: dialogueCatchup.readStore, catchup: dialogueCatchup, host, noReview,
       workspaceOf: cwd => resolveWorkspacePath(ctx, cwd),

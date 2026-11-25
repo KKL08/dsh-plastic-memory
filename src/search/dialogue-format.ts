@@ -71,11 +71,7 @@ export function renderSearchSections(sections: { memories?: string; dialogue?: s
   ].filter(x => x !== undefined).join('\n\n')
 }
 
-/** 附在记忆下面的原话不是保存时那一轮，是按内容找到的。 */
-export const INFERRED_SOURCE_MARK = '推测出处'
-/** 保存时那一轮和记忆内容对不上，也没找到更像的。 */
-export const MAYBE_NOT_SOURCE_NOTE = '这一轮可能不是内容的出处'
-/** 对话记录库里没有这一轮（会话已删，或库还没追上）。 */
+/** 这一轮在对话记录库里，但还没有可展示的用户原话或助手正文。不落到上一轮去。 */
 export const TURN_NOT_INDEXED_NOTE = '这一轮暂无原话'
 
 /** 几条记忆出自同一轮：原话只附在排在前面的那条下面，其余各条指过去。两条不一定挨着，所以带上那条的名称。 */
@@ -83,9 +79,42 @@ export function sameSourceNote(memoryName: string): string {
   return `出处同「${memoryName}」`
 }
 
+/** 记忆名称这类外部可写的文字放进一行说明时：换行和连续空白折成一个空格，标题行、代码围栏就成不了独立的行。 */
+export function foldToLine(text: string): string {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+// 记忆带原话取不到时各自的说明，互不混用
+/** 出处的会话在宿主里已经没有了。 */
+export const QUOTE_SESSION_GONE = '出处的会话已不在'
+/** 对话记录库还没收到这一轮。 */
+export const QUOTE_PENDING = '原话还在整理，稍后再查'
+/** 用户把出处的会话标成了不回看。 */
+export const QUOTE_NO_REVIEW = '出处的会话设了不回看'
+/** 会话还在、能回看，但对话记录库不收它（不在收录范围，或分不清哪些内容是它自己的）。 */
+export const QUOTE_NOT_COLLECTED = '这个会话的原话没有收录'
+/** 会话清单这一次读不到：不判断会话在不在。 */
+export const QUOTE_SESSIONS_UNAVAILABLE = '这次读不到会话信息，原话没附'
+/** 锚里的位置对不上任何一轮（整会话兜底的锚、找不到轮的开始）。 */
+export const QUOTE_UNLOCATED = '定位不到出处是哪一轮'
+/** 原话这一路这一次出了故障：记忆照常返回。 */
+export const MEMORY_QUOTES_UNAVAILABLE = '出处原话这次取不到，记忆没附原话。'
+/** 一条消息和记忆正文相同（只差空白和换行）：正文从略，只留日期和位置。 */
+export const SAME_AS_MEMORY_NOTE = '（和记忆正文相同，从略）'
+
+/** 附在记忆下面的一行状态说明。 */
+export function memoryQuoteStatus(note: string): string {
+  return `出处原话：${note}`
+}
+
+/** 出处在别的项目的会话里时的节选说明：引用读不了别的项目，改为传记忆 id 回查。 */
+export function excerptByMemoryNote(segmentCount: number, memoryId: string): string {
+  return `（节选，这条消息共 ${segmentCount} 段，可用 memory_source 传记忆 id ${memoryId} 回查）`
+}
+
 /** 只给了一条消息的一段时，接在这段后面。ref 是这条消息的引用；memory_source 接收引用的参数和这句话一起上线。 */
 export function excerptNote(segmentCount: number, ref: string): string {
-  return `（节选，这条消息共 ${segmentCount} 段，可用 memory_source 带上引用 ${ref} 看完整内容）`
+  return `（节选，这条消息共 ${segmentCount} 段，可用 memory_source 带上引用 ${ref} 看更多内容）`
 }
 
 /** 原话段里的一轮有对应的记忆时带的一行。 */
@@ -105,7 +134,7 @@ export function omittedNote(omittedTurns: number, partialTurns: number): string 
     partialTurns > 0 ? `${partialTurns} 轮只放了一部分` : undefined,
   ].filter(x => x !== undefined)
   if (parts.length === 0) return undefined
-  return `还有 ${parts.join('、')}。要接着看：换更具体的关键词再搜，或用 memory_source 带上引用看某条消息的完整内容。`
+  return `还有 ${parts.join('、')}。要接着看：换更具体的关键词再搜，或用 memory_source 带上引用看某条消息的更多内容。`
 }
 
 const DIALOGUE_NOTES: Record<Exclude<DialogueNoteCode, 'dialogue-index-building'>, string> = {
