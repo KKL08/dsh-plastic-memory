@@ -360,6 +360,67 @@ export const CONFLICT_ACTION_VERDICTS = {
 } as const
 export const RESOLVE_VERDICTS = ['keep-left', 'keep-right', 'keep-both'] as const
 
+// —— 体检覆盖 ——
+
+/** 覆盖里指令文件的状态：没有指令文件、读到了、取不到、读到了但被截断。 */
+export const COVERAGE_BASELINES = ['none', 'read', 'unavailable', 'truncated'] as const
+/** 覆盖里这一轮停在哪：查完了、到了上限、有批失败、模型用不了、这次没轮到。 */
+export const COVERAGE_STOPS = ['done', 'cap', 'batch-failed', 'model-unavailable', 'not-reached'] as const
+
+/**
+ * 一次体检对一个范围的覆盖（内容检查）。落在体检记录的完成记录和最近一次结果里，透传到健康视图、体检视图。
+ * - total：这个范围过了语义检查准入（在用、没过期）的记忆数，项目含全局记忆，其中全局几条记在 globalTotal；口径和健康视图的条数不同。
+ * - checkedNow：这次发给模型并查成功的记忆数。
+ * - 这次没有有效结果的那些批里的记忆分三种：never 从没查过、changed 改过还没重查、awaiting 内容没变、等着重查（换了模型或指令文件、点了全部重查）。
+ *   isHistoryUnknown：查过的记录这次读不了，三种分不出，都记在 never（文字统称「还没查」）。
+ * - oldestCheckedAt：这次直接用上次结果（命中）的批里最早的一次检查时间；没有为 null。
+ * 新增字段都可选；枚举在读的一侧放开：以后加了取值，这一版读到不认识的按最保守的意思处理，整条记录照常解析。
+ */
+export const checkupCoverageSchema = z.object({
+  isReadComplete: z.boolean(),
+  baseline: z.enum(COVERAGE_BASELINES).catch('unavailable'),
+  total: z.number().int().nonnegative(),
+  globalTotal: z.number().int().nonnegative().optional(),
+  checkedNow: z.number().int().nonnegative(),
+  never: z.number().int().nonnegative(),
+  changed: z.number().int().nonnegative(),
+  awaiting: z.number().int().nonnegative(),
+  oldestCheckedAt: z.number().nullable(),
+  stopped: z.enum(COVERAGE_STOPS).catch('not-reached'),
+  isHistoryUnknown: z.literal(true).optional(),
+})
+export type CheckupCoverage = z.infer<typeof checkupCoverageSchema>
+
+/** 覆盖全了：范围读全、指令文件读到了或本来没有、每条都有有效结果。只有这时才能说「没有发现问题」「记忆库健康」「状态良好」。 */
+export function isFullyCovered(c: CheckupCoverage): boolean {
+  return c.isReadComplete && (c.baseline === 'read' || c.baseline === 'none') && c.never + c.changed + c.awaiting === 0
+}
+
+/** 能不能说「没有问题」：有覆盖按 isFullyCovered；没有覆盖的记录（上一个发布版写的）照旧可以说。 */
+export function isCoverageClear(c: CheckupCoverage | undefined): boolean {
+  return c === undefined || isFullyCovered(c)
+}
+
+/**
+ * 说一个范围现在健不健康时看的覆盖：完成记录和最近一次结果里较新的那次。最近一次结果比完成记录新、带覆盖时取它
+ * （那次读不全、没查完也算，不拿更早的完成记录说健康）；否则取完成记录的。都没有为 undefined（上一个发布版写的、从没体检过的）。
+ * 能不能说「没有发现问题」「记忆库健康」「状态良好」= isCoverageClear(它)，健康视图、memory_health、memory_scan 全库报告都从这里取。
+ */
+export function latestCoverage(record: {
+  completed?: { completedAt: number; coverage?: CheckupCoverage | undefined } | undefined
+  lastResult?: { completedAt: number; coverage?: CheckupCoverage | undefined } | undefined
+} | undefined): CheckupCoverage | undefined {
+  const last = record?.lastResult
+  const completed = record?.completed
+  if (last?.coverage !== undefined && (completed === undefined || last.completedAt > completed.completedAt)) return last.coverage
+  return completed?.coverage
+}
+
+/** 还没查的条数（三种合计）：界面和工具返回的「N 条还没查」。 */
+export function uncheckedCount(c: CheckupCoverage): number {
+  return c.never + c.changed + c.awaiting
+}
+
 // —— 健康 ——
 
 /** 一项扣分：扣了多少分，包含哪些问题类型（扣 0 分时为空）。 */
@@ -393,6 +454,11 @@ export const healthScopeSchema = z.object({
    * 密钥不扣分（走红线门），不在这里。
    */
   deductions: z.object({ rule: deductionSchema, content: deductionSchema, freshness: deductionSchema }),
+  /**
+   * 现在说健不健康看的内容检查覆盖（见 latestCoverage）：完成记录和最近一次结果里较新那次的，最近一次读不全时就是它；
+   * 上一个发布版写的记录、从没体检过的没有。没覆盖全时界面不说「状态良好」。
+   */
+  coverage: checkupCoverageSchema.optional(),
 })
 export const healthViewSchema = z.object({
   version,
@@ -592,50 +658,6 @@ export function resolveAutoCheckup(settings: ReadonlyMap<string, AutoCheckupFreq
   return own === undefined ? { frequency: fallback, isOwn: false } : { frequency: own, isOwn: true }
 }
 
-/** 覆盖里指令文件的状态：没有指令文件、读到了、取不到、读到了但被截断。 */
-export const COVERAGE_BASELINES = ['none', 'read', 'unavailable', 'truncated'] as const
-/** 覆盖里这一轮停在哪：查完了、到了上限、有批失败、模型用不了、取消了、这次没轮到。 */
-export const COVERAGE_STOPS = ['done', 'cap', 'batch-failed', 'model-unavailable', 'cancelled', 'not-reached'] as const
-
-/**
- * 一次体检对一个范围的覆盖（内容检查）。落在体检记录的完成记录和最近一次结果里，透传到健康视图、体检视图。
- * - total：这个范围过了语义检查准入（在用、没过期）的记忆数，项目含全局记忆，其中全局几条记在 globalTotal；口径和健康视图的条数不同。
- * - checkedNow：这次发给模型并查成功的记忆数。
- * - 这次没有有效结果的那些批里的记忆分三种：never 从没查过、changed 改过还没重查、awaiting 内容没变、等着重查（换了模型或指令文件、点了全部重查）。
- *   isHistoryUnknown：查过的记录这次读不了，三种分不出，都记在 never（文字统称「还没查」）。
- * - oldestCheckedAt：这次直接用上次结果（命中）的批里最早的一次检查时间；没有为 null。
- * 新增字段都可选；枚举在读的一侧放开：以后加了取值，这一版读到不认识的按最保守的意思处理，整条记录照常解析。
- */
-export const checkupCoverageSchema = z.object({
-  isReadComplete: z.boolean(),
-  baseline: z.enum(COVERAGE_BASELINES).catch('unavailable'),
-  total: z.number().int().nonnegative(),
-  globalTotal: z.number().int().nonnegative().optional(),
-  checkedNow: z.number().int().nonnegative(),
-  never: z.number().int().nonnegative(),
-  changed: z.number().int().nonnegative(),
-  awaiting: z.number().int().nonnegative(),
-  oldestCheckedAt: z.number().nullable(),
-  stopped: z.enum(COVERAGE_STOPS).catch('not-reached'),
-  isHistoryUnknown: z.literal(true).optional(),
-})
-export type CheckupCoverage = z.infer<typeof checkupCoverageSchema>
-
-/** 覆盖全了：范围读全、指令文件读到了或本来没有、每条都有有效结果。只有这时才能说「没有发现问题」「记忆库健康」「状态良好」。 */
-export function isFullyCovered(c: CheckupCoverage): boolean {
-  return c.isReadComplete && (c.baseline === 'read' || c.baseline === 'none') && c.never + c.changed + c.awaiting === 0
-}
-
-/** 能不能说「没有问题」：有覆盖按 isFullyCovered；没有覆盖的记录（上一个发布版写的）照旧可以说。 */
-export function isCoverageClear(c: CheckupCoverage | undefined): boolean {
-  return c === undefined || isFullyCovered(c)
-}
-
-/** 还没查的条数（三种合计）：界面和工具返回的「N 条还没查」。 */
-export function uncheckedCount(c: CheckupCoverage): number {
-  return c.never + c.changed + c.awaiting
-}
-
 /**
  * 自动体检这次没做完、或模型用不了的原因（体检记录表与体检视图共用）。kind 见 CHECKUP_CAUSE_KINDS；
  * hostCode 是宿主给的错误码（如 ACCOUNT_SIGN_IN_REQUIRED、RATE_LIMIT），宿主给了才有；message 是宿主或体检的原话，界面按 kind 和 hostCode 写说明，原话只作补充。
@@ -696,6 +718,11 @@ export const checkupResultSchema = z.object({
    * reason 读时不限取值，以后加了原因，这一版照样读得出整条记录。
    */
   modelFallback: z.object({ reason: z.string() }).optional(),
+  /**
+   * 这一次对这个范围的内容检查覆盖（各范围的结果才有，键 all 的那条没有）；没跑内容检查、上一个发布版写的结果没有。
+   * 不进说明码：说明码是严格枚举，加新码上一个发布版会跳过整条体检记录。
+   */
+  coverage: checkupCoverageSchema.optional(),
 })
 export type CheckupResult = z.infer<typeof checkupResultSchema>
 

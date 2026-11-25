@@ -174,7 +174,7 @@ describe('认领', () => {
       const e = envWithLateProject()
       await seedScopes(e)
       expect((await e.run({ target: { kind: 'all' }, llm: quiet })).kind).toBe('done')
-      for (const scope of [GLOBAL, SESSION, OTHER]) expect((await e.recordOf(checkupKey(scope)))?.completed).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual' })
+      for (const scope of [GLOBAL, SESSION, OTHER]) expect((await e.recordOf(checkupKey(scope)))?.completed).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual', coverage: expect.any(Object) })
       expect(await e.recordOf(checkupKey(LATE))).toBeUndefined()
       expect((await e.recordOf('all'))?.lastResult).toMatchObject({ by: 'manual', completedAt: NOW })
     })
@@ -183,7 +183,7 @@ describe('认领', () => {
       const e = envWithLateProject()
       await e.store.create(record({ id: 'mem_g', name: '全局', content: '回答用中文' }))
       expect((await e.run({ target: { kind: 'all' }, llm: quiet })).kind).toBe('done')
-      expect((await e.recordOf(checkupKey(GLOBAL)))?.completed).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual' })
+      expect((await e.recordOf(checkupKey(GLOBAL)))?.completed).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual', coverage: expect.any(Object) })
       expect(await e.recordOf(checkupKey(LATE))).toBeUndefined()
       expect((await e.recordOf('all'))?.lastResult).toMatchObject({ by: 'manual', completedAt: NOW })
     })
@@ -317,7 +317,7 @@ describe('取消', () => {
     const e: Env = env({ onClaimChanged: async () => { if (!isAdvanced) { isAdvanced = true; e.clock.now = NOW + 5000 } } })
     await seedScopes(e)
     expect((await e.run({ target: SESSION, llm: quiet })).kind).toBe('done')
-    expect((await e.recordOf(checkupKey(SESSION)))?.completed).toEqual({ startedAt: NOW + 5000, completedAt: NOW + 5000, by: 'manual' })
+    expect((await e.recordOf(checkupKey(SESSION)))?.completed).toEqual({ startedAt: NOW + 5000, completedAt: NOW + 5000, by: 'manual', coverage: expect.any(Object) })
   })
 
   it('PA-32 认领后确认返回 false：放掉认领、算取消，不调模型、不写任何记录', async () => {
@@ -368,6 +368,8 @@ describe('做完：重写视图与最近一次结果', () => {
       globalAdded: { keys: [], pending: 0, advice: 0 },
       usageTokens: calls.length * 300,
       notes: [{ code: 'baseline-truncated' }],
+      // 指令文件被截断：查完了也不算全覆盖
+      coverage: expect.objectContaining({ baseline: 'truncated', stopped: 'done', never: 0, changed: 0, awaiting: 0 }),
     })
     expect(await resultOf(e, GLOBAL)).toBeUndefined()
     expect(await e.recordOf('all')).toBeUndefined()
@@ -457,8 +459,9 @@ describe('做完：重写视图与最近一次结果', () => {
       globalAdded: { keys: [], pending: 0, advice: 0 },
       usageTokens: calls.length * 1280,
       notes: [],
+      coverage: expect.objectContaining({ isReadComplete: true, baseline: 'none', stopped: 'done', never: 0, changed: 0, awaiting: 0 }),
     })
-    expect((await e.recordOf(checkupKey(SESSION)))?.completed).toEqual({ startedAt: NOW, completedAt: NOW, by: 'auto' })
+    expect((await e.recordOf(checkupKey(SESSION)))?.completed).toEqual({ startedAt: NOW, completedAt: NOW, by: 'auto', coverage: expect.any(Object) })
     const view = await e.checkupView()
     expect(view.scopes.find(s => checkupKey(s.scope) === checkupKey(SESSION))!.lastResult).toEqual(result)
     expect(view.allResult).toBeNull()
@@ -653,6 +656,6 @@ describe('心跳与写锁', () => {
 
     open()
     expect((await running).kind).toBe('done')
-    expect((await e.recordOf(checkupKey(GLOBAL)))?.completed).toEqual({ startedAt: NOW, completedAt: NOW + 20_000, by: 'manual' })
+    expect((await e.recordOf(checkupKey(GLOBAL)))?.completed).toEqual({ startedAt: NOW, completedAt: NOW + 20_000, by: 'manual', coverage: expect.any(Object) })
   })
 })

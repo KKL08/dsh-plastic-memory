@@ -690,7 +690,7 @@ describe('executeScan 完成记录（上次体检）', () => {
     const plain = makeDeps({ host: { llmOf: () => quiet } })
     for (const d of [deps, plain]) await d.store.put(record({ id: 'mem_p', scope: 'workspace', workspacePath: '/proj' }))
     const r = await executeScan({ scope: '/proj' }, deps, fakeExec())
-    expect(await completed(checkups)).toEqual({ [checkupKey({ kind: 'workspace', workspacePath: '/proj' })]: { startedAt: 9000, completedAt: 9500, by: 'agent' } })
+    expect(await completed(checkups)).toEqual({ [checkupKey({ kind: 'workspace', workspacePath: '/proj' })]: { startedAt: 9000, completedAt: 9500, by: 'agent', coverage: expect.any(Object) } })
     expect(r).toEqual(await executeScan({ scope: '/proj' }, plain, fakeExec()))
   })
 
@@ -698,7 +698,7 @@ describe('executeScan 完成记录（上次体检）', () => {
     const { checkups, deps } = withCheckups()
     await deps.store.put(record({ id: 'mem_g' }))
     await executeScan({}, deps, fakeExec())
-    expect(await completed(checkups)).toEqual({ [checkupKey({ kind: 'global' })]: { startedAt: 9000, completedAt: 9000, by: 'agent' } })
+    expect(await completed(checkups)).toEqual({ [checkupKey({ kind: 'global' })]: { startedAt: 9000, completedAt: 9000, by: 'agent', coverage: expect.any(Object) } })
   })
 
   it('全库体检：全局和每个项目各写一条；内容检查失败的那一层不写', async () => {

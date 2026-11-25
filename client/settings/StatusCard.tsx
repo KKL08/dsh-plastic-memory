@@ -1,7 +1,7 @@
 /**
  * 设置页顶部的状态卡（Health Banner）：一句结论 + 记忆数与上次体检时间 + 「打开记忆页 ›」。
  * 插件页是全局页面，结论按全部作用域汇总；数据来自视图文件（借一个会话读，没有会话时只写一句提示）。
- * 结论按优先级：配置文件关掉体检 → 有密钥 → 有 N 处等你决定 → 还没有记忆 → 还没体检过 → 状态良好。
+ * 结论按优先级：配置文件关掉体检 → 有密钥 → 有 N 处等你决定 → 还没有记忆 → 还没体检过 → 上次体检没查全 → 状态良好。
  * 「打开记忆页 ›」落在「全部」的处理视图。这里不放「立即体检」：体检要选范围，设置页没有范围，入口只留记忆页标题行。
  */
 import { isAwaitingDecision, type HealthView, type LibraryView, type PendingView } from '../../src/gui/contract.ts'
@@ -9,6 +9,7 @@ import { useGateway, type ViewState } from '../gateway.ts'
 import { formatDay, formatNumber, useT, type Translate } from '../i18n.tsx'
 import { ALL_SCOPE, type NavTarget } from '../nav.ts'
 import { HealthBanner } from '../ui/HealthBanner.tsx'
+import { partialOf } from '../checkup/coverage.ts'
 import type { MarkerKind } from '../ui/StatusMarker.tsx'
 
 interface Status { marker?: MarkerKind; conclusion: string; detail?: string }
@@ -32,6 +33,13 @@ export function summarize(
   if (decisions > 0) return { marker: 'pending', conclusion: t('settings.status.pending', { n: formatNumber(decisions) }), detail }
   if (count === 0) return { conclusion: t('settings.status.empty') }
   if (scannedAt === null) return { conclusion: t('settings.status.unscanned'), detail }
+  // 有范围上次体检的内容检查没覆盖全、或有记忆却从没体检过：不说「状态良好」
+  const partial = partialOf(views.health.layers)
+  if (partial.scopes > 1) return { conclusion: t('settings.status.partial.scopes', { n: formatNumber(partial.scopes) }), detail }
+  if (partial.scopes === 1) {
+    const n = partial.unchecked
+    return { conclusion: n > 0 ? t(n === 1 ? 'settings.status.partial.one' : 'settings.status.partial', { n: formatNumber(n) }) : t('settings.status.partial.bare'), detail }
+  }
   return { marker: 'ok', conclusion: t('settings.status.ok'), detail }
 }
 

@@ -52,16 +52,26 @@ export class CheckupRecordStore {
   /**
    * 提交点：给这些范围各写一条完成记录；已有记录开始得更晚的范围不写。这个范围查完了，自动体检的连续失败和「模型用不了」
    * 一并清掉（手动体检成功后失败计数清零，下次按新的完成记录计时），记录里的其他内容不动。
+   * continueAt：到了上限停下、还有没查到的，约下次自动体检的时间（见 storage/schema.ts）；不给就清掉旧的。
    */
-  async complete(scopes: readonly Scope[], completion: CheckupCompletion): Promise<void> {
+  async complete(scopes: readonly Scope[], completion: CheckupCompletion, continueAt?: number): Promise<void> {
     for (const scope of scopes) {
       const key = checkupKey(scope)
       await this.table.update(key, (cur) => {
         if (cur?.completed !== undefined && cur.completed.startedAt > completion.startedAt) return undefined
-        const { failure: _failure, modelUnavailable: _modelUnavailable, ...rest } = cur ?? { id: key }
-        return { ...rest, id: key, completed: completion }
+        const { failure: _failure, modelUnavailable: _modelUnavailable, continueAt: _continueAt, ...rest } = cur ?? { id: key }
+        return { ...rest, id: key, completed: completion, ...(continueAt !== undefined ? { continueAt } : {}) }
       })
     }
+  }
+
+  /**
+   * 有没命中的批、但一批都没轮到（整次上限被别的范围用完）：不写完成记录，上次的留着；约下次自动体检的时间。
+   * startedAt 是这次体检开始的时刻：这个范围已有开始得更晚的完成记录的不记。
+   */
+  async recordContinue(scope: Scope, continueAt: number, startedAt: number): Promise<void> {
+    const key = checkupKey(scope)
+    await this.table.update(key, cur => (cur?.completed !== undefined && cur.completed.startedAt > startedAt ? undefined : { ...cur, id: key, continueAt }))
   }
 
   /**

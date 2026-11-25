@@ -2,16 +2,18 @@
  * 记忆页状态条（DESIGN.md Scope Status Bar）：只放信息、不放按钮。
  * - 项目 / 全局：首行分数和分档（有密钥不打分）；第二行条数 · 上次体检 · 下次自动体检 · 分数怎么来的 ⌄，
  *   展开列出规则检查、内容检查、新鲜度各扣几分、包括哪些问题（扣 0 分的不列，都是 0 写「没有扣分」）。
+ *   上次体检的内容检查没覆盖全（见 coverage.ts）时，第二行下面另起一行写覆盖，首行不说「良好」，只说查过的部分。
  * - 「全部」：不打总分，首行写哪些范围要处理；第二行写范围数、总条数、最近一次体检和自动体检概况。
  * - 体检在配置文件里关闭：只写条数。
  * - 结果行（aria-live）：体检进行中写正在体检谁；完成后写新增几条（链接跳到第一条带「新」的条目）、用量和说明，
+ *   这次内容检查没覆盖全时只说查过的部分，一批都没轮到时写「这次没轮到」；
  *   看过这个范围的处理视图后离开再回来就收起（记录见 seen.ts）；自动体检没做完、默认模型用不了时写原因和什么时候再试；
  *   本窗口的手动体检没做成写原因。「全部」写「全部」手动体检的结果，另把没看过的自动体检结果按范围合计成一行。
  * 进行中和手动体检没做成读标题行同一份 useCheckupRuns。
  */
 import { isValidElement, useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import {
-  checkupKey, sameScope, SCOPE_KEYS,
+  checkupKey, isCoverageClear, sameScope, SCOPE_KEYS, uncheckedCount,
   type CheckupCause, type CheckupResult, type CheckupView, type HealthView, type Scope,
 } from '../../src/gui/contract.ts'
 import { NOT_RUN_KEYS } from '../command/protocol.ts'
@@ -21,6 +23,7 @@ import { allScopesSub, scopeLabel, type MemoryView, type NavStore, type NewItemJ
 import { Icon } from '../ui/Icon.tsx'
 import { useHeightTransition, withRollingNumber } from '../ui/motion.tsx'
 import { StatusMarker, type MarkerKind } from '../ui/StatusMarker.tsx'
+import { coverageParts } from './coverage.ts'
 import type { CheckupRuns, RunFailure } from './runs.ts'
 import { checkupResults, isResultSeen, markSeen, type Seen, type SeenMark } from './seen.ts'
 import { frequencyText } from './TitleControls.tsx'
@@ -182,6 +185,8 @@ function ScopeStatus({ scopeHealth, entry, count, now, result }: {
   const deductions = scopeHealth === undefined ? [] : DEDUCTIONS.filter(d => scopeHealth.deductions[d].points > 0)
   // 首行没有标记（还没打分）时，下面几行不缩进去对一个不存在的标记
   const isPlain = score !== 'secret' && (score === undefined || scopeHealth === undefined)
+  const coverage = scopeHealth?.coverage
+  const isPartial = !isCoverageClear(coverage)
   return (
     <section className={isPlain ? 'pm-status pm-status--plain' : 'pm-status'} aria-label={t('status.label')}>
       <p className="pm-status-line">
@@ -198,11 +203,12 @@ function ScopeStatus({ scopeHealth, entry, count, now, result }: {
               <>
                 <span className="pm-status-mark"><StatusMarker kind={TIER_MARKER[scopeHealth.tier]} /></span>
                 {/* 包一层：首行是 flex，裸文字段开头的空格会被吞掉，「98 分」变成「98分」 */}
-                <span>{withRollingNumber(slot => t('health.score', { score: slot }), score, formatNumber(score))}</span><Sep /><span className="pm-status-soft">{t(`health.tier.${scopeHealth.tier}`)}</span>
+                <span>{withRollingNumber(slot => t('health.score', { score: slot }), score, formatNumber(score))}</span><Sep /><span className="pm-status-soft">{t(scopeHealth.tier === 'green' && isPartial ? 'health.tier.green.partial' : `health.tier.${scopeHealth.tier}`)}</span>
               </>
             )}
       </p>
       <p className="pm-status-meta">{joined(meta)}</p>
+      {isPartial ? <p className="pm-status-meta pm-status-coverage">{joined(coverageParts(coverage!, now, t))}</p> : null}
       {isWhyOpen && scopeHealth !== undefined
         ? (
           <ul id={whyId} className="pm-status-deductions" aria-label={t('checkup.status.why')}>
@@ -319,7 +325,13 @@ function ResultRow({ scope, isTodoView, nav, runs, seen, checkups, now }: {
       const all = checkups?.allResult ?? null
       if (all !== null && !isResultSeen(seen, all.checkupId, key)) {
         shown.current.push({ checkupId: all.checkupId, scope: key })
-        lines.push(...resultLines(all, 'all'))
+        // 有范围这次没覆盖全：不说「没有发现新问题」；有范围没读全：写出来。
+        // 这次各范围的结果按体检标识拼回：有可体检的范围最近一次结果已经不是这次的（之后又单独查过），这次的覆盖拼不全，也不说
+        const subs = checkupResults(checkups).filter(({ scope: s, result }) => s !== SCOPE_KEYS.all && result.checkupId === all.checkupId)
+        const isWhole = (checkups?.scopes ?? []).every(s => !s.isCheckable || s.lastResult?.checkupId === all.checkupId)
+        const isPartial = !isWhole || subs.some(({ result }) => !isCoverageClear(result.coverage))
+        const isReadIncomplete = subs.some(({ result }) => result.coverage?.isReadComplete === false)
+        lines.push(...resultLines(all, 'all', isPartial, isReadIncomplete))
       }
       // 还没看过的自动体检结果：在那个范围、在「全部」看过的都不算
       const autos = checkupResults(checkups).filter(({ scope: s, result }) => s !== SCOPE_KEYS.all && result.by === 'auto'
@@ -359,13 +371,16 @@ function ResultRow({ scope, isTodoView, nav, runs, seen, checkups, now }: {
       const last = entry?.lastResult ?? null
       if (last !== null && !isResultSeen(seen, last.checkupId, key)) {
         shown.current.push({ checkupId: last.checkupId, scope: key })
-        lines.push(...resultLines(last, key))
+        lines.push(...resultLines(last, key, !isCoverageClear(last.coverage)))
       }
     }
   }
 
-  /** 一次结果：首行新增几条（链接）· 全局新增 · 用量；说明各占一行。 */
-  function resultLines(result: CheckupResult, lineKey: string): ReactNode[] {
+  /**
+   * 一次结果：首行新增几条（链接）· 全局新增 · 用量；说明各占一行。isPartial：内容检查没覆盖全，没有新增时只说查过的部分；
+   * 有没查的、一批都没轮到时写「这次没轮到」。isReadIncomplete：有记忆没读出来（「全部」按各范围的覆盖汇总），另起一行说。
+   */
+  function resultLines(result: CheckupResult, lineKey: string, isPartial: boolean, isReadIncomplete = result.coverage?.isReadComplete === false): ReactNode[] {
     const parts: ReactNode[] = []
     if (result.added.pending > 0) parts.push(link(t('checkup.result.newTodo', { n: formatNumber(result.added.pending) }), () => { jump('todo') }))
     if (result.added.advice > 0) parts.push(link(t('checkup.result.newAdvice', { n: formatNumber(result.added.advice) }), () => { jump('advice') }))
@@ -374,7 +389,9 @@ function ResultRow({ scope, isTodoView, nav, runs, seen, checkups, now }: {
     const head = (
       <Line key={`${lineKey}:head`}>
         {t(result.by === 'auto' ? 'checkup.result.autoDone' : 'checkup.result.done')}
-        {parts.length === 0 ? t('checkup.result.nothingNew') : joined(parts)}
+        {parts.length > 0 ? joined(parts)
+          : result.coverage?.stopped === 'not-reached' && uncheckedCount(result.coverage) > 0 ? t('checkup.result.notReached')
+            : t(isPartial ? 'checkup.result.nothingNew.partial' : 'checkup.result.nothingNew')}
         {result.usageTokens !== undefined
           // 用量连同前面的分隔点不拆行：放不下时整段折到下一行
           ? <span className="pm-status-usage"><Sep />{t('checkup.result.usage', { n: formatNumber(result.usageTokens) })}</span>
@@ -393,9 +410,22 @@ function ResultRow({ scope, isTodoView, nav, runs, seen, checkups, now }: {
               : code === 'baseline-truncated' ? t('checkup.result.note.baselineTruncated') : undefined
       return text === undefined ? [] : [<Line key={`${lineKey}:${code}`} title={cause?.message}>{text}</Line>]
     })
+    // 这次没写完成记录（读不全、批失败、模型用不了）：覆盖一行还是上次的，原因和没查到的条数写在这里；没轮到的在首行没有新增时由首行说
+    const coverage = result.coverage
+    const stops: ReactNode[] = []
+    if (isReadIncomplete) stops.push(<Line key={`${lineKey}:read-incomplete`}>{t('checkup.result.note.readIncomplete')}</Line>)
+    if (coverage !== undefined) {
+      const unchecked = uncheckedCount(coverage)
+      const isNotReached = coverage.stopped === 'not-reached'
+      if (isNotReached && parts.length > 0 && unchecked > 0) stops.push(<Line key={`${lineKey}:not-reached`}>{t('checkup.result.note.notReached')}</Line>)
+      const isRecordless = !coverage.isReadComplete || coverage.stopped === 'batch-failed' || coverage.stopped === 'model-unavailable'
+      if (isRecordless && !isNotReached && unchecked > 0) {
+        stops.push(<Line key={`${lineKey}:unchecked`}>{t(unchecked === 1 ? 'checkup.result.note.unchecked.one' : 'checkup.result.note.unchecked', { n: formatNumber(unchecked) })}</Line>)
+      }
+    }
     // 自动体检选的模型用不了、改用了默认模型：说明里最后一行
     const fallback = result.modelFallback !== undefined ? [<Line key={`${lineKey}:model-fallback`}>{t('checkup.result.note.modelFallback')}</Line>] : []
-    return [head, ...notes, ...fallback]
+    return [head, ...stops, ...notes, ...fallback]
   }
 
   useHeightTransition(box, lines.map(line => (isValidElement(line) ? line.key : '')).join('|'))

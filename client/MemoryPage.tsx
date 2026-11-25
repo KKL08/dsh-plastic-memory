@@ -22,6 +22,7 @@ import { PendingTab } from './pending/PendingTab.tsx'
 import { useCheckupRuns } from './checkup/runs.ts'
 import { useVisitSeen } from './checkup/seen.ts'
 import { scoreOf, StatusBar } from './checkup/StatusBar.tsx'
+import { partialOf } from './checkup/coverage.ts'
 import { TitleControls } from './checkup/TitleControls.tsx'
 import { Button } from './ui/Button.tsx'
 import { Chip } from './ui/Chip.tsx'
@@ -170,10 +171,14 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
               // 记忆还没读到或读取失败：不写条数，免得写成「0 条」
               const n = library === undefined ? undefined : library.layers.find(l => sameScope(l.layer, s))?.items.length ?? 0
               // 体检在配置文件里关了：只写条数，不打分（和状态条一致）
-              const score = isGovernanceEnabled ? scoreOf(health?.layers.find(l => sameScope(l.layer, s))) : undefined
+              const layer = health?.layers.find(l => sameScope(l.layer, s))
+              const score = isGovernanceEnabled ? scoreOf(layer) : undefined
               const parts: string[] = n === undefined ? [] : [t(n === 1 ? 'rail.count.one' : 'rail.count', { n: formatNumber(n) })]
               if (score === 'secret') parts.push(t('rail.unscored'))
               else if (score !== undefined) parts.push(t('health.score', { score: formatNumber(score) }))
+              // 上次体检的内容检查没覆盖全：写还有几条没查
+              const partial = isGovernanceEnabled && layer !== undefined && layer.lastCheckupAt !== null ? partialOf([layer]) : undefined
+              if (partial !== undefined && partial.scopes > 0) parts.push(partial.unchecked > 0 ? t('rail.unchecked', { n: formatNumber(partial.unchecked) }) : t('rail.partial'))
               if (isChat(s)) parts.push(t('scope.currentChat'))
               return { sub: parts.join(' · '), count }
             }}

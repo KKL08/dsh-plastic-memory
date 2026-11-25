@@ -16,6 +16,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactElement, type ReactNode, type RefObject } from 'react'
 import { PENDING_LEVELS, pendingItemKey, pendingItemScopes, type CheckupView, type HealthView, type LibraryView, type PendingItem, type PendingLevel } from '../../src/gui/contract.ts'
 import { isNewItem, markSeen, newItemIndex, readSeen, type Seen } from '../checkup/seen.ts'
+import { partialOf } from '../checkup/coverage.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, formatDay, formatNumber, useT } from '../i18n.tsx'
 import { ItemSending } from '../command/useCommandRunner.ts'
@@ -248,6 +249,7 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
             <PendingEmpty
               isOff={health.status === 'ready' && !health.data.governanceEnabled}
               lastCheckupAt={health.status === 'ready' && checkupState.status !== 'loading' ? lastScanAt(healthScopes, checkups?.scopes.filter(s => isInScope([s.scope], scope)) ?? []) : undefined}
+              partial={partialOf(healthScopes)}
               now={now}
             />
             {ignoredBlock}
@@ -454,10 +456,12 @@ function lastScanAt(scopes: HealthView['layers'], entries: CheckupView['scopes']
  * 三组都空。体检开关取健康视图（和状态条同一来源），视图还没到时按开着处理、不写上次体检。
  * 不放体检按钮：体检入口在标题行。
  */
-function PendingEmpty({ isOff, lastCheckupAt, now }: {
+function PendingEmpty({ isOff, lastCheckupAt, partial, now }: {
   isOff: boolean
   /** 这个范围的上次体检；null = 从没体检过，undefined = 健康视图还没到。 */
   lastCheckupAt: number | null | undefined
+  /** 几个范围没查全、只有一个时还有几条没查（见 checkup/coverage.ts）：没查全时说明里写出来。 */
+  partial: { scopes: number; unchecked: number }
   now: number
 }) {
   const t = useT()
@@ -466,7 +470,12 @@ function PendingEmpty({ isOff, lastCheckupAt, now }: {
   return (
     <EmptyState variant="daily" title={t('pending.empty.title')}>
       {lastCheckupAt === undefined ? undefined
-        : lastCheckupAt === null ? t('pending.empty.never') : t('pending.empty.lastScan', { date: formatDay(lastCheckupAt, now, t) })}
+        : lastCheckupAt === null ? t('pending.empty.never')
+          : partial.scopes === 0 ? t('pending.empty.lastScan', { date: formatDay(lastCheckupAt, now, t) })
+            : partial.scopes > 1 ? t('pending.empty.partial.scopes', { date: formatDay(lastCheckupAt, now, t), n: formatNumber(partial.scopes) })
+              : partial.unchecked > 0
+                ? t(partial.unchecked === 1 ? 'pending.empty.partial.one' : 'pending.empty.partial', { date: formatDay(lastCheckupAt, now, t), n: formatNumber(partial.unchecked) })
+                : t('pending.empty.partial.bare', { date: formatDay(lastCheckupAt, now, t) })}
     </EmptyState>
   )
 }

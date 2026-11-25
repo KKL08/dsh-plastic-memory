@@ -46,6 +46,8 @@ export const zh = {
   'rail.count': '{n} 条',
   'rail.count.one': '{n} 条',
   'rail.unscored': '暂不打分',
+  'rail.unchecked': '{n} 条没查',
+  'rail.partial': '没查全',
   'rail.badge': '，{n} 件待处理',
   'rail.badge.secret': '，{n} 件待处理，含密钥',
 
@@ -173,6 +175,8 @@ export const en: Record<LocaleKey, string> = {
   'rail.count': '{n} memories',
   'rail.count.one': '{n} memory',
   'rail.unscored': 'Not scored',
+  'rail.unchecked': '{n} unchecked',
+  'rail.partial': 'Not fully checked',
   'rail.badge': ', {n} to do',
   'rail.badge.secret': ', {n} to do, including a secret',
 

@@ -279,7 +279,7 @@ describe('自动体检调度：到期就在后台体检一次', () => {
     expect(e.llm.requests[0]).toMatchObject(DEFAULT_ROUTE)
     expect(e.llm.requests[0]).not.toHaveProperty('sessionId')
     const at = NOW + AUTO_CHECKUP_FIRST_CHECK_MS
-    expect((await e.completed())[checkupKey({ kind: 'workspace', workspacePath: DISCUSSION })]).toEqual({ startedAt: at, completedAt: at, by: 'auto' })
+    expect((await e.completed())[checkupKey({ kind: 'workspace', workspacePath: DISCUSSION })]).toEqual({ startedAt: at, completedAt: at, by: 'auto', coverage: expect.any(Object) })
     expect((await e.decisions.list()).map(d => d.memoryIds)).toEqual([['mem_x', 'mem_y']])
     // 这个项目没有指令文件，结果不带说明；只查这一个范围，不跑跨项目重复检查
     expect((await e.lastResultOf(checkupKey(ws(DISCUSSION))))?.notes).toEqual([])
@@ -678,7 +678,7 @@ describe('自动体检调度：按范围认领', () => {
     openAgent()
     const result = await agent
     expect(result.kind).toBe('single')
-    expect(await e.completed()).toEqual({ global: { startedAt: autoStartedAt + 1000, completedAt: autoStartedAt + 3000, by: 'agent' } })
+    expect(await e.completed()).toEqual({ global: { startedAt: autoStartedAt + 1000, completedAt: autoStartedAt + 3000, by: 'agent', coverage: expect.any(Object) } })
     const status = await collectCheckupView({ store: e.store, checkups: e.checkups, autoCheckups: e.autoCheckups, cache: e.cache, now: () => e.clock.now })
     expect(status.scopes[0]!.lastCheckupAt).toBeGreaterThanOrEqual(lastAfterAuto)
     expect((await e.cache.get('global'))?.scannedAt ?? (await e.cache.list())[0]?.[1].scannedAt).toBeGreaterThanOrEqual(autoStartedAt)
@@ -989,7 +989,7 @@ describe('自动体检调度：体检之后生成处理建议', () => {
     e.scheduler.start()
     await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
     const at = NOW + AUTO_CHECKUP_FIRST_CHECK_MS
-    expect((await e.completed()).global).toEqual({ startedAt: at, completedAt: at, by: 'auto' })
+    expect((await e.completed()).global).toEqual({ startedAt: at, completedAt: at, by: 'auto', coverage: expect.any(Object) })
     expect((await e.readView()).scopes[0]).toMatchObject({ failure: null, isDue: false })
     expect((await e.decisions.list())[0]?.suggestionFailure?.cause).toMatchObject({ kind: 'model-error', hostCode: 'RATE_LIMIT' })
   })

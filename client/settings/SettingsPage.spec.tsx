@@ -354,6 +354,31 @@ describe('状态卡', () => {
       .toEqual({ marker: 'ok', conclusion: '状态良好', detail: '共 3 条记忆 · 上次体检：10 月 3 日' })
   })
 
+  describe('没查全', () => {
+    const layer = health(NOW).layers[0]!
+    const coverage = (never: number) => ({
+      total: 3, checkedNow: 3 - never, never, changed: 0, awaiting: 0, oldestCheckedAt: NOW, baseline: 'read' as const, isReadComplete: true, stopped: 'cap' as const,
+    })
+    const project = (path: string, patch: Partial<HealthView['layers'][number]>) => ({ ...layer, layer: { kind: 'workspace' as const, workspacePath: path }, ...patch })
+    const withLayers = (layers: HealthView['layers']): HealthView => ({ ...health(NOW), layers })
+
+    it('有记忆、从没体检过的范围算没查全：别的范围查过时不说「状态良好」', () => {
+      const h = withLayers([layer, project('/w/a', { totalMemories: 2, lastCheckupAt: null })])
+      expect(summarize(views(pending(), h), true, NOW, t)).toEqual({ conclusion: '上次体检没查全', detail: '共 3 条记忆 · 上次体检：刚刚' })
+      // 没有记忆的范围从没体检过不算
+      expect(summarize(views(pending(), withLayers([layer, project('/w/a', { totalMemories: 0, lastCheckupAt: null })])), true, NOW, t).conclusion).toBe('状态良好')
+    })
+
+    it('只有一个范围没查全：写它还有几条没查到；几个范围没查全：说有几个范围，不把含全局的条数相加', () => {
+      expect(summarize(views(pending(), withLayers([layer, project('/w/a', { coverage: coverage(2) })])), true, NOW, t).conclusion).toBe('上次体检还有 2 条没查到')
+      const many = withLayers([{ ...layer, coverage: coverage(1) }, project('/w/a', { coverage: coverage(2) }), project('/w/b', { totalMemories: 1, lastCheckupAt: null })])
+      expect(summarize(views(pending(), many), true, NOW, t).conclusion).toBe('有 3 个范围上次体检没查全')
+      expect(summarize(views(pending(), many), true, NOW, createTranslator(en)).conclusion).toBe('3 scopes were not fully checked in the last checkup')
+      expect(summarize(views(pending(), withLayers([layer, project('/w/a', { coverage: coverage(1) })])), true, NOW, createTranslator(en)).conclusion)
+        .toBe('1 memory not checked in the last checkup')
+    })
+  })
+
   it('分级后口径不变：「等你决定」只数密钥以外要你拍板的事，不算同在高优问题组的读不出的文件', () => {
     expect(summarize(views(pending([unreadable, unreadable, conflict])), true, NOW, t).conclusion).toBe('有 1 处等你决定')
     expect(summarize(views(pending([unreadable])), true, NOW, t)).toEqual({ marker: 'ok', conclusion: '状态良好', detail: '共 3 条记忆 · 上次体检：刚刚' })

@@ -77,7 +77,7 @@ export interface CheckupRunDeps {
   /** 体检核心里和这次体检无关的依赖；体检记录表和时钟单独给。 */
   scan: Omit<ScanCoreDeps, 'checkups' | 'now' | 'log'>
   /** 体检记录表：认领、完成记录（核心写）、最近一次结果、自动体检的失败。 */
-  checkups: Pick<CheckupRecordStore, 'list' | 'complete' | 'claim' | 'recordFailure' | 'recordResults'>
+  checkups: Pick<CheckupRecordStore, 'list' | 'complete' | 'recordContinue' | 'claim' | 'recordFailure' | 'recordResults'>
   /** 体检前只收集不落盘；体检后全量重写，返回值就是体检后的视图。 */
   views: Pick<ViewWriter, 'collectViews' | 'rewriteAll'>
   /** 持有认领期间的心跳计时。 */
@@ -197,6 +197,7 @@ export async function runCheckup(input: CheckupRunInput, deps: CheckupRunDeps): 
         const id = genId('ck')
         await deps.checkups.recordResults(checkupResults(compared.before, compared.after.pending, {
           target: resultTarget, checkupId: id, by, completedAt: deps.now(), notes: result.notes, scopeNotes,
+          coverages: new Map((result.rounds ?? []).map(r => [checkupKey(r.scope), r.coverage])),
           ...(input.modelFallback !== undefined ? { modelFallback: input.modelFallback } : {}),
           ...(result.usageTokens !== undefined ? { usageTokens: result.usageTokens } : {}),
         }))

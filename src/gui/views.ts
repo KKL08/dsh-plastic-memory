@@ -19,7 +19,7 @@ import type { ScanNoteCode } from '../contract-codes.ts'
 import {
   ADVICE_TYPES, GUI_VIEW_VERSION, PENDING_ITEM_KINDS, PENDING_LEVEL_OF_KIND, PENDING_LEVELS, SCOPE_KEYS, checkupKey, isAwaitingDecision, resolveAutoCheckup,
   pendingItemKey, pendingItemScopes,
-  type AdviceType, type AutoCheckupFrequency, type CheckupAdded, type CheckupCause, type CheckupResult, type CheckupView, type DeletedView, type MemoryPromotion, type GlobalViewName, type HealthView, type LibraryView, type MemoryCard,
+  type AdviceType, type AutoCheckupFrequency, type CheckupAdded, type CheckupCause, type CheckupCoverage, type CheckupResult, type CheckupView, type DeletedView, type MemoryPromotion, type GlobalViewName, type HealthView, type LibraryView, type MemoryCard,
   type MemoryCommandResult, type ModelChange, type ModelSelection, type PendingItem, type PendingView, type SessionView,
 } from './contract.ts'
 import { isInScope, scopeCacheKey, scopeKey, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
@@ -283,6 +283,8 @@ export function checkupResults(before: PendingView, after: PendingView, run: {
   scopeNotes?: ReadonlyMap<string, ReadonlyArray<{ code: ScanNoteCode; cause?: CheckupCause }>>
   /** 选的模型用不了、改用了默认模型（自动体检）：各条结果同记。 */
   modelFallback?: CheckupResult['modelFallback']
+  /** 各范围这次的内容检查覆盖（键同体检记录表）；没跑内容检查的范围没有。 */
+  coverages?: ReadonlyMap<string, CheckupCoverage>
 }): Array<{ key: string; result: CheckupResult }> {
   const { target } = run
   const toNotes = (notes: typeof run.notes) => notes.map(n => ({ code: n.code, ...(n.cause !== undefined ? { cause: n.cause } : {}) }))
@@ -291,15 +293,19 @@ export function checkupResults(before: PendingView, after: PendingView, run: {
     ...(run.modelFallback !== undefined ? { modelFallback: run.modelFallback } : {}),
   }
   const usage = run.usageTokens !== undefined ? { usageTokens: run.usageTokens } : {}
+  const coverageOf = (scope: Scope) => {
+    const coverage = run.coverages?.get(checkupKey(scope))
+    return coverage !== undefined ? { coverage } : {}
+  }
   const belongsTo = (scope: Scope) => (i: PendingItem) => pendingItemScopes(i).some(s => scopeKey(s) === scopeKey(scope))
   if (target.kind === 'global') {
     const added = addedItems(before, after, [{ kind: 'global' }])
-    return [{ key: checkupKey({ kind: 'global' }), result: { ...base, added: addedOf(added), ...usage } }]
+    return [{ key: checkupKey({ kind: 'global' }), result: { ...base, added: addedOf(added), ...usage, ...coverageOf({ kind: 'global' }) } }]
   }
   if (target.kind === 'workspace') {
     const added = addedItems(before, after, [{ kind: 'global' }, target])
     // 项目体检读全局：顺带发现、只属于全局的新增记在全局名下，不算本项目的
-    const result = { ...base, added: addedOf(added.filter(belongsTo(target))), globalAdded: addedOf(added.filter(i => !belongsTo(target)(i))), ...usage }
+    const result = { ...base, added: addedOf(added.filter(belongsTo(target))), globalAdded: addedOf(added.filter(i => !belongsTo(target)(i))), ...usage, ...coverageOf(target) }
     return [{ key: checkupKey(target), result }]
   }
   const added = [...new Map(addedItems(before, after, 'all').map(i => [pendingItemKey(i), i])).values()]
@@ -317,7 +323,7 @@ export function checkupResults(before: PendingView, after: PendingView, run: {
   return [
     ...target.scopes.map(scope => {
       const own = run.scopeNotes?.get(checkupKey(scope))
-      return { key: checkupKey(scope), result: { ...base, ...(own !== undefined ? { notes: toNotes(own) } : {}), added: addedOf(added.filter(belongsTo(scope))) } }
+      return { key: checkupKey(scope), result: { ...base, ...(own !== undefined ? { notes: toNotes(own) } : {}), added: addedOf(added.filter(belongsTo(scope))), ...coverageOf(scope) } }
     }),
     { key: SCOPE_KEYS.all, result: { ...base, added: addedOf(added), byScope, ...usage } },
   ]
@@ -356,6 +362,7 @@ export function buildHealthView(input: ViewInput): HealthView {
         lastCheckupAt: r.lastCheckupAt,
         ignored: ignoredOfScope(r.ignored, input.data),
         deductions: deductionsOf(r.health),
+        ...(r.coverage !== undefined ? { coverage: r.coverage } : {}),
       }
     }),
   }
@@ -406,7 +413,7 @@ export function buildCheckupView(input: {
       const { failure, modelUnavailable } = isCheckable ? record ?? {} : {}
       return {
         scope, isCheckable, frequency, isOwn, lastCheckupAt,
-        ...isCheckable ? autoCheckupDue(frequency, lastCheckupAt, input.now) : { nextCheckupAt: null, isDue: false },
+        ...isCheckable ? autoCheckupDue(frequency, lastCheckupAt, input.now, record?.continueAt) : { nextCheckupAt: null, isDue: false },
         isInProgress: input.isInProgress(scope),
         // 重试时间按此刻的有效频率现算；仅手动时不会自动重试（不到期），按 0 天算，界面也不显示
         failure: failure === undefined ? null : {

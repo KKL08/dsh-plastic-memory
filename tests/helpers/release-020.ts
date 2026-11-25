@@ -48,3 +48,17 @@ export async function openRelease020Config(): Promise<new (raw: unknown) => { se
   const mod = await import(pathToFileURL(join(releaseDir, 'lib', 'index.js')).href) as { Config: new (raw: unknown) => { search: Record<string, unknown> } }
   return mod.Config
 }
+
+/** 0.2.0 读侧表条目用的 schema（体检记录、语义缓存、待决条目）：新版写的东西拿它解析，看旧版能不能照读。 */
+export interface Release020Schemas {
+  checkupRecord: { safeParse(value: unknown): { success: boolean; data?: unknown } }
+  scanCache: { safeParse(value: unknown): { success: boolean; data?: unknown } }
+  pendingDecision: { safeParse(value: unknown): { success: boolean; data?: unknown } }
+}
+
+export async function loadRelease020Schemas(): Promise<Release020Schemas> {
+  const load = async (...path: string[]) => await import(pathToFileURL(join(releaseDir, 'lib', ...path)).href) as Record<string, Release020Schemas['checkupRecord']>
+  const storage = await load('storage', 'schema.js')
+  const governance = await load('governance', 'schema.js')
+  return { checkupRecord: storage.checkupRecordSchema!, scanCache: governance.scanCacheSchema!, pendingDecision: governance.pendingDecisionSchema! }
+}

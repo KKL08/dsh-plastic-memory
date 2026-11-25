@@ -24,8 +24,8 @@ import type { CheckupCache } from '../storage/checkup-cache.ts'
 import { isModelUnavailableCode } from '../governance/host-llm.ts'
 import { cacheInstructions, instructionTexts, type InstructionFiles, type ReadInstructions } from '../governance/instructions.ts'
 import type { ContextHost, HostSession } from './host-session.ts'
-import { checkupKey, isFullyCovered, type CheckupCause, type CheckupCoverage } from '../gui/contract.ts'
-import { scoreScope, validateScopePaths, crossScopeConflicts, checkupRowBase, ignoredNote, findingFingerprints, GLOBAL_CACHE_KEY, TIER_LABEL } from '../governance/scope-health.ts'
+import { checkupKey, isCoverageClear, isFullyCovered, uncheckedCount, type CheckupCause, type CheckupCoverage } from '../gui/contract.ts'
+import { scoreScope, validateScopePaths, crossScopeConflicts, checkupRowBase, coverageText, ignoredNote, findingFingerprints, GLOBAL_CACHE_KEY, TIER_LABEL } from '../governance/scope-health.ts'
 import { applyIgnores, type AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
 import { prereadScopes, listingNotes, checkupWorkspaces, renderDirectoryNotes } from './scope-preread.ts'
@@ -44,7 +44,7 @@ export interface ScanToolDeps {
   /** 建议忽略表：被用户忽略的建议不列为发现、不扣分（与记忆页同口径）。缺省按没有忽略算。 */
   ignores?: Pick<AdviceIgnoreStore, 'list'>
   /** 体检记录表：一次体检全部写完后给覆盖到的范围写完成记录（提交点）。缺省不写。 */
-  checkups?: Pick<CheckupRecordStore, 'list' | 'complete'>
+  checkups?: Pick<CheckupRecordStore, 'list' | 'complete' | 'recordContinue'>
   /** 按作用域取指令文件（AGENTS.md / CLAUDE.md）：垂直冲突对照它，项目记忆对它所在项目的，全局记忆对全局层。一次扫描内每个作用域只读一次。 */
   instructions: ReadInstructions
   /** 宿主会话，都按触发调用的会话取：llmOf 按调用解析——provider/model 只能从触发调用的 agent 拿到，插件加载时不存在，
@@ -125,6 +125,10 @@ export interface CheckupScanResult {
     issueSummary: string
     /** 用户忽略、没有计分的建议条数。 */
     ignoredCount: number
+    /** 这个范围的内容检查覆盖：这次跑了内容检查的取这次的，否则取上次体检的；都没有（上一个发布版写的、没有自己的记忆）时没有。 */
+    coverage?: CheckupCoverage
+    /** coverage 是上次体检的（这次这个范围没跑内容检查，比如 layers=rule）：文字写明「上次」。 */
+    isCoverageFromLastCheckup?: true
   }>
   pendingDecisions: {
     created: number
@@ -160,6 +164,8 @@ export type ScanToolResult = SingleScanResult | CheckupScanResult | ScanErrorRes
 
 /** 提升候选一次最多列这些，其余折叠——不让治理报告被候选淹没。 */
 const PROMOTE_LIMIT = 5
+/** 一次没查完的体检约多久之后接着查（到上限停下、这次没轮到）。 */
+const CONTINUE_AFTER_MS = 86_400_000
 
 /** 把扫描结果渲染成给模型看的一段文本。纯函数。 */
 export function renderScanResult(result: ScanToolResult): string {
@@ -169,7 +175,8 @@ export function renderScanResult(result: ScanToolResult): string {
     for (const row of result.rows) {
       const name = row.layer === 'global' ? 'global' : row.workspacePath!
       const gateNote = row.gate.secret ? '｜⚠️ 检出密钥' : ''
-      lines.push(`- ${name}：${Math.floor(row.score)}/100（${TIER_LABEL[row.tier]}）｜${row.totalMemories} 条｜${row.issueSummary}${gateNote}`)
+      const coverage = row.coverage !== undefined ? `｜${coverageText(row.coverage, { isLastCheckup: row.isCoverageFromLastCheckup === true })}` : ''
+      lines.push(`- ${name}：${Math.floor(row.score)}/100（${TIER_LABEL[row.tier]}）｜${row.totalMemories} 条｜${row.issueSummary}${gateNote}${coverage}`)
     }
     const ignored = ignoredNote(result.rows.reduce((n, row) => n + row.ignoredCount, 0))
     if (ignored !== undefined) lines.push(ignored)
@@ -203,6 +210,7 @@ export function renderScanResult(result: ScanToolResult): string {
   }
 
   const lines = [result.message]
+  for (const r of result.rounds ?? []) lines.push(coverageText(r.coverage))
   for (const f of result.findings) {
     lines.push(`- [${f.severity}] ${f.type} ${f.memoryIds.join('+')}：${f.summary} → ${f.suggestedAction}`)
   }
@@ -787,9 +795,16 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
   await afterCommit('同步提升候选', () => syncPromoteCandidates(deps, checkup ? wsList : wsPath !== undefined ? [wsPath] : [], now, log))
   if (deps.checkups !== undefined && layers === 'full') {
     const checkups = deps.checkups
-    for (const { scope, closing } of results.values()) {
+    // 约下次接着查只给界面手动体检、自动体检（它们按约的时间排自动体检）；memory_scan 不约
+    const isScheduling = run.by === 'manual' || run.by === 'auto'
+    for (const { scope, closing, coverage } of results.values()) {
+      // 有没命中的批但一批都没轮到：完成记录不写（上次的留着），约一天后接着查，免得自动体检每轮都来
+      if (closing === 'not-reached' && isScheduling) await afterCommit('写体检记录', () => checkups.recordContinue(scope, now + CONTINUE_AFTER_MS, now))
       if (!isCompletionRow(closing)) continue
-      await afterCommit('写体检记录', () => checkups.complete([scope], { startedAt: now, completedAt: clock(), by: run.by ?? 'agent' }))
+      // 到了上限停下、还有没查到的：完成记录照写（覆盖如实），约完成后一天接着查
+      const completedAt = clock()
+      await afterCommit('写体检记录', () => checkups.complete([scope], { startedAt: now, completedAt, by: run.by ?? 'agent', coverage },
+        closing === 'capped' && isScheduling ? completedAt + CONTINUE_AFTER_MS : undefined))
     }
   }
   for (const scope of scopes) run.onScopeNotes?.(scope, notesOf(scope))
@@ -841,8 +856,13 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
     const scoredScopes: Scope[] = [{ kind: 'global' }, ...wsList.map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
     const rows = scoredScopes.map((scope) => {
       const r = scoreScope(deps, scored, scope, now)
+      // 这次这个范围没跑内容检查（layers=rule、拿不到模型、没有自己的记忆）：给的是上次体检的覆盖，标明出处
+      const thisRun = results.get(scopeKey(scope))?.coverage
+      const coverage = thisRun ?? r.coverage
       return {
         ...checkupRowBase(r),
+        ...(coverage !== undefined ? { coverage } : {}),
+        ...(thisRun === undefined && coverage !== undefined ? { isCoverageFromLastCheckup: true as const } : {}),
         issues: r.ruleFindings.length + r.semanticFindings.length,
       }
     })
@@ -885,7 +905,7 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
       ...(isCrossWsSkipped ? { isCrossWsSkipped: true as const } : {}),
       ...(results.size > 0 ? { rounds: [...results.values()] } : {}),
       directoryNotes: [...listingNotes(listing, { includeEmpty: true }), ...data.directoryNotes],
-      message: `全库体检完成：global + ${wsList.length} 个 workspace 各自独立扫描计分${created > 0 ? `，新增 ${created} 个待决冲突` : ''}。清理需用户确认后执行：删除用 memory_forget，冲突裁决用 memory_confirm，提升全局用 memory_promote。`,
+      message: `全库体检完成：global + ${wsList.length} 个 workspace 各自独立扫描计分${created > 0 ? `，新增 ${created} 个待决冲突` : ''}${partialNote(results.values())}。清理需用户确认后执行：删除用 memory_forget，冲突裁决用 memory_confirm，提升全局用 memory_promote。`,
       ...extras(semanticBatches),
     }
   }
@@ -931,10 +951,24 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
     semanticCachedAt,
     notes,
     directoryNotes: [...listingNotes(listing, { includeEmpty: false }), ...data.directoryNotes],
-    message: `扫描${scopeLabel} ${stats.scanned} 条，发现 ${stats.issues} 个问题${ledger.created > 0 ? `，新增 ${ledger.created} 个待决冲突` : ''}${promoteCandidates.items.length > 0 ? `，${allCandidates.length} 条建议提升全局` : ''}${noteSuffix}。清理需用户确认后执行：删除用 memory_forget，冲突裁决用 memory_confirm，提升全局用 memory_promote。`,
+    message: `扫描${scopeLabel} ${stats.scanned} 条，${issuesText(stats.issues, results.get(scopeKey(target))?.coverage)}${ledger.created > 0 ? `，新增 ${ledger.created} 个待决冲突` : ''}${promoteCandidates.items.length > 0 ? `，${allCandidates.length} 条建议提升全局` : ''}${noteSuffix}。清理需用户确认后执行：删除用 memory_forget，冲突裁决用 memory_confirm，提升全局用 memory_promote。`,
     ...(results.size > 0 ? { rounds: [...results.values()] } : {}),
     ...extras(semanticBatches),
   }
+}
+
+/** 单个作用域的「发现几个问题」：内容检查没覆盖全时不说「发现 0 个问题」，说查到的部分怎样、还有几条没查。 */
+function issuesText(issues: number, coverage: CheckupCoverage | undefined): string {
+  if (isCoverageClear(coverage)) return `发现 ${issues} 个问题`
+  const unchecked = uncheckedCount(coverage!)
+  const rest = unchecked > 0 ? `内容检查还有 ${unchecked} 条没查到` : '内容检查没覆盖全'
+  return issues > 0 ? `查到的部分发现 ${issues} 个问题，${rest}` : `查到的部分没有发现问题，${rest}`
+}
+
+/** 全库报告里「有几个范围没覆盖全」：都覆盖全了为空串。 */
+function partialNote(results: Iterable<ScanRoundResult>): string {
+  const partial = [...results].filter(r => !isFullyCovered(r.coverage)).length
+  return partial > 0 ? `，其中 ${partial} 个范围的内容检查没覆盖全（见各行）` : ''
 }
 
 /** 这份副本这次读到了（任何状态）：同 id 读到的是别的作用域里的那份，不算。 */
