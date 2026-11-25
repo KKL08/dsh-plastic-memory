@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { assembleSnapshot, estimateTokens, COLD_START_TEXT, coldStartUnparseableText, MEMORY_AS_DATA_NOTE, COMPACTION_ENGINE_NOTE, TYPE_USAGE_HEADING } from '../src/snapshot.ts'
 import { SNAPSHOT_SUPERSEDE_NOTE } from '../src/snapshot-message.ts'
-import { EVIDENCE_GUIDANCE } from '../src/evidence-guidance.ts'
+import { EVIDENCE_GUIDANCE, evidenceGuidance } from '../src/evidence-guidance.ts'
 import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { workspaceDirName } from '../src/storage/paths.ts'
@@ -140,6 +140,18 @@ describe('assembleSnapshot', () => {
     // 空库冷启动路径不拼（没有记忆就没有锚）
     const empty = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     expect(assembleSnapshot({ ...base, records: await visible(empty), evidenceLookup: 'active' }).text).toBe(COLD_START_TEXT)
+  })
+
+  it('下钻引导按记忆带原话和检索来源选文案；两个都缺省时和原来一样', async () => {
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
+    await store.put(record({ id: 'mem_1' }))
+    const records = await visible(store)
+    for (const level of ['off', 'strict', 'active'] as const) {
+      expect(assembleSnapshot({ ...base, records, evidenceLookup: level }).text).toContain(EVIDENCE_GUIDANCE[level])
+      const text = assembleSnapshot({ ...base, records, evidenceLookup: level, memoryQuotes: true, searchSource: 'both' }).text
+      expect(text).toContain(evidenceGuidance(level, { memoryQuotes: true, searchSource: 'both' }))
+      expect(text).not.toContain(EVIDENCE_GUIDANCE[level])
+    }
   })
 
   it('三段档位文案各自自包含：不引用其他档位名（运行时只有一段在场，跨段引用是悬空的）', () => {

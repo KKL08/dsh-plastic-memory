@@ -21,7 +21,12 @@ All notable changes to this project are documented here. The format follows
   your message and the assistant's reply, quoted from the local copy of past
   conversations, up to about 1,000 tokens per search. When the exchange cannot
   be shown, for example because the conversation was deleted or marked as not
-  to be reviewed, the result says so. It is off by default.
+  to be reviewed, the result says so. It is off by default. While it is on,
+  the guidance loaded into each chat tells the assistant to read these quotes
+  first and to open the conversation with `memory_source` only when they are
+  not enough. Whenever results can include quoted messages, from conversation
+  search or from these quotes, the guidance also says when to expand an excerpt
+  by its reference.
 - Groundwork for Brewing Dreams, an experimental background pass that tidies
   memories while no chat is running. It is off and has no switch yet. Once on
   for a scope (all memories, or one project), a pass starts only when enough
