@@ -10,7 +10,8 @@ import { GLOBAL_DIR, HISTORY_DIR, workspaceDirName } from '../src/storage/paths.
 import type { RecallStats } from '../src/storage/schema.ts'
 import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
 import { record } from './helpers/record.ts'
-import { openRelease020Pending, openRelease020Table } from './helpers/release-020.ts'
+import { openRelease020Config, openRelease020Pending, openRelease020Table } from './helpers/release-020.ts'
+import { Config } from '../src/index.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { sidecarSchemas } from './helpers/sidecar-schemas.ts'
@@ -176,5 +177,24 @@ describe('新旧版本共用一个记忆根（0.2.0 发布包）', () => {
     expect((await old.list()).map(([, e]) => e.id)).toEqual([conflict.id])
     expect(warnings).toHaveLength(1)
     expect((await decisions.listSettled()).map(e => [e.id, e.indexRun?.receipts.length])).toEqual([['pd_organize', 1]])
+  })
+})
+
+describe('共享配置里的新键', () => {
+  const written = { userDictionaryPath: '/dict/user.txt', source: 'both', memoryQuotes: true, dialogueTokenBudget: 1800, queryExpansion: false, dialogueToolResults: true }
+
+  it('0.2.0 读到检索来源、带原话、原话上限等新键时照常加载、不报错，自己认得的键照旧', async () => {
+    const Release020Config = await openRelease020Config()
+    const value = new Release020Config({ search: written })
+    expect((value.search.userDictionaryPath as { get(): unknown }).get()).toBe('/dict/user.txt')
+    // 新键原样留着、不校验，0.2.0 的代码不读它们：写成它不认识的值也照常加载
+    expect(() => new Release020Config({ search: { ...written, source: 42, memoryQuotes: 'yes' } })).not.toThrow()
+  })
+
+  it('新版读到这两个键写过的值照旧，没写的用新的默认值', () => {
+    const value = new Config({ search: { source: 'memory', memoryQuotes: false } } as never)
+    expect(value.search.source.get()).toBe('memory'); expect(value.search.memoryQuotes.get()).toBe(false)
+    const defaults = new Config({} as never)
+    expect(defaults.search.source.get()).toBe('both'); expect(defaults.search.memoryQuotes.get()).toBe(true)
   })
 })

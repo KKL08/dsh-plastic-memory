@@ -9,6 +9,7 @@ import type { DialogueSegment } from '../src/search/dialogue-rank.ts'
 import { dialogueTokenizer } from '../src/search/dialogue-tokenizer.ts'
 import { DIALOGUE_QUOTE_TAG, foldToLine } from '../src/search/dialogue-format.ts'
 import { record } from './helpers/record.ts'
+import { SKIPPED_WATERMARK } from '../src/storage/dialogue-records.ts'
 
 const seg = (seq: number, speaker: string, text: string, segment = 0, turnSeq = 10, at: number | undefined = 1000 + seq): DialogueSegment =>
   ({ sessionId: 's', turnSeq, seq, segment, at, speaker, text })
@@ -74,7 +75,7 @@ describe('一轮里挑哪几段', () => {
       seg(14, 'assistant', '建议用 PostgreSQL，已经装好了'),
       seg(15, 'assistant', '还有别的要调整吗'),
     ], [keywordRanker('PostgreSQL', tokenizer)])
-    expect(picked.map(m => [m.seq, m.speaker, m.text, m.isPartial])).toEqual([
+    expect(picked.map(m => [m.seq, m.speaker, m.text, m.segmentCount > 1])).toEqual([
       [11, 'user', '数据库用哪个', false],
       [14, 'assistant', '建议用 PostgreSQL，已经装好了', false],
     ])
@@ -83,7 +84,7 @@ describe('一轮里挑哪几段', () => {
   it('切过的用户消息给最相关的一段，标成节选并带总段数', async () => {
     const tokenizer = await dialogueTokenizer({ log: { warn() {} } })
     const picked = pickTurnMessages([seg(11, 'user', '第一段说背景', 0), seg(11, 'user', '第二段说写锁', 1), seg(11, 'user', '第三段收尾', 2)], [keywordRanker('写锁', tokenizer)])
-    expect(picked).toEqual([{ seq: 11, speaker: 'user', at: 1011, text: '第二段说写锁', segmentCount: 3, isPartial: true }])
+    expect(picked).toEqual([{ seq: 11, segment: 1, speaker: 'user', at: 1011, text: '第二段说写锁', segmentCount: 3 }])
   })
 
   it('助手段一段都对不上：给最后一条助手正文的第一段', async () => {
@@ -91,7 +92,7 @@ describe('一轮里挑哪几段', () => {
     const picked = pickTurnMessages([
       seg(11, 'user', '好'), seg(12, 'assistant', '甲'), seg(14, 'assistant', '乙一', 0), seg(14, 'assistant', '乙二', 1),
     ], [keywordRanker('写锁', tokenizer)])
-    expect(picked.at(-1)).toMatchObject({ seq: 14, text: '乙一', segmentCount: 2, isPartial: true })
+    expect(picked.at(-1)).toMatchObject({ seq: 14, text: '乙一', segmentCount: 2 })
   })
 
   it('打分来源可以有几个：前一个对不上时用后一个', () => {
@@ -142,16 +143,35 @@ describe('和记忆正文相同', () => {
 })
 
 describe('库里有没有这一轮', () => {
+  const library = (over: Partial<{ isRebuilding: boolean; isQueued: boolean; isOutOfScope: boolean }> = {}) => ({ isRebuilding: false, isQueued: false, isOutOfScope: false, ...over })
+
   it('收过且水位过了锚终点：有；水位没到、库里没有这个会话的行：还在整理', () => {
-    expect(quoteCoverage({ watermark: 30, revision: 1, isRemoved: false }, { isRebuilding: false }, 25)).toBe('covered')
-    expect(quoteCoverage({ watermark: 20, revision: 1, isRemoved: false }, { isRebuilding: false }, 25)).toBe('pending')
-    expect(quoteCoverage(undefined, { isRebuilding: false }, 25)).toBe('pending')
-    expect(quoteCoverage(undefined, { isRebuilding: true }, 25)).toBe('pending')
+    expect(quoteCoverage({ watermark: 30, revision: 1, isRemoved: false }, library(), 25)).toBe('covered')
+    expect(quoteCoverage({ watermark: 20, revision: 1, isRemoved: false }, library(), 25)).toBe('pending')
+    expect(quoteCoverage(undefined, library(), 25)).toBe('pending')
+    expect(quoteCoverage(undefined, library({ isRebuilding: true }), 25)).toBe('pending')
   })
 
-  it('会话的行标了移出库：没有收录；库在重建时不下这个结论', () => {
-    expect(quoteCoverage({ watermark: -1, revision: 2, isRemoved: true }, { isRebuilding: false }, 25)).toBe('not-collected')
-    expect(quoteCoverage({ watermark: -1, revision: 2, isRemoved: true }, { isRebuilding: true }, 25)).toBe('pending')
+  it('会话的行标了移出库、也不在待建队列里：没有收录；已重新排进队（取消了不回看）、库在重建：还在整理', () => {
+    expect(quoteCoverage({ watermark: -1, revision: 2, isRemoved: true }, library(), 25)).toBe('not-collected')
+    expect(quoteCoverage({ watermark: -1, revision: 2, isRemoved: true }, library({ isQueued: true }), 25)).toBe('pending')
+    expect(quoteCoverage({ watermark: -1, revision: 2, isRemoved: true }, library({ isRebuilding: true }), 25)).toBe('pending')
+  })
+
+  it('记了整个跳过的会话：没有收录；库在重建时不下这个结论', () => {
+    const skipped = { watermark: SKIPPED_WATERMARK, revision: 1, isRemoved: false }
+    expect(quoteCoverage(skipped, library(), 25)).toBe('not-collected')
+    expect(quoteCoverage(skipped, library({ isRebuilding: true }), 25)).toBe('pending')
+  })
+
+  it('还一条没收到（没读到日志、还没有自己的事件）：还在整理，在不在队里都一样', () => {
+    expect(quoteCoverage({ watermark: -1, revision: 1, isRemoved: false }, library(), 25)).toBe('pending')
+    expect(quoteCoverage({ watermark: -1, revision: 1, isRemoved: false }, library({ isQueued: true }), 25)).toBe('pending')
+  })
+
+  it('库里没有这个会话的行：上次对账时它就不在收录范围、也没人排它进队，才算没有收录', () => {
+    expect(quoteCoverage(undefined, library({ isOutOfScope: true }), 25)).toBe('not-collected')
+    expect(quoteCoverage(undefined, library({ isOutOfScope: true, isQueued: true }), 25)).toBe('pending')
   })
 })
 
@@ -219,8 +239,8 @@ describe('记忆名称和渲染', () => {
 
   it('本项目会话：整条给的带引用，节选带节选说明；别的项目会话：不带引用，节选说明指向传记忆 id 回查', () => {
     const messages = [
-      { seq: 11, speaker: 'user' as const, at: undefined, text: '问', segmentCount: 1, isPartial: false, isSameAsMemory: false },
-      { seq: 12, speaker: 'assistant' as const, at: undefined, text: '答二', segmentCount: 3, isPartial: true, isSameAsMemory: false },
+      { seq: 11, segment: 0, speaker: 'user' as const, at: undefined, text: '问', segmentCount: 1, isSameAsMemory: false },
+      { seq: 12, segment: 1, speaker: 'assistant' as const, at: undefined, text: '答二', segmentCount: 3, isSameAsMemory: false },
     ]
     const local = renderMemoryQuote({ memoryId: 'mem_a', turns: [{ sessionId: 's', isInProject: true, messages }], sameSource: [] })!
     expect(local).toContain(`<${DIALOGUE_QUOTE_TAG}>`)
@@ -234,10 +254,17 @@ describe('记忆名称和渲染', () => {
 
   it('原话和记忆正文相同：只给日期和位置', () => {
     const text = renderMemoryQuote({ memoryId: 'mem_a', sameSource: [], turns: [{ sessionId: 's', isInProject: true, messages: [
-      { seq: 11, speaker: 'user', at: new Date(2026, 10, 24, 9, 5).getTime(), text: '记住数据库用 PostgreSQL', segmentCount: 1, isPartial: false, isSameAsMemory: true },
+      { seq: 11, segment: 0, speaker: 'user', at: new Date(2026, 10, 24, 9, 5).getTime(), text: '记住数据库用 PostgreSQL', segmentCount: 1, isSameAsMemory: true },
     ] }] })!
     expect(text).toContain('[2026-11-24 09:05] 用户：（和记忆正文相同，从略）〔引用 s#11〕')
     expect(text).not.toContain('记住数据库用 PostgreSQL')
+  })
+
+  it('切过段的长消息只给了和记忆正文相同的那一段：从略，照样标节选，让模型知道还有其余段', () => {
+    const text = renderMemoryQuote({ memoryId: 'mem_a', sameSource: [], turns: [{ sessionId: 's', isInProject: true, messages: [
+      { seq: 12, segment: 1, speaker: 'assistant', at: undefined, text: '数据库用 PostgreSQL', segmentCount: 3, isSameAsMemory: true },
+    ] }] })!
+    expect(text).toContain('助手：（和记忆正文相同，从略）（节选，这条消息共 3 段，可用 memory_source 带上引用 s#12 看更多内容）')
   })
 
   it('只有说明、没有原话时不出标签；什么都没有时不出东西', () => {

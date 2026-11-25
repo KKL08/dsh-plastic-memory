@@ -105,11 +105,11 @@ export interface Config {
   search: {
     /** jieba 用户词典（每行「词 词频 词性」）的绝对路径，追加在主词典之上；不设只用主词典。改了下一次搜索生效。 */
     userDictionaryPath: Volatile<string | undefined>
-    /** memory_search 查哪里：memory 只查记忆，dialogue 只查过往对话的原话，both 两者。 */
+    /** memory_search 查哪里：memory 只查记忆，dialogue 只查过往对话的原话，both 两者（缺省）。 */
     source: Volatile<SearchSource>
     /** 一次检索里「其他原话」这一部分最多占多少 token（总量，不是单条上限）。按 300 一步取整，见 dialogueBudgetOf。 */
     dialogueTokenBudget: Volatile<number>
-    /** 命中的记忆是否带上出处那一轮的一问一答。 */
+    /** 命中的记忆是否带上出处那一轮的一问一答。缺省开。 */
     memoryQuotes: Volatile<boolean>
     /** 原话第一轮结果弱时，是否让模型从原话里挑词再搜一次。只在 source 含原话时起作用。 */
     queryExpansion: Volatile<boolean>
@@ -181,9 +181,9 @@ export const Config = z.object({
   }),
   search: z.object({
     userDictionaryPath: z.string().volatile(),
-    source: z.union(SEARCH_SOURCES).default('memory').volatile(),
+    source: z.union(SEARCH_SOURCES).default('both').volatile(),
     dialogueTokenBudget: z.number().default(DIALOGUE_BUDGET_DEFAULT).volatile(),
-    memoryQuotes: z.boolean().default(false).volatile(),
+    memoryQuotes: z.boolean().default(true).volatile(),
     queryExpansion: z.boolean().default(true).volatile(),
     dialogueToolResults: z.boolean().default(true).volatile(),
   }),

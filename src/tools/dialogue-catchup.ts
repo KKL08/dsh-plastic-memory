@@ -49,13 +49,15 @@ export type DialogueReadiness =
     coverage: DialogueCoverage
     /** 点名的会话是不是都追到了这一刻；没追完时结果里可能缺最新的几条。 */
     isCaughtUp: boolean
+    /** 这一次对过账时列到的会话清单，同一次检索里放行会话直接用它；这次没对账就没有。 */
+    listed?: HostSessionEntry[]
   }
 
 /** 一个会话在库里收到了哪：给按会话读原文的入口判断能不能直接用库。 */
 export interface SessionCoverage {
   /** 读的那一代。 */
   gen: number
-  /** 已经收到的最后一条事件的序号；一条都没收是 -1。 */
+  /** 已经收到的最后一条事件的序号；一条都没收是 -1，整个不收是 SKIPPED_WATERMARK。 */
   watermark: number
   /** 规则变了正在重建：这一代是按旧规则收的，新消息不再进来。 */
   isRebuilding: boolean
@@ -106,7 +108,7 @@ export class DialogueCatchup {
   private readonly warned = new Set<string>()
 
   /** 共享同一个对话记录库，只向读取入口提供查询方法。 */
-  get readStore(): Pick<DialogueRecordStore, 'state' | 'search' | 'segmentsOf' | 'turnsOf' | 'queued' | 'session'> {
+  get readStore(): Pick<DialogueRecordStore, 'state' | 'search' | 'segmentsOf' | 'turnsOf' | 'queued' | 'isQueued' | 'session'> {
     return this.deps.store
   }
 
@@ -138,7 +140,7 @@ export class DialogueCatchup {
           // 范围多了一个项目：上次对账没算它的会话，这一次重新对
           this.reconciledAt = undefined
         }
-        await this.reconcile(prepared, alive)
+        const listed = await this.reconcile(prepared, alive)
         const isFocusOver = () => this.now() >= started + focusBudgetMs
         // 当前会话不等对账：对账这一次没做成时，它也要能搜到自己的原话
         // 当前会话认不出属于哪个项目（没有工作目录）时不在范围里，不收；结果里如实说没追到
@@ -165,7 +167,7 @@ export class DialogueCatchup {
         // 重建期间点名的会话写进了新的一代，查询读的旧一代里没有它们的新消息
         return {
           kind: 'ready', gen: state.read.gen, status: state.status, coverage: this.deps.store.coverage(state.read.gen),
-          isCaughtUp: isCaughtUp && state.read.gen === gen,
+          isCaughtUp: isCaughtUp && state.read.gen === gen, ...(listed !== undefined ? { listed } : {}),
         }
       })
     } finally {
@@ -205,6 +207,11 @@ export class DialogueCatchup {
       if (err instanceof DialogueStoreUnavailable) return undefined
       throw err
     }
+  }
+
+  /** 上次对账时这个会话在宿主的会话清单里，但不属于收录范围里的项目。没对过账、清单里没有它（比如新开的会话）都不算。 */
+  isOutOfScope(sessionId: string): boolean {
+    return this.present.has(sessionId) && !this.eligible.has(sessionId)
   }
 
   /** 用户把一个会话标成不回看之后调：在途的批次作废，已收的行清掉。 */
@@ -274,15 +281,15 @@ export class DialogueCatchup {
 
   /**
    * 对账：按宿主此刻的会话清单，把宿主那边已经没有的、标了不回看的会话移出，范围里还没收的排进待建队列。
-   * 范围是记忆根见过的项目加上本进程里当过当前会话的项目。宿主列不出清单时这一次不对账。
+   * 范围是记忆根见过的项目加上本进程里当过当前会话的项目。宿主列不出清单时这一次不对账。返回这次对账列到的会话清单。
    */
-  private async reconcile(prepared: Prepared, alive: () => boolean): Promise<void> {
+  private async reconcile(prepared: Prepared, alive: () => boolean): Promise<HostSessionEntry[] | undefined> {
     const { store } = this.deps
     const gen = prepared.state.write.gen
     const isDue = this.reconciledGen !== gen || this.reconciledAt === undefined || this.now() - this.reconciledAt >= RECONCILE_INTERVAL_MS
-    if (!isDue) return
+    if (!isDue) return undefined
     const [listed, known, marked] = await Promise.all([this.deps.host.listSessions(), this.deps.knownWorkspaces(), this.deps.noReview.sessionIds()])
-    if (listed === null) return
+    if (listed === null) return undefined
     const scope = new Set([...known, ...this.currentWorkspaces])
     const workspaces = new Map<string | undefined, Promise<string | undefined>>()
     const workspaceOf = (cwd: string | undefined) => {
@@ -298,7 +305,7 @@ export class DialogueCatchup {
       present.set(entry.id, { ...entry, cwd: workspace })
       if (workspace !== undefined && scope.has(workspace)) eligible.set(entry.id, { ...entry, cwd: workspace })
     }
-    if (!alive()) return
+    if (!alive()) return undefined
     const stored = new Set(store.sessionIds(gen))
     const everStored = new Set([...stored, ...(prepared.state.read.gen === gen ? [] : store.sessionIds(prepared.state.read.gen))])
     for (const id of everStored) if (!present.has(id)) store.removeSession(id)
@@ -310,6 +317,7 @@ export class DialogueCatchup {
     this.present = present
     this.reconciledAt = this.now()
     this.reconciledGen = gen
+    return listed
   }
 
   /** 整词列要重算的段（换了词典，或分词器降级时收的）分批重算。进度记在库里，到点没算完下次、别的进程接着算。 */
@@ -396,8 +404,15 @@ export class DialogueCatchup {
     if (log === null) return 'unreadable'
     const intake = intakeOf(log, session.watermark)
     if (intake.kind === 'skipped') {
-      // 分不清哪些消息是它自己的：整个会话不收，也不再排队
+      // 分不清哪些消息是它自己的：整个会话不收，记下来（检索据此说没有收录），也不再排队
+      if (!alive()) return 'stopped'
+      store.markSkipped(gen, entry.id, session.revision)
       store.dequeue(gen, entry.id)
+      return 'done'
+    }
+    if (intake.rows.length === 0 && intake.turns.length === 0 && intake.watermark === session.watermark) {
+      // 这次没有新事件：不写库；在队里的照常出队
+      if (store.isQueued(gen, entry.id)) store.dequeue(gen, entry.id)
       return 'done'
     }
     let from = session.watermark

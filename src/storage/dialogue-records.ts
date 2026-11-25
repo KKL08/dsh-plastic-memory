@@ -79,7 +79,13 @@ export interface DialogueBatch {
   turns: ReadonlyArray<{ turnSeq: number; at?: number }>
 }
 
-/** 会话在库里的进度。isRemoved：已移出库（会话没了或不让回看），要重新收得先 startSession。 */
+/** 整个会话不收（分不清哪些消息是它自己的）时记下的水位，和「还一条没收到」的 -1 分开。 */
+export const SKIPPED_WATERMARK = -2
+
+/**
+ * 会话在库里的进度。watermark：收到的最后一条事件的序号，还一条没收到是 -1，整个不收是 SKIPPED_WATERMARK。
+ * isRemoved：已移出库（会话没了或不让回看），要重新收得先 startSession。
+ */
 export interface DialogueSessionState {
   watermark: number
   revision: number
@@ -178,7 +184,10 @@ export class DialogueRecordStore {
    * 和库里记的不一样说明这是别处的会话建的库，整库清掉从头来。返回准备好之后的状态。
    */
   prepare(versions: DialogueVersions, dictionary: string, sessionStore: string): DialogueStoreState {
-    return this.run(db => inTransaction(db, () => {
+    // 先只读看一眼：不用写就不拿写锁。要写时进事务再看一次，期间别人可能已经改了
+    return this.run(db => preparedWithoutWrite(db, versions, sessionStore) ?? inTransaction(db, () => {
+      const unchanged = preparedWithoutWrite(db, versions, sessionStore)
+      if (unchanged !== undefined) return unchanged
       const recorded = (db.prepare("SELECT value FROM meta WHERE key = 'session_store'").get() as { value: string } | undefined)?.value
       if (recorded !== sessionStore) {
         if (recorded !== undefined) for (const g of generations(db)) dropGeneration(db, g.gen)
@@ -246,8 +255,11 @@ export class DialogueRecordStore {
    * 这一代不在了返回 undefined。
    */
   startSession(gen: number, sessionId: string, info: DialogueSessionInfo & { isOpen?: boolean }): DialogueSessionState | undefined {
-    return this.run(db => inTransaction(db, () => {
+    // 先只读看一眼：不用写就不拿写锁。要写时进事务再看一次，期间别人可能已经改了
+    return this.run(db => sessionWithoutWrite(db, gen, sessionId, info) ?? inTransaction(db, () => {
       if (!hasGeneration(db, gen)) return undefined
+      const unchanged = sessionWithoutWrite(db, gen, sessionId, info)
+      if (unchanged !== undefined) return unchanged
       const existing = sessionOf(db, gen, sessionId)
       const cwd = info.cwd ?? null
       const isSubagent = info.isSubagent ? 1 : 0
@@ -273,6 +285,17 @@ export class DialogueRecordStore {
       const mark = db.prepare('UPDATE sessions SET watermark = -1, revision = ?, is_removed = 1 WHERE gen = ? AND session_id = ?')
       for (const g of generations(db)) mark.run(newRevision(), g.gen, sessionId)
     }))
+  }
+
+  /**
+   * 记下这个会话整个不收：只在还一条没收到时记，修订号对不上（期间被移出、重收过）就不记。
+   * 记了之后照旧可以再收：起算水位是 SKIPPED_WATERMARK，之后的事件都算新的。
+   */
+  markSkipped(gen: number, sessionId: string, revision: number): void {
+    this.run(db => {
+      db.prepare('UPDATE sessions SET watermark = ? WHERE gen = ? AND session_id = ? AND revision = ? AND is_removed = 0 AND watermark = -1')
+        .run(SKIPPED_WATERMARK, gen, sessionId, revision)
+    })
   }
 
   /** 这一代里收过、没被移出的会话 id。对账时拿它和现有的会话比。 */
@@ -335,6 +358,11 @@ export class DialogueRecordStore {
   queuedAfter(gen: number, afterPosition: number, limit: number): Array<{ position: number; sessionId: string }> {
     return this.run(db => (db.prepare('SELECT position, session_id FROM queue WHERE gen = ? AND position > ? ORDER BY position LIMIT ?').all(gen, afterPosition, limit) as Array<{ position: number; session_id: string }>)
       .map(r => ({ position: r.position, sessionId: r.session_id })))
+  }
+
+  /** 这个会话在不在这一代的待建队列里。 */
+  isQueued(gen: number, sessionId: string): boolean {
+    return this.run(db => db.prepare('SELECT 1 FROM queue WHERE gen = ? AND session_id = ?').get(gen, sessionId) !== undefined)
   }
 
   /** 这个会话建完了（或不用建了），从待建队列里拿掉。 */
@@ -513,6 +541,27 @@ function stateOf(db: DatabaseSync): DialogueStoreState {
   if (read === undefined || write === undefined) return { status: 'none' }
   const status = read.gen !== write.gen ? 'rebuilding' : read.is_complete === 1 ? 'ready' : 'building'
   return { status, read: toGeneration(read), write: toGeneration(write) }
+}
+
+/** 准备这一步不用写：库里记的会话日志位置就是这一处，正在写的那一代规则也和这次相同。不用写时返回当前状态，要写返回 undefined。 */
+function preparedWithoutWrite(db: DatabaseSync, versions: DialogueVersions, sessionStore: string): DialogueStoreState | undefined {
+  const recorded = (db.prepare("SELECT value FROM meta WHERE key = 'session_store'").get() as { value: string } | undefined)?.value
+  if (recorded !== sessionStore) return undefined
+  const state = stateOf(db)
+  return state.status !== 'none' && isSameVersions(state.write.versions, versions) ? state : undefined
+}
+
+/**
+ * 开始收会话这一步不用写：这一代在，已有这个会话的行、没被移出，工作目录、是不是子代理、开没开三项都和这次相同。
+ * 不用写时返回已有进度，要写返回 undefined。
+ */
+function sessionWithoutWrite(db: DatabaseSync, gen: number, sessionId: string, info: DialogueSessionInfo & { isOpen?: boolean }): DialogueSessionState | undefined {
+  if (!hasGeneration(db, gen)) return undefined
+  const row = db.prepare('SELECT watermark, revision, cwd, is_subagent, is_open, is_removed FROM sessions WHERE gen = ? AND session_id = ?').get(gen, sessionId) as
+    { watermark: number; revision: number; cwd: string | null; is_subagent: number; is_open: number; is_removed: number } | undefined
+  if (row === undefined || row.is_removed === 1) return undefined
+  const isSame = row.cwd === (info.cwd ?? null) && row.is_subagent === (info.isSubagent ? 1 : 0) && row.is_open === (info.isOpen === true ? 1 : 0)
+  return isSame ? { watermark: row.watermark, revision: row.revision, isRemoved: false } : undefined
 }
 
 function sessionOf(db: DatabaseSync, gen: number, sessionId: string): DialogueSessionState | undefined {

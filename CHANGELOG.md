@@ -13,20 +13,27 @@ All notable changes to this project are documented here. The format follows
   content never saved as a memory, and return quoted messages with nearby context.
   Each message includes a reference for `memory_source` to expand it with the
   preceding and following turns (up to 8,000 characters for the selected message,
-  with a truncation note for longer messages). Memory-only search remains the
-  default; set `search.source` to `dialogue` or `both` in the config file to turn
-  conversation search on.
-- With `search.memoryQuotes` turned on in the config file, the top three
-  memories in a `memory_search` result carry the exchange they were saved from:
-  your message and the assistant's reply, quoted from the local copy of past
-  conversations, up to about 1,000 tokens per search. When the exchange cannot
-  be shown, for example because the conversation was deleted or marked as not
-  to be reviewed, the result says so. It is off by default. While it is on,
-  the guidance loaded into each chat tells the assistant to read these quotes
+  with a truncation note for longer messages). It searches memories and past
+  conversations together by default; set `search.source` in the config file to
+  `memory` to search memories only, or to `dialogue` for conversations only.
+- The top three memories in a `memory_search` result carry the exchange they
+  were saved from: your message and the assistant's reply, quoted from the
+  local copy of past conversations, up to about 1,000 tokens per search. When
+  the exchange cannot be shown, for example because the conversation was
+  deleted or marked as not to be reviewed, the result says so. It is on by
+  default; set `search.memoryQuotes` to `false` in the config file to turn it
+  off. While it is on, the guidance loaded into each chat tells the assistant to read these quotes
   first and to open the conversation with `memory_source` only when they are
   not enough. Whenever results can include quoted messages, from conversation
   search or from these quotes, the guidance also says when to expand an excerpt
   by its reference.
+- When `memory_search` covers both memories and past conversations, each
+  exchange appears only once. An exchange quoted under a memory is left out of
+  the conversation results, and other parts of it that match the search are
+  added under that memory. A conversation turn that a listed memory was saved
+  from, but that is not quoted under it, ranks higher and names that memory.
+  Conversation results keep their own limit of about 1,500 tokens
+  (`search.dialogueTokenBudget`), separate from the quotes under memories.
 - Groundwork for Brewing Dreams, an experimental background pass that tidies
   memories while no chat is running. It is off and has no switch yet. Once on
   for a scope (all memories, or one project), a pass starts only when enough
@@ -49,12 +56,15 @@ All notable changes to this project are documented here. The format follows
   window running an older version of the plugin is not seen by the others.
 - The plugin can keep a searchable local copy of past conversations, built
   from the conversation logs of DeepSeek Harness, for the projects that have
-  memories and the project of the current chat. It is only built once the
-  search source includes past conversations or memories carry their source
-  dialogue; both are off by default for now. The copy holds the full text of
-  what you and the assistant said, plus short or failed tool results, stays
-  on this machine outside the memory folder, and is rebuilt from the logs if
-  deleted. `/memory delete-dialogue-records` deletes it.
+  memories and the project of the current chat. Conversation search and source
+  quotes are on by default, so after updating the copy is built in the
+  background and caught up before each search. It holds the full text of what
+  you and the assistant said, plus short or failed tool results, and stays on
+  this machine outside the memory folder, in
+  `~/.dsh/plastic-memory/<id>/dialogue-records.sqlite` (under `DSH_HOME` when
+  that is set). To stop keeping it, set `search.source` to `memory` and
+  `search.memoryQuotes` to `false`, then run `/memory delete-dialogue-records`;
+  while either is on, a deleted copy is rebuilt from the logs.
 - After an update, `memory_save` lists numbers, dates, names and paths that
   are no longer in the memory, and points out a refinement that removed a
   large part of the text. It also suggests combining memories when a single

@@ -9,6 +9,7 @@ import { DialogueCatchup } from '../src/tools/dialogue-catchup.ts'
 import { executeSearch, renderSearchResult, type SearchToolDeps, type SearchContext } from '../src/tools/search.ts'
 import { executeSource, renderSourceResult } from '../src/tools/source.ts'
 import { createSearchTool } from '../src/tools/search-tool.ts'
+import { DIALOGUE_SECTION_HEADING, MEMORY_SECTION_HEADING } from '../src/search/dialogue-format.ts'
 import { NoReviewList } from '../src/storage/no-review.ts'
 import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
@@ -105,7 +106,16 @@ it('工具声明含三个可选来源及引用能力', async () => {
   expect((tool.parameters.properties as Record<string, unknown>).source).toMatchObject({ enum: ['memory', 'dialogue', 'both'] })
   expect((tool.parameters as { required?: string[] }).required ?? []).not.toContain('source')
   expect(tool.description).toContain('能查本项目过往对话的原话，能找到没记成记忆的内容。')
-  expect(tool.description).toContain('原话结果里每条消息带引用，可以用 memory_source 看完整内容。')
+  expect(tool.description).toContain('原话结果里每条消息带引用，可以用 memory_source 看这条消息的更多内容；展开的内容有长度上限，超出会标明截断。')
+  expect(tool.description).not.toContain('完整内容')
+})
+it('工具说明讲清哪部分遮盖密钥，以及结果可能分两段', async () => {
+  const { deps } = await setup()
+  const { description } = createSearchTool(deps)
+  expect(description).toContain('记忆条目里的密钥已遮盖')
+  expect(description).toContain('原话照当时的原文给出，可能含密钥等敏感内容')
+  expect(description).toContain(`${MEMORY_SECTION_HEADING}${DIALOGUE_SECTION_HEADING}两段`)
+  expect(description).toContain('后面可能附着它出处的原话')
 })
 it('无参数跟随两路配置，记忆筛选不限制原话', async () => {
   const { deps } = await setup()

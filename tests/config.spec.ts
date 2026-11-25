@@ -34,7 +34,7 @@ describe('Config schema', () => {
       removedPresetTypes: [],
       builtinDecayDays: {},
       governance: { enabled: true, health: { sensitivity: 'normal' }, globalPromoteTarget: 'plugin-global' },
-      search: { source: 'memory', dialogueTokenBudget: 1500, memoryQuotes: false, queryExpansion: true, dialogueToolResults: true },
+      search: { source: 'both', dialogueTokenBudget: 1500, memoryQuotes: true, queryExpansion: true, dialogueToolResults: true },
       history: { mergeWindowMinutes: 60 },
       brewingDreams: { minIntervalDays: 7, minChanges: 30, minNewMessages: 50, idleMinutes: 30, weeklyTokenCap: 2_000_000, maxChangeRatio: 0.2 },
       index: { maxTopics: 30 },
@@ -142,9 +142,9 @@ describe('Config schema', () => {
   it('检索来源、原话上限、记忆带原话等键没写时取缺省值，旧配置照常解析', () => {
     for (const raw of [{}, { search: {} }, parse('search:\n  userDictionaryPath: /opt/dict/domain.txt\n')]) {
       const config = new Config(raw as never)
-      expect(config.search.source.get()).toBe('memory')
+      expect(config.search.source.get()).toBe('both')
       expect(config.search.dialogueTokenBudget.get()).toBe(1500)
-      expect(config.search.memoryQuotes.get()).toBe(false)
+      expect(config.search.memoryQuotes.get()).toBe(true)
       expect(config.search.queryExpansion.get()).toBe(true)
       expect(config.search.dialogueToolResults.get()).toBe(true)
     }

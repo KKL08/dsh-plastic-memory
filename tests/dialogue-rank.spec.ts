@@ -1,5 +1,5 @@
-import { expect, it } from 'vitest'
-import { rankSegments, groupHitsByTurn, orderCandidates, fillBudget } from '../src/search/dialogue-rank.ts'
+import { describe, expect, it } from 'vitest'
+import { rankSegments, groupHitsByTurn, orderCandidates, fillBudget, fuseLanes, RRF_K } from '../src/search/dialogue-rank.ts'
 import { dialogueTokenizer } from '../src/search/dialogue-tokenizer.ts'
 import { estimateTokens } from '../src/snapshot.ts'
 import type { DialogueHit } from '../src/storage/dialogue-records.ts'
@@ -95,4 +95,42 @@ it('逐词计数以段为单位且候选截断时限定统计范围', () => {
 })
 it('缺口标记独占一行以区分原文连续段', () => {
   expect(format.DIALOGUE_SEGMENT_GAP).toBe('\n……\n')
+})
+
+describe('多路按名次融合', () => {
+  const lane = (name: string, turns: string[]) => ({ name, items: turns.map((turn, i) => ({ id: `${name}-${i}`, turn, rank: i + 1 })) })
+
+  it('只用名次合并（k=60）：两路都命中的轮排在只有一路命中的前面', () => {
+    expect(RRF_K).toBe(60)
+    const fused = fuseLanes([lane('dialogue', ['a', 'b', 'c']), lane('memory', ['c'])])
+    expect(fused.map(f => f.turn)).toEqual(['c', 'a', 'b'])
+    expect(fused[0]!.score).toBeCloseTo(1 / 63 + 1 / 61)
+    expect(fused[0]!.sources).toEqual([{ lane: 'memory', id: 'memory-0' }, { lane: 'dialogue', id: 'dialogue-2' }])
+  })
+
+  it('一路里同一轮有几个候选：按最好的那个算一次名次，不累加', () => {
+    const dialogue = { name: 'dialogue', items: [{ id: 'x0', turn: 'a', rank: 1 }, { id: 'x1', turn: 'a', rank: 2 }, { id: 'y', turn: 'b', rank: 3 }] }
+    const fused = fuseLanes([dialogue])
+    expect(fused.map(f => [f.turn, f.score])).toEqual([['a', 1 / 61], ['b', 1 / 63]])
+  })
+
+  it('按候选给的名次算分：并列的分数相同，名次有空缺时不往前挪', () => {
+    const tied = fuseLanes([{ name: 'memory', items: [{ id: 'x', turn: 'a', rank: 1 }, { id: 'y', turn: 'b', rank: 1 }] }])
+    expect(tied.map(f => f.score)).toEqual([1 / 61, 1 / 61])
+    const sparse = fuseLanes([{ name: 'memory', items: [{ id: 'z', turn: 'c', rank: 10 }] }])
+    expect(sparse[0]!.score).toBe(1 / 70)
+  })
+
+  it('三路以上照样合并，原始分数不参与', () => {
+    const fused = fuseLanes([lane('dialogue', ['a', 'b']), lane('memory', ['b', 'c']), lane('expansion', ['c', 'b'])])
+    expect(fused.map(f => f.turn)).toEqual(['b', 'c', 'a'])
+    expect(fused.find(f => f.turn === 'b')!.sources.map(s => s.lane)).toEqual(['memory', 'dialogue', 'expansion'])
+  })
+
+  it('哪一路的前几名固定是参数：换固定的那一路，头部跟着变', () => {
+    const lanes = [lane('dialogue', ['a', 'b', 'c']), lane('memory', ['c', 'b'])]
+    expect(fuseLanes(lanes).map(f => f.turn)).toEqual(['c', 'b', 'a'])
+    expect(fuseLanes(lanes, { lane: 'dialogue', count: 1 }).map(f => f.turn)).toEqual(['a', 'c', 'b'])
+    expect(fuseLanes(lanes, { lane: 'memory', count: 1 }).map(f => f.turn)).toEqual(['c', 'b', 'a'])
+  })
 })

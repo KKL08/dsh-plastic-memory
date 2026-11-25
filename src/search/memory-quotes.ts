@@ -1,11 +1,12 @@
 import type { MemoryRecord, SourceAnchor } from '../record-schema.ts'
 import { anchorTimeMatches, relocateByTime, turnOf } from '../session-log.ts'
 import { maskSecretSurface } from '../secrets.ts'
-import type { DialogueSessionState } from '../storage/dialogue-records.ts'
+import { SKIPPED_WATERMARK, type DialogueSessionState } from '../storage/dialogue-records.ts'
 import { rankSegments, type DialogueSegment } from './dialogue-rank.ts'
 import type { DialogueTokenizer } from './dialogue-tokenizer.ts'
+import type { DialogueSpeaker } from '../contract-codes.ts'
 import {
-  SAME_AS_MEMORY_NOTE, excerptByMemoryNote, excerptNote, foldToLine, formatMessageRef, memoryQuoteStatus, messageReferenceNote,
+  DIALOGUE_SEGMENT_GAP, SAME_AS_MEMORY_NOTE, excerptByMemoryNote, excerptNote, foldToLine, formatMessageRef, memoryQuoteStatus, messageReferenceNote,
   renderDialogueLine, sameSourceNote, wrapDialogueQuote,
 } from './dialogue-format.ts'
 
@@ -78,12 +79,12 @@ function bestOf(segments: readonly DialogueSegment[], rankers: readonly SegmentR
   return undefined
 }
 
-/** 附在记忆下面的一条消息：库里的一行整段给，不在段内截。isPartial：只给了这条消息的一段。 */
-export interface QuotedMessage { seq: number; speaker: 'user' | 'assistant'; at: number | undefined; text: string; segmentCount: number; isPartial: boolean }
+/** 附在记忆下面的一段原话：库里的一行整段给，不在段内截。segment 是它在这条消息里的段序号，segmentCount 是这条消息共几段。 */
+export interface QuotedMessage { seq: number; segment: number; speaker: DialogueSpeaker; at: number | undefined; text: string; segmentCount: number }
 
 const messageOf = (segment: DialogueSegment, all: readonly DialogueSegment[], speaker: 'user' | 'assistant'): QuotedMessage => {
   const count = all.filter(s => s.seq === segment.seq).length
-  return { seq: segment.seq, speaker, at: segment.at, text: segment.text, segmentCount: count, isPartial: count > 1 }
+  return { seq: segment.seq, segment: segment.segment, speaker, at: segment.at, text: segment.text, segmentCount: count }
 }
 
 /**
@@ -126,20 +127,27 @@ const comparable = (text: string) => text.normalize('NFKC').toLowerCase().replac
 /**
  * 一条消息和记忆正文相同：NFKC、小写、去掉空白和换行之后完全一样才算，空的不算。
  * 标点、数字、比较符号都留着比：差一个小数点或「不」字就是不同的话，原话要照常给。
+ * 记忆这次只给了节选时 memory 传 undefined：没给全的正文不拿来比，一律不算相同。
  */
-export function isSameAsMemory(message: string, memory: string): boolean {
+export function isSameAsMemory(message: string, memory: string | undefined): boolean {
   const a = comparable(message)
-  return a !== '' && a === comparable(memory)
+  return memory !== undefined && a !== '' && a === comparable(memory)
 }
 
+/** 判断收没收录时，库和对账给的事实。isQueued：这个会话在待建队列里；isOutOfScope：上次对账时它在会话清单里、但不在收录范围。 */
+export interface QuoteLibraryFacts { isRebuilding: boolean; isQueued: boolean; isOutOfScope: boolean }
+
 /**
- * 锚所在的会话在库里收到没有。covered：水位过了要的位置；pending：还在整理（水位没到，或库里还没有这个会话的行）；
- * not-collected：这个会话的行标了移出库。库里没有行不算证据，按还在整理；库在重建时不下没有收录的结论。
+ * 锚所在的会话在库里收到没有。covered：水位过了要的位置；pending：还在整理；not-collected：不收这个会话。
+ * 没有收录只认三种证据：行标了移出库、也不在待建队列里；记了整个不收（分不清哪些消息是它自己的）；
+ * 库里没有它的行、上次对账时它就不在收录范围、也没在队里。新开的会话在下次对账前两样都不沾，按还在整理。
+ * 其余还一条没收到的（这次没读到日志、还没有自己的事件）都按还在整理。库在重建时，读的那一代下不了没有收录的结论（移出、跳过两种），按还在整理。
  */
-export function quoteCoverage(session: DialogueSessionState | undefined, library: { isRebuilding: boolean }, needSeq: number): 'covered' | 'pending' | 'not-collected' {
-  if (session === undefined) return 'pending'
-  if (!session.isRemoved) return session.watermark >= needSeq ? 'covered' : 'pending'
-  return library.isRebuilding ? 'pending' : 'not-collected'
+export function quoteCoverage(session: DialogueSessionState | undefined, library: QuoteLibraryFacts, needSeq: number): 'covered' | 'pending' | 'not-collected' {
+  if (session === undefined) return library.isOutOfScope && !library.isQueued ? 'not-collected' : 'pending'
+  if (session.isRemoved) return library.isRebuilding || library.isQueued ? 'pending' : 'not-collected'
+  if (session.watermark >= needSeq) return 'covered'
+  return session.watermark === SKIPPED_WATERMARK && !library.isRebuilding ? 'not-collected' : 'pending'
 }
 
 /** 去重按轮：会话 + 这一轮 turn/start 的序号。 */
@@ -195,19 +203,34 @@ export function memoryLabelOf(record: Pick<MemoryRecord, 'id' | 'name' | 'conten
   return maskSecretSurface(record).name === record.name ? foldToLine(record.name) : record.id
 }
 
-/** 渲染用的一轮。isInProject：出处会话在当前项目里，消息引用用得上。 */
+/** 渲染用的一轮。isInProject：出处会话在当前项目里，消息引用用得上。messages 是这一轮给出的各段，同一条消息的几段渲染时拼成一条。 */
 export interface QuoteTurnView { sessionId: string; isInProject: boolean; messages: ReadonlyArray<QuotedMessage & { isSameAsMemory: boolean }> }
+
+/** 按原文顺序把各段归到各自的消息下。 */
+function groupBySeq<T extends { seq: number; segment: number }>(parts: readonly T[]): T[][] {
+  const sorted = [...parts].sort((a, b) => a.seq - b.seq || a.segment - b.segment)
+  const groups: T[][] = []
+  for (const part of sorted) {
+    const last = groups.at(-1)
+    if (last !== undefined && last[0]!.seq === part.seq) last.push(part)
+    else groups.push([part])
+  }
+  return groups
+}
 
 /**
  * 附在一条记忆下面的文字：「出处同」各一行、状态说明一行，原话包进标签（几轮之间空一行）。没有可写的返回 undefined。
+ * 同一条消息给了几段时拼成一条，不相邻的段之间加缺段标记；和记忆正文相同的段从略。没给全的消息标节选，从略的段也一样：模型要知道还有其余段。
  * 本项目的会话：整条给的带引用，节选的带节选说明（引用写在说明里）；别的项目的会话不带引用，节选说明改成传记忆 id 回查。
  */
 export function renderMemoryQuote(input: { memoryId: string; turns: readonly QuoteTurnView[]; sameSource: readonly string[]; status?: string }): string | undefined {
   const lines = input.sameSource.map(sameSourceNote)
   if (input.status !== undefined) lines.push(memoryQuoteStatus(input.status))
-  const body = input.turns.map(turn => turn.messages.map(m => {
-    const line = renderDialogueLine({ speaker: m.speaker, at: m.at, text: m.isSameAsMemory ? SAME_AS_MEMORY_NOTE : m.text })
-    const isExcerpt = m.isPartial && !m.isSameAsMemory
+  const body = input.turns.map(turn => groupBySeq(turn.messages).map(parts => {
+    const m = parts[0]!
+    const text = parts.map((p, i) => (i > 0 && p.segment !== parts[i - 1]!.segment + 1 ? DIALOGUE_SEGMENT_GAP : '') + (p.isSameAsMemory ? SAME_AS_MEMORY_NOTE : p.text)).join('')
+    const line = renderDialogueLine({ speaker: m.speaker, at: m.at, text })
+    const isExcerpt = parts.length < m.segmentCount
     if (!turn.isInProject) return line + (isExcerpt ? excerptByMemoryNote(m.segmentCount, input.memoryId) : '')
     const ref = formatMessageRef({ sessionId: turn.sessionId, seq: m.seq })
     return line + (isExcerpt ? excerptNote(m.segmentCount, ref) : messageReferenceNote(ref))

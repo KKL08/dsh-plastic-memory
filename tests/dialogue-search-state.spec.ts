@@ -77,7 +77,7 @@ it('等待会话表期间换代时从新可读代查到原话', async () => {
 })
 it('库不可用时不再列会话且只留默认说明', async () => {
   const { deps, host } = await setup()
-  deps.dialogue!.catchup = { beforeSearch: async () => ({ kind: 'unavailable', isBusy: false }) }
+  deps.dialogue!.catchup = { beforeSearch: async () => ({ kind: 'unavailable', isBusy: false }), isOutOfScope: () => false }
   const result = await searchDialogue({ query: '部署' }, await host.contextOf(), deps.dialogue!)
   expect(host.listSessions).not.toHaveBeenCalled()
   expect(result).toEqual({ kind: 'unavailable', notes: [], groups: [] })
