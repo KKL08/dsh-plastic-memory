@@ -59,7 +59,9 @@ All notable changes to this project are documented here. The format follows
   Locked memories are left alone, and a change is skipped when the memory was
   edited after the model read it. One pass changes at most a share of the
   scope's active memories (`brewingDreams.maxChangeRatio`, 20% by default);
-  what is left over is picked up by the next pass. The changes of a pass can
+  what is left over is picked up by the next pass. Filing
+  memories into topics and reorganizing topics change only the topic index,
+  so they do not count toward that share. The changes of a pass can
   be undone together or one at a time, also while governance is turned off.
 - A Brewing Dreams pass also merges memories in the same scope that repeat
   each other or each hold part of the same thing: one memory is rewritten
@@ -132,11 +134,13 @@ All notable changes to this project are documented here. The format follows
   period, and Edit opens the form where you change it. A memory left
   unconfirmed for longer shows up as not confirmed in a while, so the
   reminder can follow how quickly each kind of information goes out of date.
-- Automatic checkups can use a model of your choice: the settings page lists
+- Checkups can use a model of your choice: the settings page lists
   the models available in DeepSeek Harness by provider, with reasoning effort
   where the model offers it, and the choice applies right away in every
-  window. If the chosen model becomes unavailable, the checkup runs on the
-  default model and says so in its result.
+  window, to automatic checkups and to Check now on the memory page alike.
+  Without a choice, both use the default model. If the chosen model becomes
+  unavailable, the checkup runs on the default model and says so in its
+  result.
 - Memory files can hold new optional keys that upcoming features will use:
   when a fact took effect, which sessions a memory came from and how it last
   changed, related memories, the memories a decision depends on, a
@@ -329,6 +333,10 @@ All notable changes to this project are documented here. The format follows
   rechecks the whole batch.
 - Expired memories are no longer sent to the content check. The rule check
   still points them out.
+- When a checkup looks at a project, the content check now names that project
+  and says the instruction files it is compared against belong to it, so the
+  model knows which project those files describe. Earlier results are checked
+  again once after the update.
 
 ### Fixed
 - A memory write that was cut short and whose file was then edited by hand
@@ -449,6 +457,27 @@ All notable changes to this project are documented here. The format follows
 - A checkup of all memories left out a project whose memory folder could not
   be listed, and cleared earlier results as if everything had been read. The
   project now stays in the checkup and is reported as not fully read.
+- `memory_health` for all memories failed as a whole when one project could
+  not be read, and left out a project that held only files it could not
+  parse, so their problems went unreported. It now lists the same projects
+  as a checkup of all memories, counts unparseable files against their
+  project, and marks a project it could not read in full instead of scoring
+  it as healthy.
+- `memory_health` presented how many memories the last checkup covered as if
+  it had checked them just now. It now says the figures come from the last
+  checkup.
+- Deleting a memory from a page that had not yet caught up with a promotion
+  or a move made elsewhere said the memory might have been deleted elsewhere,
+  although a copy of it still existed in another scope. It now says the
+  memory was just changed or moved elsewhere and deletes nothing.
+- A memory whose summary spanned several lines, for example with a line
+  starting with `###`, added what looked like extra headings to the memory
+  list loaded into a chat. A memory's name, summary and tags are now kept on
+  its one line there, and angle brackets in them no longer read as tags.
+- After Undo on a deleted memory in a chat's saved-memories card, the card
+  showed the memory and its delete button again before the restore had
+  finished. The card now stays deleted, with Undo shown as busy, until the
+  memory is back.
 
 ## [0.2.0] - 2026-11-21
 

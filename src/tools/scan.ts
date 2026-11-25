@@ -28,7 +28,7 @@ import { checkupKey, isCoverageClear, isFullyCovered, uncheckedCount, type Check
 import { scoreScope, validateScopePaths, crossScopeConflicts, checkupRowBase, coverageText, ignoredNote, findingFingerprints, GLOBAL_CACHE_KEY, TIER_LABEL } from '../governance/scope-health.ts'
 import { applyIgnores, type AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
-import { prereadScopes, listingNotes, checkupScanWorkspaces, renderDirectoryNotes } from './scope-preread.ts'
+import { prereadScopes, listingNotes, checkupScanWorkspaces, isScopeUnread as isScopeUnreadIn, renderDirectoryNotes } from './scope-preread.ts'
 import type { DirectoryNote } from '../storage/table.ts'
 import { isWorkspaceGone } from '../storage/project-folder.ts'
 import { buildCrossWsPrompt, runCrossWsScan, findEntityDuplicates, summaryLine, CROSS_WS_PROMPT_VERSION, type CrossWsDuplicate } from '../governance/cross-ws.ts'
@@ -306,6 +306,11 @@ interface RoundLedger {
   settled: number
 }
 
+/** 提示词里写明的检查对象：项目这一轮写它的路径，全局不写。 */
+function projectOf(scope: Scope): string | undefined {
+  return scope.kind === 'workspace' ? scope.workspacePath : undefined
+}
+
 /** 一轮的输入：过了准入的可见记忆，按治理优先级 + 新近度排（一批装得下时就按这个顺序发；分批时由 planSemanticBatches 按稳定键重排）。 */
 function orderForPrompt(records: readonly MemoryRecord[], registry: TypeRegistry): MemoryRecord[] {
   const priorityOrder = { high: 0, medium: 1, low: 2 } as const
@@ -338,7 +343,7 @@ async function prepareRound(input: {
   const batches = planSemanticBatches(orderForPrompt(input.records, input.registry)).map((records): RoundBatch => {
     const members = batchMembers(records)
     const key = batchKey(ctx, members)
-    const prompt = buildSemanticPrompt(records, baseline)
+    const prompt = buildSemanticPrompt(records, baseline, projectOf(scope))
     const row = rows.get(key)
     return {
       records, members, key,
@@ -619,8 +624,7 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
   // malformed 按扫描的作用域归属（与 memory_health 的 scoreScope 同口径）：隔离文件按读到它的目录归作用域
   const quarantinedIn = (scope: Scope) => data.quarantined.get(scopeCacheKey(scope)) ?? []
   /** 这个作用域自己这次没读全（项目不算带进来的全局）。 */
-  const isScopeUnread = (scope: Scope): boolean => (data.unreadScopes?.has(scopeCacheKey(scope)) ?? false)
-    || (scope.kind === 'workspace' && unlistedWs.has(scope.workspacePath))
+  const isScopeUnread = (scope: Scope): boolean => isScopeUnreadIn(data, listing, scope)
   // 项目这一轮的可见集合含全局记忆：全局没读全，项目这一轮也没读全
   const isReadCompleteFor = (scope: Scope): boolean => !isScopeUnread(scope)
     && (scope.kind === 'global' || isReadCompleteFor({ kind: 'global' }))
@@ -706,7 +710,7 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
     signal?.throwIfAborted()
     const round = roundByKey.get(step.round)!
     const batch = round.batches[step.index]!
-    const found = await scanBatch(batch.records, round.baseline, semanticLlm, signal, onUsage)
+    const found = await scanBatch(batch.records, round.baseline, semanticLlm, signal, onUsage, projectOf(round.scope))
     // 刷新是顺带做的：这一批的旧结论照常有效，没做成（不管什么原因）只记日志，不算这次体检停下；
     // 模型用不了时剩下的刷新也做不成，不再试，别的原因接着试下一批
     if (!Array.isArray(found) && step.isRefresh) {

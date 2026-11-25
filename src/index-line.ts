@@ -29,13 +29,23 @@ export function unattendedNote(r: MemoryRecord): string {
 }
 
 /**
- * 索引行：MEMORY.md 与注入索引同一个格式器，两处写法保持一致。
+ * 用户或模型写的文字（主题名、主题说明，成员行的名称、摘要、标签）进注入前的处理：换行和连着的空白折成一个空格，尖括号换成全角。
+ * 折成一行后标题行、代码围栏、行首角色名都落在注入自己写的行中间，不再成结构；尖括号换掉，开闭标签就不成标签。
+ */
+export function injectionText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim().replace(/[<>]/g, c => (c === '<' ? '＜' : '＞'))
+}
+
+/**
+ * 索引行：MEMORY.md 与注入索引同一个格式器，两处写法保持一致。名称、摘要、标签按 injectionText 折成一行：
+ * 保存不限制摘要单行，多行摘要原样拼进来会在注入里多出标题行之类的结构。
  * file：行末的文件引用，MEMORY.md 给同目录文件名，注入给相对记忆根目录的路径（注入混排 global 与本项目两个目录）。
  * note：注入侧的附加标注（成员行上是无人值守的说明，陈旧度只在主题行上计数），放在文件名之前，让文件名始终在行末；磁盘索引不传。
  */
 export function formatIndexLine(r: MemoryRecord, opts: { passive: boolean; file?: string; note?: string }): string {
-  const tags = r.tags.length > 0 ? ` — ${r.tags.join(', ')}` : ''
+  const name = injectionText(r.name)
+  const tags = r.tags.length > 0 ? ` — ${r.tags.map(injectionText).join(', ')}` : ''
   const tail = `${sourceNote(r)}${opts.note ?? ''}${opts.file === undefined ? '' : ` · ${opts.file}`}`
-  if (opts.passive) return `- [${r.id}] ${r.name}${tags}${tail}`  // passive 同样带低置信标注
-  return `- [${r.id}] ${r.name}（${r.summary}）${tags}${tail}`
+  if (opts.passive) return `- [${r.id}] ${name}${tags}${tail}`  // passive 同样带低置信标注
+  return `- [${r.id}] ${name}（${injectionText(r.summary)}）${tags}${tail}`
 }

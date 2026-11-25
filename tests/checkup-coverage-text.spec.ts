@@ -71,7 +71,7 @@ describe('部分覆盖', () => {
     expect(lines.find(l => l.startsWith(`- ${PROJECT}：`))).toContain('｜内容检查共 4 条（含全局 3 条），这次查了 0 条；从没查过 4 条；这次没轮到，下次再查')
   })
 
-  it('memory_health 单范围：带覆盖一行，不说「记忆库健康」，给一条「覆盖不全」的建议', async () => {
+  it('memory_health 单范围：带覆盖一行、写明是上次体检的，不说「记忆库健康」，给一条「覆盖不全」的建议', async () => {
     const e = await env({ tokenCap: 1 })
     await threeGlobal(e)
     await e.scan({ llm: stubModel() })
@@ -80,15 +80,18 @@ describe('部分覆盖', () => {
     expect(r.recommendationKinds).toContain('checkup-incomplete')
     expect(r.message).not.toContain('记忆库健康')
     expect(r.recommendation).toContain('上次体检的内容检查没覆盖全（2 条还没查），建议再运行一次 memory_scan')
-    expect(renderHealthResult(r)).toContain('内容检查共 3 条，这次查了 1 条；从没查过 2 条')
+    const rendered = renderHealthResult(r)
+    expect(rendered).toContain('上次体检的内容检查共 3 条，查了 1 条；从没查过 2 条')
+    expect(rendered).not.toContain('这次查了')
   })
 
-  it('memory_health 全库：每个范围一行带覆盖，没覆盖全的范围有一句建议', async () => {
+  it('memory_health 全库：每个范围一行带上次体检的覆盖，没覆盖全的范围有一句建议', async () => {
     const e = await env({ tokenCap: 1 })
     await threeGlobal(e)
     await e.scan({ llm: stubModel() })
     const lines = renderHealthResult(await health(e, 'all')).split('\n')
-    expect(lines.find(l => l.startsWith('- global：'))).toContain('｜内容检查共 3 条，这次查了 1 条')
+    expect(lines.find(l => l.startsWith('- global：'))).toContain('｜上次体检的内容检查共 3 条，查了 1 条')
+    expect(lines.join('\n')).not.toContain('这次查了')
     expect(lines).toContain('1 个范围上次体检的内容检查没覆盖全（见各行），建议再运行一次 memory_scan')
   })
 

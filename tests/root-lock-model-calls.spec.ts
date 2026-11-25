@@ -50,6 +50,7 @@ function env(answer?: (input: { system: string; user: string }) => string) {
   })
   const command = createMemoryCommand({
     selections: new ModelSelectionStore(sidecar.modelSelections),
+    resolveCheckupLlm: async () => ({ llm: model.llm, isSelected: false, fellBack: false }),
     memoryRoot: root, store, decisions, snapshots, cache, checkups, autoCheckups, ignores, registry, views,
     agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')), instructions: noInstructions, log: quietLog,
     host: { contextOf: async () => ({ workspacePath: SESSION_WS, delegationDepth: 0, session: { id: 'sess-1' } }), llmOf: () => model.llm },

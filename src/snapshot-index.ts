@@ -41,14 +41,6 @@ export function indexAreaLimit(mode: OverflowMode, budget: number, usedBeforeInd
   return Math.max(0, Math.min(budget - usedBeforeIndex, INDEX_AREA_TOKEN_CAP))
 }
 
-/**
- * 索引页里写的文字（主题名、主题说明）进注入前的处理：换行和连着的空白折成一个空格，尖括号换成全角。
- * 折成一行后标题行、代码围栏、行首角色名都落在注入自己写的行中间，不再成结构；尖括号换掉，开闭标签就不成标签。
- */
-export function injectionText(text: string): string {
-  return text.replace(/\s+/g, ' ').trim().replace(/[<>]/g, c => (c === '<' ? '＜' : '＞'))
-}
-
 export interface PlanTopic {
   /** 带说明的主题行。 */
   line: string

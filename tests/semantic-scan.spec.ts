@@ -17,6 +17,29 @@ describe('buildSemanticPrompt', () => {
     expect(system).toContain('JSON')
   })
 
+  it('检查项目时写明这次检查的是哪个项目、基线是它的指令文件，基线里的「本项目」指它', () => {
+    const { user } = buildSemanticPrompt([record({ id: 'mem_b', scope: 'workspace', workspacePath: '/work/b' })], ['本项目用 yarn'], '/work/b')
+    const [head] = user.split('## 记忆列表')
+    expect(head).toContain('这次检查的是项目 /work/b 的记忆')
+    expect(head).toContain('下面的基线是项目 /work/b 的指令文件')
+    expect(head).toContain('基线里说的「本项目」「这个项目」都指 /work/b')
+    // 项目说明在基线之前
+    expect(head!.indexOf('/work/b')).toBeLessThan(head!.indexOf('本项目用 yarn'))
+  })
+
+  it('检查全局时不写项目说明；检查项目、没有基线时只写检查的是哪个项目', () => {
+    expect(buildSemanticPrompt([record({ id: 'mem_a' })], ['基线']).user).not.toContain('这次检查的是项目')
+    const { user } = buildSemanticPrompt([record({ id: 'mem_a' })], null, '/work/b')
+    expect(user).toContain('这次检查的是项目 /work/b 的记忆')
+    expect(user).not.toContain('的指令文件（含全局层）')
+  })
+
+  it('项目路径里的明确密钥照样遮住', () => {
+    const { user } = buildSemanticPrompt([record({ id: 'mem_a' })], ['基线'], `/work/${FAKE_SECRET.github}`)
+    expect(user).not.toContain(FAKE_SECRET.github)
+    expect(user).toContain(`项目 /work/${SECRET_MASK}`)
+  })
+
   it('表述不清判据：只有一句结论、看不出在什么情况下定的也算，短本身不算', () => {
     const { system } = buildSemanticPrompt([record({ id: 'mem_a' })], null)
     expect(system).toContain('unclear 模糊：新会话没有额外上下文时无法据此行动；或者只有一句结论，看不出是在什么情况下定的，因此判断不了它管到哪里。')

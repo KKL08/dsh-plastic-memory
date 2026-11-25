@@ -215,6 +215,7 @@ describe('子 agent 记忆的生命周期', () => {
     const sidecar = new SidecarStore({ root: memoryRoot, schemas: sidecarSchemas })
     const command = createMemoryCommand({
       selections: new ModelSelectionStore(sidecar.modelSelections),
+      resolveCheckupLlm: async () => ({ llm: null, isSelected: false, fellBack: false }),
       memoryRoot, store: new MemoryStore(new FileTable({ root: memoryRoot, stats: sidecar.recallStats }), undefined, sidecar.recallStats),
       decisions: new PendingDecisionsStore(sidecar.pending, sidecar.lock), snapshots: new SnapshotStore(sidecar.snapshots), cache: sidecar.scanCache,
       checkups: new CheckupRecordStore(sidecar.checkups), autoCheckups: new AutoCheckupSettingStore(sidecar.autoCheckups), ignores: new AdviceIgnoreStore(sidecar.adviceIgnores),

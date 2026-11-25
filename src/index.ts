@@ -545,6 +545,10 @@ export async function apply(ctx: Context, config: Config) {
       agentOf: async id => await lookups.get('agent')?.resolve(id),
     }))
   })
+  // 体检（手动、自动）和梦境用的模型：设置里选的，没选或选的用不了时用宿主默认模型（host.defaultLlm），不借会话的模型
+  const resolveBackgroundLlm = createBackgroundLlmResolver({
+    selections, catalog: host.modelCatalog, llmFor: selection => host.llmForRoute(selection), defaultLlm: host.defaultLlm,
+  })
   ctx.inject(['commands'], child => {
     const commands = (child as unknown as { commands: { register(def: MemoryCommandDefinition): () => void } }).commands
     const writer = new ViewWriter({
@@ -559,6 +563,7 @@ export async function apply(ctx: Context, config: Config) {
     const unload = new AbortController()
     const command = createMemoryCommand({
       memoryRoot, store, decisions, snapshots, cache: scanCache, checkups, autoCheckups, selections, ignores, registry, agentsMd, views: writer, instructions, dreams, incremental,
+      resolveCheckupLlm: () => resolveBackgroundLlm('checkup'),
       onAutoCheckupChanged: () => void scheduler?.recheck(),
       deleteDialogueRecords: () => dialogueCatchup.destroy(),
       suggestions: checkupSuggestions, signal: unload.signal,
@@ -585,10 +590,7 @@ export async function apply(ctx: Context, config: Config) {
   let startupViewsPending = true
 
   // 自动体检调度：宿主有计时服务时才有（可选注册，同 commands）。计时器挂在 child 上，插件卸载时宿主停掉它们；
-  // disposer 再取消正在跑的体检并等它收尾。无会话，用自动体检选的模型，没选或选的用不了时用宿主默认模型（host.defaultLlm）。
-  const resolveBackgroundLlm = createBackgroundLlmResolver({
-    selections, catalog: host.modelCatalog, llmFor: selection => host.llmForRoute(selection), defaultLlm: host.defaultLlm,
-  })
+  // disposer 再取消正在跑的体检并等它收尾。无会话，用体检选的模型（见 resolveBackgroundLlm）。
   ctx.inject(['timer'], child => {
     const timer = child as unknown as AutoCheckupTimer
     const created = new AutoCheckupScheduler({

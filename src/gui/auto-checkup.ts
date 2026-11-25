@@ -144,9 +144,10 @@ export class AutoCheckupScheduler {
       if (fellBack) this.log.warn('[plastic-memory] 自动体检选的模型现在用不了，这次改用默认模型', reason)
       const outcome = llm === null
         ? { modelUnavailable: { kind: 'no-default-model' as const } }
-        : await this.run(scope, llm, fellBack ? { reason: reason ?? 'provider-gone' } : undefined)
+        : await this.run(scope, llm, fellBack ? { reason: reason ?? 'provider-gone' } : undefined, isSelected)
       if (outcome === undefined) continue
       // 模型用不了：别的到期范围不再白试，都记上同一个原因（别的进程正在查的不碰），下一次检查再试。
+      // 这个范围一次体检已经记过，这里再记一遍：没开跑（拿不到模型）、或一次体检没记成时靠这里记上
       // 用不了的是选的模型时注明，界面和日志不把它说成默认模型
       const cause: ModelUnavailableCause = isSelected ? { ...outcome.modelUnavailable, isSelectedModel: true } : outcome.modelUnavailable
       this.log.warn(`[plastic-memory] ${isSelected ? '自动体检选的模型' : '默认模型'}现在用不了，自动体检这次不跑，下次检查再试`, cause)
@@ -166,14 +167,15 @@ export class AutoCheckupScheduler {
 
   /**
    * 体检一个范围，和手动体检那个范围同口径：项目读全局加本项目、写本项目的缓存；全局只查全局。指令文件按范围现读，垂直冲突照查。
-   * 没做完的由一次体检记失败；碰上模型用不了不记，返回原因交给调用方。取消（插件卸载、认领被接手、已不到期）什么都不记。
+   * 没做完的由一次体检记失败；碰上模型用不了，一次体检给这个范围记上「模型用不了」（不算失败），再返回原因交给调用方。
+   * 取消（插件卸载、认领被接手、已不到期）什么都不记。
    */
-  private async run(scope: Scope, llm: SemanticLlm, modelFallback: CheckupResult['modelFallback']): Promise<{ modelUnavailable: CheckupCause } | undefined> {
+  private async run(scope: Scope, llm: SemanticLlm, modelFallback: CheckupResult['modelFallback'], isSelectedModel: boolean): Promise<{ modelUnavailable: CheckupCause } | undefined> {
     const controller = new AbortController()
     this.controller = controller
     try {
       const outcome = await runCheckup({
-        target: scope, by: 'auto', llm, signal: controller.signal,
+        target: scope, by: 'auto', llm, signal: controller.signal, isSelectedModel,
         // 选的模型用不了、改用了默认模型：结果里说明
         ...(modelFallback !== undefined ? { modelFallback } : {}),
         confirmHeld: () => this.isStillDue(scope),

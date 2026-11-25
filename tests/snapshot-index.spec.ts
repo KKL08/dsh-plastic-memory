@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import fc from 'fast-check'
-import { INDEX_AREA_TOKEN_CAP, indexAreaLimit, injectionText, planIndexArea, type IndexAreaPlan, type PlanOptions, type PlanScope } from '../src/snapshot-index.ts'
+import { INDEX_AREA_TOKEN_CAP, indexAreaLimit, planIndexArea, type IndexAreaPlan, type PlanOptions, type PlanScope } from '../src/snapshot-index.ts'
+import { injectionText } from '../src/index-line.ts'
 import { estimateTokens, tokenTenths } from '../src/snapshot.ts'
 
 // 预算纯函数的单测：成员行、主题行都用等长的字符串，算预算时好数。

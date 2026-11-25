@@ -171,6 +171,8 @@ function env(opts: {
   suggestions?: { decisions?: (real: PendingDecisionsStore) => CheckupSuggestionsDeps['decisions'] }
   /** 各项目的指令文件；不给就哪里都没有。 */
   instructions?: ReadInstructions
+  /** 体检认领到、放掉之后重写完体检视图再调用（看那一刻视图里是什么）。 */
+  afterClaimChanged?: () => Promise<void>
   /** 调度器的日志；缺省写到控制台。 */
   log?: MemoryLogger
 } = {}) {
@@ -206,7 +208,10 @@ function env(opts: {
     isGovernanceEnabled: () => governance.isEnabled,
     timer: timers.timer,
     onChecked: () => writer.requestCheckups(),
-    onClaimChanged: () => writer.requestCheckups(),
+    onClaimChanged: async () => {
+      await writer.requestCheckups()
+      await opts.afterClaimChanged?.()
+    },
     ...(suggestions !== undefined ? { suggestions } : {}),
     ...(opts.log !== undefined ? { log: opts.log } : {}),
     now: () => clock.now,
@@ -445,6 +450,22 @@ describe('自动体检调度：选用的模型', () => {
     const legacy = legacyCheckupRecordSchema.safeParse(JSON.parse(await readFile(file, 'utf8')))
     expect(legacy.success).toBe(true)
     expect(legacy.data?.modelUnavailable).toEqual({ kind: 'model-error', hostCode: 'AUTH' })
+  })
+
+  it('选的模型调用时报 key 被拒：放掉认领后的那次视图重写里，这个范围已经记着「模型用不了」', async () => {
+    const seen: unknown[] = []
+    const e: ReturnType<typeof env> = env({
+      llm: fakeHostLlm({ catalog: CATALOG, reply: () => ({ code: 'AUTH', message: 'Incorrect API key provided' }) }),
+      afterClaimChanged: async () => { seen.push((await e.readView()).scopes[0]?.modelUnavailable ?? null) },
+      log: { info() {}, warn() {}, error() {} },
+    })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 1)
+    await e.selections.set('checkup', { provider: 'provider-x', model: 'model-a' })
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    // 认领到一次、放掉一次；放掉那次重写时已经带上原因，不会先显示「做完了」
+    expect(seen).toEqual([null, { kind: 'model-error', hostCode: 'AUTH', isSelectedModel: true }])
   })
 
   it('没选模型、默认模型调用时报 key 被拒：记的「模型用不了」不带所选模型的标记，日志说默认模型', async () => {

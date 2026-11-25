@@ -127,8 +127,8 @@ export const checkupZh = {
   'checkup.result.autoFailed.retry': '自动体检没做完：{cause}。{time} 后再试',
   'checkup.result.autoFailed.next': '自动体检没做完：{cause}。下次 {time}',
   'checkup.result.modelUnavailable': '默认模型现在用不了（{cause}），自动体检先暂停。',
-  'checkup.result.modelUnavailable.selected': '自动体检用的模型现在用不了（{cause}），自动体检先暂停。',
-  'checkup.result.llmUnavailable': '这次没能体检：借用的会话拿不到模型。可以在对话里让 agent 体检。',
+  'checkup.result.modelUnavailable.selected': '体检用的模型现在用不了（{cause}），自动体检先暂停。',
+  'checkup.result.llmUnavailable': '这次没能体检：拿不到体检用的模型（所选模型或默认模型现在用不了）。可以在设置里选一个可用模型，或者在对话里让 agent 体检。',
   'checkup.result.failed': '体检没有完成：{detail}',
   'checkup.result.notRun': '这次没能体检：{reason}',
 
@@ -279,8 +279,8 @@ export const checkupEn: Record<CheckupLocaleKey, string> = {
   'checkup.result.autoFailed.retry': 'Auto checkup did not finish: {cause}. Trying again after {time}',
   'checkup.result.autoFailed.next': 'Auto checkup did not finish: {cause}. Next try {time}',
   'checkup.result.modelUnavailable': 'The default model is unavailable right now ({cause}), so auto checkups are paused.',
-  'checkup.result.modelUnavailable.selected': 'The model for automatic checkups is unavailable right now ({cause}), so auto checkups are paused.',
-  'checkup.result.llmUnavailable': 'Could not run the checkup: the borrowed session has no model. You can ask the agent to run a checkup in a chat.',
+  'checkup.result.modelUnavailable.selected': 'The model for checkups is unavailable right now ({cause}), so auto checkups are paused.',
+  'checkup.result.llmUnavailable': 'Could not run the checkup: no model is available for checkups (neither a chosen model nor the default model is available). Choose an available model in settings, or ask the agent to run a checkup in a chat.',
   'checkup.result.failed': 'The checkup did not finish: {detail}',
   'checkup.result.notRun': 'Could not run the checkup. {reason}',
 

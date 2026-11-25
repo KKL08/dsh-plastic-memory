@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { jsonObjectIn } from '../json-reply.ts'
+import { clipText } from '../save-signals.ts'
 import { RECALL_TIERS, effectiveRecall, recallOverride, type MemoryRecord, type RecallTier } from '../record-schema.ts'
 import { SECRET_MASK, maskSecretSurface, maskSecrets } from '../secrets.ts'
 import { UNSORTED_TITLE, readIndex, type IndexFiles } from '../topic-index.ts'
@@ -98,6 +99,8 @@ const operationSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('relate'), id: z.string(), related: z.array(z.string()).min(1) }),
   z.object({ op: z.literal('recall'), id: z.string(), recall: z.string() }),
 ])
+/** 认得的操作名：丢掉的操作在结果里原样写它。 */
+const TIDY_OPS: ReadonlySet<string> = new Set(operationSchema.options.map(o => o.shape.op.value))
 
 const sameList = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((v, i) => v === b[i])
 
@@ -108,8 +111,19 @@ export interface TidyParseOptions {
   maxOpsPerMemory: number
 }
 
-/** 丢掉的一个操作：kind 是模型给的 op（读不出为空），target 是它说的记忆 id（读不出为空）。 */
+/** 丢掉的一个操作：kind 是模型给的 op，target 是它说的记忆 id（都见 droppedText，读不出为空）。 */
 export interface DroppedOp { kind: string; target: string }
+
+/** 丢掉的操作在结果里列出的每个 id、操作名最长这么多字符：认得的远比它短，认不出的截到这里还认得出是什么。 */
+const DROPPED_TEXT_MAX = 40
+
+/**
+ * 丢掉的操作在结果里怎么写模型给的 id 或操作名：认得的原样；认不出的是模型写的、要落进侧表的报告，先遮疑似和高危密钥，再截短。
+ * 逐条整理和合并零碎记忆共用。
+ */
+export function droppedText(text: string, known: { has(key: string): boolean }): string {
+  return known.has(text) ? text : clipText(maskSecrets(text, { severity: 'suspected' }), DROPPED_TEXT_MAX)
+}
 
 /** 后台不把档位升到 core：core 每次会话都带全文，批量升会抬高每次会话的注入量。 */
 const BACKGROUND_TIERS: readonly RecallTier[] = RECALL_TIERS.filter(tier => tier !== 'core')
@@ -133,7 +147,7 @@ export function parseTidyOutput(raw: string, read: ReadonlyMap<string, MemoryRec
   for (const item of parsed.data.operations) {
     const r = operationSchema.safeParse(item)
     const loose = typeof item === 'object' && item !== null ? item as Record<string, unknown> : {}
-    const drop = () => { dropped.push({ kind: textOf(loose.op), target: textOf(loose.id) }) }
+    const drop = () => { dropped.push({ kind: droppedText(textOf(loose.op), TIDY_OPS), target: droppedText(textOf(loose.id), read) }) }
     const current = r.success ? read.get(r.data.id) : undefined
     if (!r.success || current === undefined || (perMemory.get(current.id) ?? 0) >= opts.maxOpsPerMemory) {
       drop()

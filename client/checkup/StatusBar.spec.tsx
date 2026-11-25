@@ -483,11 +483,11 @@ describe('结果行：自动体检没做完、模型用不了', () => {
     act(() => { gateway.setView('checkups', checkups({ scopes: { '/w/app': { modelUnavailable: { kind: 'no-default-model' } } } })) })
     expect(live()).toHaveTextContent(/^$/)
   })
-  it('自动体检选的模型用不了：写「自动体检用的模型现在用不了（原因），自动体检先暂停。」，不说默认模型', () => {
+  it('体检选的模型用不了：写「体检用的模型现在用不了（原因），自动体检先暂停。」，不说默认模型', () => {
     open(APP, {
       views: { checkups: checkups({ all: 1, scopes: { '/w/app': { isDue: true, modelUnavailable: { kind: 'model-error', hostCode: 'AUTH', isSelectedModel: true } } } }) },
     })
-    expect(live()).toHaveTextContent('自动体检用的模型现在用不了（API key 无效或没有权限），自动体检先暂停。')
+    expect(live()).toHaveTextContent('体检用的模型现在用不了（API key 无效或没有权限），自动体检先暂停。')
     expect(live()).not.toHaveTextContent('默认模型')
   })
 
@@ -495,12 +495,12 @@ describe('结果行：自动体检没做完、模型用不了', () => {
     open(APP, {
       views: { checkups: checkups({ all: 1, scopes: { '/w/app': { isDue: true, modelUnavailable: { kind: 'model-error', hostCode: 'NO_ADAPTER', isSelectedModel: true } } } }) },
     })
-    expect(live()).toHaveTextContent('自动体检用的模型现在用不了（提供方已不在），自动体检先暂停。')
+    expect(live()).toHaveTextContent('体检用的模型现在用不了（提供方已不在），自动体检先暂停。')
   })
 
   it('英文文案同一口径', () => {
     const enT = createTranslator(en)
-    expect(enT('checkup.result.modelUnavailable.selected', { cause: 'x' })).toBe('The model for automatic checkups is unavailable right now (x), so auto checkups are paused.')
+    expect(enT('checkup.result.modelUnavailable.selected', { cause: 'x' })).toBe('The model for checkups is unavailable right now (x), so auto checkups are paused.')
     expect(enT('checkup.cause.noAdapter')).toBe('the provider has been removed')
   })
 })
@@ -519,7 +519,7 @@ describe('结果行：手动体检没做成', () => {
     let answer: MemoryCommandResult = { ok: false, cmd: 'scan', code: 'llm-unavailable' }
     open(APP, { respond: () => answer })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /立即体检/ })) })
-    expect(live()).toHaveTextContent('这次没能体检：借用的会话拿不到模型。可以在对话里让 agent 体检。')
+    expect(live()).toHaveTextContent('这次没能体检：拿不到体检用的模型（所选模型或默认模型现在用不了）。可以在设置里选一个可用模型，或者在对话里让 agent 体检。')
     answer = { ok: true, cmd: 'scan' }
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /立即体检/ })) })
     expect(live()).not.toHaveTextContent('没能体检')

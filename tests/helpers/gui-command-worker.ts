@@ -49,6 +49,7 @@ const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, cache, ignores, registry, memoryRoot: root, now }), now, sleep: async () => {}, lock: sidecar.lock })
 const command = createMemoryCommand({
   selections: new ModelSelectionStore(sidecar.modelSelections),
+  resolveCheckupLlm: async () => ({ llm: null, isSelected: false, fellBack: false }),
   memoryRoot: root, store, decisions, snapshots: new SnapshotStore(sidecar.snapshots), cache,
   checkups: new CheckupRecordStore(sidecar.checkups), autoCheckups: new AutoCheckupSettingStore(sidecar.autoCheckups), ignores, registry, views,
   agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')),

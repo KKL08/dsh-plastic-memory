@@ -54,6 +54,7 @@ function env(opts: { llm?: SemanticLlm } = {}) {
   }
   const command = createMemoryCommand({
     selections: new ModelSelectionStore(sidecar.modelSelections),
+    resolveCheckupLlm: async () => ({ llm: opts.llm ?? null, isSelected: false, fellBack: false }),
     memoryRoot: root, store, decisions, snapshots, cache, checkups: new CheckupRecordStore(sidecar.checkups), autoCheckups: new AutoCheckupSettingStore(sidecar.autoCheckups), ignores, registry, views,
     agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')),
     host, instructions: noInstructions, now: () => NOW,

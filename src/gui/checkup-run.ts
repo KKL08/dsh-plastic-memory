@@ -77,7 +77,7 @@ export interface CheckupRunDeps {
   /** 体检核心里和这次体检无关的依赖；体检记录表和时钟单独给。 */
   scan: Omit<ScanCoreDeps, 'checkups' | 'now' | 'log'>
   /** 体检记录表：认领、完成记录（核心写）、最近一次结果、自动体检的失败。 */
-  checkups: Pick<CheckupRecordStore, 'list' | 'complete' | 'recordContinue' | 'claim' | 'recordFailure' | 'recordResults'>
+  checkups: Pick<CheckupRecordStore, 'list' | 'complete' | 'recordContinue' | 'claim' | 'recordFailure' | 'recordResults' | 'recordModelUnavailable'>
   /** 体检前只收集不落盘；体检后全量重写，返回值就是体检后的视图。 */
   views: Pick<ViewWriter, 'collectViews' | 'rewriteAll'>
   /** 持有认领期间的心跳计时。 */
@@ -99,8 +99,10 @@ export interface CheckupRunInput {
   signal?: AbortSignal
   /** 认领到之后、开跑之前再确认一次：返回 false 就放掉认领，结果算取消（自动体检传「仍到期」）。 */
   confirmHeld?: () => Promise<boolean>
-  /** 自动体检选的模型用不了、这次改用了默认模型：写进最近一次结果；缺省没有退回。 */
+  /** 体检选的模型用不了、这次改用了默认模型：写进最近一次结果；缺省没有退回。 */
   modelFallback?: CheckupResult['modelFallback']
+  /** 这次用的是体检选的模型（不是默认模型）：自动体检碰上模型用不了时，记下的原因注明是选的模型。缺省 = 默认模型。 */
+  isSelectedModel?: boolean
   /** 全部重查（界面「全部重查」）：见 tools/scan.ts ScanInput.isFullRecheck。缺省为普通体检。 */
   isFullRecheck?: boolean
 }
@@ -131,7 +133,8 @@ export type CheckupRunOutcome =
  *
  * 收尾按核心给的每一轮的收尾表那一行（tools/scan.ts ScanRoundResult）：最近一次结果都照写，完成记录核心已经写了。
  * 内容检查没做成（模型出错、宿主报模型用不了）两边口径不同：手动体检照样算做完，说明码带原因交给界面；
- * 自动体检要据它记失败、管重试节奏，所以模型出错、范围没读全记失败返回「失败」，模型用不了不记、返回原因交给调度器。
+ * 自动体检要据它记失败、管重试节奏，所以模型出错、范围没读全记失败返回「失败」；模型用不了不算失败，
+ * 放掉认领之前记下「模型用不了」（最近一次结果写没写成都记），返回原因交给调度器。
  * 提交前的存储步骤出错（挂账、写视图）两边都回失败。
  */
 export async function runCheckup(input: CheckupRunInput, deps: CheckupRunDeps): Promise<CheckupRunOutcome> {
@@ -192,6 +195,9 @@ export async function runCheckup(input: CheckupRunInput, deps: CheckupRunDeps): 
     if (signal.aborted) return result.kind === 'error' ? { kind: 'cancelled' } : doneOf(result)
     if (result.kind === 'error') return await failed(input, deps, scopes, { kind: 'error', message: result.message }, startedAt)
     const compared = before !== undefined && after !== undefined ? { before, after } : undefined
+    const rounds = result.rounds ?? []
+    // 自动体检逐范围调度：按这个范围那一轮的收尾
+    const own = by === 'auto' ? rounds.find(r => scopes.some(scope => checkupKey(scope) === checkupKey(r.scope))) : undefined
     let checkupId: string | undefined
     if (compared !== undefined) {
       // 体检这时已经提交，记不下结果只记日志，不把做完的体检报成失败
@@ -210,11 +216,18 @@ export async function runCheckup(input: CheckupRunInput, deps: CheckupRunDeps): 
       }
     }
     // 收尾表（tools/scan.ts closingRow）：最近一次结果上面照写；完成记录核心已按它写了
-    const rounds = result.rounds ?? []
     if (by === 'auto') {
-      // 自动体检逐范围调度：按这个范围那一轮的收尾
-      const own = rounds.find(r => scopes.some(scope => checkupKey(scope) === checkupKey(r.scope)))
-      if (own?.closing === 'model-unavailable') return { kind: 'model-unavailable', cause: own.cause ?? { kind: 'model-error' } }
+      if (own?.closing === 'model-unavailable') {
+        // 放掉认领之前记下（最近一次结果写没写成都记）：放掉认领时会重写体检视图，
+        // 晚于它再记，视图会先显示一次「自动体检做完了」却不提模型用不了
+        try {
+          const cause = { ...(own.cause ?? { kind: 'model-error' as const }), ...(input.isSelectedModel === true ? { isSelectedModel: true } : {}) }
+          for (const scope of scopes) await deps.checkups.recordModelUnavailable(scope, cause, startedAt)
+        } catch (err) {
+          deps.log.warn('[plastic-memory] 记不下自动体检的模型用不了，调度器收尾时再记', err)
+        }
+        return { kind: 'model-unavailable', cause: own.cause ?? { kind: 'model-error' } }
+      }
       if (own?.closing === 'failed') return await failed(input, deps, scopes, own.cause ?? { kind: 'model-error' }, startedAt)
       if (own?.closing === 'read-incomplete') return await failed(input, deps, scopes, READ_INCOMPLETE_CAUSE, startedAt)
     } else {
