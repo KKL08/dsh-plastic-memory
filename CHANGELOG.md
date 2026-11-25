@@ -7,6 +7,8 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- `memory_save` can record when a fact happened or held true, preserving the
+  precision and time zone supplied by the user.
 - `memory_search` can search past conversations in the current project, including
   content never saved as a memory, and return quoted messages with nearby context.
   Each message includes a reference for `memory_source` to expand it with the
@@ -152,6 +154,8 @@ All notable changes to this project are documented here. The format follows
   test instead of hanging the run.
 
 ### Changed
+- Memories whose effective time is still in the future no longer enter conversations
+  or search results, and are not reported as expired.
 - Merging two memories now records which memory the removed one went into.
   The removed memory keeps its earlier versions while it is in recently
   deleted; when it is deleted for good, they move under the memory that was

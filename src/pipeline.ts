@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto'
+import { isExpired } from './record-freshness.ts'
 import { applyEdits, type SaveEdit } from './edits.ts'
 import type { ChangeKind, MemoryRecord, SourceMode } from './record-schema.ts'
 import type { CodedNote, RejectCode, WarningCode } from './contract-codes.ts'
-import { ALREADY_REVIEWED_REASON, CHANGE_KINDS, CONFIDENCE_BY_SOURCE, NOT_DELEGATED_REASON, isPendingDelegated, memoryRecordSchema } from './record-schema.ts'
+import { ALREADY_REVIEWED_REASON, CHANGE_KINDS, CONFIDENCE_BY_SOURCE, NOT_DELEGATED_REASON, isPendingDelegated, isFactTime, memoryRecordSchema } from './record-schema.ts'
 import { applyChange, initialProvenance, type ChangeAnchor, type ChangeFields } from './change.ts'
 import { commitChange, isSameRecord } from './commit-change.ts'
 import { UNKNOWN_SESSION_ID } from './session-id.ts'
@@ -38,6 +39,8 @@ export interface SaveCandidate {
   /** 本机时间 YYYY-MM-DD HH:mm，或 YYYY-MM-DD（补写入时刻的时分）；落库前换算成毫秒（validity.ts）。 */
   validFrom?: string
   validTo?: string
+  /** 事实发生或成立的时间，按原精度保存；update 空字符串清除。 */
+  factTime?: string
   /** 新建时跳过接近逐字重复的检查（模型确认是另一件事）。 */
   force?: boolean
   /** 放行疑似密钥（用户确认不是密钥）；高危密钥照拦。 */
@@ -192,7 +195,7 @@ function resolveValidity(
     }
     given[key] = parsed.ms
   }
-  if (given.validTo !== undefined && given.validTo <= now) {
+  if (given.validTo !== undefined && isExpired(given, now)) {
     return {
       code: 'validity-past',
       reason: `validTo=${formatValidity(given.validTo)} 不晚于现在（${formatValidity(now)}），存下就已过期。核对用户说的截止时间（年份、上午下午）后重发；截止在当天的，写出具体时刻 "${VALIDITY_FORMAT}"——只写日期会把时分补成现在。`,
@@ -256,7 +259,7 @@ async function supersededGuide(target: MemoryRecord, store: MemoryStore): Promis
 const WHOLE_WRITE_REQUIRED = ['name', 'type', 'scope', 'content', 'summary'] as const
 /** 精确修改没传时沿用目标的字段。 */
 const INHERITED_KEYS = ['name', 'type', 'summary', 'tags'] as const
-type InheritedKey = typeof INHERITED_KEYS[number]
+type InheritedKey = typeof INHERITED_KEYS[number] | 'content'
 
 /**
  * 在目标正文上应用 edits（见 edits.ts），不成立时换成给模型的拒绝原因。
@@ -280,11 +283,13 @@ function editTarget(target: MemoryRecord, edits: readonly SaveEdit[]): { content
  * 把入参补成完整的候选。整条写入：校验必填项，tags 缺省按空数组。精确修改：只能配 update、不能和 content 同传；
  * 读到目标后在它的正文上应用 edits，没传的字段沿用目标的（inherited 列出是哪几个），返回的 base 就是这份读数。
  * 写入时锁内读到的正文和 base 不一样，就拿 edits 在最新正文上重做一次，沿用的字段也取最新的。
+ * update 带 factTime、没带 content 和 edits 时，正文沿用锁内最新版；同传的其他字段照常应用。
  */
 async function resolveInput(input: SaveInput, deps: PipelineDeps): Promise<{ candidate: SaveCandidate; base?: MemoryRecord; ignored?: string[]; edits?: readonly SaveEdit[]; inherited?: readonly InheritedKey[] } | Rejection> {
   const { edits, ...rest } = input
   if (input.action === 'update' && input.change === 'corroborate') return resolveCorroboration(input, deps)
-  if (edits === undefined) {
+  const keepsContent = input.action === 'update' && input.factTime !== undefined && input.content === undefined && edits === undefined
+  if (edits === undefined && !keepsContent) {
     const missing = WHOLE_WRITE_REQUIRED.filter(k => rest[k] === undefined)
     if (missing.length > 0) {
       const hint = input.action === 'update' && missing.includes('content') ? '。只改正文里的几处时传 edits，name、summary 等不传就保留原值' : ''
@@ -295,8 +300,8 @@ async function resolveInput(input: SaveInput, deps: PipelineDeps): Promise<{ can
   const invalid = (reason: string): Rejection => ({ code: 'edit-invalid', reason: `${reason}未保存。` })
   if (input.action !== 'update') return invalid('edits 只用于 action=update，新建记忆传整条 content。')
   if (rest.content !== undefined) return invalid('edits 和 content 只能传一个：改几处传 edits，重写整条传 content。')
-  if (edits.length === 0) return invalid('edits 是空的，至少写一处修改。')
-  for (const [i, edit] of edits.entries()) {
+  if (edits?.length === 0) return invalid('edits 是空的，至少写一处修改。')
+  for (const [i, edit] of (edits ?? []).entries()) {
     if (edit.oldString === '') return invalid(`第 ${i + 1} 处修改的 oldString 是空的：写出要替换的那段原文；要在某处加内容，把那处原文写进 oldString，newString 写原文加上新内容。`)
     if (edit.oldString === edit.newString) return invalid(`第 ${i + 1} 处修改的 oldString 和 newString 一样，没有改动。`)
   }
@@ -307,7 +312,7 @@ async function resolveInput(input: SaveInput, deps: PipelineDeps): Promise<{ can
   const checked = await checkUpdateTarget(input.id, read, deps)
   if ('code' in checked) return checked
   const { target } = checked
-  const applied = editTarget(target, edits)
+  const applied = edits === undefined ? { content: target.content } : editTarget(target, edits)
   if ('code' in applied) return applied
   const candidate: SaveCandidate = {
     ...rest,
@@ -318,11 +323,11 @@ async function resolveInput(input: SaveInput, deps: PipelineDeps): Promise<{ can
     tags: rest.tags ?? target.tags,
     content: applied.content,
   }
-  return { candidate, base: target, edits, inherited: INHERITED_KEYS.filter(k => rest[k] === undefined) }
+  return { candidate, base: target, edits, inherited: [...INHERITED_KEYS.filter(k => rest[k] === undefined), ...(keepsContent ? ['content' as const] : [])] }
 }
 
 /** 补证时不生效的参数：正文和别的内容字段都留着原样。 */
-const CORROBORATE_IGNORED = ['name', 'type', 'content', 'edits', 'summary', 'tags', 'supersedes', 'validFrom', 'validTo', 'related', 'premises'] as const
+const CORROBORATE_IGNORED = ['name', 'type', 'content', 'edits', 'summary', 'tags', 'supersedes', 'validFrom', 'validTo', 'factTime', 'related', 'premises'] as const
 
 /**
  * 补证（同一件事又被提到，内容不用改）：只要 id、依据和把握。内容参数不校验、不生效，候选按目标现在的样子补齐，
@@ -485,7 +490,7 @@ function hasLinks(input: Pick<SaveInput, 'related' | 'premises'>): boolean {
 }
 
 /** 改内容的参数：update 带了其中任何一个就是一次内容改动；一个都没带、只带关联和前提的是只改元数据的操作。 */
-const CONTENT_KEYS = ['name', 'type', 'content', 'edits', 'summary', 'tags', 'supersedes', 'validFrom', 'validTo'] as const
+const CONTENT_KEYS = ['name', 'type', 'content', 'edits', 'summary', 'tags', 'supersedes', 'validFrom', 'validTo', 'factTime'] as const
 
 /**
  * 只挂关联、前提的 update：带了 related 或 premises（空列表也算），没带任何改内容的参数。补证照常走补证（关联在那里不生效，结果里说明）。
@@ -697,7 +702,11 @@ export async function runSavePipeline(
     }
   }
 
-  // 有效期：换算成毫秒并校验，不合格的拒存、告诉模型怎么改；两个都没传时取值与以往一致（update 保留原值）
+  if (candidate.factTime !== undefined && !(candidate.action === 'update' && candidate.factTime === '')
+    && (typeof candidate.factTime !== 'string' || !isFactTime(candidate.factTime))) {
+    return { kind: 'rejected', code: 'validity-format', reason: 'factTime 请填写存在的日期：接受 YYYY、YYYY-MM、YYYY-MM-DD、带时刻的 ISO 8601；按用户说的精度和时区填写。update 可用空字符串清除。' }
+  }
+  // 有效期换算成毫秒；update 没传的字段保留原值。
   const validity = resolveValidity(candidate, target, now)
   if ('code' in validity) return { kind: 'rejected', ...validity }
   const isCorroboration = change === 'corroborate'
@@ -755,13 +764,14 @@ export async function runSavePipeline(
     name: inherited.has('name') ? on.name : candidate.name,
     type: inherited.has('type') ? on.type : candidate.type,
     tags: inherited.has('tags') ? on.tags : candidate.tags,
-    content,
+    content: inherited.has('content') ? on.content : content,
     summary: inherited.has('summary') ? on.summary : candidate.summary,
     confidence,
     // 可选字段统一"不传即保留"：update 是内容编辑，不重传 validTo 就清掉时效窗口
     // 会让有时效的记忆变成永不过期（有效期的回退在 resolveValidity 里）
     validFrom: valid.validFrom,
     validTo: valid.validTo,
+    factTime: candidate.factTime === undefined ? on.factTime : candidate.factTime === '' ? undefined : candidate.factTime,
     supersedes: candidate.supersedes ?? on.supersedes,
     globalCandidate: candidate.scope === 'global' && on.scope === 'workspace' ? true : on.globalCandidate,
     // 创建者四个字段永不改。子 agent 改写：内容仍是子级写的，reviewed 一律去掉（回到待确认）；
@@ -785,6 +795,7 @@ export async function runSavePipeline(
       createdAt: now, updatedAt: now, lastConfirmedAt: now,
       lastRecalledAt: null, recallCount: 0,
       validFrom: validity.validFrom, validTo: validity.validTo,
+      factTime: candidate.factTime,
       status: 'active', confidence, supersedes: candidate.supersedes,
       globalCandidate,
       // 子 agent 新建：创建者信息由宿主上下文填，不带 reviewed 即待确认（mode 不落盘）

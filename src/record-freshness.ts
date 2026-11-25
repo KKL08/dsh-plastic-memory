@@ -16,10 +16,17 @@ export function stalenessNote(r: MemoryRecord, decayDays: number | null, now: nu
   return days > decayDays ? STALENESS_NOTE(days) : ''
 }
 
-/**
- * validTo 是模型显式声明的失效时间：到点就不该再进注入和检索——治理扫描仍可见（按 status 查询），由 expired finding 引导清理。
- * 到点即过期（validTo <= now），与写入时拒存、GUI 卡片同一口径。
- */
+/** 已过期：有截止时间且不晚于现在。 */
+export function isExpired(r: Pick<MemoryRecord, 'validTo'>, now: number): boolean {
+  return r.validTo !== undefined && r.validTo <= now
+}
+
+/** 已生效：没有起始时间，或起始时间不晚于现在。 */
+export function isInEffect(r: Pick<MemoryRecord, 'validFrom'>, now: number): boolean {
+  return r.validFrom === undefined || r.validFrom <= now
+}
+
+/** 注入和检索仅使用已生效且未过期的记忆；规则体检只判断过期。 */
 export function withinValidity(r: MemoryRecord, now: number): boolean {
-  return r.validTo === undefined || r.validTo > now
+  return isInEffect(r, now) && !isExpired(r, now)
 }
