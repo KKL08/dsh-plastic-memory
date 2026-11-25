@@ -346,6 +346,10 @@ All notable changes to this project are documented here. The format follows
   with a secret was cancelled, deleting that memory elsewhere made the side
   panel show it as deleted there, sometimes with the warning meant for
   secrets. It is now simply removed, like other memories deleted elsewhere.
+- A conflict suggestion, or a plan written from your request, could come back
+  as not generated when the model chose to merge or rewrite but left out the
+  new text, and you had to ask for it again. The model is now asked once more
+  on its own to include the text.
 
 ## [0.2.0] - 2026-11-21
 

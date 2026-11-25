@@ -12,7 +12,7 @@ import { draftOutputSchema, toMemoryDraft } from './model-draft.ts'
 import type { SourceExcerpt } from './suggestion-source.ts'
 
 /**
- * 处理建议的生成：一次调用模型，给一条横向冲突（记忆 A、B）一个结论和一句理由，融合时带融合稿；操作由代码按结论推出。
+ * 处理建议的生成：调用模型（选了融合却漏了稿时再问一次），给一条横向冲突（记忆 A、B）一个结论和一句理由，融合时带融合稿；操作由代码按结论推出。
  * 能回查到出处时，各自的出处节选一起给模型（数据，不是指令）；出处由调用方读好传进来，这里不做 I/O。
  * 模型分不出哪条对时如实说（unsure），记作没生成成的一种原因 undecided，不给结论：并列融合会把冲突藏进一条记忆里。
  * 纯逻辑，模型经 SemanticLlm 注入；只回结果，不写任何东西（写进账本由 suggest 命令负责）。调用方先排除含高危密钥的记忆。
@@ -148,13 +148,50 @@ const unparseable = ({ stage, fields }: Omit<ParseFailure, 'ok'>) => ({ kind: 'u
 /** 该带稿的结论没带稿。 */
 const NO_DRAFT: Omit<ParseFailure, 'ok'> = { stage: 'shape', fields: ['draft'] }
 
-/** 解析模型输出；不合格式（含融合没给稿）给卡在哪一步。 */
-export function parseSuggestionOutput(raw: string): ParsedSuggestion | { action: 'unsure'; reason: string } | Omit<ParseFailure, 'ok'> {
-  const parsed = parseReply(outputSchema, raw)
-  if (!parsed.ok) return { stage: parsed.stage, ...(parsed.fields !== undefined ? { fields: parsed.fields } : {}) }
-  const { action, reason, draft } = parsed.data
-  if (action !== 'merge') return { action, reason }
-  return draft == null ? NO_DRAFT : { action, reason, draft: toMemoryDraft(draft) }
+/** 要带稿的结论却没给稿：解析成功、结论是 merge（横向）或 rewrite（垂直）、draft 缺失或为 null。四个入口共用。 */
+function lacksDraft(reply: { action: string; draft?: unknown }): boolean {
+  return (reply.action === 'merge' || reply.action === 'rewrite') && reply.draft == null
+}
+
+/**
+ * 更正说明：第一次漏了稿时加在第二次 user 的末尾。固定文字，不拼上一次的回复，也不拼记忆内容。
+ * 末句按入口分：处理建议改选别的结论；按要求生成时处理意图只来自用户的要求，写不出稿就是做不到（infeasible）。
+ */
+function draftCorrection(action: 'merge' | 'rewrite', fallback: string): string {
+  const draft = action === 'merge' ? '融合稿' : '改写稿'
+  return `## 更正说明\n上一次的回复选了 ${action}，但没有给出${draft} draft。选 ${action} 时同时给出 draft，content 和 summary 都要写；${fallback}回复只有一个 JSON 对象，从 { 开始、到 } 结束。`
+}
+const MERGE_DRAFT_CORRECTION = draftCorrection('merge', '判断该融合却写不出融合稿时，改选别的结论。')
+const REWRITE_DRAFT_CORRECTION = draftCorrection('rewrite', '判断该改写却写不出改写稿时，改选别的结论。')
+const MERGE_PROPOSAL_CORRECTION = draftCorrection('merge', '照用户的要求写不出融合稿时，改选 infeasible，reason 用一句话说明做不到的原因。')
+const REWRITE_PROPOSAL_CORRECTION = draftCorrection('rewrite', '照用户的要求写不出改写稿时，改选 infeasible，reason 用一句话说明做不到的原因。')
+
+type Reply<T> = { ok: true; data: T } | { ok: false; cause: SuggestionFailure['cause'] }
+
+/** 调一次模型并按 schema 读回复。 */
+async function askOnce<T extends z.ZodType>(llm: SemanticLlm, prompt: { system: string; user: string }, schema: T): Promise<Reply<z.infer<T>>> {
+  let raw: string
+  try {
+    raw = await llm.complete(prompt)
+  } catch (error) {
+    return { ok: false, cause: modelError(error) }
+  }
+  const parsed = parseReply(schema, raw)
+  return parsed.ok ? parsed : { ok: false, cause: unparseable(parsed) }
+}
+
+/**
+ * 调模型拿回复：第一次选了要带稿的结论却没给稿时，同一份提示词在 user 末尾加更正说明再问一次，按第二次的结果算
+ * （第二次报错、读不出就按那个原因；仍漏稿就是 unparseable、字段 draft）。只为这一种失败重试；
+ * 其余失败按第一次的结果返回，由用户「再试一次」。返回成功时，要带稿的结论一定带着稿。
+ */
+async function askWithDraftRetry<T extends z.ZodType<{ action: string; draft?: unknown }>>(
+  llm: SemanticLlm, prompt: { system: string; user: string }, schema: T, correction: string,
+): Promise<Reply<z.infer<T>>> {
+  const first = await askOnce(llm, prompt, schema)
+  if (!first.ok || !lacksDraft(first.data)) return first
+  const second = await askOnce(llm, { system: prompt.system, user: `${prompt.user}\n\n${correction}` }, schema)
+  return second.ok && lacksDraft(second.data) ? { ok: false, cause: unparseable(NO_DRAFT) } : second
 }
 
 /**
@@ -195,17 +232,13 @@ export type SuggestionOutcome =
   | { ok: true; action: ProposalAction; reason: string; ops: ProposalOp[]; isSourced: boolean }
   | { ok: false; cause: SuggestionFailure['cause'] }
 
-/** 单次调用，不重试：失败记在条目上，由用户「再试一次」。 */
+/** 选了 merge 却没给稿时自动再问一次，其余失败记在条目上，由用户「再试一次」。 */
 export async function generateSuggestion(input: SuggestionInput, llm: SemanticLlm): Promise<SuggestionOutcome> {
-  let raw: string
-  try {
-    raw = await llm.complete(buildSuggestionPrompt(input))
-  } catch (error) {
-    return { ok: false, cause: modelError(error) }
-  }
-  const parsed = parseSuggestionOutput(raw)
-  if ('stage' in parsed) return { ok: false, cause: unparseable(parsed) }
-  if (parsed.action === 'unsure') return { ok: false, cause: { kind: 'undecided', reason: maskSecrets(parsed.reason, { severity: 'suspected' }) } }
+  const reply = await askWithDraftRetry(llm, buildSuggestionPrompt(input), outputSchema, MERGE_DRAFT_CORRECTION)
+  if (!reply.ok) return reply
+  const { action, reason, draft } = reply.data
+  if (action === 'unsure') return { ok: false, cause: { kind: 'undecided', reason: maskSecrets(reason, { severity: 'suspected' }) } }
+  const parsed: ParsedSuggestion = action === 'merge' ? { action, reason, draft: toMemoryDraft(draft!) } : { action, reason }
   const ops = proposalOps(parsed, input.records)
   if (hasForeignSecret(ops, input.records)) return { ok: false, cause: { kind: 'secret-in-draft' } }
   const isSourced = sourcesOf(input).every(s => s !== undefined)
@@ -301,20 +334,13 @@ export type ProposalOutcome =
   | { ok: true; action: 'infeasible'; reason: string }
   | { ok: false; cause: SuggestionFailure['cause'] }
 
-/** 单次调用，不重试；不写任何东西。说明按疑似级遮盖；稿原样带回（见上）。 */
+/** 选了 merge 却没给稿时自动再问一次，其余失败由用户再试；不写任何东西。说明按疑似级遮盖；稿原样带回（见上）。 */
 export async function generateProposal(input: SuggestionInput & { request: ProposalRequest }, llm: SemanticLlm): Promise<ProposalOutcome> {
-  let raw: string
-  try {
-    raw = await llm.complete(buildProposalPrompt(input))
-  } catch (error) {
-    return { ok: false, cause: modelError(error) }
-  }
-  const parsed = parseReply(proposalOutputSchema, raw)
-  if (!parsed.ok) return { ok: false, cause: unparseable(parsed) }
-  const { action, draft } = parsed.data
-  const reason = maskSecrets(parsed.data.reason, { severity: 'suspected' })
+  const reply = await askWithDraftRetry(llm, buildProposalPrompt(input), proposalOutputSchema, MERGE_PROPOSAL_CORRECTION)
+  if (!reply.ok) return reply
+  const { action, draft } = reply.data
+  const reason = maskSecrets(reply.data.reason, { severity: 'suspected' })
   if (action === 'infeasible') return { ok: true, action, reason }
-  if (action === 'merge' && draft == null) return { ok: false, cause: unparseable(NO_DRAFT) }
   const ops = proposalOps(action === 'merge' ? { action, reason, draft: toMemoryDraft(draft!) } : { action, reason }, input.records)
   return { ok: true, action, reason, ops }
 }
@@ -426,20 +452,13 @@ const verticalOutputSchema = z.object({
   draft: draftOutputSchema.nullish(),
 })
 
-/** 单次调用，不重试。成功给结论、理由（遮疑似）、操作和是否回查过出处；改写稿带进原文没有的密钥整份丢弃。 */
+/** 选了 rewrite 却没给稿时自动再问一次，其余失败由用户再试。成功给结论、理由（遮疑似）、操作和是否回查过出处；改写稿带进原文没有的密钥整份丢弃。 */
 export async function generateVerticalSuggestion(input: VerticalSuggestionInput, llm: SemanticLlm): Promise<SuggestionOutcome> {
-  let raw: string
-  try {
-    raw = await llm.complete(buildVerticalSuggestionPrompt(input))
-  } catch (error) {
-    return { ok: false, cause: modelError(error) }
-  }
-  const parsed = parseReply(verticalOutputSchema, raw)
-  if (!parsed.ok) return { ok: false, cause: unparseable(parsed) }
-  const { action, draft } = parsed.data
-  const reason = maskSecrets(parsed.data.reason, { severity: 'suspected' })
+  const reply = await askWithDraftRetry(llm, buildVerticalSuggestionPrompt(input), verticalOutputSchema, REWRITE_DRAFT_CORRECTION)
+  if (!reply.ok) return reply
+  const { action, draft } = reply.data
+  const reason = maskSecrets(reply.data.reason, { severity: 'suspected' })
   if (action === 'unsure') return { ok: false, cause: { kind: 'undecided', reason } }
-  if (action === 'rewrite' && draft == null) return { ok: false, cause: unparseable(NO_DRAFT) }
   const ops = verticalOps(action, draft == null ? undefined : toMemoryDraft(draft), input.record)
   if (hasForeignSecret(ops, [input.record])) return { ok: false, cause: { kind: 'secret-in-draft' } }
   return { ok: true, action, reason, ops, isSourced: verticalSourceOf(input) !== undefined }
@@ -496,19 +515,12 @@ export function buildVerticalProposalPrompt(input: VerticalSuggestionInput & { r
 
 const verticalProposalOutputSchema = verticalOutputSchema.extend({ action: z.enum([...VERTICAL_PROPOSAL_ACTIONS, 'infeasible']) })
 
-/** 单次调用，不重试；不写任何东西。说明按疑似级遮盖；稿原样带回，应用时按密钥规则拦下或请用户确认（同横向）。 */
+/** 选了 rewrite 却没给稿时自动再问一次，其余失败由用户再试；不写任何东西。说明按疑似级遮盖；稿原样带回，应用时按密钥规则拦下或请用户确认（同横向）。 */
 export async function generateVerticalProposal(input: VerticalSuggestionInput & { request: ProposalRequest }, llm: SemanticLlm): Promise<ProposalOutcome> {
-  let raw: string
-  try {
-    raw = await llm.complete(buildVerticalProposalPrompt(input))
-  } catch (error) {
-    return { ok: false, cause: modelError(error) }
-  }
-  const parsed = parseReply(verticalProposalOutputSchema, raw)
-  if (!parsed.ok) return { ok: false, cause: unparseable(parsed) }
-  const { action, draft } = parsed.data
-  const reason = maskSecrets(parsed.data.reason, { severity: 'suspected' })
+  const reply = await askWithDraftRetry(llm, buildVerticalProposalPrompt(input), verticalProposalOutputSchema, REWRITE_PROPOSAL_CORRECTION)
+  if (!reply.ok) return reply
+  const { action, draft } = reply.data
+  const reason = maskSecrets(reply.data.reason, { severity: 'suspected' })
   if (action === 'infeasible') return { ok: true, action, reason }
-  if (action === 'rewrite' && draft == null) return { ok: false, cause: unparseable(NO_DRAFT) }
   return { ok: true, action, reason, ops: verticalOps(action, draft == null ? undefined : toMemoryDraft(draft), input.record) }
 }

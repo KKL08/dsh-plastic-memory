@@ -439,6 +439,175 @@ describe('垂直冲突（记忆和指令文件）的生成器', () => {
   })
 })
 
+/** 按顺序给回复的假模型：第 n 次调用给第 n 个回复，Error 就抛出；调用次数超过给的回复数时报错。 */
+function replyingInOrder(...answers: Array<string | Error>): { llm: SemanticLlm; prompts: Array<{ system: string; user: string }> } {
+  const prompts: Array<{ system: string; user: string }> = []
+  return {
+    prompts,
+    llm: {
+      complete: async (prompt) => {
+        prompts.push(prompt)
+        const answer = answers[prompts.length - 1]
+        if (answer === undefined) throw new Error(`第 ${prompts.length} 次调用没有准备回复`)
+        if (answer instanceof Error) throw answer
+        return answer
+      },
+    },
+  }
+}
+
+describe('选了要带稿的结论却没给稿：自动再问一次', () => {
+  const memory = record({ id: 'mem_v', name: '包管理器', content: '用 npm', tags: ['npm'], scope: 'workspace', workspacePath: '/w/app' })
+  const vInput = { summary: '记忆说用 npm，AGENTS.md 说用 pnpm', baselineRef: 'AGENTS.md：包管理', record: memory, baseline: ['前端统一用 pnpm'] }
+  const request = { text: '照你的判断处理', prior: [] }
+  const draft = { content: '脚本仓用 npm；前端用 pnpm', summary: '按仓库选包管理器' }
+  // 漏稿回复的理由里写着要写稿：更正说明不能把这句拼进去
+  const MODEL_REASON = '各有场景，稿写进记忆'
+
+  // 更正说明的末句：处理建议让模型改选别的结论；按要求生成时处理意图只来自用户的要求，写不出稿就是做不到
+  const entries = [
+    {
+      name: '处理建议（横向）', action: 'merge', label: '融合稿',
+      run: (llm: SemanticLlm) => generateSuggestion(input, llm),
+      undecided: JSON.stringify({ action: 'unsure', reason: '分不出' }),
+      fallback: '判断该融合却写不出融合稿时，改选别的结论。',
+      switched: [
+        ['keep-a', { ok: true, action: 'keep-a', reason: '理由' }],
+        ['unsure', { ok: false, cause: { kind: 'undecided', reason: '理由' } }],
+      ],
+    },
+    {
+      name: '按要求生成（横向）', action: 'merge', label: '融合稿',
+      run: (llm: SemanticLlm) => generateProposal({ ...input, request }, llm),
+      undecided: JSON.stringify({ action: 'infeasible', reason: '做不到' }),
+      fallback: '照用户的要求写不出融合稿时，改选 infeasible，reason 用一句话说明做不到的原因。',
+      switched: [
+        ['keep-b', { ok: true, action: 'keep-b', reason: '理由' }],
+        ['infeasible', { ok: true, action: 'infeasible', reason: '理由' }],
+      ],
+    },
+    {
+      name: '处理建议（垂直）', action: 'rewrite', label: '改写稿',
+      run: (llm: SemanticLlm) => generateVerticalSuggestion(vInput, llm),
+      undecided: JSON.stringify({ action: 'unsure', reason: '分不出' }),
+      fallback: '判断该改写却写不出改写稿时，改选别的结论。',
+      switched: [
+        ['delete', { ok: true, action: 'delete', reason: '理由' }],
+        ['unsure', { ok: false, cause: { kind: 'undecided', reason: '理由' } }],
+      ],
+    },
+    {
+      name: '按要求生成（垂直）', action: 'rewrite', label: '改写稿',
+      run: (llm: SemanticLlm) => generateVerticalProposal({ ...vInput, request }, llm),
+      undecided: JSON.stringify({ action: 'infeasible', reason: '做不到' }),
+      fallback: '照用户的要求写不出改写稿时，改选 infeasible，reason 用一句话说明做不到的原因。',
+      switched: [
+        ['keep-both', { ok: true, action: 'keep-both', reason: '理由' }],
+        ['infeasible', { ok: true, action: 'infeasible', reason: '理由' }],
+      ],
+    },
+  ] as const
+
+  describe.each(entries)('$name', ({ name, action, label, run, undecided, fallback, switched }) => {
+    const withDraft = JSON.stringify({ action, reason: '各有场景', draft })
+    const noDraft = JSON.stringify({ action, reason: MODEL_REASON })
+    const nullDraft = JSON.stringify({ action, reason: MODEL_REASON, draft: null })
+    const NO_DRAFT_CAUSE = { ok: false, cause: { kind: 'unparseable', stage: 'shape', fields: ['draft'] } }
+
+    it('第一次就合格：只调一次', async () => {
+      const { llm, prompts } = replyingInOrder(withDraft)
+      expect(await run(llm)).toMatchObject({ ok: true, action })
+      expect(prompts).toHaveLength(1)
+    })
+
+    it.each([['缺 draft', noDraft], ['draft 为 null', nullDraft]])('第一次漏稿（%s）、第二次合格：再问一次，结果和一次就合格时相同；第二次的 user 末尾加了更正说明', async (_label, first) => {
+      const { llm, prompts } = replyingInOrder(first, withDraft)
+      const r = await run(llm)
+      expect(r).toEqual(await run(replyingInOrder(withDraft).llm))
+      expect(prompts).toHaveLength(2)
+      expect(prompts[1]!.system).toBe(prompts[0]!.system)
+      expect(prompts[0]!.user).not.toContain('更正说明')
+      expect(prompts[1]!.user.startsWith(`${prompts[0]!.user}\n\n## 更正说明\n`)).toBe(true)
+      const correction = prompts[1]!.user.slice(prompts[0]!.user.length)
+      expect(correction).toContain(`上一次的回复选了 ${action}，但没有给出${label} draft`)
+      expect(correction).toContain(`选 ${action} 时同时给出 draft，content 和 summary 都要写`)
+      expect(correction).toContain('回复只有一个 JSON 对象')
+      // 各入口用自己那条更正说明：末句只出现本入口的那一种
+      expect(correction).toContain(fallback)
+      for (const other of entries.filter(e => e.name !== name)) if (other.fallback !== fallback) expect(correction).not.toContain(other.fallback)
+      // 更正说明是固定文字：不拼模型上一次的回复
+      expect(correction).not.toContain(MODEL_REASON)
+    })
+
+    it.each(switched as ReadonlyArray<readonly [string, object]>)('第一次漏稿、第二次改选不带稿的结论（%s）：原样返回第二次的结论', async (next, expected) => {
+      const { llm, prompts } = replyingInOrder(noDraft, JSON.stringify({ action: next, reason: '理由' }))
+      expect(await run(llm)).toMatchObject(expected)
+      expect(prompts).toHaveLength(2)
+    })
+
+
+    it('两次都漏稿：按第二次的结果返回，unparseable、字段 draft', async () => {
+      const { llm, prompts } = replyingInOrder(noDraft, nullDraft)
+      expect(await run(llm)).toEqual(NO_DRAFT_CAUSE)
+      expect(prompts).toHaveLength(2)
+    })
+
+    it('第一次漏稿、第二次模型报错：按第二次的错误返回', async () => {
+      const { llm, prompts } = replyingInOrder(noDraft, new Error('rate limited'))
+      expect(await run(llm)).toEqual({ ok: false, cause: { kind: 'model-error', message: 'rate limited' } })
+      expect(prompts).toHaveLength(2)
+    })
+
+    it('第一次漏稿、第二次别的格式错：按第二次卡住的那一步返回', async () => {
+      const { llm, prompts } = replyingInOrder(noDraft, '{"action":"' + action + '","reason":"合","draft":{"content":"前端')
+      expect(await run(llm)).toEqual({ ok: false, cause: { kind: 'unparseable', stage: 'syntax' } })
+      expect(prompts).toHaveLength(2)
+    })
+
+    it('第一次别的格式错：不重试，直接返回', async () => {
+      const { llm, prompts } = replyingInOrder('都挺好', withDraft)
+      expect(await run(llm)).toEqual({ ok: false, cause: { kind: 'unparseable', stage: 'no-object' } })
+      expect(prompts).toHaveLength(1)
+    })
+
+    it('第一次缺理由（字段不合，但不是漏稿）：不重试', async () => {
+      const { llm, prompts } = replyingInOrder(JSON.stringify({ action, draft }), withDraft)
+      expect(await run(llm)).toEqual({ ok: false, cause: { kind: 'unparseable', stage: 'shape', fields: ['reason'] } })
+      expect(prompts).toHaveLength(1)
+    })
+
+    it('第一次模型报错：不重试，直接返回', async () => {
+      const { llm, prompts } = replyingInOrder(new Error('rate limited'), withDraft)
+      expect(await run(llm)).toEqual({ ok: false, cause: { kind: 'model-error', message: 'rate limited' } })
+      expect(prompts).toHaveLength(1)
+    })
+
+    it('第一次判断不了或做不到（不带稿的结论）：不重试', async () => {
+      const { llm, prompts } = replyingInOrder(undecided, withDraft)
+      expect(await run(llm)).toMatchObject(JSON.parse(undecided).action === 'unsure' ? { ok: false, cause: { kind: 'undecided' } } : { ok: true, action: 'infeasible' })
+      expect(prompts).toHaveLength(1)
+    })
+  })
+
+  it.each([
+    ['处理建议（横向）', 'merge', (llm: SemanticLlm) => generateSuggestion(input, llm)],
+    ['处理建议（垂直）', 'rewrite', (llm: SemanticLlm) => generateVerticalSuggestion(vInput, llm)],
+  ] as const)('%s：稿里带进原文没有的密钥，整份丢弃，不重试', async (_label, action, run) => {
+    const { llm, prompts } = replyingInOrder(JSON.stringify({ action, reason: '合', draft: { ...draft, content: `token ${FAKE_SECRET.github}` } }), JSON.stringify({ action, reason: '合', draft }))
+    expect(await run(llm)).toEqual({ ok: false, cause: { kind: 'secret-in-draft' } })
+    expect(prompts).toHaveLength(1)
+  })
+
+  it.each([
+    ['处理建议（横向）', 'merge', (llm: SemanticLlm) => generateSuggestion(input, llm)],
+    ['处理建议（垂直）', 'rewrite', (llm: SemanticLlm) => generateVerticalSuggestion(vInput, llm)],
+  ] as const)('%s：第一次漏稿、第二次的稿里带进原文没有的密钥，整份丢弃，secret-in-draft', async (_label, action, run) => {
+    const { llm, prompts } = replyingInOrder(JSON.stringify({ action, reason: MODEL_REASON }), JSON.stringify({ action, reason: '合', draft: { ...draft, content: `token ${FAKE_SECRET.github}` } }))
+    expect(await run(llm)).toEqual({ ok: false, cause: { kind: 'secret-in-draft' } })
+    expect(prompts).toHaveLength(2)
+  })
+})
+
 describe('回复里找答案的 JSON 对象', () => {
   const ANSWER = { action: 'keep-a', reason: 'A 更新' }
   const answer = JSON.stringify(ANSWER)
