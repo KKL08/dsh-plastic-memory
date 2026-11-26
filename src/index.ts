@@ -26,6 +26,7 @@ import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { SUBAGENT_MAX_SAVES_DEFAULT } from './pipeline.ts'
 import { createSaveTool } from './tools/save-tool.ts'
+import { relatedRecheckHook } from './tools/related-recheck.ts'
 import { createSearchTool } from './tools/search-tool.ts'
 import { DialogueCallCap } from './tools/dialogue-call-cap.ts'
 import { createForgetTool } from './tools/forget-tool.ts'
@@ -108,6 +109,11 @@ export interface Config {
     globalPromoteTarget: Volatile<'plugin-global' | 'agents-md'>
     /** 一次体检交给模型的 token 上限（按发出去的提示词估算，重试不算），到了就停，下次接着查。设置页不露，配置文件可改；改了下一次体检生效。 */
     scan: { tokenCap: Volatile<number> }
+    /**
+     * 沿关联发复查信号（实验，缺省关）：一条记忆做了状态变化或纠错，related 里挂着它的决定进待处理，标「依据已变」。
+     * 设置页不露，配置文件可改；改了下一次保存生效，关掉之后下一次体检清掉还没处理的这类条目。
+     */
+    relatedRecheck: Volatile<boolean>
   }
   search: {
     /** jieba 用户词典（每行「词 词频 词性」）的绝对路径，追加在主词典之上；不设只用主词典。改了下一次搜索生效。 */
@@ -189,6 +195,7 @@ export const Config = z.object({
     scan: z.object({
       tokenCap: z.number().default(SCAN_TOKEN_CAP_DEFAULT).volatile(),
     }),
+    relatedRecheck: z.boolean().default(false).volatile(),
   }),
   search: z.object({
     userDictionaryPath: z.string().volatile(),
@@ -316,6 +323,9 @@ export async function apply(ctx: Context, config: Config) {
   const store = new MemoryStore(fileTable, ctx.logger, sidecar.recallStats)
   // forget 的快照先行与待决账本清理需要这两个存储，治理关闭时也接线
   const decisions = new PendingDecisionsStore(sidecar.pending, rootLock)
+  const relatedRecheck = relatedRecheckHook({
+    decisions, isEnabled: () => config.governance.enabled.get() && config.governance.relatedRecheck.get(), log: ctx.logger,
+  })
   // 写成之后要补的账：启动时登记，上一个进程写到一半退出的，这里的第一次写入就能补上
   store.registerSteps(ledgerSteps(decisions, ctx.logger))
   // 拍完快照落盘后复核：读完记录之后被彻底删除的那份在快照里脱敏
@@ -447,7 +457,7 @@ export async function apply(ctx: Context, config: Config) {
   const registerSave = () => registerWrite(
     createSaveTool({
     maxTopics: () => config.index.maxTopics.get(),
-      store, registry, host, snapshots, decisions, onSaved, memoryRoot, homeDir: homedir(),
+      store, registry, host, snapshots, decisions, relatedRecheck, onSaved, memoryRoot, homeDir: homedir(),
       maxSubagentSaves: () => config.subagent.maxSavesPerSession.get(),
       saveHintsIn, tokenizer: { userDictionaryPath: () => config.search.userDictionaryPath.get(), log: ctx.logger },
       guidedIn, mergeWindowMinutes: () => config.history.mergeWindowMinutes.get(),
@@ -488,7 +498,10 @@ export async function apply(ctx: Context, config: Config) {
     }
   }
   const findingSources = { readEvent: getReadEvent, noReview }
-  const incremental = { checkupCache, tokenCap: () => config.governance.scan.tokenCap.get(), sources: findingSources }
+  const incremental = {
+    checkupCache, tokenCap: () => config.governance.scan.tokenCap.get(), sources: findingSources,
+    isRelatedRecheckEnabled: () => config.governance.relatedRecheck.get(),
+  }
   ctx.tools.register(createSourceTool({ store, host, noReview, workspaceOf: cwd => resolveWorkspacePath(ctx, cwd),
     dialogueStore: dialogueCatchup.readStore, isDialogueEnabled, dialogueToolResults: () => config.search.dialogueToolResults.get() }))
   // 体检、健康分、裁决、提升四个工具随体检开关注册 / 注销（开关热更新时再同步一次）。
@@ -572,7 +585,7 @@ export async function apply(ctx: Context, config: Config) {
     // 卸载时取消手动体检之后还在跑的后续段（不等在途的模型调用）
     const unload = new AbortController()
     const command = createMemoryCommand({
-      memoryRoot, store, decisions, snapshots, cache: scanCache, checkups, autoCheckups, selections, ignores, registry, agentsMd, views: writer, instructions, dreams, incremental,
+      memoryRoot, store, decisions, snapshots, relatedRecheck, cache: scanCache, checkups, autoCheckups, selections, ignores, registry, agentsMd, views: writer, instructions, dreams, incremental,
       resolveCheckupLlm: () => resolveBackgroundLlm('checkup'),
       onAutoCheckupChanged: () => void scheduler?.recheck(),
       deleteDialogueRecords: () => dialogueCatchup.destroy(),
@@ -638,7 +651,7 @@ export async function apply(ctx: Context, config: Config) {
     // 记忆梦境：接在自动体检每一轮之后查门槛；运行计划：维护 → 整理主题索引 → 合并零碎记忆 → 逐条整理记忆
     const dreamsCreated = new DreamsScheduler({
       run: {
-        store, snapshots, decisions, dreams, log: ctx.logger,
+        store, snapshots, decisions, relatedRecheck, dreams, log: ctx.logger,
         claimScope: (scope, onLost) => holdCheckups(checkups, [scope], {
           interval: (callback, delayMs) => timer.interval(callback, delayMs), onLost, onChange: async () => { await views?.requestCheckups() }, log: ctx.logger,
         }),

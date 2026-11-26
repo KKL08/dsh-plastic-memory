@@ -76,6 +76,13 @@ export function historySteps(store: MemoryStore, snapshots: SnapshotStore, log: 
   }
 }
 
+/**
+ * 内容改动写成之后的钩子（沿关联发复查信号用，见 tools/related-recheck.ts）：commitChange 在写入段里、提交后步骤做完之后调一次，
+ * 只对写下了最近一次内容改动的写入（细化、纠错、状态变化）调，补证和只改元数据的不调。page 是这次写下的那一版，store 是这次写入用的存储。
+ * 钩子自己处理失败、不抛：写入已经提交，结果按写成的算。
+ */
+export type RelatedRecheckHook = (page: MemoryRecord, store: MemoryStore) => Promise<void>
+
 export interface CommitChangeDeps {
   store: MemoryStore
   /** 改前快照：撤销按它恢复，中断后补留历史版本也读它。 */
@@ -83,6 +90,8 @@ export interface CommitChangeDeps {
   /** 合并窗口，毫秒；缺省按 MERGE_WINDOW_MINUTES_DEFAULT。 */
   mergeWindowMs?: number
   log?: MemoryLogger
+  /** 沿关联发复查信号的钩子；不给就不发。 */
+  relatedRecheck?: RelatedRecheckHook
 }
 
 export interface CommitChangeInput<Stop = never> {
@@ -234,6 +243,7 @@ export async function commitChange<Stop = never>(input: CommitChangeInput<Stop>,
       if (written === undefined) return { kind: 'changed', current: seen.current }
       const isTopicPending = input.topic !== undefined && store.hasUnfinishedOwnStep(op.id, INDEX_ROW_STEP)
       await store.finishOp(op, written)
+      if (kind !== 'meta' && kind !== 'corroborate') await deps.relatedRecheck?.(written, store)
       return {
         kind: 'written', isTopicPending,
         op: op.id,

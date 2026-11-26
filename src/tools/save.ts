@@ -8,6 +8,7 @@ import type { MemoryStore } from '../store.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { SnapshotStore } from '../governance/snapshots.ts'
 import type { PendingDecisionsStore } from '../governance/decisions.ts'
+import type { RelatedRecheckHook } from '../commit-change.ts'
 import { isPendingDelegated, type MemoryRecord } from '../record-schema.ts'
 import { maskSecretSurface } from '../secrets.ts'
 import { runSavePipeline, type PipelineResult, type SaveDelegation, type SaveInput } from '../pipeline.ts'
@@ -54,6 +55,8 @@ export interface SaveToolDeps {
   mergeWindowMinutes?: () => number
   /** 主题数上限（配置 index.maxTopics），每次调用现读；缺省按 INDEX_MAX_TOPICS_DEFAULT。 */
   maxTopics?: () => number
+  /** 沿关联发复查信号的钩子（接线层用 relatedRecheckHook 建），交给保存管线；不给就不发。 */
+  relatedRecheck?: RelatedRecheckHook
 }
 
 /** 成功保存、改写时附在第一行末：记录是过程动作，界面已展示写入的记忆，回复里不必再报。 */
@@ -145,6 +148,7 @@ export async function executeSave(
     session: context.session,
     snapshots: deps.snapshots,
     decisions: deps.decisions,
+    relatedRecheck: deps.relatedRecheck,
     callId: String(exec.callId ?? ''),
     // 委派信息只从上下文来：args 里同名字段不进候选、也不传到这里
     delegation: context.delegation,

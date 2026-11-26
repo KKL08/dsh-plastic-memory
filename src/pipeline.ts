@@ -5,7 +5,7 @@ import type { ChangeKind, MemoryRecord, SourceMode } from './record-schema.ts'
 import type { CodedNote, RejectCode, WarningCode } from './contract-codes.ts'
 import { ALREADY_REVIEWED_REASON, CHANGE_KINDS, CONFIDENCE_BY_SOURCE, NOT_DELEGATED_REASON, isPendingDelegated, isFactTime, memoryRecordSchema } from './record-schema.ts'
 import { applyChange, CHANGE_KIND_QUESTIONS, initialProvenance, type ChangeAnchor, type ChangeFields } from './change.ts'
-import { commitChange, isSameRecord } from './commit-change.ts'
+import { commitChange, isSameRecord, type RelatedRecheckHook } from './commit-change.ts'
 import { UNKNOWN_SESSION_ID } from './session-id.ts'
 import { anchorRangeOf, type AnchorFacts } from './session-log.ts'
 import type { MemoryStore, QueryScope } from './store.ts'
@@ -697,6 +697,8 @@ export async function runSavePipeline(
     mergeWindowMs?: number
     /** 主题数上限（配置 index.maxTopics，调用时现读）；缺省 INDEX_MAX_TOPICS_DEFAULT。 */
     maxTopics?: number
+    /** 沿关联发复查信号的钩子，交给落盘原语（见 commit-change.ts）；不给就不发。 */
+    relatedRecheck?: RelatedRecheckHook
     /** 写入时刻（createdAt、updatedAt、有效期、快照与撤销记录）的时钟，缺省取当前时间。 */
     now?: () => number
     /**
@@ -1037,7 +1039,7 @@ export async function runSavePipeline(
         ...(deps.delegation !== undefined
           ? { isBlocked: (current: MemoryRecord) => current.status !== 'active' || notOwnPending(current, deps.session.id) !== undefined }
           : {}),
-      }, { store, snapshots: deps.snapshots, mergeWindowMs: deps.mergeWindowMs })
+      }, { store, snapshots: deps.snapshots, mergeWindowMs: deps.mergeWindowMs, relatedRecheck: deps.relatedRecheck })
       if (committed.kind === 'changed') return changedAfterRead(target!.id, committed.current, deps.delegation !== undefined)
       if (committed.kind === 'stopped') return committed.stop
       if (committed.kind === 'invalid') return { kind: 'rejected', code: 'schema-invalid', reason: `字段校验失败：${committed.reason}` }

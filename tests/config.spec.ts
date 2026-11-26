@@ -33,7 +33,7 @@ describe('Config schema', () => {
       scenes: PRESET_SCENES,
       removedPresetTypes: [],
       builtinDecayDays: {},
-      governance: { enabled: true, health: { sensitivity: 'normal' }, globalPromoteTarget: 'plugin-global', scan: { tokenCap: 200_000 } },
+      governance: { enabled: true, health: { sensitivity: 'normal' }, globalPromoteTarget: 'plugin-global', scan: { tokenCap: 200_000 }, relatedRecheck: false },
       search: { source: 'both', dialogueTokenBudget: 1500, memoryQuotes: true, queryExpansion: true, dialogueToolResults: true },
       history: { mergeWindowMinutes: 60 },
       brewingDreams: { minIntervalDays: 7, minChanges: 30, minNewMessages: 50, idleMinutes: 30, weeklyTokenCap: 2_000_000, maxChangeRatio: 0.2 },

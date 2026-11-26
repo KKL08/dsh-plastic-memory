@@ -183,6 +183,8 @@ type UpsertInput = {
   plan?: PendingDecision['plan']
   /** 横向冲突回查出处的结果（见 schema.ts PendingDecision.sourceCheck）：再报时换成这次的，这次没回查就去掉。 */
   sourceCheck?: PendingDecision['sourceCheck']
+  /** 依据已变的来源（见 schema.ts PendingDecision.via）：再报时换成这次的，这次没给就去掉。 */
+  via?: string
 }
 type UpsertResult = { created: boolean; settled?: true; isSkipped?: true; entry: PendingDecision }
 
@@ -199,9 +201,10 @@ function mergeReport(existing: PendingDecision, input: UpsertInput): PendingDeci
   }
   const wsById = new Map(input.memoryIds.map((id, i) => [id, input.workspaces?.[i]]))
   const workspaces = input.workspaces !== undefined ? existing.memoryIds.map(id => wsById.get(id) ?? '(未知)') : undefined
-  const { plan: _plan, sourceCheck: _sourceCheck, ...rest } = existing
+  const { plan: _plan, sourceCheck: _sourceCheck, via: _via, ...rest } = existing
   return {
     ...rest, summary: input.summary,
+    ...(input.via !== undefined ? { via: input.via } : {}),
     ...(input.plan !== undefined ? { plan: input.plan } : {}),
     ...(input.sourceCheck !== undefined ? { sourceCheck: input.sourceCheck } : {}),
     ...(input.baselineRef !== undefined ? { baselineRef: input.baselineRef } : {}),
@@ -335,6 +338,7 @@ export class PendingDecisionsStore {
       id: genId('pd'),
       ...(input.kind !== undefined && input.kind !== 'conflict' ? { kind: input.kind } : {}),
       memoryIds: input.memoryIds,
+      ...(input.via !== undefined ? { via: input.via } : {}),
       ...(input.baselineRef !== undefined ? { baselineRef: input.baselineRef } : {}),
       summary: input.summary,
       ...(input.plan !== undefined ? { plan: input.plan } : {}),
