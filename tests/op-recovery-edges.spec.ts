@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { expect, it as test, vi } from 'vitest'
 import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -13,17 +13,26 @@ import { record } from './helpers/record.ts'
 // 补做遇到的边角：中断之后、补做之前，文件被人动过或一时读不出，以及日志里有读不懂的行。
 // 在进程边界注入：指定路径的删除失败、指定路径读不出。
 
-const fault = vi.hoisted(() => ({ failRemove: '', unreadable: '', isTmpStuck: false }))
+const context = await vi.hoisted(async () => {
+  const { AsyncLocalStorage } = await import('node:async_hooks')
+  return new AsyncLocalStorage<{
+    fault: { failRemove: string; unreadable: string; isTmpStuck: boolean }
+    root: string
+    base: string
+    journals: OpJournal[]
+  }>()
+})
+const scope = () => context.getStore()!
 vi.mock('node:fs/promises', async (importOriginal) => {
   const fs = await importOriginal<typeof import('node:fs/promises')>()
   return {
     ...fs,
     rm: async (...args: Parameters<typeof fs.rm>) => {
-      if (String(args[0]) === fault.failRemove || (fault.isTmpStuck && String(args[0]).includes('.md.tmp-'))) throw new Error('删不掉')
+      if (String(args[0]) === scope().fault.failRemove || (scope().fault.isTmpStuck && String(args[0]).includes('.md.tmp-'))) throw new Error('删不掉')
       return fs.rm(...args)
     },
     readFile: async (...args: Parameters<typeof fs.readFile>) => {
-      if (String(args[0]) === fault.unreadable) throw Object.assign(new Error('读不出'), { code: 'EACCES' })
+      if (String(args[0]) === scope().fault.unreadable) throw Object.assign(new Error('读不出'), { code: 'EACCES' })
       return fs.readFile(...args)
     },
   }
@@ -32,25 +41,26 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 const quiet = { info() {}, warn() {}, error() {} }
 const global = { kind: 'global' } as const
 const STEP = 'test-step'
-let base: string
-let root: string
-const journals: OpJournal[] = []
+/** 正文完全结束后才复位故障、关库和删目录；超时不会提前回收资源。 */
+async function withRecoveryCase(fn: () => Promise<void>): Promise<void> {
+  await context.run({ fault: { failRemove: '', unreadable: '', isTmpStuck: false }, root: '', base: '', journals: [] }, async () => {
+    scope().base = await mkdtemp(join(tmpdir(), 'pm-recovery-edges-'))
+    scope().root = join(scope().base, 'memories')
+    try { await fn() } finally {
+      Object.assign(scope().fault, { failRemove: '', unreadable: '', isTmpStuck: false })
+      for (const journal of scope().journals.splice(0)) journal.close()
+      await rm(scope().base, { recursive: true, force: true })
+    }
+  })
+}
 
-beforeEach(async () => {
-  base = await mkdtemp(join(tmpdir(), 'pm-recovery-edges-'))
-  root = join(base, 'memories')
-})
-afterEach(async () => {
-  Object.assign(fault, { failRemove: '', unreadable: '', isTmpStuck: false })
-  for (const journal of journals.splice(0)) journal.close()
-  await rm(base, { recursive: true, force: true })
-})
+const it = (name: string, fn: () => Promise<void>) => test(name, () => withRecoveryCase(fn))
 
 /** 一个「进程」：自己的锁、自己的日志连接、自己的步骤记录。 */
 function open() {
-  const journal = new OpJournal({ path: join(base, 'op-journal.sqlite'), log: quiet })
-  journals.push(journal)
-  const table = new FileTable({ root, journal, log: quiet, stats: new InMemoryKvTable<RecallStats>(), lock: createRootLock({ root, log: quiet }) })
+  const journal = new OpJournal({ path: join(scope().base, 'op-journal.sqlite'), log: quiet })
+  scope().journals.push(journal)
+  const table = new FileTable({ root: scope().root, journal, log: quiet, stats: new InMemoryKvTable<RecallStats>(), lock: createRootLock({ root: scope().root, log: quiet }) })
   const ran: Array<{ content: string | undefined; isIntact: boolean }> = []
   table.registerStep(STEP, async (_step, ctx) => { ran.push({ content: ctx.record?.content, isIntact: ctx.isIntact }) })
   /** 进一次写入段，触发补做。 */
@@ -74,9 +84,9 @@ async function seedCommitted() {
 
 it('彻底删除没删成、文件随后被人改了名又改了内容：补做不删它', async () => {
   const p = await seed()
-  fault.failRemove = p.path
+  scope().fault.failRemove = p.path
   await expect(p.table.delete('mem_a', global)).rejects.toThrow('删不掉')
-  fault.failRemove = ''
+  scope().fault.failRemove = ''
   const renamed = join(dirname(p.path), '手改的名字.md')
   await rename(p.path, renamed)
   await writeFile(renamed, (await readFile(renamed, 'utf8')).replace('第一版', '用户改过的正文'))
@@ -117,12 +127,12 @@ it('写成之后、补做之前文件被人删了：仍算写成了，步骤照�
 
 it('写成了的文件一时读不出：这一行留着，读得出之后再补做', async () => {
   const p = await seedCommitted()
-  fault.unreadable = p.path
+  scope().fault.unreadable = p.path
   const next = open()
   await next.enter()
   expect(next.ran).toEqual([])
   expect(next.journal.pending().map(row => row.op)).toEqual([p.op.id])
-  fault.unreadable = ''
+  scope().fault.unreadable = ''
   await next.enter()
   expect(next.ran).toEqual([{ content: '第二版', isIntact: true }])
   expect(next.journal.pending()).toEqual([])
@@ -131,7 +141,7 @@ it('写成了的文件一时读不出：这一行留着，读得出之后再补�
 it('日志里有一行形状读不懂：留着它，后面的行照常补做', async () => {
   await seedCommitted()
   const { DatabaseSync } = await import('node:sqlite')
-  const db = new DatabaseSync(join(base, 'op-journal.sqlite'))
+  const db = new DatabaseSync(join(scope().base, 'op-journal.sqlite'))
   db.prepare('INSERT INTO ops(seq, op, at, body) VALUES (-1, ?, ?, ?)').run('op_unknown', 0, JSON.stringify({ steps: [], target: null }))
   db.close()
   const next = open()
@@ -145,7 +155,7 @@ it('目录里另一个不相干的文件读不出：写成了的那份照样找�
   const p = await seedCommitted()
   const blocker = join(dirname(p.path), '0-读不出.md')
   await writeFile(blocker, '---\nid: mem_blocker\n---\n')
-  fault.unreadable = blocker
+  scope().fault.unreadable = blocker
   const next = open()
   await next.enter()
   expect(next.ran).toEqual([{ content: '第二版', isIntact: true }])
@@ -156,10 +166,10 @@ it('彻底删除删掉了选中的那份、同 id 还剩一份：算删成了，
   const p = await seed()
   const twin = join(dirname(p.path), '另一份.md')
   await writeFile(twin, await readFile(p.path, 'utf8'))
-  fault.failRemove = twin
+  scope().fault.failRemove = twin
   const op = newWriteOp({ steps: [{ kind: STEP }] })
   await p.table.delete('mem_a', global, undefined, op).catch(() => {})
-  fault.failRemove = ''
+  scope().fault.failRemove = ''
   const survivors = [p.path, twin].filter(path => path !== twin)
   const next = open()
   await next.enter()
@@ -173,7 +183,7 @@ it('彻底删除删掉了选中的那份、同 id 还剩一份：算删成了，
 it('日志里有一行目标种类认识、字段不全：留着它，不当成没提交作废', async () => {
   const p = await seedCommitted()
   const { DatabaseSync } = await import('node:sqlite')
-  const db = new DatabaseSync(join(base, 'op-journal.sqlite'))
+  const db = new DatabaseSync(join(scope().base, 'op-journal.sqlite'))
   db.prepare('INSERT INTO ops(seq, op, at, body) VALUES (-1, ?, ?, ?)').run('op_partial', 0, JSON.stringify({ steps: [], target: { kind: 'write', dir: dirname(p.path) } }))
   db.close()
   const next = open()
@@ -192,10 +202,10 @@ it('调用方结操作时有一步没人会做：这一行留在日志里，认�
 
 it('改名的写入：新文件落下了、旧文件删不掉，随后新文件被人整个换过（提交标记也没了）：仍算写成了，步骤照补', async () => {
   const p = await seed()
-  fault.failRemove = p.path
+  scope().fault.failRemove = p.path
   const op = newWriteOp({ steps: [{ kind: STEP }] })
   await expect(p.table.update('mem_a', global, r => ({ ...r, name: '乙', content: '第二版' }), op)).rejects.toThrow('删不掉')
-  fault.failRemove = ''
+  scope().fault.failRemove = ''
   const renamed = join(dirname(p.path), '乙.md')
   const text = await readFile(renamed, 'utf8')
   expect(text).toContain(op.id)
@@ -208,7 +218,7 @@ it('改名的写入：新文件落下了、旧文件删不掉，随后新文件�
 
 it('改名的写入：新文件落下了、临时文件清不掉：写入照常算成，步骤照做', async () => {
   const p = await seed()
-  fault.isTmpStuck = true
+  scope().fault.isTmpStuck = true
   const op = newWriteOp({ steps: [{ kind: STEP }] })
   const written = await p.table.update('mem_a', global, r => ({ ...r, name: '乙', content: '第二版' }), op)
   await p.table.finishOp(op, written)
@@ -218,9 +228,9 @@ it('改名的写入：新文件落下了、临时文件清不掉：写入照常�
 
 it('按操作 id 查落没落盘：提交了、文件这一刻读不出时报错，不答「没写」；读得出就找得到；没写过的答没有', async () => {
   const p = await seedCommitted()
-  fault.unreadable = p.path
+  scope().fault.unreadable = p.path
   await expect(p.table.locateWrittenBy('mem_a', global, p.op.id)).rejects.toThrow('已经提交')
-  fault.unreadable = ''
+  scope().fault.unreadable = ''
   expect((await p.table.locateWrittenBy('mem_a', global, p.op.id))?.record.content).toBe('第二版')
   expect(await p.table.locateWrittenBy('mem_a', global, 'op_never')).toBeUndefined()
 })

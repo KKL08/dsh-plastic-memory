@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it as test, vi } from 'vitest'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -17,7 +17,16 @@ import { applied, entryOf, placement } from './helpers/topic-placement.ts'
 // 写入提交之后、索引行改完之前进程退出：在进程边界（node:fs/promises 的写调用）注入「进程没了」，
 // 换一个新实例进一次写入段补做，看索引是不是和写成的那份记忆对得上。
 
-const fault = vi.hoisted(() => ({ remaining: Number.POSITIVE_INFINITY, isDead: false, calls: 0 }))
+const context = await vi.hoisted(async () => {
+  const { AsyncLocalStorage } = await import('node:async_hooks')
+  return new AsyncLocalStorage<{
+    fault: { remaining: number; isDead: boolean; calls: number }
+    root: string
+    journalDir: string
+    journals: OpJournal[]
+  }>()
+})
+const scope = () => context.getStore()!
 class Crash extends Error {}
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -26,12 +35,12 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   return Object.fromEntries(Object.entries(actual).map(([key, value]) => [key, typeof value === 'function' && writes.has(key)
     ? async (...args: unknown[]) => {
         if (key === 'mkdir' && /[\\/]\.state[\\/]lock$/.test(String(args[0]))) return (value as (...a: unknown[]) => Promise<unknown>)(...args)
-        if (fault.isDead || fault.remaining <= 0) {
-          fault.isDead = true
+        if (scope().fault.isDead || scope().fault.remaining <= 0) {
+          scope().fault.isDead = true
           throw new Crash(`进程在 ${key} 之前退出`)
         }
-        fault.remaining--
-        fault.calls++
+        scope().fault.remaining--
+        scope().fault.calls++
         return (value as (...a: unknown[]) => Promise<unknown>)(...args)
       }
     : value]))
@@ -41,36 +50,36 @@ const quiet = { info() {}, warn() {}, error() {} }
 const G = { kind: 'global' } as const
 const WS = '/tmp/pm-topic-recovery-ws'
 
-let root: string
-let journalDir: string
-const journals: OpJournal[] = []
 async function fresh() {
-  for (const journal of journals.splice(0)) journal.close()
-  if (root !== undefined) await rm(root, { recursive: true, force: true })
-  if (journalDir !== undefined) await rm(journalDir, { recursive: true, force: true })
-  root = await mkdtemp(join(tmpdir(), 'pm-topic-recovery-'))
-  journalDir = await mkdtemp(join(tmpdir(), 'pm-topic-recovery-journal-'))
+  for (const journal of scope().journals.splice(0)) journal.close()
+  if (scope().root !== '') await rm(scope().root, { recursive: true, force: true })
+  if (scope().journalDir !== '') await rm(scope().journalDir, { recursive: true, force: true })
+  scope().root = await mkdtemp(join(tmpdir(), 'pm-topic-recovery-'))
+  scope().journalDir = await mkdtemp(join(tmpdir(), 'pm-topic-recovery-journal-'))
 }
-beforeEach(async () => {
-  fault.remaining = Number.POSITIVE_INFINITY
-  fault.isDead = false
-  await fresh()
-})
-afterEach(async () => {
-  fault.remaining = Number.POSITIVE_INFINITY
-  fault.isDead = false
-  for (const journal of journals.splice(0)) journal.close()
-  await rm(root, { recursive: true, force: true })
-  await rm(journalDir, { recursive: true, force: true })
-})
+/** 正文完全结束后才复位故障、关库和删目录；超时不会提前回收资源。 */
+async function withRecoveryCase(fn: () => Promise<void>): Promise<void> {
+  await context.run({ fault: { remaining: Number.POSITIVE_INFINITY, isDead: false, calls: 0 }, root: '', journalDir: '', journals: [] }, async () => {
+    await fresh()
+    try { await fn() } finally {
+      scope().fault.remaining = Number.POSITIVE_INFINITY
+      scope().fault.isDead = false
+      for (const journal of scope().journals.splice(0)) journal.close()
+      await rm(scope().root, { recursive: true, force: true })
+      await rm(scope().journalDir, { recursive: true, force: true })
+    }
+  })
+}
+
+const it = (name: string, fn: () => Promise<void>) => test(name, () => withRecoveryCase(fn))
 
 function open() {
-  const journal = new OpJournal({ path: join(journalDir, 'op-journal.sqlite'), log: quiet })
-  journals.push(journal)
-  return { table: new FileTable({ root, stats: new InMemoryKvTable<RecallStats>(), log: quiet, lock: createRootLock({ root, log: quiet }), journal }), journal }
+  const journal = new OpJournal({ path: join(scope().journalDir, 'op-journal.sqlite'), log: quiet })
+  scope().journals.push(journal)
+  return { table: new FileTable({ root: scope().root, stats: new InMemoryKvTable<RecallStats>(), log: quiet, lock: createRootLock({ root: scope().root, log: quiet }), journal }), journal }
 }
-const gdir = () => join(root, GLOBAL_DIR)
-const wdir = () => join(root, workspaceDirName(WS))
+const gdir = () => join(scope().root, GLOBAL_DIR)
+const wdir = () => join(scope().root, workspaceDirName(WS))
 
 /** 全局：mem_a 在「上线」，mem_b 在「未整理」。项目：mem_w 在「上线」。 */
 async function seed() {
@@ -149,9 +158,9 @@ describe('写入提交后、索引行改完前进程退出', () => {
     it(`${s.name}：每一个写调用之前退出，补做后索引和写成的那份对得上，再维护一遍不变`, async () => {
       await seed()
       const dry = open()
-      fault.calls = 0
+      scope().fault.calls = 0
       await s.run(dry.table)
-      const total = fault.calls
+      const total = scope().fault.calls
       expect(total).toBeGreaterThan(1)
       expect(await where()).toEqual(s.after)
       const doneEntry = await entryOf(gdir())
@@ -160,10 +169,10 @@ describe('写入提交后、索引行改完前进程退出', () => {
         await fresh()
         await seed()
         const crashed = open()
-        fault.remaining = k
+        scope().fault.remaining = k
         await s.run(crashed.table).catch(() => {})
-        fault.remaining = Number.POSITIVE_INFINITY
-        fault.isDead = false
+        scope().fault.remaining = Number.POSITIVE_INFINITY
+        scope().fault.isDead = false
         // 留在日志里的行不带记忆的名称、摘要、正文
         expect(JSON.stringify(crashed.journal.pending()), `第 ${k} 次写之前退出`).not.toMatch(/的摘要|的正文|发版步骤|回复语言|新记忆/)
         const next = open()
