@@ -18,6 +18,8 @@ export type MemoryToolName = (typeof MEMORY_TOOLS)[number]
 export interface Summary {
   key: LocaleKey
   params?: Record<string, string | number>
+  /** 类型名（按类型列时）：调用方按界面语言换成显示名，拼好填进 `{types}`。 */
+  types?: string[]
 }
 
 type Args = Record<string, unknown>
@@ -59,9 +61,85 @@ export function isGlobalConfirmPending(text: string): boolean {
   return /^未保存：[^\n]*是全局记忆，改动会影响所有项目/.test(text)
 }
 
-/** `renderSearchResult`：每条命中一段，段首「[id] 类型｜摘要」。 */
+/** 原话没查成、改查了记忆时，结果开头单独一行的说明（`renderSearchResult` 的 pathNote），后面紧跟记忆检索结果。 */
+const PATH_NOTES = ['当前设置是只查记忆，这次没有查过往对话的原话。', '过往对话的原话暂时查不了，这次只查了记忆。', '这次读不到会话信息，过往对话的原话没查。']
+
+function pathNoteOf(text: string): string | undefined {
+  return PATH_NOTES.find(note => text.startsWith(`${note}\n`))
+}
+
+/**
+ * `renderSearchResult`：每条命中一段，段首「[id] 类型｜摘要」。开头的路径说明和第一条命中只隔一个换行，先去掉再数。
+ * 同时搜过往对话时分「【记忆条目】」「【其他原话】」两段（`renderSearchSections`），只数记忆条目段；
+ * 原话段在最后，记忆正文里也可能写着这个标题，所以从最后一处切。
+ */
 export function countSearchHits(text: string): number {
-  return text.split('\n\n').filter(block => /^\[[^\]\s]+\] [^\n]*｜/.test(block)).length
+  const pathNote = pathNoteOf(text)
+  if (pathNote !== undefined) return countSearchHits(text.slice(pathNote.length + 1))
+  if (text.startsWith('【其他原话】\n')) return 0
+  let memories = text
+  if (text.startsWith('【记忆条目】\n')) {
+    const dialogueAt = text.lastIndexOf('\n\n【其他原话】\n')
+    memories = text.slice('【记忆条目】\n'.length, dialogueAt === -1 ? undefined : dialogueAt)
+  }
+  return memories.split('\n\n').filter(block => /^\[[^\]\s]+\] [^\n]*｜/.test(block)).length
+}
+
+/** 按主题浏览的结果：每条一行「- [id] 名称（摘要）…」。 */
+function countBrowseRows(text: string): number {
+  return text.match(/^- \[[^\]\s]+\] /gm)?.length ?? 0
+}
+
+/** 列历史的头行「记忆 <id> 的历史：共读到 N 版，给出 M 版。」→ 给出的版数；参数错、找不到这条记忆时没有这行。 */
+function historyGiven(text: string): number | undefined {
+  const m = /^记忆 \S+ 的历史：共读到 \d+ 版，给出 (\d+) 版。/.exec(text)
+  return m ? Number(m[1]) : undefined
+}
+
+/**
+ * memory_search 按参数分五种用法，判定顺序同服务端：给了 id 是列历史或读一版，其次有关键词是检索（可带 topic、types），
+ * 再次只给 topic 是按主题浏览，只给 types 是按类型列。结果只说「列出 / 搜到 N 条」，参数错、找不到、读不全时不说找到了什么。
+ * 给了 topic 时服务端只查记忆；其余情况下 source 为 dialogue 是只搜过往对话，不数条数（原话没查成、改查了记忆时除外）。
+ */
+function searchSummary(args: Args, resultText: string | null): Summary {
+  const id = str(args.id)
+  const version = str(args.version)
+  if (id !== '' && version !== '') {
+    if (resultText === null) return { key: 'chat.tool.search.version.running', params: { id, version } }
+    const isRead = /^记忆 \S+ 的版本 \S+ · 起始 /.test(resultText)
+    return { key: isRead ? 'chat.tool.search.version.done' : 'chat.tool.search.version.failed', params: { id, version } }
+  }
+  if (id !== '' && args.history === true) {
+    if (resultText === null) return { key: 'chat.tool.search.history.running', params: { id } }
+    const count = historyGiven(resultText)
+    if (count === undefined) return { key: 'chat.tool.search.history.failed', params: { id } }
+    if (count === 0) return { key: resultText.includes('这条记忆没有历史版本') ? 'chat.tool.search.history.none' : 'chat.tool.search.history.failed', params: { id } }
+    const kind = resultText.includes('有部分历史版本没读出来') ? 'partial' : 'found'
+    return { key: count === 1 ? `chat.tool.search.history.${kind}.one` : `chat.tool.search.history.${kind}`, params: { id, count } }
+  }
+  const query = str(args.query)
+  const topic = str(args.topic).trim()
+  if (query.trim() === '' && topic !== '') {
+    if (resultText === null) return { key: 'chat.tool.search.topic.running', params: { topic } }
+    const count = countBrowseRows(resultText)
+    return count === 0 ? { key: 'chat.tool.search.topic.none', params: { topic } } : { key: 'chat.tool.search.topic.found', params: { topic, count } }
+  }
+  // 结果以路径说明开头时原话没查成、改查了记忆，照关键词检索数
+  if (args.source === 'dialogue' && topic === '' && (resultText === null || pathNoteOf(resultText) === undefined)) {
+    // 原话按会话和轮分组，数不出说得清的条数：只说搜了过往对话，说明里有「过往对话里没有找到。」这一行时说没搜到
+    if (resultText === null) return { key: 'chat.tool.search.dialogue.running', params: { query } }
+    const isNoHit = resultText.split('\n').includes('过往对话里没有找到。')
+    return { key: isNoHit ? 'chat.tool.search.dialogue.none' : 'chat.tool.search.dialogue.done', params: { query } }
+  }
+  const types = list(args.types).filter((type): type is string => typeof type === 'string' && type !== '')
+  if (query.trim() === '' && types.length > 0) {
+    if (resultText === null) return { key: 'chat.tool.search.types.running', types }
+    const count = countSearchHits(resultText)
+    return count === 0 ? { key: 'chat.tool.search.types.none', types } : { key: 'chat.tool.search.types.found', params: { count }, types }
+  }
+  if (resultText === null) return { key: 'chat.tool.search.running', params: { query } }
+  const count = countSearchHits(resultText)
+  return count === 0 ? { key: 'chat.tool.search.none', params: { query } } : { key: 'chat.tool.search.found', params: { count, query } }
 }
 
 /** `memory_forget` 的「已遗忘 N 条记忆」；全部不存在时没有这句。 */
@@ -122,12 +200,8 @@ export function toolSummary(toolName: MemoryToolName, args: Args | undefined, re
       const notSaved = isGlobalConfirmPending(resultText) ? 'chat.tool.save.confirmingGlobal' : 'chat.tool.save.notSaved'
       return { key: result === undefined ? notSaved : `chat.tool.save.${result.kind}`, params: { name: str(args.name) || (result?.name ?? name) } }
     }
-    case 'memory_search': {
-      const query = str(args.query)
-      if (resultText === null) return { key: 'chat.tool.search.running', params: { query } }
-      const count = countSearchHits(resultText)
-      return count === 0 ? { key: 'chat.tool.search.none', params: { query } } : { key: 'chat.tool.search.found', params: { count, query } }
-    }
+    case 'memory_search':
+      return searchSummary(args, resultText)
     case 'memory_forget': {
       if (resultText === null) {
         const ids = list(args.ids).length

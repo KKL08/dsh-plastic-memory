@@ -8,6 +8,7 @@
  */
 import { useMemo, type KeyboardEvent } from 'react'
 import { useT } from '../i18n.tsx'
+import { typeLabel } from '../type-label.ts'
 import { Icon } from '../ui/Icon.tsx'
 import { maskCard, maskedBody } from './command-summary.ts'
 import { parseArgs, toolSummary, type MemoryToolName } from './tool-summary.ts'
@@ -67,6 +68,7 @@ export function MemoryToolRow(props: MemoryToolViewProps & { hostT: HostTranslat
     if (summary === null) return ''
     const params = { ...summary.params }
     if (summary.scope !== undefined) params.scope = t(summary.scope.key, summary.scope.params)
+    if (summary.types !== undefined) params.types = summary.types.map(type => typeLabel(t, type, {})).join(t('chat.tool.search.typeSep'))
     return maskCard(t(summary.key, params))
   }, [state, output, toolName, argsRaw, done, t])
 

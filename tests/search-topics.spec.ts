@@ -25,6 +25,7 @@ import { InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 import { indexTree } from './helpers/topic-index.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 import { breakTopicIndex, removeTopicIndex, writeTopicIndex } from './helpers/topic-fixture.ts'
+import { toolSummary } from '../client/chat/tool-summary.ts'
 
 // memory_search 的主题检索：只给主题按索引顺序列出成员行并翻页；关键词检索的每条结果带所属主题和「同主题还有 N 条」，
 // 关键词命中主题名、曾用名或说明时先给「匹配的主题」，零命中或命中弱时附主题目录；条数和注入同口径。
@@ -988,5 +989,28 @@ describe('带主题的取候选（findTopicCandidates、topicGroupOf）', () => 
     expect(topicGroupOf(topics, rec)).toBe(g)
     expect(topicGroupOf(topics, { ...rec, scope: 'workspace', workspacePath: WS })).toBeUndefined()
     expect(topicGroupOf(topics, mem('nowhere'))).toBeUndefined()
+  })
+})
+
+describe('对话折叠行按渲染出的文本数主题浏览和按类型列的条数', () => {
+  // 折叠行只拿得到渲染文本：用真实执行器的结果对着解析跑一遍，改任一侧格式都会在这里失败
+  const summaryOf = async (e: ReturnType<typeof env>, args: SearchArgs) => toolSummary('memory_search', { ...args }, renderSearchResult(await e.search(args)))
+
+  it('主题浏览数这一页列出的行；主题不存在、读不到索引时是零条', async () => {
+    await standard()
+    const e = env()
+    expect(await summaryOf(e, { topic: '发版流程', scope: 'global', limit: 2 })).toEqual({ key: 'chat.tool.search.topic.found', params: { topic: '发版流程', count: 2 } })
+    expect(await summaryOf(e, { topic: '发版流程' })).toEqual({ key: 'chat.tool.search.topic.found', params: { topic: '发版流程', count: 5 } })
+    expect(await summaryOf(e, { topic: '发版流程', scope: 'global', offset: 5 })).toMatchObject({ key: 'chat.tool.search.topic.none' })
+    expect(await summaryOf(e, { topic: '不存在的主题' })).toMatchObject({ key: 'chat.tool.search.topic.none' })
+    await breakTopicIndex(globalDir())
+    expect(await summaryOf(e, { topic: '不存在的主题' })).toMatchObject({ key: 'chat.tool.search.topic.none' })
+  })
+
+  it('只给 types：数命中的段；这几类没有记忆时是零条', async () => {
+    await standard()
+    const e = env()
+    expect(await summaryOf(e, { types: ['preference'] })).toEqual({ key: 'chat.tool.search.types.found', params: { count: 1 }, types: ['preference'] })
+    expect(await summaryOf(e, { types: ['procedure'] })).toEqual({ key: 'chat.tool.search.types.none', types: ['procedure'] })
   })
 })

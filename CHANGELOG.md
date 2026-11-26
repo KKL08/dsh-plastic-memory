@@ -466,6 +466,9 @@ All notable changes to this project are documented here. The format follows
   again once after the update.
 
 ### Fixed
+- In the chat, the collapsed `memory_search` row showed an empty search when
+  the assistant listed memories by type. It now says which types were listed
+  and how many memories came back.
 - A memory you moved into the `.archive/` folder by hand while its file still
   said it was in use came back into use when it was accepted or rewritten,
   and restoring it from Recently deleted left it in `.archive/`. Both now
