@@ -14,7 +14,7 @@
 #   semantic layer    model-backed checks; they run only when DEEPSEEK_API_KEY
 #                     is set and the host can pick a default model, otherwise
 #                     they are reported as SKIPPED.
-# 第三趟始终运行：只用合成凭据和预加载的 HTTP 响应，验证认证脱敏及 550 分类。
+# 第三趟始终运行：只用合成凭据和预加载的 HTTP 响应，验证默认模型自动体检成功落盘、认证脱敏及 550 分类。
 # Model-backed checks can also run on another provider route the host ships
 # (scripts/host-contract/test-model.ts): set TEST_LLM_PROVIDER, TEST_LLM_MODEL
 # and TEST_LLM_API_KEY together. That route then takes precedence over
@@ -25,7 +25,7 @@
 #   scripts/host-contract/run.sh              run (temp dir removed on exit)
 #   HOST_SMOKE_KEEP=1 ...                     keep the temp dir (logs, DSH_HOME) — with a key set,
 #                                             the kept dir holds an owner-only .credentials.yaml
-#   DEEPSEEK_API_KEY=... ...                  enable the semantic-layer and auto-checkup cases
+#   DEEPSEEK_API_KEY=... ...                  enable the real-model semantic-layer cases
 #   TEST_LLM_PROVIDER=... TEST_LLM_MODEL=... TEST_LLM_API_KEY=... ...
 #                                             same cases on another provider route
 set -euo pipefail
@@ -136,6 +136,7 @@ if [ ! -f "$RESULTS3" ]; then
 fi
 # Each results file comes from one boot; a failed case is reported against the
 # boot that ran it, with that boot's log tail, not against the last boot started.
+# H17 在第三趟计入通过或失败，不再算作第一趟无 key 时的跳过；H18 同趟计数。
 STEP=results
 FAILED_STEPS="$TMP/failed-steps"
 set +e

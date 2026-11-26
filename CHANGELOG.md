@@ -330,6 +330,11 @@ All notable changes to this project are documented here. The format follows
   matching memories and moves the turns they were saved from up the results.
 
 ### Changed
+- Testing: `pnpm host:contract` runs the default-model automatic checkup
+  without a model key, using a fixed successful HTTP stream through the real
+  host adapter and scheduler. It checks the request route and saved findings,
+  and reports each checkup stage, the last saved state and read errors on
+  failure.
 - `memory_save` now guides the assistant to keep one topic, state or event
   per memory and to update the same memory when a project or decision
   changes, so the earlier state stays as a past version. Decisions are

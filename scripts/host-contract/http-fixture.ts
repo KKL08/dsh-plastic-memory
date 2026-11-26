@@ -14,8 +14,8 @@ export interface HttpFixtureConfig {
   sentinel: string
 }
 
-/** 两种 550 正文分别验证状态码分类和认证类型的优先级。 */
-export type HttpFixtureMode = 'auth' | 'server' | 'auth-type'
+/** 成功流验证体检落盘；两种 550 正文分别验证状态码分类和认证类型的优先级。 */
+export type HttpFixtureMode = 'success' | 'auth' | 'server' | 'auth-type'
 
 /** HTTP 实收值；provider 是 URL 对应的官方路由，GET 没有模型字段。 */
 export interface HttpRequestRecord {
@@ -57,7 +57,7 @@ export function createHttpFixture(config: HttpFixtureConfig): HttpFixture {
       const isModels = url === config.modelsUrl && method === 'GET'
       const isMessages = url === config.messagesUrl && method === 'POST'
       const matched = isModels || isMessages
-      const status = matched ? (isModels || fixture.mode === 'auth' ? 401 : 550) : null
+      const status = matched ? (isModels || fixture.mode === 'auth' ? 401 : fixture.mode === 'success' ? 200 : 550) : null
       const body = await request.text()
       const model = isMessages && body !== '' ? (JSON.parse(body) as { model?: string }).model ?? null : null
       fixture.requests.push({
@@ -65,11 +65,34 @@ export function createHttpFixture(config: HttpFixtureConfig): HttpFixture {
         provider: matched ? config.provider : null, model, matched, status,
       })
       if (status === null) throw new Error(`未匹配的 HTTP 请求：${method} ${url}`)
+      if (isMessages && fixture.mode === 'success') return semanticResponse(body, config.model)
       const type = isModels || fixture.mode !== 'server' ? 'authentication_error' : 'api_error'
       return Response.json({ error: { type, message: config.sentinel } }, { status })
     },
   }
   return fixture
+}
+
+/** 返回完整文本流；发现引用请求里的真实记忆，确保解析器和持久化都能接受。 */
+function semanticResponse(body: string, model: string): Response {
+  const request = JSON.parse(body) as { messages: Array<{ role: string; content: Array<{ type: string; text?: string }> }> }
+  const userText = request.messages.filter(m => m.role === 'user').flatMap(m => m.content.filter(c => c.type === 'text').map(c => c.text ?? '')).join('\n')
+  const id = /^- id=(\S+) type=/m.exec(userText)?.[1]
+  if (id === undefined) throw new Error('成功响应需要语义扫描请求中的记忆 ID')
+  const text = JSON.stringify({ findings: [{
+    type: 'unclear', memoryIds: [id], summary: '这条约定的适用范围尚不明确', suggestedAction: '补充适用范围和执行条件',
+  }] })
+  const events = [
+    { type: 'message_start', message: { id: 'msg_checkup', type: 'message', role: 'assistant', model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 0 } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 20 } },
+    { type: 'message_stop' },
+  ]
+  return new Response(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''), {
+    status: 200, headers: { 'content-type': 'text/event-stream' },
+  })
 }
 
 // NODE_OPTIONS 只在测试那趟设置；验证插件导入同一个模块，读取同一份请求记录。
