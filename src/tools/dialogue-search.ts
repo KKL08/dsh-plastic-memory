@@ -60,6 +60,17 @@ function isVisibleSegment(segment: DialogueSegment, includeTools: boolean): bool
   return includeTools || segment.speaker !== 'tool'
 }
 
+/** 按会话和消息缓存可见段；每轮检索新建读取器，扩查不沿用首轮缓存。 */
+export function messageReader(store: DialogueSearchDeps['store'], gen: number, includeTools: boolean): (segment: DialogueSegment) => DialogueSegment[] {
+  const messages = new Map<string, DialogueSegment[]>()
+  return (s: DialogueSegment) => {
+    const key = JSON.stringify([s.sessionId, s.seq])
+    let rows = messages.get(key)
+    if (!rows) { rows = store.segmentsOf(gen, s.sessionId, s.seq, s.seq).filter(s => isVisibleSegment(s, includeTools)); messages.set(key, rows) }
+    return rows
+  }
+}
+
 /** 现查一次会话表，留下宿主列出的清单。 */
 export async function listSessionTable(deps: Pick<DialogueSearchDeps, 'host' | 'noReview' | 'workspaceOf'>): Promise<ListedSessions> {
   let entries: HostSessionEntry[] = []
@@ -98,7 +109,8 @@ export function shareDialogueReads(deps: DialogueSearchDeps): DialogueSearchDeps
   }
 }
 
-function queryAndRank(query: string, tokenizer: DialogueTokenizer, store: DialogueSearchDeps['store'], gen: number, sessionIds: string[], includeTools: boolean) {
+/** 同一查询口径供首轮和扩查复用，所有读库同步完成。 */
+export function queryAndRank(query: string, tokenizer: DialogueTokenizer, store: DialogueSearchDeps['store'], gen: number, sessionIds: string[], includeTools: boolean) {
   const match = tokenizer.match(query)
   const opts = { limit: 60, weights: DIALOGUE_BM25_WEIGHTS, sessionIds, speakers: includeTools ? ['user', 'assistant', 'tool'] : ['user', 'assistant'] }
   const all = match ? store.search(gen, match.all, opts) : []
@@ -194,13 +206,7 @@ export async function retrieveDialogue(args: { query: string }, context: SearchC
   for (const hit of hits) if (!turnTables.has(hit.sessionId)) turnTables.set(hit.sessionId, deps.store.turnsOf(gen, hit.sessionId))
   const candidates = groupHitsByTurn(ranked.map(r => ({ ...r.segment, tier: r.tier })))
   for (const turn of candidates) turn.at = turnTables.get(turn.sessionId)?.find(t => t.turnSeq === turn.turnSeq)?.at
-  const messages = new Map<string, DialogueSegment[]>()
-  const messageOf = (s: DialogueSegment) => {
-    const key = JSON.stringify([s.sessionId, s.seq])
-    let rows = messages.get(key)
-    if (!rows) { rows = deps.store.segmentsOf(gen, s.sessionId, s.seq, s.seq).filter(s => isVisibleSegment(s, includeTools)); messages.set(key, rows) }
-    return rows
-  }
+  const messageOf = messageReader(deps.store, gen, includeTools)
   return { kind: 'ready', gen, notes, isComplete, includeTools, allowed: new Set(sessionIds), hits, ranked, diagnostics, candidates, turnTables, messageOf }
 }
 
@@ -208,6 +214,10 @@ export async function retrieveDialogue(args: { query: string }, context: SearchC
 export interface DialogueFusionInput {
   /** 原话之外参与排序的路，如记忆一路。不给就不融合：只查原话时按档位和分数排。 */
   lanes?: readonly FusionLane[]
+  /** 扩查合并并排好序的候选；不给时沿用首轮融合。 */
+  candidates?: DialogueTurnCandidate[]
+  /** 已给出的头部轮先装，避免新会话占掉预算。 */
+  pinned?: readonly DialogueTurnCandidate[]
   /** 别处已经给出的段（附在记忆下面的原话）：不再给、不计费。 */
   given?: ReadonlySet<string>
   /** 已附在记忆下面的轮：这些轮里装进来的段并到记忆下面，不在原话段里出现，也不再带前后轮。 */
@@ -220,7 +230,7 @@ export interface DialogueFusionInput {
 }
 
 /** 原话一路和别的路按名次融合，给原话命中的轮标上融合后的名次；别的路单独带来的轮没有可给的段，不进来。 */
-function fusedCandidates(retrieval: DialogueRetrieval, lanes: readonly FusionLane[]): DialogueTurnCandidate[] {
+export function fusedCandidates(retrieval: DialogueRetrieval, lanes: readonly FusionLane[]): DialogueTurnCandidate[] {
   const dialogueLane: FusionLane = { name: DIALOGUE_LANE, items: retrieval.ranked.map((r, i) => ({ id: segmentKey(r.segment), turn: quoteTurnKey(r.segment.sessionId, r.segment.turnSeq), rank: i + 1 })) }
   const byTurn = new Map(retrieval.candidates.map(t => [quoteTurnKey(t.sessionId, t.turnSeq), t]))
   return fuseLanes([dialogueLane, ...lanes]).flatMap((f, rank) => {
@@ -241,7 +251,7 @@ export async function finishDialogue(retrieval: DialogueRetrieval, deps: Dialogu
   const attached = input.attached ?? new Set<string>()
   const related = input.related ?? new Map()
   const notes = [...retrieval.notes]
-  const candidates = input.lanes === undefined ? retrieval.candidates : fusedCandidates(retrieval, input.lanes)
+  const candidates = input.candidates ?? (input.lanes === undefined ? retrieval.candidates : fusedCandidates(retrieval, input.lanes))
   const isOutside = (s: { sessionId: string; turnSeq: number }) => !attached.has(quoteTurnKey(s.sessionId, s.turnSeq))
   // 已附在记忆下面的轮不在原话段里输出：会话的先后和首轮名额只看要输出的轮
   const groups = orderCandidates(candidates.filter(isOutside))
@@ -258,7 +268,7 @@ export async function finishDialogue(retrieval: DialogueRetrieval, deps: Dialogu
       })
     },
   }, dialogueBudgetOf(deps.budget?.() ?? NaN), {
-    given: input.given, attached: candidates.filter(t => !isOutside(t)), costOf: s => isSameAsRelated(s, related) ? 0 : estimateTokens(s.text),
+    pinned: input.pinned, given: input.given, attached: candidates.filter(t => !isOutside(t)), costOf: s => isSameAsRelated(s, related) ? 0 : estimateTokens(s.text),
   })
   const omitted = omittedNote(fill.omittedTurns, fill.partialTurns)
   if (omitted) notes.push(omitted)

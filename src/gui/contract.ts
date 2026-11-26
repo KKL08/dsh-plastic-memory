@@ -789,10 +789,10 @@ export type CheckupResult = z.infer<typeof checkupResultSchema>
 // —— 后台模型的选择 ——
 
 /**
- * 选择键：不经会话、在后台调模型的功能各一个（自动体检、记忆梦境）。一个键存一份选择，几个宿主进程共用；
- * 没有这个键的选择 = 跟随（自动体检跟随默认模型，梦境跟随自动体检，见 governance/background-llm.ts）。
+ * 选择键：另调模型的功能各一个（自动体检、记忆梦境、原话检索的扩查）。一个键存一份选择，几个宿主进程共用；
+ * 没有这个键的选择 = 跟随（自动体检跟随默认模型，梦境跟随自动体检，见 governance/background-llm.ts；扩查跟随主对话的模型，见 tools/query-expansion.ts）。
  */
-export const MODEL_SELECTION_KEYS = ['checkup', 'dreams'] as const
+export const MODEL_SELECTION_KEYS = ['checkup', 'dreams', 'expansion'] as const
 export type ModelSelectionKey = (typeof MODEL_SELECTION_KEYS)[number]
 
 /**

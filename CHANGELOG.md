@@ -307,6 +307,18 @@ All notable changes to this project are documented here. The format follows
   against the other memories in that topic.
 - Testing: `pnpm host:contract` checks that DeepSeek Harness sees `topic` and
   `topicAbout` as optional parameters of `memory_save`.
+- When a search of past conversations finds nothing or only partial matches,
+  `memory_search` asks the current chat's model for other words the earlier
+  conversation may have used (synonyms, another language, names from code),
+  searches again with them and merges the results, keeping the first search's
+  best turns on top. The model sees the search words, your message in the
+  current turn, up to three excerpts from the first search and the names and
+  tags of up to five related memories; if it fails or takes more than about
+  10 seconds, you get the first search's result with a note. It is on by
+  default; set `search.queryExpansion` to `false` in the config file to turn
+  it off.
+- When `memory_search` searches past conversations only, it also looks for
+  matching memories and moves the turns they were saved from up the results.
 
 ### Changed
 - The memories loaded at the start of a chat now follow the topic index.

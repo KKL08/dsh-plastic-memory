@@ -459,6 +459,7 @@ export async function apply(ctx: Context, config: Config) {
   // memory_search 的 types 说明同样从类型表生成，类型配置热更新时随 memory_save 一起重注册；执行时仍经转发对象现读类型表
   const registerSearch = () => ctx.tools.register(createSearchTool({
     store, registry, host, sessionRecall: snapshotCache, callCap,
+    expansion: { isEnabled: () => config.search.queryExpansion.get(), host, selections },
     searchSource: () => config.search.source.get(),
     memoryQuotes: () => config.search.memoryQuotes.get(),
     dialogue: {

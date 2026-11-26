@@ -74,7 +74,7 @@ export type AutoCheckupSetting = z.infer<typeof autoCheckupSettingSchema>
 
 /**
  * 模型选择表的一行（`.state/model-selections/<sha1(id)>.json`，见 storage/sidecar.ts），一个选择键一条。id 是选择键
- * （`checkup`、`dreams`，见 gui/contract.ts MODEL_SELECTION_KEYS），其余字段是那份选择（提供方、模型、可选的推理强度）。
+ * （`checkup`、`dreams`、`expansion`，见 gui/contract.ts MODEL_SELECTION_KEYS），其余字段是那份选择（提供方、模型、可选的推理强度）。
  * 没有某个键的条目 = 跟随。几个宿主进程共用，开跑时现读。
  */
 export const modelSelectionRowSchema = modelSelectionSchema.extend({ id: z.string() })
