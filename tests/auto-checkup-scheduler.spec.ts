@@ -706,6 +706,39 @@ describe('自动体检调度：按范围认领', () => {
   })
 })
 
+describe('自动体检调度：核对所选模型时宿主列提供方出错', () => {
+  const CATALOG = { deepseek: { 'deepseek-v4-flash': [] }, 'provider-x': { 'model-a': ['low', 'high'] } }
+  /** 宿主列提供方时抛错，其余照常。 */
+  const providersFail = (llm: ReturnType<typeof fakeHostLlm>): ReturnType<typeof fakeHostLlm> =>
+    ({ ...llm, listProviders: () => { throw Object.assign(new Error('listing providers failed'), { code: 'TRANSPORT' }) } })
+
+  it('确认不了：这一轮照常用选的模型体检、写完成记录，不算退回', async () => {
+    const e = env({ llm: providersFail(fakeHostLlm({ catalog: CATALOG })) })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 1)
+    await e.selections.set('checkup', { provider: 'provider-x', model: 'model-a', reasoningEffort: 'high' })
+    await expect(e.scheduler.recheck()).resolves.toBeUndefined()
+    expect(e.llm.requests).toHaveLength(1)
+    expect(e.llm.requests[0]).toMatchObject({ provider: 'provider-x', model: 'model-a', reasoningEffort: 'high' })
+    expect((await e.completed()).global).toMatchObject({ by: 'auto' })
+    expect((await e.lastResultOf('global'))?.modelFallback).toBeUndefined()
+  })
+
+  it('随后选的模型调用出错：记体检失败、带重试时间，不写完成记录', async () => {
+    const e = env({ llm: providersFail(fakeHostLlm({ catalog: CATALOG, reply: () => ({ code: 'RATE_LIMIT', message: 'too many requests' }) })) })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 1)
+    await e.selections.set('checkup', { provider: 'provider-x', model: 'model-a' })
+    await expect(e.scheduler.recheck()).resolves.toBeUndefined()
+    expect(e.llm.requests[0]).toMatchObject({ provider: 'provider-x', model: 'model-a' })
+    expect(await e.completed()).toEqual({})
+    expect((await e.readView()).scopes[0]).toMatchObject({
+      modelUnavailable: null,
+      failure: { count: 1, retryAt: e.clock.now + HOUR, cause: { kind: 'model-error', hostCode: 'RATE_LIMIT' } },
+    })
+  })
+})
+
 describe('自动体检调度：失败与重试', () => {
   /** 一次体检尝试 = 一次调用加内容检查自带的一次重试（两次都不成才算没做完）。 */
   const ATTEMPT = 2

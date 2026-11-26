@@ -48,13 +48,13 @@ export type SelectionProblem = 'provider-gone' | 'model-gone' | 'effort-gone'
 /**
  * 选的提供方、模型、推理强度现在还在不在：都在为 undefined，不在给原因。
  * 提供方看宿主的提供方列表；模型看这个提供方列出来的模型（没登录、没配 key 时提供方列不出模型，按不在算）；
- * 选了推理强度时再看模型详情里有没有它。列模型、读详情出错时确认不了，不算不在（调用时出错照常按体检失败处理）；
+ * 选了推理强度时再看模型详情里有没有它。提供方列表读不出、列模型、读详情出错时确认不了，不算不在（调用时出错照常按体检失败处理）；
  * 只有宿主报提供方没有适配器（NO_ADAPTER）时算提供方不在。
  */
 export async function checkSelection(catalog: HostModelCatalog | undefined, selection: ModelSelection): Promise<SelectionProblem | undefined> {
   if (catalog === undefined) return 'provider-gone'
-  if (!catalog.listProviders().some(p => p.id === selection.provider)) return 'provider-gone'
   try {
+    if (!catalog.listProviders().some(p => p.id === selection.provider)) return 'provider-gone'
     const models = await catalog.listModels(selection.provider)
     if (!models.some(m => m.id === selection.model)) return 'model-gone'
     if (selection.reasoningEffort === undefined) return undefined

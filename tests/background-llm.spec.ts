@@ -118,6 +118,13 @@ describe('「还在不在」的校验', () => {
     const { host } = setup({ 'provider-x': { models: 'throws' } })
     expect(await checkSelection(host.service, { provider: 'provider-x', model: 'model-a' })).toBeUndefined()
   })
+
+  it('列提供方出错：确认不了，不算不在；宿主报 NO_ADAPTER 时仍算提供方不在', async () => {
+    const { host } = setup()
+    const failing = (code: string): HostModelCatalog => ({ ...host.service, listProviders: () => { throw Object.assign(new Error('listing providers failed'), { code }) } })
+    expect(await checkSelection(failing('TRANSPORT'), { provider: 'provider-x', model: 'model-a' })).toBeUndefined()
+    expect(await checkSelection(failing('NO_ADAPTER'), { provider: 'provider-x', model: 'model-a' })).toBe('provider-gone')
+  })
 })
 
 describe('解析器：自动体检', () => {
@@ -159,6 +166,19 @@ describe('解析器：自动体检', () => {
     const r = await s.resolve('checkup')
     expect(r).toMatchObject({ fellBack: true, reason: 'provider-gone' })
     expect(await s.call(r)).toMatchObject(DEFAULT_ROUTE)
+  })
+
+  it('列提供方出错：确认不了，照常用选的模型，不算退回', async () => {
+    const s = setup()
+    await s.selections.set('checkup', { provider: 'provider-y', model: 'model-b' })
+    const resolve = createBackgroundLlmResolver({
+      ...s.deps,
+      catalog: () => ({ ...s.host.service, listProviders: () => { throw Object.assign(new Error('listing providers failed'), { code: 'TRANSPORT' }) } }),
+      defaultLlm: () => hostSemanticLlm(s.host.service, DEFAULT_ROUTE),
+    })
+    const r = await resolve('checkup')
+    expect(r).toMatchObject({ isSelected: true, fellBack: false })
+    expect(await s.call(r)).toMatchObject({ provider: 'provider-y', model: 'model-b' })
   })
 
   it('退回默认模型时宿主也没有默认模型：llm 为 null，仍说明是退回', async () => {
