@@ -1,3 +1,4 @@
+import { withWriteSession } from './storage/recent-changes.ts'
 import { createSaveHints, type SaveHints } from './save-signals.ts'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
@@ -42,7 +43,7 @@ import { createCordisHostSession } from './cordis-host-session.ts'
 import { goneCopies } from './tools/workspace-gate.ts'
 import type { ReadEventFn } from './tools/source.ts'
 import { SnapshotCache, resolveWorkspacePath } from './runtime.ts'
-import { lastVisibleSnapshot, shouldSendSnapshot, snapshotMessageBody } from './snapshot-message.ts'
+import { changeNoticeMessageBody, lastVisibleSnapshot, shouldSendSnapshot, snapshotMessageBody } from './snapshot-message.ts'
 import { OVERFLOW_MODES, type OverflowMode } from './contract-codes.ts'
 import { resolveHealthThresholds, type HealthSensitivity } from './governance/health-presets.ts'
 import { PendingDecisionsStore, overflowScopeOf } from './governance/decisions.ts'
@@ -406,6 +407,7 @@ export async function apply(ctx: Context, config: Config) {
   // 超限提醒进待决账本（治理关闭时也记：它是待处理里的提醒，不是体检结果）。
   // 上限、超限处理、溯源档位是 getter：每次构建快照时现读配置（SnapshotCache 一次构建只取一次）。
   const snapshotCache = new SnapshotCache({
+    recentChanges: journal,
     store, registry, overflowLedger: decisions, snapshots, memoryRoot, host, log: ctx.logger,
     get budget() { return config.snapshotTokenBudget.get() },
     get overflow() { return config.snapshotOverflow.get() },
@@ -433,7 +435,7 @@ export async function apply(ctx: Context, config: Config) {
     ...tool,
     execute: async (args, exec) => {
       try {
-        return await tool.execute(args, exec)
+        return await withWriteSession(exec.agent?.session.header.id, () => tool.execute(args, exec))
       } finally {
         void views?.request()
       }
@@ -755,9 +757,16 @@ export async function apply(ctx: Context, config: Config) {
   // 发送点只有下面两处，组装（冻结、计召回、会话视图）也只在这里发生，所以冻结即模型可见。
   // 发不发看会话里模型最后能看到的那份快照：组装出的文本与它逐字相同就不发，前缀不动；
   // 压缩遮蔽了旧快照、记忆改过、配置热更新后，文本不同才补发一份，取代句告诉模型以最新这份为准。
-  const snapshotMessage = async (session: Session): Promise<UserMessage | undefined> => {
+  const snapshotMessages = async (session: Session): Promise<UserMessage[]> => {
     const text = await snapshotCache.assemble(session)
-    return shouldSendSnapshot(text, lastVisibleSnapshot(session.deriveMessages())) ? createUserMessage(snapshotMessageBody(text)) : undefined
+    const messages = shouldSendSnapshot(text, lastVisibleSnapshot(session.deriveMessages())) ? [createUserMessage(snapshotMessageBody(text))] : []
+    try {
+      const notice = await snapshotCache.changeNotice(session, session.header.id)
+      if (notice !== undefined) messages.push(createUserMessage(changeNoticeMessageBody(notice)))
+    } catch (err) {
+      ctx.logger.error('[plastic-memory] 变化通知组装失败:', err)
+    }
+    return messages
   }
   const appendSnapshot = (session: Session, message: UserMessage) => {
     try {
@@ -777,10 +786,10 @@ export async function apply(ctx: Context, config: Config) {
     const decision = await next()
     if (decision.kind !== 'enter' || signal.aborted) return decision
     if (decision.messages.length === 0 && step === 1) return decision
-    const message = await snapshotMessage(agent.session)
-    if (message === undefined) return decision
-    if (decision.messages.length > 0) return { ...decision, messages: [message, ...decision.messages] }
-    appendSnapshot(agent.session, message)
+    const messages = await snapshotMessages(agent.session)
+    if (messages.length === 0) return decision
+    if (decision.messages.length > 0) return { ...decision, messages: [...messages, ...decision.messages] }
+    for (const message of messages) appendSnapshot(agent.session, message)
     return decision
   }, { prepend: true })
   // 溢出恢复：compaction-basic 压缩后返回 retry，同一步重试前不再经过 pre-step；只在重试时补发。
@@ -788,8 +797,7 @@ export async function apply(ctx: Context, config: Config) {
   ctx.on('agent/request-error', async ({ agent, signal }, next) => {
     const action = await next()
     if (action?.kind === 'retry' && !signal.aborted) {
-      const message = await snapshotMessage(agent.session)
-      if (message !== undefined) appendSnapshot(agent.session, message)
+      for (const message of await snapshotMessages(agent.session)) appendSnapshot(agent.session, message)
     }
     return action
   }, { prepend: true })

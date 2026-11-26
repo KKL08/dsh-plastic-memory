@@ -120,7 +120,8 @@ describe('edit-memory（建议整理的直接改）', () => {
     const after = (await e.store.get('mem_e', { workspacePath: SESSION_WS }))!
     expect([after.content, after.name, after.summary, after.tags]).toEqual(['新正文', '发版步骤', '新摘要', ['发版', 'npm']])
     expect([after.updatedAt, after.lastConfirmedAt]).toEqual([LATER, LATER])
-    const changed = ['content', 'name', 'summary', 'tags', 'updatedAt', 'lastConfirmedAt'] as const
+    // 最近一次内容改动也是这次写的：它的值在 change-notice-gui.spec.ts 里逐字段核对
+    const changed = ['content', 'name', 'summary', 'tags', 'updatedAt', 'lastConfirmedAt', 'lastChange'] as const
     const rest = (r: typeof original) => Object.fromEntries(Object.entries(r).filter(([k]) => !(changed as readonly string[]).includes(k)))
     expect(rest(after)).toEqual(rest(original))
 

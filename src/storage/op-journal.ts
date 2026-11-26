@@ -1,17 +1,19 @@
 import { mkdirSync, rmSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
-import { isSqliteBusy, loadSqliteQuietly, type SqliteModule } from './root-lock.ts'
+import { inTransaction, isSqliteBusy, loadSqliteQuietly, type SqliteModule } from './root-lock.ts'
 import { describeError } from './state-files.ts'
 import type { MemoryLogger, OpStep } from './table.ts'
+import { RECENT_CHANGES_PER_SCOPE } from './recent-changes.ts'
+import type { RecentChangeRow, RecentChangeInput, RecentChangeLog, RecentChangeRead } from './recent-changes.ts'
 
 /**
  * 操作日志库：记每次写入提交之后还要补做的事，中断后由下一个拿到写锁的人补完（见 FileTable.recoverPending）。
  * 一个 SQLite 库，放在记忆根之外、每台机器一份：崩溃恢复只和本机有关，也不让网盘同步一个活的数据库文件。
  *
- * - 行只在写锁内增删，所以没有并发写；几个进程各开各的连接。
+ * - 写在写锁内；最近改动的两个读方法在锁外，只读、不删库。建库由 SQLite 的锁保护。
  * - 行里不存字段值和正文：目标只记记忆 id、目录和文件名的摘要，改动只记字段名和指纹。
- * - 做完就删行，平时库里一行都没有，查一次很便宜。
+ * - 待完成操作做完就删行；最近改动按作用域定长保留。
  * - 库丢了、损坏、是更新的版本建的，或 node:sqlite 加载不到：什么都不记，写入照常进行，只剩顺序保护。
  *   只承诺进程中途退出时能恢复，不承诺断电。
  */
@@ -80,13 +82,14 @@ export interface OpJournalOptions {
   loadSqlite?: () => SqliteModule | undefined
 }
 
-export class OpJournal {
+export class OpJournal implements RecentChangeLog {
   private readonly path: string
   private readonly log: MemoryLogger
   private readonly loadSqlite: () => SqliteModule | undefined
   private db: DatabaseSync | undefined
   /** 打开失败过：本实例此后什么都不记。 */
   private isBroken = false
+  private readonly readOpenFailures = new Set<string>()
 
   constructor(opts: OpJournalOptions) {
     // 懒打开：构造不做 I/O
@@ -134,6 +137,92 @@ export class OpJournal {
         return []
       }
     })
+  }
+
+  /**
+   * 最近改动记录（见 recent-changes.ts）：记一行；同一个 op 已经记过就什么都不做；记完把这个作用域裁到
+   * RECENT_CHANGES_PER_SCOPE 行，挤掉的最大序号记进这个作用域的那一笔。插入、裁行、记序号必须在一个写事务里
+   * （inTransaction），中途失败整段不留。库不可用或写失败只记日志。只在写锁内调用，打开失败时照现有规则换新库。
+   */
+  recordChange(change: RecentChangeInput): void {
+    this.exec(db => inTransaction(db, () => {
+      const inserted = db.prepare('INSERT OR IGNORE INTO recent_changes(op, scope, memory_id, change, moved_to, session, at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(change.op, change.scope, change.memoryId, change.change, change.movedTo ?? null, change.session ?? null, change.at)
+      if (inserted.changes === 0) return
+      const pruned = db.prepare('SELECT MAX(seq) AS seq FROM (SELECT seq FROM recent_changes WHERE scope = ? ORDER BY seq DESC LIMIT -1 OFFSET ?)').get(change.scope, RECENT_CHANGES_PER_SCOPE) as { seq: number | null }
+      if (pruned.seq === null) return
+      db.prepare('DELETE FROM recent_changes WHERE scope = ? AND seq <= ?').run(change.scope, pruned.seq)
+      db.prepare('INSERT INTO recent_change_floors(scope, pruned_through) VALUES (?, ?) ON CONFLICT(scope) DO UPDATE SET pruned_through = MAX(pruned_through, excluded.pruned_through)').run(change.scope, pruned.seq)
+    }))
+  }
+
+  /**
+   * 库里用到过的最大改动序号（含已挤掉的，只增不减）；空库为 0，读不出为 undefined。
+   * 锁外读（发送点、冻结时调用）：打开失败不删库、不换新库、不放弃这个实例，这一次回 undefined；库文件不存在时照常建。
+   */
+  latestChangeSeq(): number | undefined {
+    return this.read(db => this.latestSeq(db))
+  }
+
+  /**
+   * 这几个作用域里序号大于 after 的行（升序）、库里最大序号、各作用域挤掉的最大序号；读不出为 undefined。
+   * 几次查询必须在一个读事务里（BEGIN … COMMIT，延迟式，不占写锁），读回的是同一刻的样子。打开方式同 latestChangeSeq（锁外读）。
+   */
+  changesSince(scopes: readonly string[], after: number): RecentChangeRead | undefined {
+    return this.read(db => {
+      const rows: RecentChangeRow[] = []
+      const prunedThrough: Record<string, number> = {}
+      for (const scope of scopes) {
+        const found = db.prepare('SELECT seq, scope, memory_id AS memoryId, change, moved_to AS movedTo, session FROM recent_changes WHERE scope = ? AND seq > ? ORDER BY seq').all(scope, after)
+        for (const row of found) rows.push({ seq: row.seq as number, scope: row.scope as string, memoryId: row.memoryId as string, change: row.change as string, ...(row.movedTo === null ? {} : { movedTo: row.movedTo as string }), ...(row.session === null ? {} : { session: row.session as string }) })
+        const floor = db.prepare('SELECT pruned_through FROM recent_change_floors WHERE scope = ?').get(scope) as { pruned_through: number } | undefined
+        prunedThrough[scope] = floor?.pruned_through ?? 0
+      }
+      return { rows: rows.sort((a, b) => a.seq - b.seq), latestSeq: this.latestSeq(db), prunedThrough }
+    })
+  }
+
+  private latestSeq(db: DatabaseSync): number {
+    const row = db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'recent_changes'").get() as { seq: number } | undefined
+    return row?.seq ?? 0
+  }
+
+  /** 延迟式事务保持几次查询一致；打开失败不走写路径的换库逻辑。 */
+  private read<T>(fn: (db: DatabaseSync) => T): T | undefined {
+    if (this.isBroken) return undefined
+    if (this.db === undefined) {
+      let sqlite: SqliteModule | undefined
+      try { sqlite = this.loadSqlite() } catch { sqlite = undefined }
+      if (sqlite === undefined) return this.giveUp('node:sqlite 不可用')
+      try {
+        mkdirSync(dirname(this.path), { recursive: true })
+        this.db = openJournal(sqlite, this.path)
+      } catch (err) {
+        const reason = describeError(err)
+        if (!this.readOpenFailures.has(reason)) {
+          this.readOpenFailures.add(reason)
+          this.log.warn(`[plastic-memory] 操作日志库读取失败：${reason}`)
+        }
+        return undefined
+      }
+    }
+    const db = this.db
+    try {
+      db.exec('BEGIN')
+      try {
+        const result = fn(db)
+        db.exec('COMMIT')
+        this.readOpenFailures.clear()
+        return result
+      } catch (err) {
+        try { db.exec('ROLLBACK') } catch { /* 事务已不在 */ }
+        throw err
+      }
+    } catch (err) {
+      this.log.warn(`[plastic-memory] 操作日志库读取失败：${describeError(err)}`)
+      this.close()
+      return undefined
+    }
   }
 
   close(): void {
@@ -212,6 +301,8 @@ function openJournal(sqlite: SqliteModule, path: string): DatabaseSync {
       db.exec('CREATE TABLE IF NOT EXISTS ops(seq INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL UNIQUE, at INTEGER NOT NULL, body TEXT NOT NULL)')
       db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
     }
+    db.exec('CREATE TABLE IF NOT EXISTS recent_changes(seq INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL UNIQUE, scope TEXT NOT NULL, memory_id TEXT NOT NULL, change TEXT NOT NULL, moved_to TEXT, session TEXT, at INTEGER NOT NULL)')
+    db.exec('CREATE TABLE IF NOT EXISTS recent_change_floors(scope TEXT PRIMARY KEY, pruned_through INTEGER NOT NULL)')
     db.prepare('SELECT 1 FROM ops LIMIT 1').get()
     return db
   } catch (err) {

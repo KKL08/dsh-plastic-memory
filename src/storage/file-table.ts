@@ -1,5 +1,6 @@
 import { mkdir, readdir, readFile, writeFile, rename, rm, stat } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
+import { classifyChange, currentWriteSession, RECENT_CHANGE_STEP, type RecentChangeInput } from './recent-changes.ts'
 import { ConcurrentModificationError, RecordNotFoundError } from '../errors.ts'
 import { basename, dirname, join, relative } from 'node:path'
 import type { MemoryRecord } from '../record-schema.ts'
@@ -48,6 +49,7 @@ const RECOVERY_ATTEMPTS = 3
 
 /** 换作用域提交之后把历史版本目录搬过去：文件表自己记进操作日志的一步，中断后按日志补做。 */
 export const HISTORY_MOVE_STEP = 'history-move'
+interface RecentChangeStep extends OpStep, Omit<RecentChangeInput, 'op'> { kind: typeof RECENT_CHANGE_STEP }
 interface HistoryMoveStep extends OpStep { kind: typeof HISTORY_MOVE_STEP; memoryId: string; from: string; to: string }
 
 /** 索引操作提交之后的一步：把计划在这个目录的索引上套完（重复做结果不变）。 */
@@ -298,6 +300,10 @@ export class FileTable implements MemoryTable {
     // 每次拿到写锁先看有没有被打断的操作：平时一行都没有
     if (this.journal !== undefined) this.lock.onEnter?.(() => this.recoverPending())
     this.globalDir = join(opts.root, GLOBAL_DIR)
+    this.stepHandlers.set(RECENT_CHANGE_STEP, async (raw, ctx) => {
+      const { kind: _kind, ...change } = raw as RecentChangeStep
+      this.journal?.recordChange({ op: ctx.op, ...change })
+    })
     this.stepHandlers.set(HISTORY_MOVE_STEP, raw => this.followMove(raw as HistoryMoveStep))
     this.stepHandlers.set(INDEX_PLAN_STEP, raw => this.finishIndexPlan(raw as IndexPlanStep))
     this.stepHandlers.set(INDEX_WRITE_STEP, raw => this.finishIndexWrites(raw as IndexWriteStep))
@@ -1647,12 +1653,14 @@ export class FileTable implements MemoryTable {
       // 这次会动到的几层：新文件那层、原文件那层、要清的副本那几层，还有改索引的顶层
       const current = await this.currentLevels([level, dir, ...(prev === undefined ? [] : [dirname(prev.filePath), prev.dir, ...prev.copies.map(c => dirname(c.filePath))])])
       const changes: Array<{ path: string; id?: string }> = []
+      const classified = classifyChange(prev && byPosition(prev), next)
+      const recent: RecentChangeStep | undefined = classified && { kind: RECENT_CHANGE_STEP, ...classified, memoryId: key, session: currentWriteSession(), at: this.now() }
       const historyMove: HistoryMoveStep | undefined = moved ? { kind: HISTORY_MOVE_STEP, memoryId: key, from: prev.dir, to: dir } : undefined
       this.beginOp(op, {
         kind: 'write', memoryId: key, dir: level, fields: changedFields(prev?.record, next),
         ...(prev !== undefined ? { before: fingerprintOf(prev.raw) } : {}), after: fingerprintOf(text),
         ...(prev !== undefined && !isInPlace ? { source: { dir: dirname(prev.filePath), nameHash: fingerprintOf(basename(prev.filePath)) } } : {}),
-      }, historyMove === undefined ? [] : [historyMove])
+      }, [...(historyMove === undefined ? [] : [historyMove]), ...(recent === undefined ? [] : [recent])])
       let filePath: string
       // 文件已经带着提交标记落在目标目录里、不会再被撤回：在日志行上记一笔。之后文件被不拿锁的写（手改）换掉、标记没了，补做也认这次写成了
       const markCommitted = () => { if (this.isJournaling()) this.journal!.markCommitted(op.id) }
@@ -1679,6 +1687,11 @@ export class FileTable implements MemoryTable {
           await this.removeFile(prev.filePath)
           changes.push({ path: prev.filePath })
         }
+      }
+      // 两条分支都已写完目标并清掉旧文件，才让锁外发送点看到改动。
+      if (recent !== undefined && this.isJournaling()) {
+        const { kind: _kind, ...change } = recent
+        this.journal!.recordChange({ op: op.id, ...change })
       }
       changes.push({ path: filePath, id: key })
       const removedFrom = await this.removeOtherCopies(key, filePath, dir, isOwnDirOnly, prev?.copies ?? [], changes)
@@ -1929,16 +1942,22 @@ export class FileTable implements MemoryTable {
       const slot = found && this.toLocated(found)
       if (!slot || skipIf?.(slot)) return false
       const op = given ?? newWriteOp()
+      const classified = classifyChange(byPosition(slot), undefined)
+      const recent: RecentChangeStep | undefined = classified && { kind: RECENT_CHANGE_STEP, ...classified, memoryId: id, session: currentWriteSession(), at: this.now() }
       this.beginOp(op, {
         kind: 'delete', memoryId: id, dir: dirname(slot.filePath), nameHash: fingerprintOf(basename(slot.filePath)),
         before: fingerprintOf(found.raw), scopeDir: slot.dir, isOwnDirOnly: isScopeTarget(at),
-      })
+      }, recent === undefined ? [] : [recent])
       // 历史版本先于记忆文件删：中途断掉最多是记忆还在、历史没了，不会留下记忆已删、旧内容（可能带密钥）还在的历史。
       // 要删的是这一层和（按会话定位时）全局里这个 id 的全部副本，这几层的历史直接删；它以前住过的层也删。
       // 有哪一层删不掉或拿不准就在这里报错，记忆文件不动
       if (opts.isHistoryCarried === true && !(await this.carryHistory(slot.record, slot.dir))) throw new Error(`记忆 ${id} 的历史版本没能并到它并入的那条名下，未删除`)
       await this.removeOwnedHistory(id, new Set(isScopeTarget(at) ? [slot.dir] : [slot.dir, this.globalDir]), true)
       await this.removeFile(slot.filePath)
+      if (recent !== undefined && this.isJournaling()) {
+        const { kind: _kind, ...change } = recent
+        this.journal!.recordChange({ op: op.id, ...change })
+      }
       // 彻底删除（密钥硬删、最近删除里的彻底删除）的承诺是「可见集合里再没有它」：global 与该记录目录里同 id 的其余副本
       // （含 .archive/）一并物理删除；给作用域时只删该目录里的，别的作用域里的同 id 副本是另一张卡
       const removed: Array<{ path: string }> = [{ path: slot.filePath }]
