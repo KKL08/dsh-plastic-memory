@@ -431,9 +431,12 @@ export class DialogueRecordStore {
       .map(r => ({ turnSeq: r.turn_seq, at: r.at ?? undefined })))
   }
 
-  /** 换词典后重算 w 列用：这一代里行号在 afterId 之后的一批段，按行号排。 */
+  /**
+   * 换词典后重算 w 列用：这一代里行号在 afterId 之后的一批段，按行号排。
+   * `+gen` 让 SQLite 不走按代的索引：那样要取出整代再排序，每一批的代价随段数涨；沿行号范围扫取够一批就停。
+   */
   segmentsAfter(gen: number, afterId: number, limit: number): Array<{ id: number; text: string }> {
-    return this.run(db => (db.prepare('SELECT id, CAST(text AS BLOB) AS text FROM segments WHERE gen = ? AND id > ? ORDER BY id LIMIT ?').all(gen, afterId, limit) as Array<{ id: number; text: Uint8Array }>)
+    return this.run(db => (db.prepare('SELECT id, CAST(text AS BLOB) AS text FROM segments WHERE +gen = ? AND id > ? ORDER BY id LIMIT ?').all(gen, afterId, limit) as Array<{ id: number; text: Uint8Array }>)
       .map(r => ({ id: r.id, text: textOf(r.text) })))
   }
 
