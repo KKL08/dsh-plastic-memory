@@ -175,6 +175,8 @@ function env(opts: {
   afterClaimChanged?: () => Promise<void>
   /** 调度器的日志；缺省写到控制台。 */
   log?: MemoryLogger
+  /** 包一层宿主默认模型的取法（模拟宿主那边出错）。 */
+  wrapDefaultLlm?: (real: () => SemanticLlm | null) => () => SemanticLlm | null
 } = {}) {
   const clock = { now: NOW }
   // 侧表也用这个时钟：认领的时间和是否残留按它算
@@ -187,8 +189,9 @@ function env(opts: {
   const route = { current: 'defaultModel' in opts ? opts.defaultModel : DEFAULT_ROUTE }
   // 自动体检选的模型：真的选择表（同一个记忆根的侧表），选择在不在按假宿主的模型目录查
   const selections = new ModelSelectionStore(sidecar.modelSelections)
+  const defaultLlm = () => hostSemanticLlm(llm, route.current)
   const resolveLlm = createBackgroundLlmResolver({
-    selections, catalog: () => llm, llmFor: selection => hostSemanticLlm(llm, selection), defaultLlm: () => hostSemanticLlm(llm, route.current),
+    selections, catalog: () => llm, llmFor: selection => hostSemanticLlm(llm, selection), defaultLlm: opts.wrapDefaultLlm?.(defaultLlm) ?? defaultLlm,
   })
   const source = { store, checkups, autoCheckups, selections, cache, isGovernanceEnabled: () => governance.isEnabled, now: () => clock.now }
   const collectViews = () => collectGlobalViews({ store, decisions, cache, ignores, checkups, registry, memoryRoot: root, now: () => clock.now })
@@ -736,6 +739,94 @@ describe('自动体检调度：核对所选模型时宿主列提供方出错', (
       modelUnavailable: null,
       failure: { count: 1, retryAt: e.clock.now + HOUR, cause: { kind: 'model-error', hostCode: 'RATE_LIMIT' } },
     })
+  })
+})
+
+describe('自动体检调度：一轮检查里意外出错', () => {
+  it('取宿主默认模型时抛错：不冒成未处理的 rejection，记日志和一次失败（1 小时后再试），之后的检查照常调度', async () => {
+    const warns: unknown[][] = []
+    let warned!: () => void
+    const firstWarn = new Promise<void>((resolve) => { warned = resolve })
+    const log: MemoryLogger = { info() {}, warn: (...args: unknown[]) => { warns.push(args); warned() }, error() {} }
+    let isHostBroken = true
+    const e = env({
+      log,
+      wrapDefaultLlm: real => () => {
+        if (isHostBroken) throw new Error('宿主默认模型读取出错')
+        return real()
+      },
+    })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 1)
+    const rejections: unknown[] = []
+    const onRejection = (reason: unknown) => { rejections.push(reason); warned() }
+    process.on('unhandledRejection', onRejection)
+    try {
+      e.scheduler.start()
+      // 只推进计时、不等这一轮：定时器回调里发起的检查没人接，出错就是未处理的 rejection
+      e.timers.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+      await firstWarn
+      // 未处理的 rejection 在微任务清空之后才报：再过一个宏任务
+      await new Promise<void>((resolve) => { setImmediate(resolve) })
+      expect(rejections).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onRejection)
+    }
+    await e.scheduler.whenIdle()
+    const failedAt = e.clock.now
+    expect(warns.some(args => args.some(a => a instanceof Error && a.message === '宿主默认模型读取出错'))).toBe(true)
+    expect(e.llm.requests).toEqual([])
+    expect((await e.readView()).scopes[0]).toMatchObject({
+      isDue: true, modelUnavailable: null,
+      failure: { count: 1, retryAt: failedAt + HOUR, cause: { kind: 'error', message: '宿主默认模型读取出错' } },
+    })
+
+    // 宿主恢复：1 小时之内的检查不再试，到了 1 小时照常体检
+    isHostBroken = false
+    await e.advance(5 * AUTO_CHECKUP_INTERVAL_MS)
+    expect(e.llm.requests).toEqual([])
+    await e.advance(AUTO_CHECKUP_INTERVAL_MS)
+    expect(e.llm.requests).toHaveLength(1)
+    expect(Object.keys(await e.completed())).toEqual(['global'])
+  })
+  it('读完到期状态后另一次体检做完了，随后出错：这个范围不记失败，完成记录照留', async () => {
+    let isCompletedElsewhere = false
+    const e: ReturnType<typeof env> = env({
+      log: { info() {}, warn() {}, error() {} },
+      // 读完状态（全局还到期）之后，另一次开始得更早的体检刚好做完
+      wrapStatus: read => async () => {
+        const view = await read()
+        if (!isCompletedElsewhere) {
+          isCompletedElsewhere = true
+          await e.checkups.complete([{ kind: 'global' }], { startedAt: e.clock.now - 60_000, completedAt: e.clock.now, by: 'manual' })
+        }
+        return view
+      },
+      wrapDefaultLlm: () => () => { throw new Error('宿主默认模型读取出错') },
+    })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 1)
+    await expect(e.scheduler.recheck()).resolves.toBeUndefined()
+    expect(e.llm.requests).toEqual([])
+    const [stored] = await e.checkups.list()
+    expect(stored).toMatchObject({ completed: { completedAt: e.clock.now, by: 'manual' } })
+    expect(stored).not.toHaveProperty('failure')
+    expect((await e.readView()).scopes[0]).toMatchObject({ failure: null, isDue: false })
+  })
+
+  it('一次体检已经记了失败，放掉认领后的收尾又出错：失败只记这一次，原因不被盖掉', async () => {
+    let claimChanges = 0
+    const e = env({
+      llm: fakeHostLlm({ reply: () => 'garbage' }),
+      log: { info() {}, warn() {}, error() {} },
+      // 第二次是放掉认领之后
+      afterClaimChanged: async () => { if (++claimChanges === 2) throw new Error('收尾时重写视图出错') },
+    })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 1)
+    await expect(e.scheduler.recheck()).resolves.toBeUndefined()
+    expect(claimChanges).toBe(2)
+    expect((await e.readView()).scopes[0]!.failure).toMatchObject({ count: 1, cause: { kind: 'unparseable' } })
   })
 })
 

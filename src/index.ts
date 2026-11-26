@@ -718,7 +718,7 @@ export async function apply(ctx: Context, config: Config) {
   const loaderEvents = ctx as unknown as {
     on(name: 'loader/volatile-update', fn: (paths: readonly (readonly string[])[]) => Promise<void>): () => void
   }
-  loaderEvents.on('loader/volatile-update', async paths => {
+  const onVolatileUpdate = async (paths: readonly (readonly string[])[]) => {
     const changed = (...keys: string[]) => paths.some(path => keys.includes(path.join('.')))
     // 决定类型表的配置：变了重建类型表，冻结快照也过期
     const typeKeys = ['template', 'customTypes', 'scenes', 'removedPresetTypes', 'builtinDecayDays']
@@ -759,7 +759,9 @@ export async function apply(ctx: Context, config: Config) {
     // 体检开关变了：自动体检立刻重算（打开时到期的范围马上开始查）
     if (changed('governance.enabled')) void scheduler?.recheck()
     if (changed('governance.enabled') || changed('brewingDreams.minIntervalDays', 'brewingDreams.minChanges', 'brewingDreams.minNewMessages', 'brewingDreams.idleMinutes', 'brewingDreams.weeklyTokenCap')) void dreamsScheduler?.recheck()
-  })
+  }
+  // 宿主发这个事件不等监听器返回的 promise：它 reject 就成了未处理的 rejection，宿主会整个退出。在这里接住，只记日志
+  loaderEvents.on('loader/volatile-update', paths => onVolatileUpdate(paths).catch((err: unknown) => { ctx.logger.error('[plastic-memory] 处理配置热更新出错:', err) }))
 
   // frozen snapshot：按 session 隔离缓存，session/created 异步解析 workspace，compaction 结束标过期、下一次组装重建。
   // session/* 事件由常驻的 @deepseek-ai/dsh-session 提供，但其 cordis Events 增广不在本插件的

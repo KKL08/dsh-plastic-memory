@@ -666,6 +666,10 @@ All notable changes to this project are documented here. The format follows
   showed the memory and its delete button again before the restore had
   finished. The card now stays deleted, with Undo shown as busy, until the
   memory is back.
+- An unexpected error during an automatic checkup, or while applying a change
+  to the plugin's settings, closed DeepSeek Harness. The error is now written
+  to the log, and an automatic checkup that hit it counts as failed and is
+  retried like other failed checkups.
 
 ## [0.2.0] - 2026-11-21
 

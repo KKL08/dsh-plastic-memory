@@ -1962,6 +1962,26 @@ describe('配置热生效（loader/volatile-update）', () => {
   /** 缺省设置（检索来源两者、记忆带原话开）下各档的下钻引导。 */
   const defaultGuidance = (level: 'strict' | 'active') => evidenceGuidance(level, { memoryQuotes: true, searchSource: 'both' })
 
+  it('处理配置变化时出错（重注册工具时宿主抛错）：只记日志，监听器返回的 promise 不 reject（宿主发事件不接它）', async () => {
+    const errors: unknown[][] = []
+    let isRegisterBroken = false
+    const base = mockCtx()
+    const ctx = {
+      ...base,
+      logger: { info() {}, warn() {}, error: (...args: unknown[]) => { errors.push(args) } },
+      tools: {
+        register: (def: { name: string }) => {
+          if (isRegisterBroken) throw new Error('宿主拒绝注册工具')
+          return base.tools.register(def)
+        },
+      },
+    }
+    await apply(ctx as never, new Config({ memoryRoot: await makeTmpRoot() } as never))
+    isRegisterBroken = true
+    await expect(ctx.listeners.get('loader/volatile-update')!([['governance', 'enabled']])).resolves.toBeUndefined()
+    expect(errors.some(args => args.some(a => a instanceof Error && a.message === '宿主拒绝注册工具'))).toBe(true)
+  })
+
   it('改上限、超限处理、溯源档位后，同一会话下一次组装就按新值（不等压缩）', async () => {
     const t = await setup()
     await t.putGlobal({ id: 'mem_k', type: 'knowledge', name: '报销截止', content: '报销截止每月 25 日', summary: '报销截止日' })

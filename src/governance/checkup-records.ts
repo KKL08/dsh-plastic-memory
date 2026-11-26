@@ -81,12 +81,19 @@ export class CheckupRecordStore {
    */
   async recordFailure(scope: Scope, cause: CheckupCause, failedAt: number, startedAt = failedAt): Promise<void> {
     const key = checkupKey(scope)
-    await this.table.update(key, (cur) => {
-      if (cur?.completed !== undefined && cur.completed.startedAt > startedAt) return undefined
-      const { modelUnavailable: _modelUnavailable, ...rest } = cur ?? { id: key }
-      const count = (cur?.failure?.count ?? 0) + 1
-      return { ...rest, id: key, failure: { count, failedAt, cause } }
-    })
+    await this.table.update(key, cur => (cur?.completed !== undefined && cur.completed.startedAt > startedAt ? undefined : withFailure(cur, key, cause, failedAt)))
+  }
+
+  /**
+   * 自动体检调度一轮检查里没兜住的错误：给出错时正在处理的范围记一次失败，同 recordFailure。不持有认领时调用。
+   * since 是这轮检查的开始时间：这个范围之后已有体检做完（完成时间不早于它），或已记过失败（这一轮的体检自己记的），就不记，
+   * 免得把刚做完的范围记成失败、把同一次失败记两遍。判定在这条记录的读改写里做。
+   */
+  async recordRoundFailure(scope: Scope, cause: CheckupCause, failedAt: number, since: number): Promise<void> {
+    const key = checkupKey(scope)
+    await this.table.update(key, cur => ((cur?.completed?.completedAt ?? -Infinity) >= since || (cur?.failure?.failedAt ?? -Infinity) >= since
+      ? undefined
+      : withFailure(cur, key, cause, failedAt)))
   }
 
   /**
@@ -139,4 +146,10 @@ export class CheckupRecordStore {
 export function lastCheckupAt(record: CheckupRecord | undefined, cached: Pick<ScanCacheEntry, 'scannedAt' | 'isTrackedByCheckups'> | undefined): number | null {
   const fallback = cached !== undefined && cached.isTrackedByCheckups !== true ? cached.scannedAt : null
   return record?.completed?.completedAt ?? fallback
+}
+
+/** 记一次失败之后的记录：连续失败次数加一，最近一次尝试不再是「模型用不了」。 */
+function withFailure(cur: CheckupRecord | undefined, key: string, cause: CheckupCause, failedAt: number): CheckupRecord {
+  const { modelUnavailable: _modelUnavailable, ...rest } = cur ?? { id: key }
+  return { ...rest, id: key, failure: { count: (cur?.failure?.count ?? 0) + 1, failedAt, cause } }
 }
