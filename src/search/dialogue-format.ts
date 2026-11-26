@@ -95,10 +95,14 @@ export const QUOTE_NO_REVIEW = '出处的会话设了不回看'
 export const QUOTE_NOT_COLLECTED = '这个会话的原话没有收录'
 /** 会话清单这一次读不到：不判断会话在不在。 */
 export const QUOTE_SESSIONS_UNAVAILABLE = '这次读不到会话信息，原话没附'
-/** 锚里的位置对不上任何一轮（整会话兜底的锚、找不到轮的开始）。 */
+/** 锚里的位置对不上任何一轮（整会话兜底的锚、找不到轮的开始，补找也没找到）。 */
 export const QUOTE_UNLOCATED = '定位不到出处是哪一轮'
 /** 原话这一路这一次出了故障：记忆照常返回。 */
 export const MEMORY_QUOTES_UNAVAILABLE = '出处原话这次取不到，记忆没附原话。'
+/** 推测出处那一轮前面单独一行：这一轮按内容相近补找，仅供参考。 */
+export const GUESSED_SOURCE_MARK = '【推测出处】下面这一轮是按内容相近补找的，供参考'
+/** 保存时记下的轮与记忆内容重合少、又没给推测出处时，跟在这一轮后面说明出处待确认。 */
+export const ANCHOR_TURN_MISMATCH_NOTE = '【出处待确认】上面这一轮是保存时记下的，和记忆内容重合少，内容可能出自更早几轮'
 /** 一条消息和记忆正文相同（只差空白和换行）：正文从略，只留日期和位置。 */
 export const SAME_AS_MEMORY_NOTE = '（和记忆正文相同，从略）'
 
