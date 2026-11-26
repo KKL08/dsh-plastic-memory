@@ -391,6 +391,11 @@ All notable changes to this project are documented here. The format follows
   processes indexing at once end up with the same index. Unit tests check the
   same time limit by counting log reads, and that a full disk is reported as
   past conversations being unavailable while memory search works as usual.
+- The local copy of past conversations is built faster for very long
+  conversations: the background no longer rereads the whole conversation log
+  each time it continues. Catch-up before a search now takes turns among open
+  conversations, so with many chats open they are all caught up over a few
+  searches instead of the same first few every time.
 - Testing: `pnpm host:contract` checks how model errors are reported by
   answering requests to the model API with fixed responses instead of using
   a real invalid key, so the check also runs without a model key. A 401 must

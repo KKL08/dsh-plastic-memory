@@ -1,4 +1,4 @@
-import { DIALOGUE_INTAKE_VERSION, intakeOf, type DialogueRow } from '../search/dialogue-intake.ts'
+import { DIALOGUE_INTAKE_VERSION, intakeOf, type DialogueRow, type DialogueTurn } from '../search/dialogue-intake.ts'
 import type { DialogueTokenizer } from '../search/dialogue-tokenizer.ts'
 import { SEGMENT_RULE_VERSION } from '../search/segments.ts'
 import {
@@ -14,6 +14,8 @@ import type { HostSession, HostSessionEntry } from './host-session.ts'
  *   （检索前是当前会话和开着的会话）→ 在剩下的时间里推进待建队列。每一步都看时限，到点就停，剩下的留给下一次。
  * - 一个会话的日志整份读一次，按消息条数切批提交；批与批之间让出事件循环。每批提交前都看一眼：功能还开着、
  *   库没被删。同步检查之后紧接着同步提交，中间不让出，所以本进程里删库之后不会再写进去。
+ * - 待建队列推进时一次没交完的批留在内存里（只留一个会话），下一次推进先接着交，不再整份重读；交完之后的那次推进
+ *   照常整份读一次，收期间新增的事件、没有新事件就出队。库里的代、修订号和水位对不上就不用它，照常整份读。
  * - 几个进程、几次调用同时追同一个会话不加锁：提交时库核对代、修订号和起算水位，对不上的那一批作废，这次不再追它。
  * - 读不到日志的会话留在队尾，不当成会话没了；会话没了只由对账（宿主列得出会话清单时）认定。队里只剩读不到的，这一代照样算建完。
  * - 换了词典：库记下新词典和整词列重算到哪，之后只收按新词典算的批；重算的进度在库里，换进程接着算。
@@ -85,6 +87,23 @@ export interface DialogueCatchupDeps {
 
 type SessionOutcome = 'done' | 'partial' | 'superseded' | 'unreadable' | 'removed' | 'stopped'
 
+type Batch = { rows: DialogueRow[]; watermark: number; isLast: boolean }
+
+/**
+ * 一个会话整份读过一次、切好但还没提交完的批。键是（代、会话 id、修订号）；next 之前的批都已提交成功，
+ * from 是下一批的起算水位，end 是读到的日志末尾（最后一批提交到这里）。
+ */
+interface Pending {
+  gen: number
+  sessionId: string
+  revision: number
+  from: number
+  end: number
+  turns: DialogueTurn[]
+  batches: Batch[]
+  next: number
+}
+
 interface Prepared { state: Exclude<DialogueStoreState, { status: 'none' }>; tokenizer: DialogueTokenizer }
 
 export class DialogueCatchup {
@@ -106,6 +125,13 @@ export class DialogueCatchup {
   private foreground = 0
   /** 已经警告过的故障：后台每几秒跑一次，同一个故障只记一条。 */
   private readonly warned = new Set<string>()
+  /** 检索前追赶上次开始追各个会话的时刻：开着的会话按它从早到晚轮，时限内追不完的下次接着排在前面。 */
+  private readonly focusedAt = new Map<string, number>()
+  /**
+   * 待建队列推进时没交完的批，只留一个会话。推进一个会话时槽里是它的就取走接着交；同一进程里两次推进并发时，
+   * 没取到的那一次照常整份读。放回见 keep。检索前追点名的会话不用它。
+   */
+  private snapshot: Pending | undefined
 
   /** 共享同一个对话记录库，只向读取入口提供查询方法。 */
   get readStore(): Pick<DialogueRecordStore, 'state' | 'search' | 'segmentsOf' | 'turnsOf' | 'queued' | 'isQueued' | 'session'> {
@@ -144,14 +170,19 @@ export class DialogueCatchup {
         const isFocusOver = () => this.now() >= started + focusBudgetMs
         // 当前会话不等对账：对账这一次没做成时，它也要能搜到自己的原话
         // 当前会话认不出属于哪个项目（没有工作目录）时不在范围里，不收；结果里如实说没追到
+        // 其余开着的会话按上次开始追的时刻从早到晚排，没追过的最前，同一时刻按宿主清单的顺序
         const focus = new Map<string, HostSessionEntry>()
         if (workspace !== undefined) focus.set(current.sessionId, { id: current.sessionId, cwd: workspace, isSubagent: current.isSubagent, isLive: true })
-        for (const entry of this.eligible.values()) if (entry.isLive && !focus.has(entry.id)) focus.set(entry.id, entry)
+        const live = [...this.eligible.values()].filter(e => e.isLive && !focus.has(e.id))
+        const focusedAt = (id: string) => this.focusedAt.get(id) ?? Number.MIN_SAFE_INTEGER
+        live.sort((a, b) => focusedAt(a.id) - focusedAt(b.id))
+        for (const entry of live) focus.set(entry.id, entry)
         let isCaughtUp = workspace !== undefined
         for (const entry of focus.values()) {
           if (!alive()) return { kind: 'off' }
           if (isFocusOver()) { isCaughtUp = false; break }
-          const outcome = await this.catchUpSession(prepared, entry, isFocusOver, alive)
+          this.focusedAt.set(entry.id, this.now())
+          const outcome = await this.catchUpSession(prepared, entry, isFocusOver, alive, false)
           if (outcome !== 'done' && outcome !== 'removed') isCaughtUp = false
         }
         if (queueBudgetMs > 0) {
@@ -218,6 +249,8 @@ export class DialogueCatchup {
   dropSession(sessionId: string): void {
     this.eligible.delete(sessionId)
     this.present.delete(sessionId)
+    // 不回看的原文不留在内存里；在途的批放回前会查到它已经不在队里
+    this.forget(sessionId)
     try {
       if (this.deps.store.state().status !== 'none') this.deps.store.removeSession(sessionId)
     } catch (err) {
@@ -234,6 +267,7 @@ export class DialogueCatchup {
   /** 停用（功能关掉、插件卸载）：在途的追赶作废，关连接，库文件留着。 */
   stop(): void {
     this.epoch += 1
+    this.snapshot = undefined
     this.eligible = new Map()
     this.present = new Map()
     this.reconciledAt = undefined
@@ -308,7 +342,11 @@ export class DialogueCatchup {
     if (!alive()) return undefined
     const stored = new Set(store.sessionIds(gen))
     const everStored = new Set([...stored, ...(prepared.state.read.gen === gen ? [] : store.sessionIds(prepared.state.read.gen))])
-    for (const id of everStored) if (!present.has(id)) store.removeSession(id)
+    const removed = [...everStored].filter(id => !present.has(id))
+    for (const id of removed) {
+      store.removeSession(id)
+      this.forget(id)
+    }
     // 没收过的要建；现在开着的后面还有新消息；上次收的时候开着、现在关了的要收一次尾巴
     const wasOpen = store.openSessionIds(gen)
     const toQueue = [...eligible.values()].filter(e => !stored.has(e.id) || e.isLive).map(e => e.id)
@@ -353,6 +391,9 @@ export class DialogueCatchup {
     const gen = prepared.state.write.gen
     // 没对过账就不知道队里的会话该不该收、是谁的
     if (this.reconciledGen !== gen) return
+    // 槽里的会话已经不在这一代的队里（别的进程建完或移出了它，或换了代）：原文不再留着
+    const held = this.snapshot
+    if (held !== undefined && (held.gen !== gen || !store.isQueued(gen, held.sessionId))) this.snapshot = undefined
     const isFresh = this.reconciledAt !== undefined && this.now() - this.reconciledAt < RECONCILE_INTERVAL_MS
     const unreadable = new Set<string>()
     let position = 0
@@ -369,7 +410,7 @@ export class DialogueCatchup {
         else this.reconciledAt = undefined
         continue
       }
-      const outcome = await this.catchUpSession(prepared, entry, isOver, alive)
+      const outcome = await this.catchUpSession(prepared, entry, isOver, alive, true)
       if (outcome === 'stopped') return
       if (outcome === 'unreadable') {
         unreadable.add(next.sessionId)
@@ -384,8 +425,13 @@ export class DialogueCatchup {
     if (state.status !== 'none' && state.write.gen === gen && !state.write.isComplete) store.completeBuild(gen, [...unreadable])
   }
 
-  /** 把一个会话追到日志此刻的末尾，或追到时限为止。 */
-  private async catchUpSession(prepared: Prepared, entry: HostSessionEntry, isOver: () => boolean, alive: () => boolean): Promise<SessionOutcome> {
+  /**
+   * 把一个会话追到日志此刻的末尾，或追到时限为止。isFromQueue：待建队列推进调的，先接着交上次没交完的批，
+   * 没交完的留给下一次；交完上次的批返回 partial、不出队，下一次推进再整份读一次。
+   */
+  private async catchUpSession(
+    prepared: Prepared, entry: HostSessionEntry, isOver: () => boolean, alive: () => boolean, isFromQueue: boolean,
+  ): Promise<SessionOutcome> {
     const { store } = this.deps
     const gen = prepared.state.write.gen
     // 先拿修订号，再看有没有标不回看，最后才读日志。拿到修订号之后会话被移出（标了不回看、宿主那边删了），
@@ -397,7 +443,15 @@ export class DialogueCatchup {
       this.eligible.delete(entry.id)
       this.present.delete(entry.id)
       store.removeSession(entry.id)
+      this.forget(entry.id)
       return 'removed'
+    }
+    const kept = isFromQueue ? this.takeSnapshot(gen, entry.id, session) : undefined
+    if (kept !== undefined) {
+      // 没付出读的成本：第一批也看时限
+      const outcome = await this.commitPending(prepared, kept, isOver, alive, false)
+      if (outcome === 'partial') this.keep(kept, alive)
+      return outcome === 'done' ? 'partial' : outcome
     }
     const log = await this.deps.host.readSessionLog(entry.id)
     if (!alive()) return 'stopped'
@@ -415,26 +469,74 @@ export class DialogueCatchup {
       if (store.isQueued(gen, entry.id)) store.dequeue(gen, entry.id)
       return 'done'
     }
-    let from = session.watermark
-    for (const batch of batchesOf(intake.rows, this.batchMessages)) {
-      // 第一批不看时限：读日志已经花了时间，一批都不交的话，日志大的会话每次都白读
-      if (from !== session.watermark && isOver()) return 'partial'
-      const isLast = batch.isLast
-      const watermark = isLast ? intake.watermark : batch.watermark
+    const pending: Pending = {
+      gen, sessionId: entry.id, revision: session.revision, from: session.watermark, end: intake.watermark,
+      turns: intake.turns, batches: batchesOf(intake.rows, this.batchMessages), next: 0,
+    }
+    // 第一批不看时限：读日志已经花了时间，一批都不交的话，日志大的会话每次都白读
+    const outcome = await this.commitPending(prepared, pending, isOver, alive, true)
+    if (outcome === 'partial' && isFromQueue) this.keep(pending, alive)
+    if (outcome !== 'done') return outcome
+    if (!alive()) return 'stopped'
+    // 开着的会话留在队里的事由对账管：这里追完就出队，下次对账见它还开着会再排进来
+    store.dequeue(gen, entry.id)
+    return 'done'
+  }
+
+  /** 槽里是这个会话的批就丢掉：本进程移出它时调。 */
+  private forget(sessionId: string): void {
+    if (this.snapshot?.sessionId === sessionId) this.snapshot = undefined
+  }
+
+  /**
+   * 槽里是这个会话的批就取走。别的会话的批留着：队首的会话交完留下的批之后还要再读一次，期间不该丢掉排在它后面、
+   * 已经留下批的会话。取走的批库里的代、修订号对不上，或水位不是下一批的起算水位（别人提交过），就丢掉、返回 undefined。
+   */
+  private takeSnapshot(gen: number, sessionId: string, session: { revision: number; watermark: number }): Pending | undefined {
+    const held = this.snapshot
+    if (held?.sessionId !== sessionId) return undefined
+    this.snapshot = undefined
+    return held.gen === gen && held.revision === session.revision && held.from === session.watermark ? held : undefined
+  }
+
+  /**
+   * 一次推进没交完时把批放进槽，槽里别的会话的批被换掉。放之前向库核对会话此刻仍在这一代的待建队列里：
+   * 别处移出它、标了不回看、换掉这一代，队列里那一行都跟着删了，这时不放。槽里已有同一会话、游标更靠后的
+   * 一份（同一进程里并发的另一次推进留下的）也不放，不用旧游标盖掉新的。
+   */
+  private keep(pending: Pending, alive: () => boolean): void {
+    if (!alive() || !this.deps.store.isQueued(pending.gen, pending.sessionId)) return
+    const held = this.snapshot
+    if (held?.sessionId === pending.sessionId && held.gen === pending.gen && held.from >= pending.from) return
+    this.snapshot = pending
+  }
+
+  /**
+   * 从 pending.next 起逐批提交，每提交成功一批才把 from、next 往后挪。到点停下返回 partial；
+   * isFirstFree 时这一次的第一批不看时限。全部交完返回 done，被别人抢先（提交对不上）返回 superseded。
+   */
+  private async commitPending(
+    prepared: Prepared, pending: Pending, isOver: () => boolean, alive: () => boolean, isFirstFree: boolean,
+  ): Promise<'done' | 'partial' | 'superseded' | 'stopped'> {
+    const { store } = this.deps
+    const first = pending.next
+    while (pending.next < pending.batches.length) {
+      if ((!isFirstFree || pending.next !== first) && isOver()) return 'partial'
+      const batch = pending.batches[pending.next]!
+      const from = pending.from
+      const watermark = batch.isLast ? pending.end : batch.watermark
       const segments = batch.rows.map(r => ({
         turnSeq: r.turnSeq, seq: r.seq, segment: r.segment, ...(r.at === undefined ? {} : { at: r.at }), speaker: r.speaker, text: r.text,
         ...prepared.tokenizer.columns(r.text),
       }))
-      const turns = intake.turns.filter(t => t.turnSeq > from && t.turnSeq <= watermark).map(t => ({ turnSeq: t.turnSeq, ...(t.at === undefined ? {} : { at: t.at }) }))
+      const turns = pending.turns.filter(t => t.turnSeq > from && t.turnSeq <= watermark).map(t => ({ turnSeq: t.turnSeq, ...(t.at === undefined ? {} : { at: t.at }) }))
       // 检查和提交之间不让出：本进程里删库、关功能之后不会再写进去
       if (!alive()) return 'stopped'
-      if (!store.commitBatch({ gen, sessionId: entry.id, revision: session.revision, dictionary: dictionaryOf(prepared.tokenizer), fromWatermark: from, watermark, segments, turns })) return 'superseded'
-      from = watermark
-      if (!isLast) await this.pause()
+      if (!store.commitBatch({ gen: pending.gen, sessionId: pending.sessionId, revision: pending.revision, dictionary: dictionaryOf(prepared.tokenizer), fromWatermark: from, watermark, segments, turns })) return 'superseded'
+      pending.from = watermark
+      pending.next += 1
+      if (!batch.isLast) await this.pause()
     }
-    if (!alive()) return 'stopped'
-    // 开着的会话留在队里的事由对账管：这里追完就出队，下次对账见它还开着会再排进来
-    store.dequeue(gen, entry.id)
     return 'done'
   }
 }
@@ -446,8 +548,8 @@ const dictionaryOf = (tokenizer: DialogueTokenizer) => tokenizer.degraded ? '' :
  * 把一个会话待收的行切成批：一条消息的全部段在同一批里，一批最多 size 条消息。
  * 没有行也给一批空的：水位和没有文本的空轮照样要提交。
  */
-function batchesOf(rows: readonly DialogueRow[], size: number): Array<{ rows: DialogueRow[]; watermark: number; isLast: boolean }> {
-  const batches: Array<{ rows: DialogueRow[]; watermark: number; isLast: boolean }> = []
+function batchesOf(rows: readonly DialogueRow[], size: number): Batch[] {
+  const batches: Batch[] = []
   let current: DialogueRow[] = []
   let messages = 0
   let lastSeq: number | undefined

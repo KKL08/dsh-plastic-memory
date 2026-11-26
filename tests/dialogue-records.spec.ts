@@ -8,6 +8,7 @@ import {
   DialogueRecordStore, DialogueStoreUnavailable, SKIPPED_WATERMARK,
   type DialogueBatch, type DialogueRecordStoreOptions, type DialogueSegmentInput, type DialogueVersions,
 } from '../src/storage/dialogue-records.ts'
+import { sqliteProbe } from './helpers/sqlite-probe.ts'
 
 // 对话记录库的存储层：真 node:sqlite、临时目录。「另一个进程」用同一路径上的第二个实例模拟（各有自己的连接）。
 // 三列索引词在这里手写（空格分开的词），分词器另有自己的测试。
@@ -269,6 +270,24 @@ describe('把会话移出库', () => {
     const again = begin(store, 's2')
     again.commit([seg(1, 'gamma')], 1)
     expect(store.segmentsAfter(gen, last, 10).map(r => r.text)).toEqual(['gamma'])
+  })
+
+  it('按行号往后取段时沿行号范围扫，不按代取出整代再排序', () => {
+    const probe = sqliteProbe()
+    const { store } = open({ loadSqlite: () => probe.module })
+    const { gen, commit } = begin(store)
+    commit(Array.from({ length: 30 }, (_, i) => seg(i + 1, `alpha ${i}`)), 30)
+    const { result, statements } = probe.record(() => store.segmentsAfter(gen, 10, 5))
+    expect(result.map(r => r.text)).toEqual(['alpha 10', 'alpha 11', 'alpha 12', 'alpha 13', 'alpha 14'])
+    const raw = new DatabaseSync(storePath())
+    try {
+      const plans = statements.filter(st => [...st.reads].some(r => r.startsWith('segments.')))
+        .map(st => (raw.prepare(`EXPLAIN QUERY PLAN ${st.sql}`).all() as Array<{ detail: string }>).map(p => p.detail))
+      expect(plans).toHaveLength(1)
+      expect(plans[0]).toEqual(['SEARCH segments USING INTEGER PRIMARY KEY (rowid>?)'])
+    } finally {
+      raw.close()
+    }
   })
 
   it('排队可以按位置一个个往后翻', () => {
