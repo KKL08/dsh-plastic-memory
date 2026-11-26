@@ -20,7 +20,8 @@ import { DREAMS_APPLY_MAX_OPS, isCompleteRead, type DreamsStep, type DreamsStepC
 const UNUSABLE = 'unusable'
 
 export interface TidyStepDeps {
-  store: Pick<MemoryStore, 'readIndex' | 'readRaw' | 'maintain'>
+  /** readUsage：逐条整理每批问模型之前现读这一批的使用信号，读不出按没有信号（提示词里只带召回次数）。 */
+  store: Pick<MemoryStore, 'readIndex' | 'readRaw' | 'maintain' | 'readUsage'>
   maxTopics: () => number
   now: () => number
   /** 类型默认的注入档位。 */
@@ -157,7 +158,8 @@ export const tidyMemoriesStep = (deps: TidyStepDeps): DreamsStep => ({
       const batchRead = new Map(batch.flatMap(id => { const r = read.get(id); return r === undefined || closed.includes(id) ? [] : [[id, r] as const] }))
       if (batchRead.size === 0) continue
       const parse = (raw: string) => parseTidyOutput(raw, batchRead, newOpId, { typeRecall: deps.typeRecall, maxOpsPerMemory: DREAMS_APPLY_MAX_OPS })
-      const parsed = await ask(llm, buildTidyPrompt(files, read, new Set(batchRead.keys()), deps.typeRecall), parse, ctx)
+      const usage = deps.store.readUsage(ctx.scope, [...batchRead.keys()])
+      const parsed = await ask(llm, buildTidyPrompt(files, read, new Set(batchRead.keys()), deps.typeRecall, usage), parse, ctx)
       if (ctx.shouldStop()) return
       if (parsed === undefined) {
         unread++

@@ -9,8 +9,9 @@ import {
 } from './storage/table.ts'
 import type { BatchKvTable } from './kv-table.ts'
 import type { RecallStats } from './storage/schema.ts'
+import type { UsageSignalCounts, UsageSignalKind, UsageSignalLog } from './storage/usage-signals.ts'
 import { hasSecret } from './secrets.ts'
-import type { Scope } from './scope.ts'
+import { scopeKey, scopeOfMemory, type Scope } from './scope.ts'
 import type { IndexFiles } from './topic-index.ts'
 import type { IndexOp, IndexPlan } from './topic-ops.ts'
 import { RETENTION_MS } from './retention.ts'
@@ -64,13 +65,15 @@ export class MemoryStore {
   private table: MemoryTable
   private readonly log: MemoryLogger
   private stats: BatchKvTable<RecallStats>
+  private readonly usage: UsageSignalLog | undefined
   private readonly stepHandlers = new Map<string, OpStepHandler>()
 
-  /** log 缺省回退 console；stats：召回统计侧表（接线层传 .state/recall-stats.json）。 */
-  constructor(table: MemoryTable, log: MemoryLogger | undefined, stats: BatchKvTable<RecallStats>) {
+  /** log 缺省回退 console；stats：召回统计侧表（接线层传 .state/recall-stats.json）；usage：使用信号（接线层传操作日志库），不给就不记不读。 */
+  constructor(table: MemoryTable, log: MemoryLogger | undefined, stats: BatchKvTable<RecallStats>, usage?: UsageSignalLog) {
     this.table = table
     this.log = log ?? console
     this.stats = stats
+    this.usage = usage
   }
 
   /** 历史版本（见 MemoryTable.history）。 */
@@ -352,6 +355,20 @@ export class MemoryStore {
 
   async query(filter: QueryFilter): Promise<MemoryRecord[]> {
     return (await this.queryScope(filter)).records
+  }
+
+  /**
+   * 记一笔使用信号（见 storage/usage-signals.ts），记在这条记忆自己的作用域下（作用域 + id）。作用域推不出来（项目记忆缺
+   * workspacePath）、没接信号库、库不可用时什么都不做。不进写入段，不抛错。
+   */
+  noteUsage(memory: Pick<MemoryRecord, 'id' | 'scope' | 'workspacePath'>, signal: { kind: UsageSignalKind; key: string; at: number }): void {
+    const scope = scopeOfMemory(memory)
+    if (scope !== undefined) this.usage?.recordUsage({ scope: scopeKey(scope), memoryId: memory.id, ...signal })
+  }
+
+  /** 这个作用域里这几条记忆的使用信号计数（见 UsageSignalLog.readUsage）。没接信号库、读不出返回 undefined。 */
+  readUsage(scope: Scope, memoryIds: readonly string[]): ReadonlyMap<string, UsageSignalCounts> | undefined {
+    return this.usage?.readUsage(scopeKey(scope), memoryIds)
   }
 
   /** 召回统计只读改写侧表，不经 table.update——记忆文件不因召回而重写。一次调用是侧表的一次读改写（mergeMany：
