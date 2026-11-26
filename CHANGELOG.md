@@ -110,6 +110,14 @@ All notable changes to this project are documented here. The format follows
   corrected within 24 hours of being recalled. These counts only guide the
   model and nothing is ranked by them. They are recorded without a setting
   and kept on this machine outside the memory folder, with no memory text.
+- A Brewing Dreams pass can also go back to the conversations a memory came
+  from to fill gaps such as the reason for a change, a decision's basis or
+  the options it ruled out, or a past state between two versions more than
+  180 days apart. When every message it relies on is your own words, the pass
+  refines the memory or adds the past state to its history; otherwise the
+  draft is kept in the pass's report and nothing is written. A pass reads at
+  most `brewingDreams.maxDrillDowns` places in past conversations (5 by
+  default, 0 turns this off), and what it writes is undone with the pass.
 - The plugin records which project folders have a chat running in
   `.state/activity/` inside the memory folder, so several DeepSeek Harness
   windows that share a memory folder can tell when a project is idle. A

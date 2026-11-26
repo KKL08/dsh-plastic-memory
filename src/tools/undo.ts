@@ -8,9 +8,11 @@ import { asUndoable, expectedFingerprints, isStillOwnWrite, undoRuleOf, undoStat
 import { snapshotIdFor, verdictLoser, type IndexReceipt, type MemorySnapshot, type SnapshotRecord } from '../governance/schema.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { RecordNotFoundError } from '../errors.ts'
-import { scopeAt, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
+import { sameScope, scopeAt, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
 import { LINK_UNDONE_STEP, indexReceiptUndoneStep, ledgerSteps, linkUndoneStep } from '../governance/op-steps.ts'
-import { newWriteOp } from '../storage/table.ts'
+import { newWriteOp, type LocatedRecord } from '../storage/table.ts'
+import { layerOf } from '../storage/history.ts'
+import type { RecoveredVersionReceipt } from '../governance/schema.ts'
 import { hasDropped, linksOutside, restoreLinks, withoutLinks, type DroppedLinks } from '../links.ts'
 import { hasPendingReceipts, receiptsOfEntry, revertChange, settleOpenGroups, withdrawVersion } from './changeset.ts'
 import { firstRevertBlock, type ChangeReceipt } from '../governance/changeset.ts'
@@ -156,16 +158,25 @@ async function undoDreamsRun(entry: UndoableEntry, op: string | undefined, allow
   let changes = current.changes ?? []
   const allIndex = current.indexRun?.receipts ?? []
   let indexReceipts = allIndex.filter(r => r.isConfirmed === true)
+  let recovered = current.recoveredVersions ?? []
   if (op !== undefined) {
     const change = changes.find(r => r.op === op)
     const at = allIndex.findIndex(r => r.op === op && r.isConfirmed === true)
-    if (change === undefined && at < 0) return notFound(`${entry.id} 里的这一条`, 'no-entry')
+    const rec = recovered.find(r => r.op === op)
+    recovered = rec === undefined ? [] : [rec]
+    if (change === undefined && at < 0 && rec === undefined) return notFound(`${entry.id} 里的这一条`, 'no-entry')
     // 后面的索引操作还没记完账：跳过它先撤这一条会打乱逆序，等它记完
     if (at >= 0 && allIndex.slice(at + 1).some(r => r.isConfirmed !== true)) return error('busy', `${entry.id} 这批的索引操作还没记完，稍后再撤，未做任何改动`)
     changes = change === undefined ? [] : change.group === undefined ? [change] : changes.filter(r => r.group === change.group)
     indexReceipts = at < 0 ? [] : allIndex.slice(at)
   }
-  if (changes.length === 0 && indexReceipts.length === 0) return notFound(`${entry.id}（没有可撤的）`, 'no-entry')
+  if (changes.length === 0 && indexReceipts.length === 0 && recovered.length === 0) return notFound(`${entry.id}（没有可撤的）`, 'no-entry')
+  // 补回的版本和记忆的改动一起过跨项目门（补回的版本只看带着它的那份）：有一条不放行就都不动
+  if (recovered.length > 0) {
+    const targets = (await Promise.all(recovered.map(r => recoveredTarget(r, deps.store)))).flatMap(t => t.target === undefined ? [] : [t.target.found])
+    const rejected = gateRecords(targets.map(t => t.record), context, allow).rejected
+    if (rejected.length > 0) return crossWorkspace(rejected)
+  }
   const label = entry.workspaces?.[0]
   const restored: string[] = []
   if (changes.length > 0) {
@@ -181,15 +192,19 @@ async function undoDreamsRun(entry: UndoableEntry, op: string | undefined, allow
   if (indexReceipts.length > 0 && label !== undefined) {
     const scope = scopeOfLedger(label)
     skipped = await undoIndexReceipts(entry.id, scope, indexReceipts, deps)
-    if (skipped === indexReceipts.length && changes.length === 0) return error('stale', '这次整理动过的主题之后又被改过，撤销会冲掉之后的改动，未做任何改动', 'changed')
+    if (skipped === indexReceipts.length && changes.length === 0 && recovered.length === 0) return error('stale', '这次整理动过的主题之后又被改过，撤销会冲掉之后的改动，未做任何改动', 'changed')
     // 入口投影（MEMORY.md）跟着索引重新生成
     if (skipped < indexReceipts.length) await deps.store.maintain(scope)
   }
+  for (const receipt of recovered) if (!(await undoRecoveredVersion(entry.id, receipt, allow, context, deps))) skipped++
   // 还没确认的索引回执（提交了、等着补做确认）不撤也不拿掉：留着条目，补做确认之后还能撤。
   // 回执都撤空了也先在写入段里看一眼有没有记忆的回执等着补记：有就留着条目，不然那次改动就没了撤销入口
   const { left, isPending } = await deps.store.writeSection(async () => {
     const found = (await deps.decisions.listSettled()).find(d => d.id === entry.id)
-    const isEmpty = found !== undefined && (found.changes?.length ?? 0) === 0 && (found.indexRun?.receipts.length ?? 0) === 0
+    const hasReceipts = (found?.changes?.length ?? 0) > 0 || (found?.indexRun?.receipts.length ?? 0) > 0 || (found?.recoveredVersions?.length ?? 0) > 0
+    // 单撤之后，还没给用户看的下钻报告（交给用户的稿、读不到的锚）跟着条目留着；整批撤销连同报告一起拿掉
+    const hasNotes = (found?.drillDown?.proposals.length ?? 0) > 0 || (found?.drillDown?.unreadable.length ?? 0) > 0
+    const isEmpty = found !== undefined && !hasReceipts && (op === undefined || !hasNotes)
     const pending = isEmpty && hasPendingReceipts(deps.store, entry.id)
     if (isEmpty && !pending) await deps.decisions.remove(entry.id)
     return { left: found, isPending: pending }
@@ -199,6 +214,46 @@ async function undoDreamsRun(entry: UndoableEntry, op: string | undefined, allow
   const remaining = new Set((left?.indexRun?.receipts ?? []).map(r => r.op))
   const alsoUndone = op === undefined ? 0 : indexReceipts.slice(1).filter(r => !remaining.has(r.op)).length
   return { kind: 'undone', decisionId: entry.id, restored, ...(skipped > 0 ? { skipped } : {}), ...(alsoUndone > 0 ? { alsoUndone } : {}) }
+}
+
+/**
+ * 补回版本回执对应的那一版在哪份副本（含已删）的历史里：回执作用域那份先找，找不到再找这个 id 在别的作用域里的各份
+ * （之后换了作用域，原处又可能新建了同 id 的）。都没找到时，isGone 只在定位到了副本、且各份的历史都读全了时为真：
+ * 一份都定位不到分不出是真没了还是记忆文件读不出，不算确认没有。
+ */
+async function recoveredTarget(receipt: RecoveredVersionReceipt, store: MemoryStore): Promise<{ target?: { found: LocatedRecord; versionId: string }; isGone: boolean }> {
+  const home = scopeOfLedger(receipt.scopeKey)
+  const own = await store.locate(receipt.memoryId, home)
+  const copies = own === undefined ? [] : [own]
+  for (const scope of await store.copiesOf(receipt.memoryId)) {
+    if (sameScope(scope, home)) continue
+    const found = await store.locate(receipt.memoryId, scope)
+    if (found !== undefined) copies.push(found)
+  }
+  let isComplete = copies.length > 0
+  for (const found of copies) {
+    const listing = await store.history.list(layerOf(found), receipt.memoryId)
+    const version = listing.versions.find(v => v.writes.some(w => w.op === receipt.op))
+    if (version !== undefined) return { target: { found, versionId: version.versionId }, isGone: false }
+    if (!listing.isComplete) isComplete = false
+  }
+  return { isGone: isComplete }
+}
+
+/** 删掉一个补回的历史版本（按写入清单里的 op 找）、再拿掉回执；没过跨项目门、或没找到那一版又确认不了它已不在时留着回执，返回 false。 */
+async function undoRecoveredVersion(entryId: string, receipt: RecoveredVersionReceipt, allow: boolean | undefined, context: GovernanceContext, deps: UndoDeps): Promise<boolean> {
+  return deps.store.writeSection(async () => {
+    const { target, isGone } = await recoveredTarget(receipt, deps.store)
+    if (target === undefined) {
+      if (!isGone) return false
+      await deps.decisions.dropRecoveredVersion(entryId, receipt.op)
+      return true
+    }
+    if (gateRecords([target.found.record], context, allow).rejected.length > 0) return false
+    await deps.store.history.remove(layerOf(target.found), receipt.memoryId, target.versionId)
+    await deps.decisions.dropRecoveredVersion(entryId, receipt.op)
+    return true
+  })
 }
 
 /**

@@ -1650,10 +1650,12 @@ describe('体检输出里的「重要、等你定」', () => {
 })
 
 describe('运行计划和配置', () => {
-  it('计划按顺序：维护、整理主题索引、合并零碎记忆、处理矛盾、逐条整理', () => {
+  it('计划按顺序：维护、整理主题索引、合并零碎记忆、下钻补全、处理矛盾、逐条整理', () => {
     const tidy = { store, maxTopics: () => 30, now: () => NOW, typeRecall: () => 'search' as const }
-    const plan = dreamsPlan({ tidy, merge: { store, dreams }, resolve: tierDeps() })
-    expect(plan.map(s => s.name)).toEqual(['maintain', 'organize-index', 'merge-fragments', 'resolve-findings', 'tidy-memories'])
+    const { readSessionLog, noReview } = tierDeps()
+    const drill = { store, decisions, host: { readSessionLog, listSessions: async () => [], archivedSessionIds: async () => new Set<string>() }, noReview, maxDrillDowns: () => 5, now: () => NOW }
+    const plan = dreamsPlan({ tidy, merge: { store, dreams }, drill, resolve: tierDeps() })
+    expect(plan.map(s => s.name)).toEqual(['maintain', 'organize-index', 'merge-fragments', 'drill-down', 'resolve-findings', 'tidy-memories'])
   })
 
   it('档位和重点类型的缺省值；写了的值原样读出', () => {

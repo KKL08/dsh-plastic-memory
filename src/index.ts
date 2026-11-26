@@ -58,6 +58,7 @@ import { AutoCheckupSettingStore } from './governance/auto-checkups.ts'
 import { ModelSelectionStore, createBackgroundLlmResolver } from './governance/background-llm.ts'
 import { DREAMS_DEFAULTS, resolveDreamsConfig } from './governance/dreams-gate.ts'
 import { FOCUS_TYPES_DEFAULT, isKnownTier } from './governance/dreams-tiers.ts'
+import { DRILL_MAX_DEFAULT, isKnownMaxDrillDowns } from './governance/drill-down.ts'
 import { DreamsStore } from './governance/dreams-records.ts'
 import { dreamsPlan } from './tools/dreams-plan.ts'
 import { DreamsScheduler } from './tools/dreams-scheduler.ts'
@@ -150,6 +151,8 @@ export interface Config {
     tier: Volatile<string>
     /** 「这些类型的记忆有矛盾时由我来定」：把关档下改到这些类型的用户明说记忆时先问用户。全局一份。 */
     focusTypes: Volatile<string[]>
+    /** 一次运行最多回原对话下钻几处（读到会话日志的才算）；0 是不下钻。坏值按缺省跑，并记一条告警。 */
+    maxDrillDowns: Volatile<number>
   }
   index: {
     /** 一个作用域（全局、每个项目各算）里主题数的上限；到了上限不再新建主题。设置页不露，配置文件可改；改了下一次整理生效。 */
@@ -221,6 +224,8 @@ export const Config = z.object({
     maxChangeRatio: z.number().default(DREAMS_DEFAULTS.maxChangeRatio).volatile(),
     tier: z.string().default('gatekeep').volatile(),
     focusTypes: z.array(z.string()).default([...FOCUS_TYPES_DEFAULT]).volatile(),
+    // 一次运行最多回原对话下钻几处；坏值在用的时候换成默认值（resolveMaxDrillDowns）
+    maxDrillDowns: z.number().default(DRILL_MAX_DEFAULT).volatile(),
   }),
   index: z.object({
     maxTopics: z.natural().min(1).default(INDEX_MAX_TOPICS_DEFAULT).volatile(),
@@ -667,6 +672,7 @@ export async function apply(ctx: Context, config: Config) {
         plan: dreamsPlan({
           tidy: { store, maxTopics: () => config.index.maxTopics.get(), now: () => Date.now(), typeRecall: type => registry.get(type).recall },
           merge: { store, dreams },
+          drill: { store, decisions, host, noReview, maxDrillDowns: () => config.brewingDreams.maxDrillDowns.get(), now: () => Date.now() },
           resolve: {
             store, decisions, dreams, readSessionLog: id => host.readSessionLog(id), noReview, memoryRoot, homeDir: homedir(),
             tier: () => config.brewingDreams.tier.get(), focusTypes: () => config.brewingDreams.focusTypes.get(), now: () => Date.now(),
@@ -679,10 +685,11 @@ export async function apply(ctx: Context, config: Config) {
       },
       store, board,
       timeout: (callback, delayMs) => timer.timeout(callback, delayMs),
-      badConfigKeys: () => {
-        const keys = dreamsConfig().badKeys
-        return isKnownTier(config.brewingDreams.tier.get()) ? keys : [...keys, 'tier']
-      },
+      badConfigKeys: () => [
+        ...dreamsConfig().badKeys,
+        ...(isKnownTier(config.brewingDreams.tier.get()) ? [] : ['tier']),
+        ...(isKnownMaxDrillDowns(config.brewingDreams.maxDrillDowns.get()) ? [] : ['maxDrillDowns']),
+      ],
       log: ctx.logger,
     })
     dreamsScheduler = dreamsCreated

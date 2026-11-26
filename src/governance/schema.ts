@@ -308,6 +308,36 @@ export type IndexReceipt = z.infer<typeof indexReceiptSchema>
 export const indexRunSchema = z.object({ receipts: z.array(indexReceiptSchema) })
 export type IndexRun = z.infer<typeof indexRunSchema>
 
+/**
+ * 记忆梦境下钻补回的一个历史版本（versionKind recovered，不经变更集）：写版本文件之前先在批次条目上记下，撤销时按 op 找到那一版删掉。
+ * op 是这次补回的操作 id，同时写进那一版的写入清单；versionId 是写下时的版本标识（之后换作用域可能改名，撤销按 op 认）。
+ */
+export const recoveredVersionReceiptSchema = z.object({ op: z.string(), memoryId: z.string(), scopeKey: z.string(), versionId: z.string(), at: z.number() })
+export type RecoveredVersionReceipt = z.infer<typeof recoveredVersionReceiptSchema>
+
+/** 报告里依据的一条消息：会话、序号、说话人，正文已遮盖、折成一行、截短。 */
+export const drillExcerptSchema = z.object({ sessionId: z.string(), seq: z.number(), speaker: z.string(), text: z.string() })
+export type DrillExcerpt = z.infer<typeof drillExcerptSchema>
+
+/**
+ * 记忆梦境一次运行的下钻报告（记在 brewing-dreams-run 批次条目上，运行收尾时写一次）。种类、原因是开放取值。
+ * drills：实际读了几处（占名额的）；archivedSessionsRead：读了几个存档会话（按会话去重）；
+ * unreadable：确认读不到的锚（会话没了、标了不回看、锚失效、锚那段没有可读的消息）；
+ * filled：直接补上的（refine 的回执在 changes 里、id 等于 opId；recovered 的回执在 recoveredVersions 里、op 等于 opId）；
+ * proposals：依据里有推断的，交给用户的稿（已遮盖）。
+ */
+export const drillDownReportSchema = z.object({
+  drills: z.number().int().nonnegative(),
+  archivedSessionsRead: z.number().int().nonnegative(),
+  unreadable: z.array(z.object({ memoryId: z.string(), sessionId: z.string(), eventRange: z.tuple([z.number(), z.number()]), at: z.number(), reason: z.string() })),
+  filled: z.array(z.object({ memoryId: z.string(), gap: z.string(), kind: z.string(), opId: z.string(), excerpts: z.array(drillExcerptSchema) })),
+  proposals: z.array(z.object({
+    memoryId: z.string(), gap: z.string(), kind: z.string(), content: z.string(),
+    summary: z.string().optional(), factTime: z.string().optional(), reason: z.string().optional(), excerpts: z.array(drillExcerptSchema),
+  })),
+})
+export type DrillDownReport = z.infer<typeof drillDownReportSchema>
+
 export { linkIdsSchema, type LinkIds } from '../record-schema.ts'
 
 export const pendingDecisionSchema = z.object({
@@ -336,6 +366,10 @@ export const pendingDecisionSchema = z.object({
   changes: z.array(changeReceiptSchema).optional(),
   /** 还没做完的组（见 ChangeOp.group）：开始前记上，做成或撤干净后拿掉。留在这里的是中断或没撤干净的，下次应用、撤销之前先按回执撤回。 */
   openGroups: z.array(z.string()).optional(),
+  /** 记忆梦境的一次运行（brewing-dreams-run）：下钻补回的历史版本，一版一条，撤掉后拿掉。上一个发布版读到时丢掉它。 */
+  recoveredVersions: z.array(recoveredVersionReceiptSchema).optional(),
+  /** 记忆梦境的一次运行（brewing-dreams-run）：这次的下钻报告。上一个发布版读到时丢掉它。 */
+  drillDown: drillDownReportSchema.optional(),
   /** 只挂关联、前提的保存（link）：这一次新加的 id（已有的不算）。撤销只去掉这些。其余条目没有此字段。 */
   links: linkIdsSchema.optional(),
   /** 模型改写、替代：哪个会话里哪次 memory_save 调用改的（对话卡按 callId、右侧栏按 sessionId 认领）；替代时 by 是替代它的那条。 */

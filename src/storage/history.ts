@@ -43,6 +43,8 @@ export interface HistoryVersion {
 export const STATE_CHANGE_VERSION = 'state-change'
 /** 并成版本时，旧状态那条记忆本身成的一版。 */
 export const MERGED_VERSION = 'merged'
+/** 记忆梦境按出处补回的过去状态：内容取自会话里用户的原话，不是旧记录的原样副本。 */
+export const RECOVERED_VERSION = 'recovered'
 
 /** 记忆文件所在的那一层：历史版本跟着它放。 */
 export interface HistoryLayer { dir: string; loc: FileLocation }

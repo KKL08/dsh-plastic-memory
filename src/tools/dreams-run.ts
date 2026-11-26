@@ -3,7 +3,7 @@ import type { MemoryLogger, MemoryStore } from '../store.ts'
 import type { ScopeReadResult } from '../storage/table.ts'
 import { ledgerLabel, scopeKey, type Scope } from '../scope.ts'
 import { applyChangeset, hasPendingReceipts, isOnDisk, settleOpenGroups, type ApplyOptions, type ApplyResult, type ChangesetDeps, type OpOutcome } from './changeset.ts'
-import { copyKey, scanFingerprint, scopeKeyOf, type ChangeOp } from '../governance/changeset.ts'
+import { copyKey, scanFingerprint, scopeKeyOf, type ChangeOp, type OpBasis } from '../governance/changeset.ts'
 import type { PlanWrite } from '../governance/decisions.ts'
 import type { DreamsResult } from '../governance/schema.ts'
 import { INDEX_RECEIPT_STEP, indexReceiptStep, ledgerSteps } from '../governance/op-steps.ts'
@@ -16,6 +16,11 @@ import { changeQuota, countChanges, dreamContentFingerprint, dreamsGate, resolve
 import type { DreamsLastResult, DreamsStore } from '../governance/dreams-records.ts'
 import { ACTIVITY_REREAD_MS, isAnyRunning, type ActivityView } from '../governance/session-activity.ts'
 import { locateCopy } from './workspace-gate.ts'
+import { drillReportOf, isDrillLogEmpty, newDrillLog, type DrillLog } from '../governance/drill-down.ts'
+import { writeGate } from '../governance/write-gate.ts'
+import { byPosition } from '../storage/table.ts'
+import { layerOf, newVersionId, type HistoryVersion } from '../storage/history.ts'
+import { hasSecret } from '../secrets.ts'
 
 /**
  * 记忆梦境的一次运行：认领范围 → 认领后确认 → 记开始 → 收尾上次留下的 → 读基线 → 按运行计划逐步做 → 记结果 → 放认领。
@@ -99,11 +104,39 @@ export interface DreamsStepContext {
    * 和 apply 一样占住条目写，写在 store.writeSection 里（和回执的补记、撤销整批互斥）；条目中途被撤销、移出账本了抛 DreamsEntryGone。
    */
   recordResult(result: DreamsResult): Promise<void>
+  /**
+   * 这次运行的下钻账：各步共用一份（名额、试过的锚、读过的存档会话、读不到的锚、补上的、交给用户的）。
+   * 运行收尾（记结果）时不为空就记进批次条目的下钻报告（drillReportOf），批次条目还没有时建一条；记不上时这次按出错收，下次运行重做。
+   */
+  readonly drillLog: DrillLog
+  /**
+   * 在一条记忆名下补回一个过去的历史版本（versionKind recovered，不经变更集，记忆文件不动）。先查要不要停，再占住批次条目、进写入段：
+   * 按 basis 的作用域键和 id 找到这一份，按位置算仍在用、扫描指纹等于 basis、写入许可放行（锁定的不写）、这一层的历史读全了，
+   * build 拼出的版本记录不含疑似密钥（hasSecret），才先在批次条目上记回执（appendRecoveredVersion）、再写版本文件。
+   * 不占改动量。跳过的（stopped 除外）记进这次运行的跳过清单（kind recover-version，target 是记忆 id）。
+   * 条目中途被撤销了抛 DreamsEntryGone；写版本文件出错原样抛出（回执留着，撤销时找不到那一版照样拿掉回执）。
+   */
+  recoverVersion(input: RecoverVersionInput): Promise<RecoverVersionOutcome>
   /** 这次运行用的模型（一次运行只解析一次）。拿不到抛 DreamsModelUnavailable。 */
   llm(): Promise<SemanticLlm>
   /** 一次模型调用用了这么多 token：立刻记进七天用量。 */
   addUsage(tokens: number): Promise<void>
 }
+
+/** 补回一个历史版本要的：操作 id（`<运行 id>:drill:<序号>`，进回执和版本的写入清单）、读到这条记忆时的依据、这一版的结束时刻、拼版本的函数。 */
+export interface RecoverVersionInput {
+  op: string
+  basis: OpBasis
+  /** 这一版的结束时刻：版本标识按它取（newVersionId，避开这一层已有的）。 */
+  endedAt: number
+  /** 拿锁内重读到的这一份和定好的版本标识拼出要写的版本（下钻用 recoveredVersion）；写入清单里带着 op。 */
+  build: (current: MemoryRecord, versionId: string) => HistoryVersion
+}
+
+/** applied：写下了，versionId 是版本标识；skipped：没写，原因见 DreamsStepContext.recoverVersion。 */
+export type RecoverVersionOutcome =
+  | { kind: 'applied'; versionId: string }
+  | { kind: 'skipped'; reason: 'stopped' | 'gone' | 'basis-changed' | 'locked' | 'history-unreadable' | 'has-secret' }
 
 export interface DreamsStep {
   name: string
@@ -255,6 +288,7 @@ export async function runDreams(scope: Scope, opts: DreamsRunOptions, deps: Drea
     // 这次没处理到的记忆：写基线时不记这次的值；留给下次运行的：基线里不留
     const unprocessed = new Set<string>()
     const held = new Set<string>()
+    const drillLog = newDrillLog()
     // 上一次做完时的基线和这次开始时读到的：判断哪条变了
     let previousMarks: Record<string, string> | undefined
     let initialMarks: Record<string, string> = {}
@@ -375,6 +409,28 @@ export async function runDreams(scope: Scope, opts: DreamsRunOptions, deps: Drea
         const recorded = await withEntry(id => deps.store.writeSection(() => deps.decisions.appendDreamsResult(id, result)))
         if (!recorded) throw new DreamsEntryGone()
       },
+      drillLog,
+      async recoverVersion(input) {
+        if (shouldStop()) return { kind: 'skipped', reason: 'stopped' }
+        const outcome = await withEntry(id => deps.store.writeSection(async (): Promise<RecoverVersionOutcome> => {
+          const found = await deps.store.locate(input.basis.memoryId, scope)
+          if (found === undefined || scopeKeyOf(found.record) !== input.basis.scopeKey || byPosition(found).status !== 'active') return { kind: 'skipped', reason: 'gone' }
+          if (scanFingerprint(found.record) !== input.basis.fingerprint) return { kind: 'skipped', reason: 'basis-changed' }
+          if (writeGate(DREAMS_INITIATOR, found.record, deps.now()) === 'locked') return { kind: 'skipped', reason: 'locked' }
+          const layer = layerOf(found)
+          const listing = await deps.store.history.list(layer, found.record.id)
+          if (!listing.isComplete) return { kind: 'skipped', reason: 'history-unreadable' }
+          const versionId = newVersionId(input.endedAt, listing.versions.map(v => v.versionId))
+          const version = input.build(found.record, versionId)
+          if (hasSecret(version.record)) return { kind: 'skipped', reason: 'has-secret' }
+          const isNoted = await deps.decisions.appendRecoveredVersion(id, { op: input.op, memoryId: found.record.id, scopeKey: input.basis.scopeKey, versionId, at: deps.now() })
+          if (!isNoted) throw new DreamsEntryGone()
+          await deps.store.history.write(layer, version)
+          return { kind: 'applied', versionId }
+        }))
+        if (outcome.kind === 'skipped' && outcome.reason !== 'stopped') noteSkipped('recover-version', input.basis.memoryId, outcome.reason)
+        return outcome
+      },
       llm() {
         llm ??= deps.resolveLlm().then((resolved) => {
           if (resolved.fellBack) result.modelFallback = { to: resolved.isSelected ? 'checkup' : 'default', reason: resolved.reason ?? 'provider-gone' }
@@ -468,11 +524,21 @@ export async function runDreams(scope: Scope, opts: DreamsRunOptions, deps: Drea
     if (result.kind === 'lost' || isGone()) return { ...result, kind: 'lost' }
 
     // 7 记结果
+    if (!isDrillLogEmpty(drillLog)) {
+      try {
+        await withEntry(id => deps.store.writeSection(() => deps.decisions.recordDrillReport(id, drillReportOf(drillLog))))
+      } catch (err) {
+        // 报告里有交给用户的稿：没记上就丢了。这次不能记成做完（做完会推水位，下次就不再看这几条），按出错收，下次运行重做。
+        // 重做时这次已经补回的历史版本可能再补一遍：两版各有回执，都能撤
+        log.warn('[plastic-memory] 记忆梦境的下钻报告没记上，这次按出错收，下次运行重做', err)
+        if (result.kind === 'completed') result.kind = 'failed'
+      }
+    }
     try {
       const id = entryId
       if (id !== undefined) {
         await deps.store.writeSection(() => deps.decisions.finishChangeRun(
-          id, { writes, summary: `记忆梦境整理 ${writes.length} 条` }, op => deps.store.isOpPending(op), () => hasPendingReceipts(deps.store, id),
+          id, { writes, ...(writes.length > 0 || isDrillLogEmpty(drillLog) ? { summary: `记忆梦境整理 ${writes.length} 条` } : {}) }, op => deps.store.isOpPending(op), () => hasPendingReceipts(deps.store, id),
         ))
       }
     } catch (err) {

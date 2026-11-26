@@ -47,7 +47,7 @@ export interface UndoRule {
 export function undoRuleOf(entry: UndoableEntry): UndoRule {
   const { verdict, isBornSettled } = entry.settled
   // 记忆梦境的一次运行：记忆改动和索引操作两种回执，一条都不剩时移出账本
-  if (entry.kind === 'brewing-dreams-run') return { targets: [...new Set((entry.changes ?? []).map(r => r.memoryId))], mechanism: 'undo-dreams', fate: 'remove' }
+  if (entry.kind === 'brewing-dreams-run') return { targets: [...new Set([...(entry.changes ?? []), ...(entry.recoveredVersions ?? [])].map(r => r.memoryId))], mechanism: 'undo-dreams', fate: 'remove' }
   // 按变更集应用的（带逐操作回执）：不管是哪一种条目，都按回执逆序还原；撤后的去向仍按种类
   if (entry.changes !== undefined) {
     const targets = [...new Set(entry.changes.map(r => r.memoryId))]
