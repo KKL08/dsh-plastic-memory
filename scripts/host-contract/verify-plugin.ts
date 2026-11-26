@@ -13,7 +13,7 @@
  * 原话检索的连续调用上限（H36，无 key）：连续、并行、和别的工具交错三种调用形态，清零靠宿主真会话的事件。
  * 宿主接口探针（H22–H30、H32，无 key）：sessionQuery 的会话列举、父子追溯、标题、事件时间与过滤；当轮用户消息的来源标记；本进程的空闲信号；
  * 指令文件的修改时间；会话存档状态（含跨进程，第二趟）；会话卸下后读事件、另一个进程写下的会话（第二趟）；fork 型子会话的快照；经插件自有来源的消息开一轮（含续接冷会话）；各种会话的继承前缀长度（H32）。
- * 有 DEEPSEEK_API_KEY（或 test-model.ts 的替代路由可用）且宿主能选出默认模型时再跑语义扫描与取消两项、一次真实的自动体检（H17：无会话、宿主默认模型）、
+ * 有 DEEPSEEK_API_KEY（或 test-model.ts 的替代路由可用）且宿主能选出默认模型时再跑语义扫描与取消两项、
  * 一次带出处的处理建议（H20：两条记忆的出处从真会话读回，交给真模型）、一次整理索引再整批撤销（H35：真模型给操作，只验结构），否则标 SKIPPED。
  * run.sh 随后用同一个 DSH_HOME 再起一次宿主（HOST_CONTRACT_PHASE=restart）：第一趟把
  * 恢复的记录 id 写进交接文件，第二趟跑 H12，证明恢复结果过了进程重启仍可读。
@@ -21,7 +21,7 @@
  * 无 key 也能比）；有 key 时再在真会话里跑一轮，
  * 模型收到的指令文件正文和宿主函数返回的逐字相同。
  * run.sh 始终用合成凭据起第三趟（HOST_CONTRACT_PHASE=bad-key），仅替换 HTTP 响应：
- * 验证认证错误脱敏、普通 550 记失败，以及 550 带认证类型时仍归 AUTH。
+ * 验证无会话的默认模型自动体检落盘、认证错误脱敏、普通 550 记失败，以及 550 带认证类型时仍归 AUTH。
  *
  * 只用可擦除的 TypeScript 语法（engines 要求的 Node 22.19+/24 原生 strip-types 直接加载，不需要构建）。
  */
@@ -52,6 +52,7 @@ import { readIndex } from '../../src/topic-index.ts'
 import { dialogueNote } from '../../src/search/dialogue-format.ts'
 import type { TestModelState } from './test-model.ts'
 import { httpFixture } from './http-fixture.ts'
+import { CheckupDiagnostics } from './checkup-diagnostics.ts'
 
 export const name = 'dsh-plastic-memory-host-contract'
 export const inject = ['tools', 'sessions']
@@ -118,7 +119,7 @@ type CheckupScopeShape = {
 }
 /** 体检视图文件（与 src/gui/contract.ts 的 GUI_VIEW_DIR、GUI_CHECKUP_VIEW_FILE 同步）。 */
 const CHECKUP_VIEW_PATH = ['.state', 'gui', 'checkups.json']
-/** 等自动体检出结果的上限：H17 要真调一次模型，H18 只等一次被拒的请求。 */
+/** 自动体检经真实宿主调度和落盘的等待上限，成功和失败响应共用同一预算。 */
 const AUTO_CHECKUP_WAIT_MS = 180_000
 const AUTO_CHECKUP_POLL_MS = 500
 
@@ -229,43 +230,43 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       const r = await commands.execute(agent, line, [], new AbortController().signal)
       return r === undefined ? '/memory 命令没有注册' : r.result
     }
-    /**
-     * 打开一个项目的自动体检（每天），走界面同一条路：宿主 commands 服务执行 `/memory set-auto-checkup`，
-     * 插件写设置表后立刻重算调度，从没体检过的项目马上到期，后台无会话、用宿主默认模型去查。
-     * 会话只是命令借来写生命周期事件、解析项目的，体检本身不经过它。返回 undefined 表示命令成功，否则是原因。
-     */
-    const enableAutoCheckup = async (workspacePath: string): Promise<string | undefined> => {
-      if (!ctx.get('timer')) return '宿主缺 timer 服务（插件的自动体检调度挂在它上面）'
-      const r = await runMemoryCommand(workspacePath, `/memory set-auto-checkup ${JSON.stringify({ scope: { kind: 'workspace', workspacePath }, frequency: 1 })}`)
-      if (typeof r === 'string') return r
-      return r.kind === 'success' ? undefined : `set-auto-checkup → ${r.kind}: ${r.text}`
-    }
-    const checkupViewPath = join(memoriesRoot, ...CHECKUP_VIEW_PATH)
-    /** 体检视图里这个项目的那一项；视图还没写出来或正在替换时为 undefined。 */
-    const readCheckupScope = (workspacePath: string): CheckupScopeShape | undefined => {
-      try {
-        const view = JSON.parse(readFileSync(checkupViewPath, 'utf8')) as { scopes: CheckupScopeShape[] }
-        return view.scopes.find(s => s.scope.kind === 'workspace' && s.scope.workspacePath === workspacePath)
-      } catch { return undefined }
-    }
-    /** 等这个项目的自动体检有了结局：做完（lastResult.by === 'auto'）、没做完（failure）或模型用不了（modelUnavailable）。超时返回 undefined。 */
-    const waitAutoCheckup = async (workspacePath: string): Promise<CheckupScopeShape | undefined> => {
-      const deadline = Date.now() + AUTO_CHECKUP_WAIT_MS
-      while (Date.now() < deadline) {
-        const s = readCheckupScope(workspacePath)
-        if (s !== undefined && (s.lastResult?.by === 'auto' || s.failure !== null || s.modelUnavailable !== null)) return s
-        await new Promise(resolve => setTimeout(resolve, AUTO_CHECKUP_POLL_MS))
-      }
-      return undefined
-    }
-    const seedMemories = async (ws: string, label: string) => {
-      for (const [n, c] of [[`${label}-1`, '部署统一跑 deploy.sh'], [`${label}-2`, '单测不 mock 数据库'], [`${label}-3`, '提交信息用英文祈使句']]) {
-        await call('memory_save', { action: 'create', name: n, summary: c, content: c, ...MEMORY_BASE }, mkExec(ws))
-      }
-    }
-
     if (process.env.HOST_CONTRACT_PHASE === 'bad-key') {
       if (httpFixture === undefined || globalThis.fetch !== httpFixture.fetch) throw new Error('HTTP 拦截器没有预加载')
+      /**
+       * 打开一个项目的自动体检（每天），走界面同一条路：宿主 commands 服务执行 `/memory set-auto-checkup`，
+       * 插件写设置表后立刻重算调度，从没体检过的项目马上到期，后台无会话、用宿主默认模型去查。
+       * 会话只是命令借来写生命周期事件、解析项目的，体检本身不经过它。返回 undefined 表示命令成功，否则是原因。
+       */
+      const enableAutoCheckup = async (workspacePath: string): Promise<string | undefined> => {
+        if (!ctx.get('timer')) return '宿主缺 timer 服务（插件的自动体检调度挂在它上面）'
+        const r = await runMemoryCommand(workspacePath, `/memory set-auto-checkup ${JSON.stringify({ scope: { kind: 'workspace', workspacePath }, frequency: 1 })}`)
+        if (typeof r === 'string') return r
+        return r.kind === 'success' ? undefined : `set-auto-checkup → ${r.kind}: ${r.text}`
+      }
+      const checkupViewPath = join(memoriesRoot, ...CHECKUP_VIEW_PATH)
+      /** 体检视图里这个项目的那一项；视图还没写出来或正在替换时为 undefined。 */
+      const readCheckupScope = (workspacePath: string): CheckupScopeShape | undefined => {
+        try {
+          const view = JSON.parse(readFileSync(checkupViewPath, 'utf8')) as { scopes: CheckupScopeShape[] }
+          return view.scopes.find(s => s.scope.kind === 'workspace' && s.scope.workspacePath === workspacePath)
+        } catch { return undefined }
+      }
+      /** 等这个项目的自动体检有了结局：做完（lastResult.by === 'auto'）、没做完（failure）或模型用不了（modelUnavailable）。超时返回 undefined。 */
+      const waitAutoCheckup = async (workspacePath: string): Promise<CheckupScopeShape | undefined> => {
+        const deadline = Date.now() + AUTO_CHECKUP_WAIT_MS
+        while (Date.now() < deadline) {
+          const s = readCheckupScope(workspacePath)
+          if (s !== undefined && (s.lastResult?.by === 'auto' || s.failure !== null || s.modelUnavailable !== null)) return s
+          await new Promise(resolve => setTimeout(resolve, AUTO_CHECKUP_POLL_MS))
+        }
+        return undefined
+      }
+      const seedMemories = async (ws: string, label: string) => {
+        for (const [n, c] of [[`${label}-1`, '部署统一跑 deploy.sh'], [`${label}-2`, '单测不 mock 数据库'], [`${label}-3`, '提交信息用英文祈使句']]) {
+          await call('memory_save', { action: 'create', name: n, summary: c, content: c, ...MEMORY_BASE }, mkExec(ws))
+        }
+      }
+
       const fixture = httpFixture
       const expected = fixture.config
       const sel = readDefaultModel()
@@ -295,6 +296,59 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
         const r = await runMemoryCommand(workspacePath, `/memory set-auto-checkup ${JSON.stringify({ scope: { kind: 'workspace', workspacePath }, frequency: 'manual' })}`)
         if (typeof r === 'string' || r.kind !== 'success') throw new Error(`关闭自动体检失败：${JSON.stringify(r)}`)
       }
+      // 无会话的体检由真实调度器开跑；只观察宿主流和落盘，模型响应留在 HTTP 边界替换。
+      await attempt('H17-AUTO-CHECKUP-DEFAULT-MODEL', async () => {
+        fixture.mode = 'success'
+        const ws = mkWs('auto-success')
+        await seedMemories(ws, 'auto-success')
+        const start = fixture.requests.length
+        const diagnostics = new CheckupDiagnostics(memoriesRoot, ws)
+        const stream = llm.stream
+        llm.stream = async function* (request) {
+          diagnostics.stages.scheduled = true
+          diagnostics.stages.modelStarted = true
+          diagnostics.sample()
+          try {
+            for await (const chunk of stream.call(this, request)) {
+              if (chunk.type === 'finish') diagnostics.modelFinish = chunk.reason
+              yield chunk
+            }
+          } finally {
+            diagnostics.stages.modelEnded = true
+            diagnostics.sample()
+          }
+        }
+        try {
+          diagnostics.stages.scheduleRequested = true
+          const enabled = await enableAutoCheckup(ws)
+          if (enabled !== undefined) return { ok: false, detail: `${enabled} | diagnostics=${diagnostics.detail()}` }
+          const deadline = Date.now() + AUTO_CHECKUP_WAIT_MS
+          let s: ReturnType<CheckupDiagnostics['sample']>
+          while (Date.now() < deadline) {
+            s = diagnostics.sample()
+            if (s !== undefined && (s.lastResult?.by === 'auto' || s.failure !== null || s.modelUnavailable !== null)) break
+            await new Promise(resolve => setTimeout(resolve, AUTO_CHECKUP_POLL_MS))
+          }
+          if (s === undefined || (s.lastResult?.by !== 'auto' && s.failure === null && s.modelUnavailable === null)) return { ok: false, detail: `${AUTO_CHECKUP_WAIT_MS / 1000}s 内自动体检没有结局 | diagnostics=${diagnostics.detail()}` }
+          const codes = (s.lastResult?.notes ?? []).map(n => n.code)
+          const health = await call('memory_health', {}, mkExec(ws)) as { breakdown: { semanticLayer: { unclear: number; cachedAt: number | null } } }
+          const semantic = health.breakdown.semanticLayer
+          const routeMatches = requestsSince(start, 200)
+          const findingsPersisted = semantic.unclear === 1 && typeof semantic.cachedAt === 'number'
+          return {
+            ok: s.lastResult?.by === 'auto' && s.lastCheckupAt !== null && s.failure === null && s.modelUnavailable === null && !codes.includes('semantic-failed')
+              && routeMatches && findingsPersisted && s.lastResult.usageTokens === 30,
+            detail: `by=${s.lastResult?.by} lastCheckupAt=${s.lastCheckupAt} failure=${JSON.stringify(s.failure?.cause ?? null)} modelUnavailable=${JSON.stringify(s.modelUnavailable)} notes=${codes.join(',')}`
+              + ` provider=${sel.provider} model=${sel.model} url=${expected.messagesUrl} requestsMatch=${routeMatches} findingsPersisted=${findingsPersisted} usageTokens=${s.lastResult?.usageTokens}`
+              + ` | diagnostics=${diagnostics.detail()}`,
+          }
+        } finally {
+          // 停掉已到期的范围，再切错误响应，免得后续调度串进下一组。
+          await disableAutoCheckup(ws)
+          llm.stream = stream
+          fixture.mode = 'auth'
+        }
+      })
       await attempt('H18-AUTH-ERROR-MASKED', async () => {
         const probeStart = fixture.requests.length
         const raw = await probe()
@@ -986,7 +1040,7 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       }
     })
 
-    // 无 key 档的宿主服务契约：命令服务或计时服务变了，这两项先红，不必等带 key 的 H17
+    // 无 key 档的宿主服务契约：命令服务或计时服务变了，这两项先红，不必等第三趟自动体检
     await attempt('PA-49-COMMANDS-GUI-CONTRACT', async () => {
       const ws = mkWs('pa49')
       // 界面的解码同一套：结果正文是 JSON，过 GUI 契约的 memoryCommandResultSchema
@@ -1496,22 +1550,6 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       const r = await call('memory_scan', { layers: 'full' }, mkExec(wsB, sel)) as { kind: string; semanticCachedAt: number | null; notes?: Array<{ code: string }> }
       const codes = (r.notes ?? []).map(n => n.code)
       return { ok: r.kind === 'single' && typeof r.semanticCachedAt === 'number' && !codes.includes('semantic-failed') && !codes.includes('semantic-unavailable'), detail: `kind=${r.kind} cachedAt=${r.semanticCachedAt} notes=${codes.join(',')}` }
-    })
-    // 自动体检真跑一次：无会话，模型由插件自己经宿主 agentDefaultModel 选（这里的 sel 只用来判前提），
-    // 和后台定时体检同一条路径（调度器认领范围、全库扫描、写完成记录和最近一次结果），体检视图里记成自动体检做完
-    await attempt('H17-AUTO-CHECKUP-DEFAULT-MODEL', async () => {
-      const gate = semanticGate(); if (gate) return gate
-      const wsC = mkWs('c')
-      await seedMemories(wsC, 'c')
-      const enabled = await enableAutoCheckup(wsC)
-      if (enabled !== undefined) return { ok: false, detail: enabled }
-      const s = await waitAutoCheckup(wsC)
-      if (s === undefined) return { ok: false, detail: `${AUTO_CHECKUP_WAIT_MS / 1000}s 内自动体检没有结局` }
-      const codes = (s.lastResult?.notes ?? []).map(n => n.code)
-      return {
-        ok: s.lastResult?.by === 'auto' && s.lastCheckupAt !== null && s.failure === null && s.modelUnavailable === null && !codes.includes('semantic-failed'),
-        detail: `by=${s.lastResult?.by} lastCheckupAt=${s.lastCheckupAt} failure=${JSON.stringify(s.failure?.cause ?? null)} modelUnavailable=${JSON.stringify(s.modelUnavailable)} notes=${codes.join(',')}`,
-      }
     })
     // H35 整理索引：一个项目里存六条记忆（三件事各两条），界面同一条路发 /memory organize-index，由真会话的模型给操作。
     // 模型怎么分不验，只验结构：命令成功、结果合契约；整理后每条记忆在索引里恰好一行；做成过操作就再发 undo，撤完同样每条恰好一行。

@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parse } from 'yaml'
+import { createHash } from 'node:crypto'
+import { CheckupDiagnostics } from '../scripts/host-contract/checkup-diagnostics.ts'
+import { parseSemanticFindings } from '../src/governance/semantic-scan.ts'
 import { createHttpFixture, createHttpFixtureConfig } from '../scripts/host-contract/http-fixture.ts'
 
 describe('宿主契约的 HTTP 替身', () => {
@@ -98,6 +101,56 @@ describe('宿主契约的 HTTP 替身', () => {
       expect(JSON.parse(loaded.stdout)).toEqual({ status: 401, count: 1 })
     } finally {
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('宿主契约自动体检用例的成功响应和诊断', () => {
+  it('成功流包含可解析的真实记忆发现、用量和结束事件', async () => {
+    const config = createHttpFixtureConfig()
+    const fixture = createHttpFixture(config)
+    fixture.mode = 'success'
+    const response = await fixture.fetch(config.messagesUrl, {
+      method: 'POST', body: JSON.stringify({ model: config.model, messages: [{ role: 'user', content: [{ type: 'text', text: '## 记忆列表（共 1 条）\n- id=mem_fixture type=knowledge scope=workspace\n  name: 流程约定' }] }] }),
+    })
+    expect(response.status).toBe(200)
+    expect(response.headers.get('content-type')).toBe('text/event-stream')
+    const events = (await response.text()).split('\n\n').filter(Boolean).map(event => JSON.parse(event.split('\ndata: ')[1]!))
+    expect(events.map(event => event.type)).toEqual(['message_start', 'content_block_start', 'content_block_delta', 'content_block_stop', 'message_delta', 'message_stop'])
+    const findings = parseSemanticFindings(events[2].delta.text, new Set(['mem_fixture']))
+    expect(findings?.length).toBe(1)
+    expect(findings?.[0]?.type).toBe('unclear')
+    expect(findings?.[0]?.memoryIds).toEqual(['mem_fixture'])
+    expect(events[4].delta.stop_reason).toBe('end_turn')
+    expect(events[0].message.usage.input_tokens + events[4].usage.output_tokens).toBe(30)
+    expect((await fixture.fetch(config.modelsUrl)).status).toBe(401)
+    await expect(fixture.fetch(`${config.messagesUrl}/unexpected`, { method: 'POST' })).rejects.toThrow(/未匹配/)
+  })
+
+  it('诊断保留读取和解析错误，完成记录不冒充结果或视图写入', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pm-checkup-diagnostics-'))
+    const workspace = join(root, 'workspace')
+    const key = createHash('sha1').update(workspace).digest('hex')
+    const recordDir = join(root, '.state', 'checkups')
+    const viewDir = join(root, '.state', 'gui')
+    try {
+      mkdirSync(recordDir, { recursive: true })
+      mkdirSync(viewDir, { recursive: true })
+      const diagnostics = new CheckupDiagnostics(root, workspace)
+      expect(diagnostics.sample()).toBeUndefined()
+      writeFileSync(join(viewDir, 'checkups.json'), '{')
+      writeFileSync(join(recordDir, `${key}.claim`), JSON.stringify({ pid: process.pid, at: 1, id: 'claim' }))
+      writeFileSync(join(recordDir, `${key}.json`), JSON.stringify({ id: workspace, completed: { startedAt: 1, completedAt: 2, by: 'auto' } }))
+      expect(diagnostics.sample()).toBeUndefined()
+      expect(diagnostics.stages.claimed).toBe(true)
+      expect(diagnostics.stages.completed).toBe(true)
+      expect(diagnostics.stages.resultWritten).toBe(false)
+      expect(diagnostics.stages.viewResultWritten).toBe(false)
+      expect(diagnostics.detail()).toMatch(/ENOENT/)
+      expect(diagnostics.detail()).toMatch(/JSON/)
+      expect(diagnostics.detail()).toMatch(/"completedAt":2/)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
     }
   })
 })
