@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import fc from 'fast-check'
 import { kindOf, verdictLoser } from '../src/governance/schema.ts'
-import { assertSerialEquivalent, headStartArb, interleaveParams, interleaveRuns, interleaveScheduler, tallyOrder, type Subject } from './helpers/interleave.ts'
+import { withInterleaveCase, assertSerialEquivalent, headStartArb, interleaveParams, interleaveRuns, interleaveScheduler, tallyOrder, type Subject } from './helpers/interleave.ts'
 import { STORE_NOW, W, keyArb, memorySubject, type MemOp, type MemoryWorld, type Seed, type Verdict } from './helpers/memory-subject.ts'
 
 // 文件系统是进程边界：存储层 import 的 node:fs/promises 换成夹具包过的那份，调用的全序交给调度器（见 helpers/interleave.ts）
@@ -45,7 +45,7 @@ const decisionOpArb: fc.Arbitrary<MemOp> = fc.oneof(
 )
 
 describe('IL-03 裁决、撤销与写入', () => {
-  it('IL-03：裁决、两边都留、撤销、改写败方或胜方任取 2–3 个并发（未决或已裁决的冲突上），串行等价（含认领不到），账本与盘面一致', async () => {
+  it('IL-03：裁决、两边都留、撤销、改写败方或胜方任取 2–3 个并发（未决或已裁决的冲突上），串行等价（含认领不到），账本与盘面一致', async ({ signal }) => withInterleaveCase(signal, async () => {
     let claimedRuns = 0
     await fc.assert(
       fc.asyncProperty(fc.constantFrom<'open' | 'settled'>('open', 'settled'), fc.array(decisionOpArb, { minLength: 2, maxLength: 3 }), interleaveScheduler(),
@@ -56,11 +56,11 @@ describe('IL-03 裁决、撤销与写入', () => {
       interleaveParams(DEFAULT_RUNS),
     )
     console.info(`[IL-03] 有操作认领不到的次数：${claimedRuns}`)
-  }, TIMEOUT_MS)
+  }), TIMEOUT_MS)
 })
 
 describe('IL-03 强制模板', () => {
-  it('裁决删一方 × 改写败方：串行等价，账本与盘面一致，且对上不止一种串行顺序', async () => {
+  it('裁决删一方 × 改写败方：串行等价，账本与盘面一致，且对上不止一种串行顺序', async ({ signal }) => withInterleaveCase(signal, async () => {
     const tally = new Map<string, number>()
     await fc.assert(
       fc.asyncProperty(fc.boolean(), fc.option(decisionOpArb, { nil: undefined }), headStartArb(2, 150), interleaveScheduler(), async (allowsSecret, extra, head, s) => {
@@ -71,5 +71,5 @@ describe('IL-03 强制模板', () => {
     )
     console.info(`[裁决删一方 × 改写败方] 对上的串行顺序分布：${JSON.stringify(Object.fromEntries(tally))}`)
     expect(tally.size).toBeGreaterThanOrEqual(2)
-  }, TIMEOUT_MS)
+  }), TIMEOUT_MS)
 })

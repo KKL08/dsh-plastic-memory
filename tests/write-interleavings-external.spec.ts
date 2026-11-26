@@ -9,7 +9,7 @@ import { resolveDuplicates } from '../src/storage/table.ts'
 import { isPendingDelegated } from '../src/record-schema.ts'
 import { memberLine } from '../src/topic-index.ts'
 import { indexText, indexedIds } from './helpers/topic-index.ts'
-import { interleaveParams, interleaveRuns, interleaveScheduler, observeConcurrent, scheduleTrace } from './helpers/interleave.ts'
+import { withInterleaveCase, interleaveParams, interleaveRuns, interleaveScheduler, observeConcurrent, scheduleTrace } from './helpers/interleave.ts'
 import { W, externalOpArb, labelOf, memorySubject, seedArb, writeOpArb, type MemoryWorld } from './helpers/memory-subject.ts'
 
 // 文件系统是进程边界：存储层 import 的 node:fs/promises 换成夹具包过的那份，调用的全序交给调度器（见 helpers/interleave.ts）
@@ -34,7 +34,7 @@ describe('IL-04 外部写者', () => {
     return stale.length === 0 ? undefined : `${dir} 的主题索引里这几条的名称、摘要或文件名没跟上：${stale.map(l => l.record.id).join(', ')}`
   }
 
-  it('IL-04：IL-01 的操作夹着不拿锁的原始改写：不崩、无残留、文件都能解析、下一次维护后索引与文件一致', async () => {
+  it('IL-04：IL-01 的操作夹着不拿锁的原始改写：不崩、无残留、文件都能解析、下一次维护后索引与文件一致', async ({ signal }) => withInterleaveCase(signal, async () => {
     await fc.assert(
       fc.asyncProperty(seedArb, fc.array(writeOpArb, { minLength: 1, maxLength: 2 }), externalOpArb, fc.nat(), interleaveScheduler(),
         async (seed, writes, external, at, s) => {
@@ -63,7 +63,7 @@ describe('IL-04 外部写者', () => {
         }),
       interleaveParams(),
     )
-  }, TIMEOUT_MS)
+  }), TIMEOUT_MS)
 })
 
 /** 记忆根下全部记忆文件（顶层与 .archive/，不含索引），相对路径。 */
