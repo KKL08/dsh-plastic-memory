@@ -4,7 +4,7 @@ import { applyEdits, type SaveEdit } from './edits.ts'
 import type { ChangeKind, MemoryRecord, SourceMode } from './record-schema.ts'
 import type { CodedNote, RejectCode, WarningCode } from './contract-codes.ts'
 import { ALREADY_REVIEWED_REASON, CHANGE_KINDS, CONFIDENCE_BY_SOURCE, NOT_DELEGATED_REASON, isPendingDelegated, isFactTime, memoryRecordSchema } from './record-schema.ts'
-import { applyChange, initialProvenance, type ChangeAnchor, type ChangeFields } from './change.ts'
+import { applyChange, CHANGE_KIND_QUESTIONS, initialProvenance, type ChangeAnchor, type ChangeFields } from './change.ts'
 import { commitChange, isSameRecord } from './commit-change.ts'
 import { UNKNOWN_SESSION_ID } from './session-id.ts'
 import { anchorRangeOf, type AnchorFacts } from './session-log.ts'
@@ -371,10 +371,7 @@ export function changeKindGuide(target: MemoryRecord, given: unknown): string {
     ? '更新记忆要用 change 声明这次改动的性质'
     : `change=${JSON.stringify(given)} 不是可用的取值，可用：${CHANGE_KINDS.join('、')}`
   return `${head}。「${masked.name.replace(/\s+/g, ' ').trim()}」（${target.id}）现在的内容是：\n${body}\n`
-    + '对照它依次判断：\n'
-    + '1. 正文要不要改？不用改，只是同一件事又被提到：change=corroborate，只传 id 和 sourceMode。\n'
-    + '2. 旧内容现在是否仍全部成立？成立，只是补条件、原因、步骤、例外：change=refine，只增不删。\n'
-    + '3. 旧内容当时成立吗？当时成立、现在变了：change=state-change，旧内容留成历史版本，changeReason 写变化的原因；当时就不对：change=correct。拿不准当时成不成立，按 state-change。\n'
+    + `对照它依次判断：\n${CHANGE_KIND_QUESTIONS}\n`
     + '带上 change 重发这次 update。'
 }
 

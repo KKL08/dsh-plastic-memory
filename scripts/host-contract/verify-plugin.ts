@@ -37,6 +37,7 @@ import { executeSource, renderSourceResult } from '../../src/tools/source.ts'
 import { MemoryStore } from '../../src/store.ts'
 import { FileTable } from '../../src/storage/file-table.ts'
 import { buildTypeRegistry } from '../../src/type-registry.ts'
+import { CHANGE_KINDS } from '../../src/record-schema.ts'
 import { SidecarStore } from '../../src/storage/sidecar.ts'
 import { DialogueRecordStore } from '../../src/storage/dialogue-records.ts'
 import { DialogueCatchup } from '../../src/tools/dialogue-catchup.ts'
@@ -482,6 +483,19 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
         { parameters?: { properties?: { factTime?: { type?: string } }; required?: string[] } } | undefined
       const parameters = schema?.parameters
       return { ok: parameters?.properties?.factTime?.type === 'string' && !(parameters?.required ?? []).includes('factTime'), detail: JSON.stringify(parameters) }
+    })
+
+    // 更新和新建闸的参数：change 是封闭枚举，其余都是可选参数，组合由管线按 action 校验。
+    await attempt('SAVE-UPDATE-PARAMS-SCHEMA', async () => {
+      const schema = tools.schemas().find(s => s.name === 'memory_save') as
+        { parameters?: { properties?: Record<string, { type?: string; enum?: string[]; items?: { type?: string } }>; required?: string[] } } | undefined
+      const parameters = schema?.parameters
+      const properties = parameters?.properties ?? {}
+      const required = parameters?.required ?? []
+      const isShaped = JSON.stringify(properties.change?.enum) === JSON.stringify(CHANGE_KINDS) && properties.changeReason?.type === 'string'
+        && ['related', 'premises'].every(k => properties[k]?.type === 'array' && properties[k]?.items?.type === 'string')
+        && ['force', 'allowSecret'].every(k => properties[k]?.type === 'boolean')
+      return { ok: isShaped && !['change', 'changeReason', 'related', 'premises', 'force', 'allowSecret'].some(k => required.includes(k)), detail: JSON.stringify(parameters) }
     })
 
     // 引用入口需要两个可选标识，由执行器校验二选一。

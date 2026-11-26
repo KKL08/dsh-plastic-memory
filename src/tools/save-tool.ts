@@ -16,7 +16,7 @@ const WHOLE_WRITE = 'create 和整条 update 必填；用 edits 时不传就保�
  * 子 agent 收到的是委派方裁剪过的任务，存下的记录先待确认，由委派方决定去留。
  * 配额写缺省值和配置项名，不写现值：改配额不用重注册工具，超额时拒绝原因里带实际上限。
  */
-const SUBAGENT_RULES = `子 agent 会话里：只能新建 knowledge、project 两类，且要在当前场景里；project 只记观察到的项目状态，不记决定和目标。每个子会话新建有上限（默认 ${SUBAGENT_MAX_SAVES_DEFAULT} 条，可在配置 subagent.maxSavesPerSession 改）。存下的记录是待确认，不进主会话注入；存完在回复里报出 id 和摘要，由委派方决定接受、改写或丢弃。`
+const SUBAGENT_RULES = `子 agent 会话里：能新建当前场景里的 knowledge、project 两类，能更新本子会话存下、还没被接受的记录；project 只记观察到的项目状态，不记决定和目标。每个子会话新建有上限（默认 ${SUBAGENT_MAX_SAVES_DEFAULT} 条，可在配置 subagent.maxSavesPerSession 改）。存下的记录是待确认，不进主会话注入；存完在回复里报出 id 和摘要，由委派方决定接受、改写或丢弃。被重复检查拦下时，在回复里向委派方说明并带上已有那条的 id；内容有疑似密钥时，改写成不含密钥的指针再存。发现和指令文件矛盾时报给委派方，指令文件由主会话处理。supersedes、force、allowSecret 只供主会话用。`
 
 /** topic 参数的说明：参数表里登记成可选字符串，不必填。 */
 export const SAVE_TOPIC_DESCRIPTION = `这条记忆归哪个主题，填主题名。和现有主题（含曾用名）同名就归进去，比较时去掉首尾空白、不分大小写；没有就新建这个主题。新建和 update 都能带：update 带它就把这条挪到该主题。只改主题时，action=update 只传 id、sourceMode 和 topic，不用填 change，记忆内容不动。主题名最多 ${TOPIC_NAME_MAX} 个字，不含换行、顿号、逗号，不以 # 开头。主题数到上限或名字不能用时照常保存，结果里说明原因并列出名字最相近的现有主题。`
@@ -36,41 +36,41 @@ export function createSaveTool(deps: SaveToolDeps, options: { allowSubagent?: bo
     description: options.allowSubagent ? `${description}\n${SUBAGENT_RULES}` : description,
     parameters: {
       // dsh 参数 DSL：漏写 required: true 即为可选。name、type、scope、content、summary 只在整条写入时必填（edits 时可省），由管线按 action 校验
-      action: { type: 'string', enum: ['create', 'update'], required: true },
+      action: { type: 'string', enum: ['create', 'update'], required: true, description: 'create 新建一条记忆；update 改已有的一条，配 id。' },
       topic: { type: 'string', description: SAVE_TOPIC_DESCRIPTION },
       topicAbout: { type: 'string', description: SAVE_TOPIC_ABOUT_DESCRIPTION },
       id: { type: 'string', description: 'action=update 时必填，目标记忆 id' },
-      change: { type: 'string', enum: [...CHANGE_KINDS], description: 'action=update 时必填（只补挂 related、premises 或只改 topic 的除外）：这次改动的性质，决定旧内容怎么处置。corroborate（补证）：同一件事又被提到，内容不用改；只刷新确认时间、记下这次的出处，正文等内容参数不生效，只传 id 和 sourceMode。refine（细化）：旧内容仍全部成立，补上条件、原因、步骤、例外；只增不删。correct（纠错）：旧内容当时就不对，直接改掉，不留历史。state-change（状态变化）：旧内容当时成立、现在变了；旧内容整条留成历史版本，这条记忆换成现在的状态。拿不准旧内容当时成不成立，填 state-change。' },
-      changeReason: { type: 'string', description: 'change=state-change 时填：一句话说明为什么变了，随历史版本留着。' },
+      change: { type: 'string', enum: [...CHANGE_KINDS], description: 'action=update 时必填（只补挂 related、premises 或只改 topic 的除外）：这次改动的性质，决定旧内容怎么处置。corroborate（补证）：同一件事又被提到，内容不用改；只刷新确认时间、记下这次的出处，正文等内容参数不生效，只传 id 和 sourceMode。refine（细化）：旧内容仍全部成立，补上条件、原因、步骤、例外；只增不删。correct（纠错）：旧内容当时就不对，直接改掉，不留历史。state-change（状态变化）：旧内容当时成立、现在变了；旧内容整条留成历史版本，这条记忆换成现在的状态，changeReason 写为什么变。拿不准旧内容当时成不成立，填 state-change。' },
+      changeReason: { type: 'string', description: '可选，change=state-change 时填：一句话说明为什么变了，随历史版本留着；说不出原因可以不填。' },
       name: { type: 'string', description: `简短标题（2-16 字）。${WHOLE_WRITE}` },
       type: { type: 'string', enum: typeNames, description: WHOLE_WRITE },
       scope: { type: 'string', enum: ['global', 'workspace'], description: WHOLE_WRITE },
-      content: { type: 'string', description: `整条正文，会替换原来的全部正文；只改其中几处用 edits。按所选类型说明里的「正文」写法组织：结论在前，类型说明里的「原因：」「依据：」「背景：」接在句号后面，同一段写完、不换行（类型说明没写正文写法的，写清事实和它的依据或情境）。用第三人称陈述句并标明主体（「用户…」「项目定了…」），提到用户时每次都写「用户」，不用「他」「她」代称，日后读到时能和用户当下的话分开。用自己的话概括清楚，去掉口语和语气词；补充说明直接写进句子，正文里不加括号补注：别名和缩写放进 tags，日期按对话里的精度写，对话里没提到的细节直接略过；人名、地名、数字、单位、命令和路径照原样写，不概括成类别；适用范围和确定程度照对话里的写。正文只写这件事本身：这条是用户告诉你的、什么时候记的，记录会自动保存；第三方出处（同事、文档、通知）照常写进正文或「依据：」；写记忆时的操作经过（写入被拒、重试）留在会话里。只写对话或资料里有依据的内容，不替用户编理由。怎么用由类型统一交代，正文里不另列泛泛的使用场景和注意事项；不写行号、临时路径这类很快过时的细节，改用稳定的位置描述。完整经过可以用 memory_source 回查，不用抄进正文。提到别的记忆时写它的名称，不写记忆 id。${WHOLE_WRITE}` },
+      content: { type: 'string', description: `整条正文，会替换原来的全部正文；只改其中几处用 edits。按所选类型说明里的「正文」写法组织：结论在前，类型说明里的「原因：」「依据：」「背景：」接在句号后面，同一段写完、不换行（类型说明没写正文写法的，写清事实和它的依据或情境）。用第三人称陈述句并标明主体（「用户…」「项目定了…」），提到用户时每次都写「用户」，不用「他」「她」代称，日后读到时能和用户当下的话分开。用自己的话概括清楚，去掉口语和语气词；补充说明直接写进句子，正文里不加括号补注：别名和缩写放进 tags，日期按对话里的精度写，对话里没提到的细节直接略过；人名、地名、数字、单位、命令和路径照原样写，不概括成类别；适用范围和确定程度照对话里的写。正文只写这件事本身：这条是用户告诉你的、什么时候记的，记录会自动保存；第三方出处（同事、文档、通知）照常写进正文或「依据：」；写记忆时的操作经过（写入被拒、重试）留在会话里。只写对话或资料里有依据的内容，不替用户编理由。怎么用由类型统一交代，正文里不另列泛泛的使用场景和注意事项；不写行号、临时路径这类很快过时的细节，改用稳定的位置描述。完整经过可以用 memory_source 回查，不用抄进正文。提到别的记忆时正文写它的名称，它的 id 填进 related 或 premises。${WHOLE_WRITE}` },
       edits: {
         type: 'array',
-        description: '只改正文里的几处时用（配 action=update，不传 content）。按顺序应用，后一处匹配的是前一处改完的正文；任一处不成立，整次都不写。',
+        description: '只改正文里的几处时用（配 action=update，不传 content），至少一处。按顺序应用，后一处匹配的是前一处改完的正文；任一处不成立，整次都不写。',
         items: {
           type: 'object',
           additionalProperties: false,
           properties: {
-            oldString: { type: 'string', required: true, description: '要替换的原文，从当前正文原样摘取（标点、空格、换行一致）。在正文里只能出现一次，出现多次就多带些前后文。' },
-            newString: { type: 'string', required: true, description: '换成的文字；删掉这段就填空字符串。' },
+            oldString: { type: 'string', required: true, description: '要替换的原文，不能为空，从当前正文原样摘取（标点、空格、换行一致）。默认在正文里只能出现一次，出现多次就多带些前后文；每处都要换时配 replaceAll=true。' },
+            newString: { type: 'string', required: true, description: '换成的文字，要和 oldString 不同；删掉这段就填空字符串。' },
             replaceAll: { type: 'boolean', description: 'oldString 出现多次、每处都要换时填 true。' },
           },
         },
       },
       summary: { type: 'string', description: `一句话说清这条记忆讲什么，显示在索引里，供人和模型判断相关不相关；不复述 name，不堆关键词。${WHOLE_WRITE}` },
-      tags: { type: 'array', items: { type: 'string' }, description: '只写正文、name、summary 里都没出现、但以后可能被拿来搜它的词：同义词、中英文别名、缩写。不写泛化概念。用 edits 时不传就保留原标签。' },
-      sourceMode: { type: 'string', enum: ['user-explicit', 'user-behavior', 'environment-observed', 'agent-inferred', 'agent-action-confirmed'], required: true, description: '信息从哪来，决定置信度上限。user-explicit：用户明说的。agent-action-confirmed：你做的事经用户确认有效，或被采纳。user-behavior：用户反复做出的动作（多次改写、撤销、拒绝同一类做法）；对一次举动揣测动机不算。environment-observed：从文件、命令输出、配置里直接读到的事实。agent-inferred：你自己的推断和解读；只要中间有一步是你推出来的、不是直接看到的，就填它。' },
-      confidence: { type: 'number', description: '取值 0–1（0.9=确定，0.5=推测）。越界会被夹到边界、不报错，所以想表达低置信就填小值，别填 0 以上的整数' },
-      supersedes: { type: 'array', items: { type: 'string' }, description: '被这条新记忆取代的旧记忆 id（action=create 时用）。旧的随即失效、不再带入；旧说法要留档时用它，只是补充或改正同一条用 action=update。' },
+      tags: { type: 'array', items: { type: 'string' }, description: '只写正文、name、summary 里都没出现、但以后可能被拿来搜它的词：同义词、中英文别名、缩写。不写泛化概念。整条 update 时传的 tags 替换原标签，不传就清空，要保留就一并传回；用 edits 时不传就保留原标签。' },
+      sourceMode: { type: 'string', enum: ['user-explicit', 'user-behavior', 'environment-observed', 'agent-inferred', 'agent-action-confirmed'], required: true, description: '信息从哪来，决定置信度上限。user-explicit：用户明说的。agent-action-confirmed：你做的事经用户确认有效，或被采纳。user-behavior：用户反复做出的动作（多次改写、撤销、拒绝同一类做法）；对一次举动揣测动机不算。environment-observed：从文件、命令输出、配置里直接读到的事实。agent-inferred：你自己的推断和解读；只要中间有一步是你推出来的、不是直接看到的，就填它。这一轮不是用户本人发起的（定时任务、别的 agent 发来的）时，只能填 environment-observed 或 agent-inferred。' },
+      confidence: { type: 'number', description: '可选，0 到 1 之间的小数：0.9 表示确定，0.5 表示推测。不填按 sourceMode 对应的上限；填的值超过上限，按上限算。补证时不填就保留原值。' },
+      supersedes: { type: 'array', items: { type: 'string' }, description: '被这条新记忆整个接替的旧记忆 id（action=create 时用）：同一作用域里在用的旧记忆随即失效、不再带入；跨作用域的、找不到的不受影响。主体不同的记忆各自保留，不用它接替。同一件事的新状态、补充或改正，对原来那条用 action=update 并声明 change：状态变化时旧内容自动留成历史版本。' },
       factTime: { type: 'string', description: '这件事发生或成立的时间：接受 YYYY、YYYY-MM、YYYY-MM-DD、带时刻的 ISO 8601。用户说了多细就写多细，只说了年就写年；精度和时区原样保留。用户没说就不填。事实时间只记录这件事什么时候发生或成立，不影响带入和检索；什么时候开始用、用到什么时候由 validFrom、validTo 管。只改事实时间时，update 传 id、sourceMode、change 和 factTime 即可。update 时传空字符串 "" 清除，不传保留原值。' },
       validFrom: { type: 'string', description: `生效起始，本机时间。只有用户说了从什么时候开始才填；只有截止时间的，填 validTo 就够。用户说了具体时刻写 "${VALIDITY_FORMAT}"，没说就只写日期 "${VALIDITY_DATE_FORMAT}"，插件补上现在的时分。填了将来的时间，到点前这条记忆不带入新对话，也搜不到。` },
-      validTo: { type: 'string', description: `失效截止，本机时间。只有用户明确给了截止时间，或信息本身有确定的到期日（一次活动、临时方案）才填，其余不填。用户说了具体时刻写 "${VALIDITY_FORMAT}"（如「今天下午三点前」写 "2026-10-29 15:00"），没说就只写日期 "${VALIDITY_DATE_FORMAT}"，插件补上现在的时分；截止在今天的必须写时刻。必须晚于现在和 validFrom。到点后这条记忆不再带入新对话，也搜不到；已带入当前对话的，到下个会话或上下文压缩后才去掉。` },
-      allowSecret: { type: 'boolean', description: '内容里有疑似密钥会被拦下；向用户确认不是密钥后，带 true 重发。明确的密钥一律不存。' },
-      force: { type: 'boolean', description: '新建时内容和某条已有记忆几乎一样会被拦下；确认这是另一件事后，带 true 重发这次 create。' },
-      related: { type: 'array', items: { type: 'string' }, description: `相关记忆的 id：这条记忆和它们说的是相关的事（比如一条决定改变了某个项目的现状），以后查到其中一条能顺着找到另一条。追加在已有的后面，已有的保留；每条最多 ${LINKS_PER_KIND_MAX} 个。项目记忆能指向本项目和全局的在用记忆，全局记忆只能指向全局记忆。新建、整条 update 时可一起传；给已有记忆补挂时，action=update 只传 id、sourceMode 和 related，不用填 change，内容保持原样。` },
-      premises: { type: 'array', items: { type: 'string' }, description: `这条决定依据的记忆 id（type=decision 时用）：插件记下每条依据当时的内容，依据以后变了能看出来。追加规则、作用域和补挂方式同 related，每条最多 ${LINKS_PER_KIND_MAX} 个。` },
+      validTo: { type: 'string', description: `失效截止，本机时间。只有用户明确给了截止时间，或信息本身有确定的到期日（一次活动、临时方案）才填，其余不填。用户说了具体时刻写 "${VALIDITY_FORMAT}"（比如今天是 2026-10-29，「今天下午三点前」写 "2026-10-29 15:00"），没说就只写日期 "${VALIDITY_DATE_FORMAT}"，插件补上现在的时分；截止在今天的必须写时刻。必须晚于现在和 validFrom。到点后这条记忆不再带入新对话，也搜不到；已带入当前对话的，到下个会话或上下文压缩后才去掉。` },
+      allowSecret: { type: 'boolean', description: '内容里有疑似密钥时这次写入会被拦下；向用户确认不是密钥后，带 true 重发。带明确厂商特征的密钥始终拦下，改写成不含密钥的指针（如「密钥在 .env 的 API_KEY」）再存。' },
+      force: { type: 'boolean', description: '只用于 create，只跳过重复检查：新内容和某条已有记忆几乎一样时会被拦下，结果里给出那条的 id。确认是另一件事（比如主体不同）后，带 true 重发这次 create。' },
+      related: { type: 'array', items: { type: 'string' }, description: `相关记忆的 id：这条记忆和它们说的是相关的事，以后查到其中一条能顺着找到另一条；不能指向这条自己。决定、查明的事实、资料入口属于某个事项时，在这里填那个事项状态页的 id。追加在已有的后面，已有的保留；每条最多 ${LINKS_PER_KIND_MAX} 个。项目记忆能指向本项目和全局的在用记忆，全局记忆只能指向全局记忆。新建、改内容的 update（整条或 edits）时可一起传；给已有记忆补挂时，action=update 只传 id、sourceMode 和 related，不用填 change，内容保持原样。` },
+      premises: { type: 'array', items: { type: 'string' }, description: `决定的「前提」引用的记忆 id：插件记下每条前提当时内容的指纹，前提以后变了能看出来。追加规则、作用域和补挂方式同 related，每条最多 ${LINKS_PER_KIND_MAX} 个。` },
       confirmGlobal: { type: 'string', description: '确认改写全局记忆时用：原样填这条记忆最近一次未保存提示里给的确认码；第一次调用不填。' },
     },
     output: {

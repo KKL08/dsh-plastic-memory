@@ -314,7 +314,7 @@ describe('密钥硬删', () => {
     const params = (tool.parameters as unknown as { properties: Record<string, { description?: string }> }).properties
     expect(params.force.description).not.toContain('密钥')
     expect(params.allowSecret.description).not.toContain('重复')
-    expect(params.allowSecret.description).toBe('内容里有疑似密钥会被拦下；向用户确认不是密钥后，带 true 重发。明确的密钥一律不存。')
+    expect(params.allowSecret.description).toBe('内容里有疑似密钥时这次写入会被拦下；向用户确认不是密钥后，带 true 重发。带明确厂商特征的密钥始终拦下，改写成不含密钥的指针（如「密钥在 .env 的 API_KEY」）再存。')
   })
 
   it('规则层 secret finding 建议文案改为「memory_forget 会立即物理删除，不进 14 天回收，并轮换凭证」', () => {

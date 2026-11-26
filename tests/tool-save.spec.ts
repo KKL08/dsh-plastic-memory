@@ -418,9 +418,10 @@ describe('renderSaveDescription（memory_save 工具描述来源）', () => {
 
   it('update 与 supersedes 分工：更新带改动性质、旧内容由状态变化留成历史版本；新记忆取代旧记忆才新建并填 supersedes', () => {
     const description = registry.renderSaveDescription()
-    expect(description).toContain('更新已有记忆传 action=update、目标 id 和 change，别重复新增。')
-    expect(description).toContain('填 state-change，旧内容自动留成历史版本，changeReason 写变化的原因')
-    expect(description).toContain('一条新记忆取代另一条旧记忆时，新建并在 supersedes 填旧记忆的 id。')
+    expect(description).toContain('更新已有记忆传 action=update 和目标 id，在原来那条上改。')
+    expect(description).toMatch(/只补挂关联、前提或只改主题时[^。]*不用填 change。改内容或补证时[^。]*再依次判断定 change/)
+    expect(description).toContain('change=state-change，旧内容留成历史版本，changeReason 写变化的原因')
+    expect(description).toContain('同一件事有了新状态，用 state-change 更新原来那条；另一件事整个接替了旧的那件，新建一条并在 supersedes 填旧记忆的 id。')
   })
 
   it('用户要求记住时记内容本身，不记「用户让我记」这个动作', () => {
