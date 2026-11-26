@@ -20,6 +20,7 @@ import type { MemoryRecord } from '../src/record-schema.ts'
 import { record } from './helpers/record.ts'
 import { fakeExec } from './helpers/exec.ts'
 import { FAKE_SECRET, generatePrivateKeyPem } from './helpers/secrets.ts'
+import { toolSummary } from '../client/chat/tool-summary.ts'
 
 // memory_search 的历史模式：按 id 列历史版本、按版本标识读一版，参数组合的合法表，以及普通检索结果标历史版本数。
 // 走工具执行器 executeSearch 和渲染 renderSearchResult；真实临时目录上的文件表和侧表。
@@ -464,5 +465,39 @@ describe('普通检索结果标历史版本数', () => {
     await mergedAway(e, gone, keeper)
     expect((await search(e, { query: '部署方式' })).hits.find(h => h.id === keeper.id)!.versionCount).toBe(1)
     expect((await search(e, { id: keeper.id, history: true })).history!.total).toBe(2)
+  })
+})
+
+describe('对话折叠行按渲染出的文本认得历史模式', () => {
+  // 折叠行只拿得到渲染文本：这里用真实执行器的各种结果对着解析跑一遍，改任一侧格式都会在这里失败
+  const summaryKey = async (e: Env, args: SearchArgs) => toolSummary('memory_search', { ...args }, renderSearchResult(await search(e, args)))?.key
+
+  it('列历史：给了几版、没有历史、读不全、找不到这条记忆、参数错', async () => {
+    const e = env()
+    const m = await made(e)
+    expect(await summaryKey(e, { id: m.id, history: true })).toBe('chat.tool.search.history.none')
+    await changeState(e, m, '第二版', '一')
+    expect(await summaryKey(e, { id: m.id, history: true })).toBe('chat.tool.search.history.found.one')
+    await changeState(e, m, '第三版', '二')
+    await changeState(e, m, '第四版', '三')
+    const listed = await search(e, { id: m.id, history: true, limit: 2 })
+    expect(toolSummary('memory_search', { id: m.id, history: true, limit: 2 }, renderSearchResult(listed))).toEqual({ key: 'chat.tool.search.history.found', params: { id: m.id, count: 2 } })
+    await putGarbage(globalDir(), m.id)
+    expect(await summaryKey(e, { id: m.id, history: true })).toBe('chat.tool.search.history.partial')
+    const blocked = await made(e, { name: '另一条' })
+    await blockHistoryDir(globalDir(), blocked.id)
+    expect(await summaryKey(e, { id: blocked.id, history: true })).toBe('chat.tool.search.history.failed')
+    expect(await summaryKey(e, { id: 'mem_nowhere', history: true })).toBe('chat.tool.search.history.failed')
+    expect(await summaryKey(e, { id: m.id, history: true, query: 'x' })).toBe('chat.tool.search.history.failed')
+  })
+
+  it('读一版：读到了、没有这一版、找不到这条记忆', async () => {
+    const e = env()
+    const m = await made(e)
+    await changeState(e, m, '第二版', '一')
+    const versionId = (await search(e, { id: m.id, history: true })).history!.versions[0]!.versionId
+    expect(await summaryKey(e, { id: m.id, version: versionId })).toBe('chat.tool.search.version.done')
+    expect(await summaryKey(e, { id: m.id, version: '20000101T000000000Z' })).toBe('chat.tool.search.version.failed')
+    expect(await summaryKey(e, { id: 'mem_nowhere', version: versionId })).toBe('chat.tool.search.version.failed')
   })
 })

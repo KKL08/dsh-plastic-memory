@@ -6,6 +6,8 @@ import { parseSaveResult, countSearchHits, isGlobalConfirmPending, toolSummary }
 import { renderSaveResult } from '../src/tools/save.ts'
 import { globalUpdateGuide } from '../src/pipeline.ts'
 import { renderSearchResult } from '../src/tools/search.ts'
+import { renderDialogueSearch } from '../src/tools/dialogue-search.ts'
+import { DIALOGUE_NO_HIT, DIALOGUE_QUERY_REQUIRED, DIALOGUE_SECTION_HEADING, DIALOGUE_SESSIONS_UNAVAILABLE, MEMORY_SECTION_HEADING, dialogueNote, renderSearchSections } from '../src/search/dialogue-format.ts'
 import { record } from './helpers/record.ts'
 import { readFileSync } from 'node:fs'
 
@@ -73,6 +75,57 @@ describe('对话卡解析的文本格式与服务端渲染器一致', () => {
     const text = renderSearchResult({ hits, note: '没有同时命中全部关键词的记忆，以下按相关性排序。', moreNote: '共命中 9 条，只列出前 4 条。' })
     expect(text).toContain('[b] fact｜摘要 b · 节选，正文共 5321 字符 · /m/global/b.md\n[前文省略]\n')
     expect(countSearchHits(text)).toBe(4)
+  })
+
+  it('memory_search：记忆和原话分两段时只数记忆条目段', () => {
+    const hit = (id: string) => ({ id, type: 'fact', summary: `摘要 ${id}`, content: '正文\n第二行', sourceNote: '', stalenessNote: '', matchNote: '', path: `/m/global/${id}.md` })
+    const message = (seq: number, text: string) => ({ seq, speaker: 'user' as const, at: Date.UTC(2026, 10, 20, 2, seq), text, segmentCount: 1, givenSegments: 1, ref: `s${seq}#${seq}` })
+    // 两个会话：第二个的标题长得像命中段首，原话段整段都不算
+    const dialogueText = renderDialogueSearch({
+      kind: 'ready', notes: [],
+      groups: [
+        { sessionId: 's1', title: '数据库排查', turns: [{ turnSeq: 1, at: Date.UTC(2026, 10, 19), messages: [message(1, '数据库超时')] }] },
+        { sessionId: 's2', title: '[mem_t] 部署｜排查', turns: [{ turnSeq: 1, at: Date.UTC(2026, 10, 20), messages: [message(2, '数据库连不上')], relatedMemory: '部署' }] },
+      ],
+    })
+    const both = (hits: ReturnType<typeof hit>[]) => renderSearchResult({ hits, dialogueText, onlyDialogue: false })
+    expect(both([hit('a'), hit('b')]).startsWith(`${MEMORY_SECTION_HEADING}\n[a] fact｜`)).toBe(true)
+    expect(both([hit('a'), hit('b')])).toContain(`\n\n${DIALOGUE_SECTION_HEADING}\n`)
+    expect(countSearchHits(both([hit('a'), hit('b')]))).toBe(2)
+    expect(countSearchHits(both([hit('a')]))).toBe(1)
+    expect(countSearchHits(both([]))).toBe(0)
+    expect(countSearchHits(renderSearchSections({ dialogue: dialogueText }))).toBe(0)
+    expect(countSearchHits(renderSearchSections({ memories: renderSearchResult({ hits: [hit('a')] }) }))).toBe(1)
+  })
+
+  it('memory_search：只搜过往对话时折叠行不数条数，没搜到时认得服务端的说明', () => {
+    const args = { query: '数据库', source: 'dialogue' }
+    const only = (dialogueText: string) => renderSearchResult({ hits: [], dialogueText, onlyDialogue: true })
+    const quoted = renderDialogueSearch({
+      kind: 'ready', notes: [],
+      groups: [{ sessionId: 's1', title: '[mem_t] 部署｜排查', turns: [{ turnSeq: 1, at: Date.UTC(2026, 10, 20), messages: [{ seq: 3, speaker: 'user', at: Date.UTC(2026, 10, 20, 2), text: '数据库连不上', segmentCount: 1, givenSegments: 1, ref: 's1#3' }] }] }],
+    })
+    expect(toolSummary('memory_search', args, only(quoted))).toEqual({ key: 'chat.tool.search.dialogue.done', params: { query: '数据库' } })
+    for (const notes of [[DIALOGUE_NO_HIT], [dialogueNote('dialogue-tokenizer-basic'), DIALOGUE_NO_HIT]]) {
+      expect(toolSummary('memory_search', args, only(renderDialogueSearch({ kind: 'ready', notes, groups: [] })))).toEqual({ key: 'chat.tool.search.dialogue.none', params: { query: '数据库' } })
+    }
+    expect(toolSummary('memory_search', { source: 'dialogue' }, only(DIALOGUE_QUERY_REQUIRED))).toEqual({ key: 'chat.tool.search.dialogue.done', params: { query: '' } })
+    expect(toolSummary('memory_search', args, only(dialogueNote('dialogue-search-limit')))).toEqual({ key: 'chat.tool.search.dialogue.done', params: { query: '数据库' } })
+  })
+
+  it('memory_search：原话没查成、改查记忆时，结果开头的路径说明不吞掉第一条命中', () => {
+    const hit = (id: string) => ({ id, type: 'fact', summary: `摘要 ${id}`, content: '正文\n第二行', sourceNote: '', stalenessNote: '', matchNote: '', path: `/m/global/${id}.md` })
+    for (const pathNote of [dialogueNote('dialogue-source-off'), dialogueNote('dialogue-unavailable'), DIALOGUE_SESSIONS_UNAVAILABLE]) {
+      const one = renderSearchResult({ hits: [hit('a')], pathNote })
+      expect(one.startsWith(`${pathNote}\n[a] fact｜`)).toBe(true)
+      expect(countSearchHits(one)).toBe(1)
+      expect(countSearchHits(renderSearchResult({ hits: [hit('a'), hit('b')], pathNote }))).toBe(2)
+      expect(countSearchHits(renderSearchResult({ hits: [], pathNote }))).toBe(0)
+      for (const source of ['dialogue', 'both', 'memory']) {
+        expect(toolSummary('memory_search', { query: '数据库', source }, one)).toEqual({ key: 'chat.tool.search.found', params: { count: 1, query: '数据库' } })
+      }
+      expect(toolSummary('memory_search', { query: '数据库', source: 'dialogue' }, renderSearchResult({ hits: [], pathNote }))).toEqual({ key: 'chat.tool.search.none', params: { query: '数据库' } })
+    }
   })
 
   it('memory_forget：从 message 里读「已遗忘 N 条」', () => {
