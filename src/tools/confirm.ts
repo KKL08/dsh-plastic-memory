@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import type { MemoryLogger, MemoryStore } from '../store.ts'
 import { conflictFingerprint, isBaselineCurrent, isBasisCurrent, type PendingDecisionsStore } from '../governance/decisions.ts'
 import { baselineFor, type ReadInstructions } from '../governance/instructions.ts'
@@ -210,6 +211,7 @@ export async function executeConfirm(
     if (!(await deps.store.updateIfLive(target, r => ({ ...r, lastConfirmedAt: now }), options.target))) {
       return { kind: 'error', message: `记忆不存在或已删除：${args.memoryId}` }
     }
+    deps.store.noteUsage(target, { kind: 'confirm', key: randomUUID(), at: now })
     return {
       kind: 'refreshed', memoryId: args.memoryId, lastConfirmedAt: now, otherWorkspaces,
       message: `已确认记忆 ${args.memoryId} 仍然准确，新鲜度已刷新。${crossWorkspaceNote([], otherWorkspaces)}`,

@@ -103,6 +103,13 @@ All notable changes to this project are documented here. The format follows
   to a memory you stated yourself whose type is in `brewingDreams.focusTypes`
   (`preference`, `profile` and `decision` by default) waits for you, and
   `memory_confirm` can adopt it; with `trust`, such changes are applied too.
+- Experimental: when a Brewing Dreams pass refreshes summaries and adjusts
+  how each memory is injected, it also sees how the memory has been used:
+  how often it was recalled, in how many chats it was read in full by its id,
+  how often it was confirmed as still accurate, and how often it was
+  corrected within 24 hours of being recalled. These counts only guide the
+  model and nothing is ranked by them. They are recorded without a setting
+  and kept on this machine outside the memory folder, with no memory text.
 - The plugin records which project folders have a chat running in
   `.state/activity/` inside the memory folder, so several DeepSeek Harness
   windows that share a memory folder can tell when a project is idle. A

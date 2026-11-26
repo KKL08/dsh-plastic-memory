@@ -6,6 +6,7 @@ import { describeError } from './state-files.ts'
 import type { MemoryLogger, OpStep } from './table.ts'
 import { RECENT_CHANGES_PER_SCOPE } from './recent-changes.ts'
 import type { RecentChangeRow, RecentChangeInput, RecentChangeLog, RecentChangeRead } from './recent-changes.ts'
+import { USAGE_SIGNAL_KINDS, type UsageSignalCounts, type UsageSignalInput, type UsageSignalKind, type UsageSignalLog } from './usage-signals.ts'
 
 /**
  * 操作日志库：记每次写入提交之后还要补做的事，中断后由下一个拿到写锁的人补完（见 FileTable.recoverPending）。
@@ -14,6 +15,7 @@ import type { RecentChangeRow, RecentChangeInput, RecentChangeLog, RecentChangeR
  * - 写在写锁内；最近改动的两个读方法在锁外，只读、不删库。建库由 SQLite 的锁保护。
  * - 行里不存字段值和正文：目标只记记忆 id、目录和文件名的摘要，改动只记字段名和指纹。
  * - 待完成操作做完就删行；最近改动按作用域定长保留。
+ * - 使用信号（见 usage-signals.ts）单独一张表 usage_signals，锁外记、锁外读，打开方式同最近改动的读（不删库、不换新库）。
  * - 库丢了、损坏、是更新的版本建的，或 node:sqlite 加载不到：什么都不记，写入照常进行，只剩顺序保护。
  *   只承诺进程中途退出时能恢复，不承诺断电。
  */
@@ -82,7 +84,7 @@ export interface OpJournalOptions {
   loadSqlite?: () => SqliteModule | undefined
 }
 
-export class OpJournal implements RecentChangeLog {
+export class OpJournal implements RecentChangeLog, UsageSignalLog {
   private readonly path: string
   private readonly log: MemoryLogger
   private readonly loadSqlite: () => SqliteModule | undefined
@@ -182,13 +184,54 @@ export class OpJournal implements RecentChangeLog {
     })
   }
 
+  /**
+   * 记一笔使用信号（见 UsageSignalLog.recordUsage）：一条插入，键重复就什么都不做。锁外调用：打开失败不删库、不换新库、
+   * 不放弃这个实例，这一笔不记；库忙只丢这一笔，不记日志、不关连接；其余执行出错只记日志、关掉连接，下一笔重新打开。不抛错。
+   */
+  recordUsage(signal: UsageSignalInput): void {
+    const db = this.openOutsideWriteLock()
+    if (db === undefined) return
+    try {
+      // 信号只作参考，库忙就丢这一笔；同步插入结束后恢复共享连接的等待，写锁内的路径仍等 1 秒。
+      db.exec('PRAGMA busy_timeout = 0')
+      try {
+        db.prepare('INSERT OR IGNORE INTO usage_signals(scope, memory_id, kind, key, at) VALUES (?, ?, ?, ?, ?)')
+          .run(signal.scope, signal.memoryId, signal.kind, signal.key, signal.at)
+      } finally {
+        db.exec('PRAGMA busy_timeout = 1000')
+      }
+      this.readOpenFailures.clear()
+    } catch (err) {
+      // 库忙只说明别的进程正占着写锁，连接没坏，不必告警也不必重开
+      if (isSqliteBusy(err)) return
+      this.log.warn(`[plastic-memory] 使用信号写入失败，这一次不记：${describeError(err)}`)
+      this.close()
+    }
+  }
+
+  /** 读使用信号计数（见 UsageSignalLog.readUsage）：一次查询，库里不认识的种类跳过。打开方式同 recordUsage。读不出为 undefined。 */
+  readUsage(scope: string, memoryIds: readonly string[]): ReadonlyMap<string, UsageSignalCounts> | undefined {
+    return this.read(db => {
+      const rows = db.prepare(`SELECT memory_id, kind, COUNT(*) AS count FROM usage_signals WHERE scope = ? AND memory_id IN (${memoryIds.map(() => '?').join(',')}) AND kind IN (${USAGE_SIGNAL_KINDS.map(() => '?').join(',')}) GROUP BY memory_id, kind`)
+        .all(scope, ...memoryIds, ...USAGE_SIGNAL_KINDS) as Array<{ memory_id: string; kind: UsageSignalKind; count: number }>
+      const fields = { 'full-read': 'fullReads', confirm: 'confirms', 'quick-correction': 'quickCorrections' } as const
+      const counts = new Map<string, UsageSignalCounts>()
+      for (const row of rows) {
+        const entry = counts.get(row.memory_id) ?? { fullReads: 0, confirms: 0, quickCorrections: 0 }
+        entry[fields[row.kind]] = row.count
+        counts.set(row.memory_id, entry)
+      }
+      return counts
+    })
+  }
+
   private latestSeq(db: DatabaseSync): number {
     const row = db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'recent_changes'").get() as { seq: number } | undefined
     return row?.seq ?? 0
   }
 
-  /** 延迟式事务保持几次查询一致；打开失败不走写路径的换库逻辑。 */
-  private read<T>(fn: (db: DatabaseSync) => T): T | undefined {
+  /** 锁外读写共用连接；打开失败只告警，不走写锁内的换库逻辑。 */
+  private openOutsideWriteLock(): DatabaseSync | undefined {
     if (this.isBroken) return undefined
     if (this.db === undefined) {
       let sqlite: SqliteModule | undefined
@@ -206,7 +249,13 @@ export class OpJournal implements RecentChangeLog {
         return undefined
       }
     }
-    const db = this.db
+    return this.db
+  }
+
+  /** 延迟式事务保持几次查询一致；打开失败不走写路径的换库逻辑。 */
+  private read<T>(fn: (db: DatabaseSync) => T): T | undefined {
+    const db = this.openOutsideWriteLock()
+    if (db === undefined) return undefined
     try {
       db.exec('BEGIN')
       try {
@@ -303,6 +352,7 @@ function openJournal(sqlite: SqliteModule, path: string): DatabaseSync {
     }
     db.exec('CREATE TABLE IF NOT EXISTS recent_changes(seq INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL UNIQUE, scope TEXT NOT NULL, memory_id TEXT NOT NULL, change TEXT NOT NULL, moved_to TEXT, session TEXT, at INTEGER NOT NULL)')
     db.exec('CREATE TABLE IF NOT EXISTS recent_change_floors(scope TEXT PRIMARY KEY, pruned_through INTEGER NOT NULL)')
+    db.exec('CREATE TABLE IF NOT EXISTS usage_signals(scope TEXT NOT NULL, memory_id TEXT NOT NULL, kind TEXT NOT NULL, key TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(scope, memory_id, kind, key)) WITHOUT ROWID')
     db.prepare('SELECT 1 FROM ops LIMIT 1').get()
     return db
   } catch (err) {

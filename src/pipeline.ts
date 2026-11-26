@@ -10,6 +10,7 @@ import { UNKNOWN_SESSION_ID } from './session-id.ts'
 import { anchorRangeOf, type AnchorFacts } from './session-log.ts'
 import type { MemoryStore, QueryScope } from './store.ts'
 import { newWriteOp, type TopicIntent } from './storage/table.ts'
+import { isQuickCorrection } from './storage/usage-signals.ts'
 import { INDEX_RECEIPT_STEP, indexReceiptStep, LINK_CHANGE_STEP, MODEL_CHANGE_STEP, ledgerSteps, linkChangeStep, modelChangeStep } from './governance/op-steps.ts'
 import { linkShapeProblem, mergeLinks, resolveLinks, type ResolvedLinks } from './links.ts'
 import { ledgerLabel, scopeOfMemory, type Scope } from './scope.ts'
@@ -1045,6 +1046,9 @@ export async function runSavePipeline(
       if (committed.kind === 'invalid') return { kind: 'rejected', code: 'schema-invalid', reason: `字段校验失败：${committed.reason}` }
       if (committed.isTopicPending) topicNotes = topicNote('topic-pending')
       clean = committed.record
+      if (change === 'correct' && isQuickCorrection(committed.before, clean.lastChange!.at)) {
+        store.noteUsage(clean, { kind: 'quick-correction', key: committed.op, at: clean.lastChange!.at })
+      }
       snapshotId = committed.snapshotId
       if (!isCorroboration) {
         const before = maskSecretSurface(committed.before, { severity: 'suspected' }).content

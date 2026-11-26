@@ -325,7 +325,7 @@ export async function apply(ctx: Context, config: Config) {
     log: ctx.logger,
   })
   // 加载期零 I/O：FileTable 构造不碰磁盘，每个操作读它涉及的目录（磁盘是唯一真相，外部改动下次操作就能看到）
-  const store = new MemoryStore(fileTable, ctx.logger, sidecar.recallStats)
+  const store = new MemoryStore(fileTable, ctx.logger, sidecar.recallStats, journal)
   // forget 的快照先行与待决账本清理需要这两个存储，治理关闭时也接线
   const decisions = new PendingDecisionsStore(sidecar.pending, rootLock)
   const relatedRecheck = relatedRecheckHook({

@@ -4,6 +4,7 @@ import { turnOpenerOf, isRealUserMessage, messageText } from '../session-log.ts'
 import { quoteTurnKey } from '../search/memory-quotes.ts'
 import type { DialogueTokenizer } from '../search/dialogue-tokenizer.ts'
 import { dirname } from 'node:path'
+import { UNKNOWN_SESSION_ID } from '../session-id.ts'
 import { VERSION_ID_PATTERN } from '../storage/history.ts'
 import type { SearchSource } from '../contract-codes.ts'
 import { retrieveDialogue, finishDialogue, renderDialogueSearch, runPath, catchUpFor, listSessionTable, shareDialogueReads, DIALOGUE_PATH_BUDGET_MS, type DialogueSearchDeps, type FinishedDialogue, type DialogueRetrieval, type DialogueFusionInput, fusedCandidates, queryAndRank, messageReader } from './dialogue-search.ts'
@@ -541,6 +542,9 @@ async function executeMemorySearch(
   const topIds = top.map(e => e.record.id)
   if (sessionRecall && handle) await sessionRecall.markRecalled(handle, topIds)
   else await deps.store.markRecalled(topIds, now)
+  if (isDirect && offset === 0 && top.length > 0 && session.id !== UNKNOWN_SESSION_ID) {
+    deps.store.noteUsage(top[0]!.record, { kind: 'full-read', key: session.id, at: now })
+  }
   onListed?.({ top, context })
   return outcome
 }

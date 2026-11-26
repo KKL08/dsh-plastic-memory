@@ -21,6 +21,7 @@ const noSqlite = [
   'tests/write-interleaving-regressions.spec.ts',
   'tests/write-interleavings-sidecar.spec.ts',
   'tests/write-interleavings-secrets.spec.ts',
+  'tests/usage-signals-store.spec.ts',
 ]
 
 export default defineConfig({
