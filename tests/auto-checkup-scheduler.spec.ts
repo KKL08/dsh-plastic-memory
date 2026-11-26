@@ -422,7 +422,7 @@ describe('自动体检调度：选用的模型', () => {
     expect(await e.completed()).toEqual({})
     expect((await e.readView()).scopes[0]).toMatchObject({
       isDue: true, modelUnavailable: null,
-      failure: { count: 1, retryAt: e.clock.now + HOUR, cause: { kind: 'error', message: expect.stringContaining('读不出来') } },
+      failure: { count: 1, retryAt: e.clock.now + HOUR, cause: { kind: 'error', code: 'selection-unreadable', message: expect.stringContaining('读不出来') } },
     })
     await e.advance(6 * AUTO_CHECKUP_INTERVAL_MS)
     expect(e.llm.requests).toEqual([])

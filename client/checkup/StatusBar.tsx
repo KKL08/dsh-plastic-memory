@@ -81,8 +81,9 @@ const CAUSE_KIND = {
   'error': 'checkup.cause.error',
 } as const satisfies Record<CheckupCause['kind'], LocaleKey>
 
-/** 原因按宿主错误码、再按 kind 写成界面文案；宿主原话（message）不进正文，由调用方放进悬停提示。 */
+/** 原因按插件自己的 code、宿主错误码、再按 kind 写成界面文案；宿主原话（message）不进正文，由调用方放进悬停提示。 */
 export function causeText(cause: CheckupCause, t: Translate): string {
+  if (cause.code === 'selection-unreadable') return t('checkup.cause.selectionUnreadable')
   const byCode = cause.hostCode === undefined ? undefined : HOST_CODE_CAUSE[cause.hostCode]
   return t(byCode ?? CAUSE_KIND[cause.kind])
 }

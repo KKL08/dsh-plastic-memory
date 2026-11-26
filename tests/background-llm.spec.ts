@@ -301,7 +301,7 @@ describe('选择文件在、却读不出', () => {
   it.each([
     ['checkup', '设置里为体检选的模型读不出来，这次没有调用模型。可以在设置里重新选一次'],
     ['dreams', '设置里为记忆梦境选的模型读不出来，这次没有调用模型'],
-    ['expansion', '设置里为补搜选的模型读不出来，这次没有调用模型'],
+    ['expansion', '设置里为扩查选的模型读不出来，这次没有调用模型。可以在设置里重新选一次'],
   ] as const)('%s 读不出时的说明用界面上的功能名，不露出选择键', async (key, message) => {
     const s = counted()
     await breakModelSelection(root, key, 'bad-json')

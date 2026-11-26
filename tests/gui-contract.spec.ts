@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  checkupResultSchema, CROSS_WORKSPACE_COMMANDS, directoryIssueSchema, encodeMemoryCommand, MEMORY_COMMAND_NAME, memoryCommandResultSchema,
+  checkupCauseSchema, checkupResultSchema, CROSS_WORKSPACE_COMMANDS, directoryIssueSchema, encodeMemoryCommand, MEMORY_COMMAND_NAME, memoryCommandResultSchema,
   MAX_BATCH_EDIT, memoryCommandSchema, OPEN_ITEM_COMMANDS, parseMemoryCommand, pendingItemSchema, type MemoryCommand, type RequestedProposal,
 } from '../src/gui/contract.ts'
 import { SAMPLE_COMMANDS } from '../client/command/test-commands.ts'
@@ -21,6 +21,14 @@ describe('契约的枚举字段', () => {
 
     const scan = (code: string) => memoryCommandResultSchema.safeParse({ ok: true, cmd: 'scan', notes: [code] }).success
     expect([scan('baseline-missing'), scan('baseline-gone')]).toEqual([true, false])
+  })
+})
+
+describe('体检失败原因的 code', () => {
+  it('是开放的可选字符串：以后版本加的原因码照样读得进来，不让整条记录或整份视图解析失败', () => {
+    expect(checkupCauseSchema.parse({ kind: 'error', code: 'selection-unreadable' })).toEqual({ kind: 'error', code: 'selection-unreadable' })
+    expect(checkupCauseSchema.parse({ kind: 'error', code: 'later-version-cause', message: 'm' })).toEqual({ kind: 'error', code: 'later-version-cause', message: 'm' })
+    expect(checkupCauseSchema.parse({ kind: 'error' })).toEqual({ kind: 'error' })
   })
 })
 

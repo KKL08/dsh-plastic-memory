@@ -1,6 +1,6 @@
 import type { MemoryLogger } from '../store.ts'
 import type { SemanticLlm } from '../governance/semantic-scan.ts'
-import type { ResolvedLlm } from '../governance/background-llm.ts'
+import { ModelSelectionUnreadable, type ResolvedLlm } from '../governance/background-llm.ts'
 import { scopeKey, type Scope } from '../scope.ts'
 import { maskDiagnostic } from '../secrets.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
@@ -175,7 +175,9 @@ export class AutoCheckupScheduler {
     if (current === undefined) return
     try {
       // 原话进体检记录和视图：先遮掉疑似密钥。这轮开始之后这个范围已有体检做完、或已记过失败，就不再记（见 recordRoundFailure）
-      await this.deps.checkups.recordRoundFailure(current.scope, { kind: 'error', message: maskDiagnostic(err instanceof Error ? err.message : String(err)) }, this.deps.now(), current.since)
+      // 选择读不出带上 code，界面写成中英文说明，不只给服务端原话
+      const code = err instanceof ModelSelectionUnreadable ? { code: err.code } : {}
+      await this.deps.checkups.recordRoundFailure(current.scope, { kind: 'error', ...code, message: maskDiagnostic(err instanceof Error ? err.message : String(err)) }, this.deps.now(), current.since)
       await this.deps.onChecked?.()
     } catch (recordErr) {
       this.log.warn('[plastic-memory] 记不下自动体检的失败，下次检查再试', recordErr)

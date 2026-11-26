@@ -149,6 +149,7 @@ export const checkupZh = {
   'checkup.cause.modelError': '模型调用出错',
   'checkup.cause.unparseable': '模型的回复读不出结果',
   'checkup.cause.error': '体检出错',
+  'checkup.cause.selectionUnreadable': '设置里保存的模型选择读不出，到设置页重新选一次就能恢复',
 } as const
 
 export type CheckupLocaleKey = keyof typeof checkupZh
@@ -302,4 +303,5 @@ export const checkupEn: Record<CheckupLocaleKey, string> = {
   'checkup.cause.modelError': 'the model call failed',
   'checkup.cause.unparseable': 'could not read the model\'s reply',
   'checkup.cause.error': 'the checkup ran into an error',
+  'checkup.cause.selectionUnreadable': "the model choice saved in settings couldn't be read; choose again on the Settings page to fix it",
 }

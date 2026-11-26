@@ -789,6 +789,12 @@ export function resolveAutoCheckup(settings: ReadonlyMap<string, AutoCheckupFreq
 export const checkupCauseSchema = z.object({
   kind: z.enum(CHECKUP_CAUSE_KINDS),
   hostCode: z.string().optional(),
+  /**
+   * 插件自己认得的原因，界面按它写说明（优先于 kind）：selection-unreadable = 设置里存的模型选择读不出（kind 为 error）。
+   * 可选字段、不加进 kind：上一个发布版读到不认识的键直接丢掉，照旧按 kind 显示。
+   * 取值不封闭：以后版本加的原因码照样读得进来，界面只认上面这个，其余当作没有。
+   */
+  code: z.string().optional(),
   message: z.string().optional(),
 })
 export type CheckupCause = z.infer<typeof checkupCauseSchema>

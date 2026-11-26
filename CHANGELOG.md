@@ -200,7 +200,9 @@ All notable changes to this project are documented here. The format follows
   window, to automatic checkups and to Check now on the memory page alike.
   Without a choice, both use the default model. If the chosen model becomes
   unavailable, the checkup runs on the default model and says so in its
-  result.
+  result. If the saved choice cannot be read, the settings page and the
+  automatic checkup menu say so instead of showing the default model, a
+  failed automatic checkup gives that reason, and choosing again fixes it.
 - Memory files can hold new optional keys that upcoming features will use:
   when a fact took effect, which sessions a memory came from and how it last
   changed, related memories, the memories a decision depends on, a

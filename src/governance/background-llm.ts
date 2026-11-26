@@ -17,16 +17,18 @@ export interface HostModelCatalog {
 }
 
 /** 说明里各选择键对应的功能，用界面和插件其他说明里的叫法。 */
-const SELECTION_FEATURES: Record<ModelSelectionKey, string> = { checkup: '体检', dreams: '记忆梦境', expansion: '补搜' }
+const SELECTION_FEATURES: Record<ModelSelectionKey, string> = { checkup: '体检', dreams: '记忆梦境', expansion: '扩查' }
 
 /**
  * 选择文件在、却读不出（没有读权限、内容坏了、读到半个文件）：不知道用户选了哪个，这次不调模型，
  * 交给各入口按自己的失败处理报出来；不当成没选，也不清、不改这份选择。
- * 说明会显示给用户：用功能名，不露出选择键；设置页只有体检的模型选择器，只对它说去设置里重选。
+ * 说明会显示给用户：用功能名，不露出选择键；设置页有体检和扩查的模型选择器，只对这两个说去设置里重选。
  */
 export class ModelSelectionUnreadable extends Error {
+  /** 记进体检失败原因的 code，界面按它出中英文说明。 */
+  readonly code = 'selection-unreadable' as const
   constructor(key: ModelSelectionKey) {
-    super(`设置里为${SELECTION_FEATURES[key]}选的模型读不出来，这次没有调用模型${key === 'checkup' ? '。可以在设置里重新选一次' : ''}`)
+    super(`设置里为${SELECTION_FEATURES[key]}选的模型读不出来，这次没有调用模型${key === 'checkup' || key === 'expansion' ? '。可以在设置里重新选一次' : ''}`)
     this.name = 'ModelSelectionUnreadable'
   }
 }
