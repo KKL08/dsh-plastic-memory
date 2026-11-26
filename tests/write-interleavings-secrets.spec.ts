@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import fc from 'fast-check'
-import { assertSerialEquivalent, headStartArb, interleaveParams, interleaveRuns, interleaveScheduler, tallyOrder, type Subject } from './helpers/interleave.ts'
+import { withInterleaveCase, assertSerialEquivalent, headStartArb, interleaveParams, interleaveRuns, interleaveScheduler, tallyOrder, type Subject } from './helpers/interleave.ts'
 import { IDS, initArb, keyArb, secretSubject, snapshotIdsArb, type Key, type MemOp, type MemoryWorld, type Seed } from './helpers/memory-subject.ts'
 
 // 文件系统是进程边界：存储层 import 的 node:fs/promises 换成夹具包过的那份，调用的全序交给调度器（见 helpers/interleave.ts）
@@ -49,7 +49,7 @@ function withCopyRedactionIgnored(subject: Subject<MemoryWorld, MemOp>): Subject
 // 强制模板：只随机内部的调度（和少量初始盘面），每组统计对上了几种不同的串行顺序。
 // 不变量（secretSubject）：快照里带明文密钥的那条记录，它自己那一层必须还在
 describe('IL-02③ 与密钥硬删的强制模板', () => {
-  it('拍快照 × 密钥硬删（含同一条；全局可有一份相同的独立副本，这时只删项目这一层）：硬删返回后任何快照里都没有它的明文', async () => {
+  it('拍快照 × 密钥硬删（含同一条；全局可有一份相同的独立副本，这时只删项目这一层）：硬删返回后任何快照里都没有它的明文', async ({ signal }) => withInterleaveCase(signal, async () => {
     const tally = new Map<string, number>()
     await fc.assert(
       fc.asyncProperty(deletionArb, snapshotIdsArb, fc.option(extraArb, { nil: undefined }), headStartArb(2, 150), interleaveScheduler(),
@@ -63,9 +63,9 @@ describe('IL-02③ 与密钥硬删的强制模板', () => {
     )
     console.info(`[拍快照 × 密钥硬删] 对上的串行顺序分布：${JSON.stringify(Object.fromEntries(tally))}`)
     expect(tally.size).toBeGreaterThanOrEqual(2)
-  }, TIMEOUT_MS)
+  }), TIMEOUT_MS)
 
-  it('快照恢复 × 密钥硬删同一条：恢复不出删掉的密钥，快照里也不留明文', async () => {
+  it('快照恢复 × 密钥硬删同一条：恢复不出删掉的密钥，快照里也不留明文', async ({ signal }) => withInterleaveCase(signal, async () => {
     const tally = new Map<string, number>()
     await fc.assert(
       fc.asyncProperty(deletionArb, initArb.filter(i => i !== 'deleted'), headStartArb(2, 150), interleaveScheduler(), async ([hasCopy, del], b, head, s) => {
@@ -76,5 +76,5 @@ describe('IL-02③ 与密钥硬删的强制模板', () => {
     )
     console.info(`[快照恢复 × 密钥硬删] 对上的串行顺序分布：${JSON.stringify(Object.fromEntries(tally))}`)
     expect(tally.size).toBeGreaterThanOrEqual(2)
-  }, TIMEOUT_MS)
+  }), TIMEOUT_MS)
 })

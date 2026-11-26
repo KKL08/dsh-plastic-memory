@@ -36,23 +36,49 @@ const RANDOM_ID_RE = /\b(?:snap|pd|sg|ck)_[a-z0-9]{6,}/g
 
 interface OpContext { index: number; label: string }
 
-const control: {
+interface Control {
   scheduler: TaskScheduler | undefined
   root: string | undefined
   inflight: Set<Promise<unknown>>
   /** 随机 id → 第一次以它为名落盘的操作下标与该操作内的先后序号。 */
   idOwners: Map<string, { index: number; nth: number }>
-} = { scheduler: undefined, root: undefined, inflight: new Set(), idOwners: new Map() }
+}
+
+interface CaseScope {
+  signal: AbortSignal
+  templates: Map<string, Promise<string>>
+  serialCache: Map<string, Observation>
+}
+const currentCase = new AsyncLocalStorage<CaseScope>()
+
+/** 整条性质在自己的作用域执行；取消中断随机探索，退出时仍以取消原因拒绝。 */
+export async function withInterleaveCase<T>(signal: AbortSignal, fn: () => Promise<T>): Promise<T> {
+  return currentCase.run({ signal, templates: new Map(), serialCache: new Map() }, async () => {
+    try {
+      signal.throwIfAborted()
+      return await fn()
+    } finally {
+      signal.throwIfAborted()
+    }
+  })
+}
+
+function checkActive(): void {
+  // 中断标记让性质停止探索和缩减；用例边界负责还原取消原因。
+  if (currentCase.getStore()?.signal.aborted) throw new fc.PreconditionFailure(true)
+}
+
+const currentRound = new AsyncLocalStorage<Control>()
 
 const currentOp = new AsyncLocalStorage<OpContext>()
 
-function pathLabel(arg: unknown): string {
+function pathLabel(control: Control, arg: unknown): string {
   if (typeof arg !== 'string' || control.root === undefined) return '?'
   return relative(control.root, arg).replace(TMP_RE, '.tmp-*')
 }
 
 /** 记下操作新落盘的名字里的随机 id 是谁生成的（受调度、直通两种模式都记）。 */
-function noteCreatedIds(name: string, args: readonly unknown[]): void {
+function noteCreatedIds(control: Control, name: string, args: readonly unknown[]): void {
   const op = currentOp.getStore()
   const target = TWO_PATH.has(name) ? args[1] : name === 'writeFile' || name === 'appendFile' ? args[0] : undefined
   if (op === undefined || typeof target !== 'string') return
@@ -68,12 +94,15 @@ function noteCreatedIds(name: string, args: readonly unknown[]): void {
 function wrap<K extends typeof WRAPPED[number]>(name: K): FsPromises[K] {
   const real = realFs[name] as (...args: unknown[]) => Promise<unknown>
   return (async (...args: unknown[]) => {
-    noteCreatedIds(name, args)
+    const control = currentRound.getStore()
+    if (control === undefined) return real.apply(realFs, args)
+    checkActive()
+    noteCreatedIds(control, name, args)
     const s = control.scheduler
-    if (s === undefined) return real.apply(realFs, args)
     const op = currentOp.getStore()
-    const label = `${op === undefined ? 'other' : `op${op.index}:${op.label}`} ${name}(${pathLabel(args[0])}${TWO_PATH.has(name) ? ` → ${pathLabel(args[1])}` : ''})`
-    await s.schedule(Promise.resolve(), label)
+    const label = `${op === undefined ? 'other' : `op${op.index}:${op.label}`} ${name}(${pathLabel(control, args[0])}${TWO_PATH.has(name) ? ` → ${pathLabel(control, args[1])}` : ''})`
+    if (s !== undefined) await s.schedule(Promise.resolve(), label)
+    checkActive()
     const p = real.apply(realFs, args)
     control.inflight.add(p)
     try { return await p } finally { control.inflight.delete(p) }
@@ -89,6 +118,7 @@ export const interleavedFs: FsPromises & { default: FsPromises } = (() => {
 
 /** 放行一个令牌之后：等这次真实调用落定、调用方后续的同步逻辑跑到下一次排队（或结束），再交还调度器。 */
 async function settle(): Promise<void> {
+  const control = currentRound.getStore()!
   await new Promise<void>(resolve => setImmediate(resolve))
   while (control.inflight.size > 0) {
     await Promise.allSettled([...control.inflight])
@@ -177,12 +207,22 @@ export function interleaveParams(defaultRuns?: number): { seed: number; numRuns:
 
 /** 全新临时目录，用完删掉。 */
 export async function withTempRoot<T>(fn: (root: string) => Promise<T>): Promise<T> {
-  const root = await realFs.realpath(await realFs.mkdtemp(join(tmpdir(), 'pm-interleave-')))
-  try {
-    return await fn(root)
-  } finally {
-    await realFs.rm(root, { recursive: true, force: true })
-  }
+  checkActive()
+  return currentRound.run({ scheduler: undefined, root: undefined, inflight: new Set(), idOwners: new Map() }, async () => {
+    const root = await realFs.realpath(await realFs.mkdtemp(join(tmpdir(), 'pm-interleave-')))
+    try {
+      const result = await fn(root)
+      checkActive()
+      return result
+    } finally {
+      try {
+        await settle()
+        await realFs.rm(root, { recursive: true, force: true })
+      } finally {
+        checkActive()
+      }
+    }
+  })
 }
 
 const TMP_RE = /\.tmp-\d+-[a-z0-9]+/g
@@ -201,7 +241,7 @@ export function normalizeText(text: string, root: string, ids: ReadonlyMap<strin
 
 /** 本次世界里随机 id 的出处表：`snap_…` → `snap@op1#0`。 */
 function idNames(): Map<string, string> {
-  return new Map([...control.idOwners].map(([id, o]) => [id, `${id.slice(0, id.indexOf('_'))}@op${o.index}#${o.nth}`]))
+  return new Map([...currentRound.getStore()!.idOwners].map(([id, o]) => [id, `${id.slice(0, id.indexOf('_'))}@op${o.index}#${o.nth}`]))
 }
 
 async function walk(dir: string, out: string[]): Promise<void> {
@@ -243,8 +283,12 @@ export type Outcome = { value: unknown } | { error: string }
 
 async function outcomeOf(fn: () => Promise<unknown>): Promise<Outcome> {
   try {
-    return { value: await fn() }
+    checkActive()
+    const value = await fn()
+    checkActive()
+    return { value }
   } catch (err) {
+    checkActive()
     return { error: err instanceof Error ? `${err.constructor.name}: ${err.message}` : String(err) }
   }
 }
@@ -305,25 +349,31 @@ async function observe<W, Op>(subject: Subject<W, Op>, w: W, root: string, outco
 /** 铺好的初始盘面：seedKey → 模板目录。进程退出时删掉。 */
 const templates = new Map<string, Promise<string>>()
 let templateParent: string | undefined
+let templateParentReady: Promise<string> | undefined
 process.once('exit', () => { if (templateParent !== undefined) rmSync(templateParent, { recursive: true, force: true }) })
 
 async function templateFor<W, Op>(subject: Subject<W, Op>, key: string): Promise<string> {
-  let dir = templates.get(key)
+  const cache = currentCase.getStore()?.templates ?? templates
+  let dir = cache.get(key)
   if (dir === undefined) {
     dir = (async () => {
-      templateParent ??= await realFs.realpath(await realFs.mkdtemp(join(tmpdir(), 'pm-interleave-seed-')))
-      const root = await realFs.mkdtemp(join(templateParent, 's-'))
+      templateParentReady ??= realFs.mkdtemp(join(tmpdir(), 'pm-interleave-seed-')).then(path => realFs.realpath(path)).then(path => { templateParent = path; return path })
+      const root = await realFs.mkdtemp(join(await templateParentReady, 's-'))
       await subject.seed(await subject.world(root, undefined), root)
       return root
     })()
-    templates.set(key, dir)
+    cache.set(key, dir)
   }
   return dir
 }
 
 async function freshWorld<W, Op>(subject: Subject<W, Op>, root: string): Promise<W> {
-  if (subject.seedKey !== undefined) await realFs.cp(await templateFor(subject, subject.seedKey), root, { recursive: true })
-  control.idOwners = new Map()
+  if (subject.seedKey !== undefined) {
+    const template = await templateFor(subject, subject.seedKey)
+    checkActive()
+    await realFs.cp(template, root, { recursive: true })
+  }
+  currentRound.getStore()!.idOwners = new Map()
   const w = await subject.world(root, await subject.lock?.(root))
   if (subject.seedKey === undefined) await subject.seed(w, root)
   await subject.prepare?.(w, root)
@@ -338,19 +388,29 @@ async function freshWorld<W, Op>(subject: Subject<W, Op>, root: string): Promise
 export async function observeConcurrent<W, Op>(subject: Subject<W, Op>, s: TaskScheduler, ops: readonly Op[], after?: (w: W, root: string, outcomes: readonly Outcome[]) => Promise<void>, headStart: readonly number[] = []):
   Promise<Observation & { raw: Outcome[]; leftover: string[]; unhandled: string[] }> {
   return withTempRoot(async root => {
+    const control = currentRound.getStore()!
     const w = await freshWorld(subject, root)
     const unhandled: string[] = []
-    const onUnhandled = (reason: unknown) => { unhandled.push(String(reason)) }
+    const onUnhandled = (reason: unknown) => { if (currentRound.getStore() === control) unhandled.push(String(reason)) }
     process.on('unhandledRejection', onUnhandled)
     control.scheduler = s
     control.root = root
     let outcomes: Outcome[]
     try {
-      const all = Promise.all(ops.map(async (op, index) => {
-        for (let k = 0; k < (headStart[index] ?? 0); k++) await s.schedule(Promise.resolve(), `等待 op${index}`)
+      const all = Promise.allSettled(ops.map(async (op, index) => {
+        for (let k = 0; k < (headStart[index] ?? 0); k++) {
+          checkActive()
+          await s.schedule(Promise.resolve(), `等待 op${index}`)
+          checkActive()
+        }
         return currentOp.run({ index, label: subject.label(op) }, () => outcomeOf(() => subject.run(w, op, index, NO_HOOKS)))
       }))
-      outcomes = await s.waitFor(all)
+      const settled = await s.waitFor(all)
+      checkActive()
+      outcomes = settled.map(result => {
+        if (result.status === 'rejected') throw result.reason
+        return result.value
+      })
       // 操作都结束了，后台还排着的调用（不该有）也放完，再离开受调度模式
       await s.waitIdle()
     } finally {
@@ -374,25 +434,31 @@ export async function observeSerial<W, Op>(subject: Subject<W, Op>, ops: readonl
     const w = await freshWorld(subject, root)
     const outcomes: Outcome[] = new Array(ops.length)
     const paused = new Map<number, { release: () => void; done: Promise<Outcome> }>()
-    for (const step of steps) {
-      const op = ops[step.index]!
-      const start = (hooks: OpHooks) => currentOp.run({ index: step.index, label: subject.label(op) }, () => outcomeOf(() => subject.run(w, op, step.index, hooks)))
-      if (step.part === 'all') {
-        outcomes[step.index] = await start(NO_HOOKS)
-      } else if (step.part === 'read') {
-        let reached!: () => void
-        const atCommit = new Promise<void>(resolve => { reached = resolve })
-        let release!: () => void
-        const gate = new Promise<void>(resolve => { release = resolve })
-        let isFirst = true
-        const done = start({ beforeCommit: async () => { if (isFirst) { isFirst = false; reached(); await gate } } })
-        await Promise.race([atCommit, done])
-        paused.set(step.index, { release, done })
-      } else {
-        const p = paused.get(step.index)!
-        p.release()
-        outcomes[step.index] = await p.done
+    try {
+      for (const step of steps) {
+        const op = ops[step.index]!
+        const start = (hooks: OpHooks) => currentOp.run({ index: step.index, label: subject.label(op) }, () => outcomeOf(() => subject.run(w, op, step.index, hooks)))
+        if (step.part === 'all') {
+          outcomes[step.index] = await start(NO_HOOKS)
+        } else if (step.part === 'read') {
+          let reached!: () => void
+          const atCommit = new Promise<void>(resolve => { reached = resolve })
+          let release!: () => void
+          const gate = new Promise<void>(resolve => { release = resolve })
+          let isFirst = true
+          const done = start({ beforeCommit: async () => { if (isFirst) { isFirst = false; reached(); await gate } } })
+          await Promise.race([atCommit, done])
+          paused.set(step.index, { release, done })
+        } else {
+          const p = paused.get(step.index)!
+          p.release()
+          outcomes[step.index] = await p.done
+        }
       }
+    } finally {
+      // 取消也要放行已暂停的提交段，等其退出后才能删本轮目录。
+      for (const p of paused.values()) p.release()
+      await Promise.allSettled([...paused.values()].map(p => p.done))
     }
     return observe(subject, w, root, outcomes)
   })
@@ -472,13 +538,15 @@ function observedPositions(s: TaskScheduler, n: number): (step: Step) => number 
 /** 串行观测只由初始盘面、操作和顺序决定（重放确定性由夹具自检守着）：同一组输入在一轮性质里只跑一次。 */
 const serialCache = new Map<string, Observation>()
 async function observeSerialCached<W, Op>(subject: Subject<W, Op>, ops: readonly Op[], order: readonly Step[]): Promise<Observation> {
+  checkActive()
   if (subject.seedKey === undefined) return observeSerial(subject, ops, order)
   const key = JSON.stringify([subject.seedKey, ops, order])
-  let obs = serialCache.get(key)
+  const cache = currentCase.getStore()?.serialCache ?? serialCache
+  let obs = cache.get(key)
   if (obs === undefined) {
     obs = await observeSerial(subject, ops, order)
-    if (serialCache.size > 5000) serialCache.clear()
-    serialCache.set(key, obs)
+    if (cache.size > 5000) cache.clear()
+    cache.set(key, obs)
   }
   return obs
 }

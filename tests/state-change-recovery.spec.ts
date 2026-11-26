@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it as test, vi } from 'vitest'
 import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -19,7 +19,16 @@ import { indexedIds } from './helpers/topic-index.ts'
 // 状态变化写到一半进程退出：在进程边界（node:fs/promises 的写调用）注入，第 k 次写调用之前「进程没了」。
 // 然后换一个新实例进一次写入段，看补做之后记忆和历史版本对不对得上。改前快照放在不受注入影响的表里：它在写文件之前就落盘了。
 
-const fault = vi.hoisted(() => ({ remaining: Number.POSITIVE_INFINITY, isDead: false, calls: 0 }))
+const context = await vi.hoisted(async () => {
+  const { AsyncLocalStorage } = await import('node:async_hooks')
+  return new AsyncLocalStorage<{
+    fault: { remaining: number; isDead: boolean; calls: number }
+    root: string
+    journalDir: string
+    journals: OpJournal[]
+  }>()
+})
+const scope = () => context.getStore()!
 class Crash extends Error {}
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -28,12 +37,12 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   return Object.fromEntries(Object.entries(actual).map(([key, value]) => [key, typeof value === 'function' && writes.has(key)
     ? async (...args: unknown[]) => {
         if (key === 'mkdir' && /[\\/]\.state[\\/]lock$/.test(String(args[0]))) return (value as (...a: unknown[]) => Promise<unknown>)(...args)
-        if (fault.isDead || fault.remaining <= 0) {
-          fault.isDead = true
+        if (scope().fault.isDead || scope().fault.remaining <= 0) {
+          scope().fault.isDead = true
           throw new Crash(`进程在 ${key} 之前退出`)
         }
-        fault.remaining--
-        fault.calls++
+        scope().fault.remaining--
+        scope().fault.calls++
         return (value as (...a: unknown[]) => Promise<unknown>)(...args)
       }
     : value]))
@@ -44,30 +53,32 @@ const T0 = 1_700_000_000_000
 const global = { kind: 'global' } as const
 const exists = (path: string) => stat(path).then(() => true, () => false)
 
-let root: string
-let journalDir: string
-const journals: OpJournal[] = []
-const alive = () => { fault.remaining = Number.POSITIVE_INFINITY; fault.isDead = false; fault.calls = 0 }
-beforeEach(async () => {
-  alive()
-  root = await mkdtemp(join(tmpdir(), 'pm-history-recovery-'))
-  journalDir = await mkdtemp(join(tmpdir(), 'pm-history-journal-'))
-})
-afterEach(async () => {
-  alive()
-  for (const journal of journals.splice(0)) journal.close()
-  await rm(root, { recursive: true, force: true })
-  await rm(journalDir, { recursive: true, force: true })
-})
+const alive = () => { scope().fault.remaining = Number.POSITIVE_INFINITY; scope().fault.isDead = false; scope().fault.calls = 0 }
+/** 正文完全结束后才复位故障、关库和删目录；超时不会提前回收资源。 */
+async function withRecoveryCase(fn: () => Promise<void>): Promise<void> {
+  await context.run({ fault: { remaining: Number.POSITIVE_INFINITY, isDead: false, calls: 0 }, root: '', journalDir: '', journals: [] }, async () => {
+    alive()
+    scope().root = await mkdtemp(join(tmpdir(), 'pm-history-recovery-'))
+    scope().journalDir = await mkdtemp(join(tmpdir(), 'pm-history-journal-'))
+    try { await fn() } finally {
+      alive()
+      for (const journal of scope().journals.splice(0)) journal.close()
+      await rm(scope().root, { recursive: true, force: true })
+      await rm(scope().journalDir, { recursive: true, force: true })
+    }
+  })
+}
+
+const it = (name: string, fn: () => Promise<void>) => test(name, () => withRecoveryCase(fn))
 
 /** 一个「进程」：自己的锁和日志连接；启动时登记历史版本的步骤（同接线层）。快照表跨进程共用（代表磁盘上的那份）。 */
 function open(snapshotTable: InMemoryKvTable<MemorySnapshot>) {
-  const journal = new OpJournal({ path: join(journalDir, 'op-journal.sqlite'), log: quiet })
-  journals.push(journal)
+  const journal = new OpJournal({ path: join(scope().journalDir, 'op-journal.sqlite'), log: quiet })
+  scope().journals.push(journal)
   // 进程没了，日志里的行也销不了账：注入的失败有的被写路径吞掉、接着往下走，不能让它把行结掉
   const done = journal.done.bind(journal)
-  journal.done = (opId: string) => { if (!fault.isDead) done(opId) }
-  const table = new FileTable({ root, stats: new InMemoryKvTable<RecallStats>(), log: quiet, lock: createRootLock({ root, log: quiet }), journal })
+  journal.done = (opId: string) => { if (!scope().fault.isDead) done(opId) }
+  const table = new FileTable({ root: scope().root, stats: new InMemoryKvTable<RecallStats>(), log: quiet, lock: createRootLock({ root: scope().root, log: quiet }), journal })
   const store = new MemoryStore(table, quiet, new InMemoryBatchKvTable())
   const snapshots = new SnapshotStore(snapshotTable)
   store.registerSteps(historySteps(store, snapshots, quiet))
@@ -100,22 +111,22 @@ describe('状态变化中途进程退出', () => {
   it('在哪一次写调用之前退出，恢复后都不出现和当前页内容相同的历史版本：要么没改、没有版本，要么改了、改前那版留着', async () => {
     // 先完整跑一遍，数出这次状态变化一共有几次写调用
     const clean = await prepare()
-    fault.calls = 0
+    scope().fault.calls = 0
     expect((await stateChange(clean.first)).kind).toBe('written')
-    const total = fault.calls
+    const total = scope().fault.calls
     expect(total).toBeGreaterThan(3)
     expect(await settled(clean.snapshotTable)).toEqual({ content: '第二版', versions: ['第一版'] })
 
     const outcomes = new Set<string>()
     for (let k = 0; k < total; k++) {
       alive()
-      for (const journal of journals.splice(0)) journal.close()
-      await rm(root, { recursive: true, force: true })
-      await rm(journalDir, { recursive: true, force: true })
-      root = await mkdtemp(join(tmpdir(), 'pm-history-recovery-'))
-      journalDir = await mkdtemp(join(tmpdir(), 'pm-history-journal-'))
+      for (const journal of scope().journals.splice(0)) journal.close()
+      await rm(scope().root, { recursive: true, force: true })
+      await rm(scope().journalDir, { recursive: true, force: true })
+      scope().root = await mkdtemp(join(tmpdir(), 'pm-history-recovery-'))
+      scope().journalDir = await mkdtemp(join(tmpdir(), 'pm-history-journal-'))
       const { snapshotTable, first } = await prepare()
-      fault.remaining = k
+      scope().fault.remaining = k
       await stateChange(first).catch(() => undefined)
       const after = await settled(snapshotTable)
       expect(after.versions, `第 ${k} 次写调用之前退出`).not.toContain(after.content)
@@ -135,12 +146,12 @@ describe('状态变化中途进程退出', () => {
     let k = 0
     for (;; k++) {
       alive()
-      fault.remaining = k
+      scope().fault.remaining = k
       const done = await run(first).then(() => true, () => false)
       if (done || (await first.store.get('mem_a', global))!.content === '第二版') break
     }
     const { readdir, readFile } = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
-    for (const name of await readdir(journalDir)) expect((await readFile(join(journalDir, name))).includes(Buffer.from(marker)), name).toBe(false)
+    for (const name of await readdir(scope().journalDir)) expect((await readFile(join(scope().journalDir, name))).includes(Buffer.from(marker)), name).toBe(false)
     alive()
     const next = open(snapshotTable)
     await next.store.update({ id: 'mem_other', workspacePath: undefined }, r => ({ ...r, summary: `${r.summary}。` }), global)
@@ -159,7 +170,7 @@ describe('状态变化中途进程退出', () => {
 describe('历史版本跟着记忆走，中途进程退出', () => {
   const WS = '/tmp/pm-history-recovery-ws'
   const inWs = { kind: 'workspace', workspacePath: WS } as const
-  const layers = () => [join(root, GLOBAL_DIR), join(root, workspaceDirName(WS))]
+  const layers = () => [join(scope().root, GLOBAL_DIR), join(scope().root, workspaceDirName(WS))]
   const moveToWs = (w: ReturnType<typeof open>) =>
     w.store.update({ id: 'mem_a', workspacePath: undefined }, r => ({ ...r, scope: 'workspace', workspacePath: WS }), global)
 
@@ -179,18 +190,18 @@ describe('历史版本跟着记忆走，中途进程退出', () => {
   }
   async function fresh() {
     alive()
-    for (const journal of journals.splice(0)) journal.close()
-    await rm(root, { recursive: true, force: true })
-    await rm(journalDir, { recursive: true, force: true })
-    root = await mkdtemp(join(tmpdir(), 'pm-history-recovery-'))
-    journalDir = await mkdtemp(join(tmpdir(), 'pm-history-journal-'))
+    for (const journal of scope().journals.splice(0)) journal.close()
+    await rm(scope().root, { recursive: true, force: true })
+    await rm(scope().journalDir, { recursive: true, force: true })
+    scope().root = await mkdtemp(join(tmpdir(), 'pm-history-recovery-'))
+    scope().journalDir = await mkdtemp(join(tmpdir(), 'pm-history-journal-'))
   }
   /** 完整跑一遍，数出这一步一共有几次写调用。 */
   async function countWrites(run: (w: ReturnType<typeof open>) => Promise<unknown>) {
     const { first } = await withVersion()
-    fault.calls = 0
+    scope().fault.calls = 0
     await run(first)
-    const total = fault.calls
+    const total = scope().fault.calls
     await fresh()
     return total
   }
@@ -213,7 +224,7 @@ describe('历史版本跟着记忆走，中途进程退出', () => {
     const outcomes = new Set<string>()
     for (let k = 0; k < total; k++) {
       const { snapshotTable, first } = await withVersion()
-      fault.remaining = k
+      scope().fault.remaining = k
       await moveToWs(first).catch(() => undefined)
       alive()
       const next = open(snapshotTable)
@@ -234,12 +245,12 @@ describe('历史版本跟着记忆走，中途进程退出', () => {
     const total = await countWrites(moveToWs)
     for (let k = 0; k < total; k++) {
       const { snapshotTable, first } = await withVersion()
-      fault.remaining = k
+      scope().fault.remaining = k
       await moveToWs(first).catch(() => undefined)
       alive()
-      for (const journal of journals.splice(0)) journal.close()
-      await rm(journalDir, { recursive: true, force: true })
-      journalDir = await mkdtemp(join(tmpdir(), 'pm-history-journal-'))
+      for (const journal of scope().journals.splice(0)) journal.close()
+      await rm(scope().journalDir, { recursive: true, force: true })
+      scope().journalDir = await mkdtemp(join(tmpdir(), 'pm-history-journal-'))
       const next = open(snapshotTable)
       await next.store.maintain(global)
       await next.store.maintain(inWs)
@@ -275,7 +286,7 @@ describe('历史版本跟着记忆走，中途进程退出', () => {
     await writeFile(join(wsLayer, HISTORY_DIR), '挡路')
     await moveToWs(first)
     // 不记操作日志的写者（例如旧版本）在全局另建了同 id 的一条，它也有了自己的历史
-    const bystander = new FileTable({ root, stats: new InMemoryKvTable<RecallStats>(), log: quiet })
+    const bystander = new FileTable({ root: scope().root, stats: new InMemoryKvTable<RecallStats>(), log: quiet })
     await bystander.create(record({ id: 'mem_a', name: '全局的另一条', content: '全局另一条的正文' }))
     await bystander.history.write({ dir: globalLayer, loc: { scope: 'global' } }, {
       versionId: '20261125T000000000Z', record: record({ id: 'mem_a', content: '全局另一条的旧版' }), extras: {}, startedAt: 1, endedAt: 2, kind: STATE_CHANGE_VERSION, writes: [],
@@ -292,21 +303,21 @@ describe('历史版本跟着记忆走，中途进程退出', () => {
     const purge = (w: ReturnType<typeof open>) => w.store.hardDelete({ id: 'mem_a', workspacePath: undefined }, { at: global })
     const { first: clean } = await withVersion()
     await clean.store.maintain(global)
-    fault.calls = 0
+    scope().fault.calls = 0
     await purge(clean)
-    const total = fault.calls
+    const total = scope().fault.calls
     await fresh()
     const outcomes = new Set<string>()
     for (let k = 0; k < total; k++) {
       const { snapshotTable, first } = await withVersion()
       await first.store.maintain(global)
-      fault.remaining = k
+      scope().fault.remaining = k
       await purge(first).catch(() => undefined)
       alive()
       const next = open(snapshotTable)
       await touchOther(next)
       const [[hasMemory, versions]] = await whereabouts(next)
-      if (!hasMemory) expect(await exists(join(root, GLOBAL_DIR, HISTORY_DIR, 'mem_a')), `第 ${k} 次写调用之前退出`).toBe(false)
+      if (!hasMemory) expect(await exists(join(scope().root, GLOBAL_DIR, HISTORY_DIR, 'mem_a')), `第 ${k} 次写调用之前退出`).toBe(false)
       else expect([[], ['第一版']], `第 ${k} 次写调用之前退出`).toContainEqual(versions)
       outcomes.add(hasMemory ? '还在' : '删了')
       await fresh()

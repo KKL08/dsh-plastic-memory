@@ -1,6 +1,6 @@
 import { describe, it, vi } from 'vitest'
 import fc from 'fast-check'
-import { assertSerialEquivalent, interleaveParams, interleaveRuns, interleaveScheduler, type Subject } from './helpers/interleave.ts'
+import { withInterleaveCase, assertSerialEquivalent, interleaveParams, interleaveRuns, interleaveScheduler, type Subject } from './helpers/interleave.ts'
 import { IDS, initArb, keyArb, memorySubject, snapshotIdsArb, type Key, type MemOp, type MemoryWorld, type Seed } from './helpers/memory-subject.ts'
 
 // 文件系统是进程边界：存储层 import 的 node:fs/promises 换成夹具包过的那份，调用的全序交给调度器（见 helpers/interleave.ts）
@@ -14,7 +14,7 @@ const recallArb = fc.record({ kind: fc.constant('recall' as const), ids: fc.cons
 
 // 侧表的读改写（召回计数整表合并、快照逐份条件写）都在写锁内重读；进程内的排队已经删掉，并发由这里搜
 describe('IL-02 侧表读改写', () => {
-  it('IL-02①：两三条并发的召回记录，各条记忆的召回次数等于各次之和', async () => {
+  it('IL-02①：两三条并发的召回记录，各条记忆的召回次数等于各次之和', async ({ signal }) => withInterleaveCase(signal, async () => {
     const subject = (seed: Seed): Subject<MemoryWorld, MemOp> => ({
       ...memorySubject(seed),
       invariant: async (w, ops) => {
@@ -34,9 +34,9 @@ describe('IL-02 侧表读改写', () => {
       }),
       interleaveParams(DEFAULT_RUNS),
     )
-  }, TIMEOUT_MS)
+  }), TIMEOUT_MS)
 
-  it('IL-02②：同一份既有快照上的脱敏、清除并发（可另有召回或新拍快照），各自的效果都在：脱敏的不变回明文，清除的不回来', async () => {
+  it('IL-02②：同一份既有快照上的脱敏、清除并发（可另有召回或新拍快照），各自的效果都在：脱敏的不变回明文，清除的不回来', async ({ signal }) => withInterleaveCase(signal, async () => {
     const subject = (seed: Seed): Subject<MemoryWorld, MemOp> => ({
       ...memorySubject(seed),
       invariant: async (w, ops) => {
@@ -62,5 +62,5 @@ describe('IL-02 侧表读改写', () => {
       }),
       interleaveParams(DEFAULT_RUNS),
     )
-  }, TIMEOUT_MS)
+  }), TIMEOUT_MS)
 })
