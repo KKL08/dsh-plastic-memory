@@ -57,10 +57,9 @@ import { CheckupRecordStore } from './governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from './governance/auto-checkups.ts'
 import { ModelSelectionStore, createBackgroundLlmResolver } from './governance/background-llm.ts'
 import { DREAMS_DEFAULTS, resolveDreamsConfig } from './governance/dreams-gate.ts'
+import { FOCUS_TYPES_DEFAULT, isKnownTier } from './governance/dreams-tiers.ts'
 import { DreamsStore } from './governance/dreams-records.ts'
-import { maintainStep } from './tools/dreams-run.ts'
-import { organizeIndexStep, tidyMemoriesStep } from './tools/dreams-tidy.ts'
-import { mergeFragmentsStep } from './tools/dreams-merge.ts'
+import { dreamsPlan } from './tools/dreams-plan.ts'
 import { DreamsScheduler } from './tools/dreams-scheduler.ts'
 import { ActivityBoard } from './governance/session-activity.ts'
 import { adviceIgnoreSchema, genId, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from './governance/schema.ts'
@@ -147,6 +146,10 @@ export interface Config {
     weeklyTokenCap: Volatile<number>
     /** 一次运行最多改动本范围在用记忆的比例（0 到 1）；整理的各步共用这一份，同一条记忆做几个操作只算一条。 */
     maxChangeRatio: Volatile<number>
+    /** 处理矛盾的档位：gatekeep（把关，缺省）或 trust（信任）。开放取值：不认识的值按把关档跑，并记一条告警。 */
+    tier: Volatile<string>
+    /** 「这些类型的记忆有矛盾时由我来定」：把关档下改到这些类型的用户明说记忆时先问用户。全局一份。 */
+    focusTypes: Volatile<string[]>
   }
   index: {
     /** 一个作用域（全局、每个项目各算）里主题数的上限；到了上限不再新建主题。设置页不露，配置文件可改；改了下一次整理生效。 */
@@ -216,6 +219,8 @@ export const Config = z.object({
     idleMinutes: z.number().default(DREAMS_DEFAULTS.idleMinutes).volatile(),
     weeklyTokenCap: z.number().default(DREAMS_DEFAULTS.weeklyTokenCap).volatile(),
     maxChangeRatio: z.number().default(DREAMS_DEFAULTS.maxChangeRatio).volatile(),
+    tier: z.string().default('gatekeep').volatile(),
+    focusTypes: z.array(z.string()).default([...FOCUS_TYPES_DEFAULT]).volatile(),
   }),
   index: z.object({
     maxTopics: z.natural().min(1).default(INDEX_MAX_TOPICS_DEFAULT).volatile(),
@@ -648,7 +653,7 @@ export async function apply(ctx: Context, config: Config) {
       },
     })
     void board.start().catch((err: unknown) => { ctx.logger.warn('[plastic-memory] 活动表启动失败，记忆梦境不会自动运行', err) })
-    // 记忆梦境：接在自动体检每一轮之后查门槛；运行计划：维护 → 整理主题索引 → 合并零碎记忆 → 逐条整理记忆
+    // 记忆梦境：在自动体检每一轮之后查门槛
     const dreamsCreated = new DreamsScheduler({
       run: {
         store, snapshots, decisions, relatedRecheck, dreams, log: ctx.logger,
@@ -659,10 +664,14 @@ export async function apply(ctx: Context, config: Config) {
         resolveLlm: () => resolveBackgroundLlm('dreams'),
         config: () => dreamsConfig().config,
         isGovernanceEnabled: () => config.governance.enabled.get(),
-        plan: (() => {
-          const tidyDeps = { store, maxTopics: () => config.index.maxTopics.get(), now: () => Date.now(), typeRecall: (type: string) => registry.get(type).recall }
-          return [maintainStep(store), organizeIndexStep(tidyDeps), mergeFragmentsStep({ store, dreams }), tidyMemoriesStep(tidyDeps)]
-        })(),
+        plan: dreamsPlan({
+          tidy: { store, maxTopics: () => config.index.maxTopics.get(), now: () => Date.now(), typeRecall: type => registry.get(type).recall },
+          merge: { store, dreams },
+          resolve: {
+            store, decisions, dreams, readSessionLog: id => host.readSessionLog(id), noReview, memoryRoot, homeDir: homedir(),
+            tier: () => config.brewingDreams.tier.get(), focusTypes: () => config.brewingDreams.focusTypes.get(), now: () => Date.now(),
+          },
+        }),
         interval: (callback, delayMs) => timer.interval(callback, delayMs),
         now: () => Date.now(),
         // 运行 id 同时是这次运行在账本里的条目 id，和别的条目同一种写法
@@ -670,7 +679,10 @@ export async function apply(ctx: Context, config: Config) {
       },
       store, board,
       timeout: (callback, delayMs) => timer.timeout(callback, delayMs),
-      badConfigKeys: () => dreamsConfig().badKeys,
+      badConfigKeys: () => {
+        const keys = dreamsConfig().badKeys
+        return isKnownTier(config.brewingDreams.tier.get()) ? keys : [...keys, 'tier']
+      },
       log: ctx.logger,
     })
     dreamsScheduler = dreamsCreated

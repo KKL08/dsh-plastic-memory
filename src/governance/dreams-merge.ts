@@ -135,14 +135,22 @@ export function mergeConclusion(members: readonly MemoryRecord[]): string {
 }
 
 const GROUP_MARK = ':merge:'
-const CONCLUSION_RE = /:merge:([0-9a-f]{40})$/
+const CONCLUSION_RE = /:(?:merge|resolve):([0-9a-f]{40})$/
 
 /** 梦境发起的合并组的组号：这次运行的 id 加结论身份。撤销时凭它认出这是梦境的合并，取回结论身份。 */
 export function mergeGroupId(runId: string, conclusion: string): string {
   return `${runId}${GROUP_MARK}${conclusion}`
 }
 
-/** 组号里编着的合并结论身份；不是梦境合并组的组号返回 undefined。 */
+/**
+ * 梦境处理矛盾（resolve-findings）落盘那一组的组号：这次运行的 id 加结论身份（tierConclusion），标记和合并组分开。
+ * 撤销时 conclusionOfGroup 同样取回结论身份，记进同一份撤销过的结论。
+ */
+export function resolveGroupId(_runId: string, _conclusion: string): string {
+  return `${_runId}:resolve:${_conclusion}`
+}
+
+/** 组号里编着的结论身份（梦境的合并组、处理矛盾的组两种标记都认）；不是这两种组号返回 undefined。 */
 export function conclusionOfGroup(group: string): string | undefined {
   return CONCLUSION_RE.exec(group)?.[1]
 }

@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { linkIdsSchema, memoryRecordSchema } from '../record-schema.ts'
 import type { IndexPlan } from '../topic-ops.ts'
 import { MODEL_CHANGE_KINDS, PROPOSAL_ACTIONS, PROPOSAL_SOURCES, SUGGESTION_FAILURE_KINDS, SUGGESTION_PARSE_STAGES } from '../contract-codes.ts'
-import { changeReceiptSchema } from './changeset.ts'
+import { changeOpSchema, changeReceiptSchema } from './changeset.ts'
 
 /** 与 mem_ id 同模式（pipeline.ts），不引入 nanoid。 */
 export function genId(prefix: string): string {
@@ -21,10 +21,13 @@ export function genId(prefix: string): string {
  * 体检的另外四种发现（FINDING_LEDGER_KINDS）：missed-change 漏记的变化（两条分开的记忆，时间先后解释得了差异）、
  * exception 例外提示（范围解释得了差异）、premise-changed 依据已变（决定记下的前提摘要和被依据记忆现在的对不上，代码直接判）、
  * cross-duplicate 跨项目重复（几个项目各记了同一件事）。0.2.0 不认识这几个种类，读到时跳过。
+ * important-pending「重要、等你定」：记忆梦境核实过的一对矛盾（原是 conflict 或 missed-change，就地改成这个种类），
+ * 把关档下有把握但改的是重要记忆，或任一方锁定；归「先处理」。用户可以 adopt 梦境的方案，也可以按原来那种发现裁决（见 resolveVerdictsOf）：
+ * 后者结清时种类换回原来那种、dreamsHold 留着，撤销或败方回来重开时换回 important-pending。0.2.0 不认识，读到时跳过、不计数。
  */
 export const PENDING_KINDS = [
   'conflict', 'promote-candidate', 'overflow', 'edit', 'move', ...MODEL_CHANGE_KINDS, 'index-organize', 'link', 'brewing-dreams-run',
-  'missed-change', 'premise-changed', 'exception', 'cross-duplicate',
+  'missed-change', 'premise-changed', 'exception', 'cross-duplicate', 'important-pending',
 ] as const
 export type PendingKind = (typeof PENDING_KINDS)[number]
 
@@ -61,6 +64,97 @@ export const VERDICTS_BY_KIND = {
 export type ResolveVerdict = (typeof VERDICTS_BY_KIND)[FindingLedgerKind][number]
 
 /**
+ * 这条待决项此刻能用的裁决（memory_confirm resolve 与界面共用）。配对和其余发现照 VERDICTS_BY_KIND；
+ * 「重要、等你定」（important-pending）是它原来那种发现（dreamsHold.fromKind）的全部裁决，含义和原来一样，
+ * 带梦境方案（dreamsHold.proposal）的另在最前加 adopt（按方案落盘）；没有方案的（锁定通知）没有 adopt。
+ * 没有 dreamsHold 的 important-pending（手改出来的、读不懂的条目）只能 dismiss。其余种类返回空。
+ */
+export function resolveVerdictsOf(_entry: { kind?: PendingKind; dreamsHold?: { fromKind: TierFindingKind; proposal?: unknown } }): readonly (ResolveVerdict | 'adopt')[] {
+  const kind = kindOf(_entry)
+  if (kind === 'important-pending') {
+    const hold = _entry.dreamsHold
+    if (!hold) return ['dismiss']
+    const verdicts = VERDICTS_BY_KIND[hold.fromKind]
+    return hold.proposal === undefined ? verdicts : ['adopt', ...verdicts]
+  }
+  return Object.hasOwn(VERDICTS_BY_KIND, kind) ? VERDICTS_BY_KIND[kind as FindingLedgerKind] : []
+}
+
+/** 记忆梦境按把关档、信任档处理的配对发现：两条分开的记忆之间的矛盾、漏记的变化。纵向冲突（带 baselineRef）不在内。 */
+export const TIER_FINDING_KINDS = ['conflict', 'missed-change'] as const satisfies readonly PendingKind[]
+export type TierFindingKind = (typeof TIER_FINDING_KINDS)[number]
+
+/** 记忆梦境处理矛盾时会落盘的改动性质：状态变化（旧的一方并成新的一方的历史版本）、纠错（改写旧的一方）。 */
+export const TIER_CHANGE_KINDS = ['state-change', 'correct'] as const
+export type TierChangeKind = (typeof TIER_CHANGE_KINDS)[number]
+
+/**
+ * 记忆梦境核实一对发现后没有直接处理、交给用户的原因（记在条目的 dreamsReview 上，按两边的扫描指纹认，指纹不变不再交给模型）。
+ * 前九个是「有把握」没过的那一条（judgeConfidence 的 doubt，按检查顺序）；has-secret：任一方或纠错稿含疑似密钥；
+ * draft-unusable：纠错没给能用的稿（缺正文、和原文一样、超长、名称或摘要不合规）；undone-before：用户撤销过记忆梦境对同一个结论的处理
+ * （用户在「先处理」里不采纳、按原来那种发现裁决都不算）。
+ */
+export const TIER_OUTCOMES = [
+  'pair-mismatch', 'not-same-dimension', 'change-unclear', 'not-a-change',
+  'evidence-missing', 'evidence-unknown-ref', 'evidence-not-qualified', 'order-unclear', 'both-user-unclear',
+  'has-secret', 'draft-unusable', 'undone-before',
+] as const
+export type TierOutcome = (typeof TIER_OUTCOMES)[number]
+
+/** 方案依据的一条会话事件：会话 id 加事件序号。 */
+export const evidenceRefSchema = z.object({ sessionId: z.string(), seq: z.number() })
+export type EvidenceRef = z.infer<typeof evidenceRefSchema>
+
+/** 依据原文节选：模型引用的那条事件的说话方和文字（已遮盖疑似密钥、折成一行、截到 TIER_EXCERPT_MAX）。 */
+export const dreamsExcerptSchema = z.object({ sessionId: z.string(), seq: z.number(), speaker: z.enum(['user', 'tool']), text: z.string() })
+export type DreamsExcerpt = z.infer<typeof dreamsExcerptSchema>
+
+/**
+ * 「重要、等你定」上记忆梦境留的东西。cause：important 是把关档下要改重要记忆，locked 是任一方锁定（两档都通知，不调模型、没有方案；
+ * 两边都解锁、含锁到期之后，下次运行把条目改回 fromKind 照常处理）。
+ * fromKind：改成这个种类之前是哪种发现，用户按它的裁决处理。conclusion：这一对的结论身份（tierConclusion），撤销梦境处理的那一组时记进撤销过的结论。
+ * proposal：有把握时的方案：ops 是 versionPlan 或纠错的 edit（组号 resolveGroupId(runId, conclusion)），newer 是新的一方，
+ * reason 已遮盖、折一行；olderBoundNote 是旧的一方没填事实时间、用出处时间当上限时给用户看的说明（不是事实时间）。
+ */
+export const dreamsHoldSchema = z.object({
+  runId: z.string(),
+  at: z.number(),
+  cause: z.enum(['important', 'locked']),
+  fromKind: z.enum(TIER_FINDING_KINDS),
+  conclusion: z.string(),
+  proposal: z.object({
+    ops: z.array(changeOpSchema),
+    newer: z.string(),
+    reason: z.string(),
+    excerpts: z.array(dreamsExcerptSchema),
+    olderBoundNote: z.string().optional(),
+  }).optional(),
+})
+export type DreamsHold = z.infer<typeof dreamsHoldSchema>
+
+/** 记忆梦境核实过、交给用户的配对发现：哪次运行、什么时候、为什么没直接处理，当时两边的配对依据（pairBasis）。 */
+export const dreamsReviewSchema = z.object({ runId: z.string(), at: z.number(), outcome: z.enum(TIER_OUTCOMES), basis: z.string() })
+export type DreamsReview = z.infer<typeof dreamsReviewSchema>
+
+/**
+ * 记忆梦境直接处理掉的一对矛盾（记在这次运行的批次条目上，梦境报告读它）：变更组号、原是哪种发现、改动性质、新旧两条、
+ * 是否重要（信任档下直接处理的重要记忆，列在最前）、理由和依据节选（都已遮盖），olderBoundNote 同 dreamsHoldSchema。
+ */
+export const dreamsResultSchema = z.object({
+  group: z.string(),
+  fromKind: z.enum(TIER_FINDING_KINDS),
+  change: z.enum(TIER_CHANGE_KINDS),
+  newer: z.string(),
+  older: z.string(),
+  isImportant: z.literal(true).optional(),
+  reason: z.string(),
+  excerpts: z.array(dreamsExcerptSchema),
+  olderBoundNote: z.string().optional(),
+  at: z.number(),
+})
+export type DreamsResult = z.infer<typeof dreamsResultSchema>
+
+/**
  * 已裁决条目的 verdict。两边都留：keep-both、dismiss（也是超限提醒的「忽略」）、垂直 keep-left；
  * 删一方：横向 keep-left / keep-right、垂直 keep-right（败方见 verdictLoser）；keep-local：提升候选「留在本项目」；
  * promoted：提升候选已提升为全局，snapshotId 是提升前的快照，保留窗口内可撤销；
@@ -77,10 +171,11 @@ export type ResolveVerdict = (typeof VERDICTS_BY_KIND)[FindingLedgerKind][number
  * not-conflict：确实不冲突（配对排除，见 PAIR_EXCLUDING_VERDICTS）；exception：记成例外（同样配对排除；对方是项目记忆的例外由例外表从这里重建）；
  * as-versions：两条并成状态页的新旧版本（旧状态那条软删、记下去向），逐操作回执在条目的 changes 里，撤销按回执还原、条目回到待处理。
  * 这三个取值 0.2.0 不认识：用它们结清的条目它读到时跳过。
+ * adopt：「重要、等你定」按记忆梦境给的方案落盘（逐操作回执在条目的 changes 里，撤销按回执还原、条目回到待处理）。0.2.0 不认识。
  */
 export const SETTLED_VERDICTS = [
   'keep-both', 'dismiss', 'keep-left', 'keep-right', 'keep-local', 'promoted', 'edited', 'merged', 'moved', 'rewritten', 'superseded', 'batch-edited', 'plan-applied', 'index-organized', 'linked',
-  'not-conflict', 'exception', 'as-versions',
+  'not-conflict', 'exception', 'as-versions', 'adopt',
 ] as const
 export type SettledVerdict = (typeof SETTLED_VERDICTS)[number]
 
@@ -94,14 +189,14 @@ export function snapshotIdFor(
 }
 
 /**
- * 裁决要删掉的一方（败方）；并成版本按删除回执取旧状态那条，两边都留时为 undefined。
+ * 裁决要删掉的一方（败方）；并成版本、采纳梦境的方案（adopt）按删除回执取被删的那条（采纳纠错方案没有删除，没有败方），两边都留时为 undefined。
  * 横向：left=memoryIds[0]、right=memoryIds[1]；垂直（有 baselineRef）：left=记忆、right=基线，基线不可删，keep-right 意为记忆删除。
  * plan-applied 的败方是结清信息回执里删除的那一条（融合时并入的那条；垂直改写没有败方）。
  */
 export function verdictLoser(
   entry: { kind?: PendingKind; memoryIds: string[]; baselineRef?: string; settled?: { receipts?: readonly BatchReceipt[] }; changes?: ReadonlyArray<{ kind: string; memoryId: string }> }, verdict: SettledVerdict,
 ): string | undefined {
-  if (verdict === 'as-versions') return entry.changes?.find(r => r.kind === 'forget')?.memoryId
+  if (verdict === 'as-versions' || verdict === 'adopt') return entry.changes?.find(r => r.kind === 'forget')?.memoryId
   if (kindOf(entry) !== 'conflict') return undefined
   if (verdict === 'plan-applied') return entry.settled?.receipts?.find(r => r.op === 'forget')?.memoryId
   if (entry.baselineRef !== undefined) return verdict === 'keep-right' ? entry.memoryIds[0] : undefined
@@ -266,6 +361,16 @@ export const pendingDecisionSchema = z.object({
    * 上一个发布版不认识 premise-changed 种类，整条跳过。
    */
   via: z.string().optional(),
+  /** 「重要、等你定」：方案的改动性质（有方案时才有）。 */
+  change: z.enum(TIER_CHANGE_KINDS).optional(),
+  /** 「重要、等你定」：方案依据的会话事件（有方案时才有）。 */
+  evidence: z.array(evidenceRefSchema).optional(),
+  /** 「重要、等你定」：记忆梦境留的原因、结论身份和方案，见 dreamsHoldSchema。 */
+  dreamsHold: dreamsHoldSchema.optional(),
+  /** 配对发现：记忆梦境核实过、交给用户的记录，见 dreamsReviewSchema。两边扫描指纹变了就不算数。 */
+  dreamsReview: dreamsReviewSchema.optional(),
+  /** 记忆梦境的批次条目：这次直接处理掉的矛盾，重要的在前，见 dreamsResultSchema。 */
+  dreamsResults: z.array(dreamsResultSchema).optional(),
   /** 冲突：处理建议最近一次没生成成的原因；生成成功时清掉。 */
   suggestionFailure: suggestionFailureSchema.optional(),
   /** 冲突：体检自己发起的生成对这个冲突指纹试过几次（用户点「补上建议」不计）；指纹变了从头算。 */

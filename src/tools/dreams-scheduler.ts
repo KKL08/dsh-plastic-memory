@@ -1,6 +1,6 @@
 import type { MemoryLogger, MemoryStore } from '../store.ts'
 import { scopeKey, type Scope } from '../scope.ts'
-import { dreamsGate, resolveDreamsEnabled, type DreamsConfig } from '../governance/dreams-gate.ts'
+import { dreamsGate, resolveDreamsEnabled } from '../governance/dreams-gate.ts'
 import type { DreamsState } from '../governance/dreams-records.ts'
 import { countDreamChanges, runDreams, type DreamsRunDeps, type DreamsRunResult } from './dreams-run.ts'
 import { scheduledScopes } from '../governance/scope-health.ts'
@@ -25,7 +25,7 @@ export interface DreamsSchedulerDeps {
   /** 一次性的计时（宿主的计时服务）；返回取消。 */
   timeout: (callback: () => void, delayMs: number) => () => void
   /** 配置里有用了默认值的坏值时给出键名（记日志用）；缺省不查。 */
-  badConfigKeys?: () => readonly (keyof DreamsConfig)[]
+  badConfigKeys?: () => readonly string[]
   log?: MemoryLogger
 }
 

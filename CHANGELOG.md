@@ -92,6 +92,17 @@ All notable changes to this project are documented here. The format follows
   the combined text would be longer than 2,000 characters. Undoing a merge
   restores every memory in it, and later passes do not propose the same
   merge again unless the type, name or text of one of those memories changes.
+- A Brewing Dreams pass also settles conflicts and missed changes that
+  checkups found between two memories of the same scope: after reading the
+  conversations both were saved from, it makes the older memory an earlier
+  version of the newer one, or corrects it. It acts only when your own words
+  or a tool result from outside the memory folder back the change and the
+  newer memory's fact time shows it came later; pairs with a locked memory,
+  something that looks like a secret, or anything less clear are left for
+  you to decide. With `brewingDreams.tier` at `gatekeep`, the default, a change
+  to a memory you stated yourself whose type is in `brewingDreams.focusTypes`
+  (`preference`, `profile` and `decision` by default) waits for you, and
+  `memory_confirm` can adopt it; with `trust`, such changes are applied too.
 - The plugin records which project folders have a chat running in
   `.state/activity/` inside the memory folder, so several DeepSeek Harness
   windows that share a memory folder can tell when a project is idle. A

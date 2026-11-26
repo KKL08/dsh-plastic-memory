@@ -5,6 +5,7 @@ import { ledgerLabel, scopeKey, type Scope } from '../scope.ts'
 import { applyChangeset, hasPendingReceipts, isOnDisk, settleOpenGroups, type ApplyOptions, type ApplyResult, type ChangesetDeps, type OpOutcome } from './changeset.ts'
 import { copyKey, scanFingerprint, scopeKeyOf, type ChangeOp } from '../governance/changeset.ts'
 import type { PlanWrite } from '../governance/decisions.ts'
+import type { DreamsResult } from '../governance/schema.ts'
 import { INDEX_RECEIPT_STEP, indexReceiptStep, ledgerSteps } from '../governance/op-steps.ts'
 import type { IndexOpOutcome } from '../storage/table.ts'
 import type { IndexOp, IndexPlan } from '../topic-ops.ts'
@@ -63,7 +64,7 @@ export interface DreamsStepContext {
    * 写成了的记忆顺手记进这次运行的基线：梦境自己的改动下次不算「内容变了」。
    * 这次运行的条目中途被撤销、移出账本了：抛 DreamsEntryGone，这次运行按出错收（不再往下写）。
    */
-  apply(ops: readonly ChangeOp[], opts?: Pick<ApplyOptions, 'anchor' | 'fingerprint' | 'isSecret'>): Promise<ApplyResult>
+  apply(ops: readonly ChangeOp[], opts?: Pick<ApplyOptions, 'anchor' | 'fingerprint' | 'isSecret' | 'afterCommit'>): Promise<ApplyResult>
   /**
    * 对这个范围的主题索引做一个操作（见 MemoryStore.applyIndexOp）：回执记到这次运行的条目上，提交点是第一个改写的索引文件。
    * 落盘前按当下的索引核对，对不上的跳过，什么都不写。条目中途被撤销了抛 DreamsEntryGone。
@@ -93,6 +94,11 @@ export interface DreamsStepContext {
   isHeldForNextRun(memoryId: string): boolean
   /** 记一条跳过的操作，列进这次运行的结果（模型给的值不能用之类，reason 用短代码）。 */
   skip(item: { kind: string; target: string; reason: string }): void
+  /**
+   * 把一对直接处理掉的矛盾记到这次运行的批次条目上（梦境报告读它；重要的排在前面，见 PendingDecisionsStore.appendDreamsResult）。
+   * 和 apply 一样占住条目写，写在 store.writeSection 里（和回执的补记、撤销整批互斥）；条目中途被撤销、移出账本了抛 DreamsEntryGone。
+   */
+  recordResult(result: DreamsResult): Promise<void>
   /** 这次运行用的模型（一次运行只解析一次）。拿不到抛 DreamsModelUnavailable。 */
   llm(): Promise<SemanticLlm>
   /** 一次模型调用用了这么多 token：立刻记进七天用量。 */
@@ -365,6 +371,10 @@ export async function runDreams(scope: Scope, opts: DreamsRunOptions, deps: Drea
       holdForNextRun(memoryIds) { for (const id of memoryIds) held.add(id) },
       isHeldForNextRun: memoryId => held.has(memoryId),
       skip: item => noteSkipped(item.kind, item.target, item.reason),
+      async recordResult(result) {
+        const recorded = await withEntry(id => deps.store.writeSection(() => deps.decisions.appendDreamsResult(id, result)))
+        if (!recorded) throw new DreamsEntryGone()
+      },
       llm() {
         llm ??= deps.resolveLlm().then((resolved) => {
           if (resolved.fellBack) result.modelFallback = { to: resolved.isSelected ? 'checkup' : 'default', reason: resolved.reason ?? 'provider-gone' }

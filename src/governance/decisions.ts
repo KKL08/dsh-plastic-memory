@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import type { CasKvTable, CheckedListKvTable, ClaimKvTable } from '../kv-table.ts'
 import type { RootLock } from '../root-lock.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { OverflowLevel } from '../contract-codes.ts'
 import {
-  PAIR_FINDING_KINDS, PAIR_EXCLUDING_VERDICTS, genId, kindOf, snapshotIdFor, verdictLoser, type BatchReceipt, type IndexReceipt, type IndexRun, type LinkIds, type PendingDecision, type PendingKind, type SettledProposal, type SettledVerdict, type StoredSuggestion,
+  PAIR_FINDING_KINDS, PAIR_EXCLUDING_VERDICTS, TIER_FINDING_KINDS, genId, kindOf, snapshotIdFor, verdictLoser, type BatchReceipt, type DreamsResult, type IndexReceipt, type IndexRun, type LinkIds, type PendingDecision, type PendingKind, type SettledProposal, type SettledVerdict, type StoredSuggestion, type TierFindingKind,
   type SuggestionBasis, type SuggestionFailure,
 } from './schema.ts'
 import { isUndoExpired } from './undo-rules.ts'
@@ -99,9 +100,14 @@ export function pairKey(entry: { memoryIds: string[]; baselineRef?: string }): s
   return dedupKey(entry.memoryIds) + (entry.baselineRef !== undefined ? '#baseline' : '')
 }
 
-/** 发现还没被裁决掉：冲突、漏记的变化、例外要有同种类、同 pairKey 的未决条目；其余类型都算开着。 */
-export function isConflictOpen(pending: readonly { kind?: PendingKind; memoryIds: string[]; baselineRef?: string }[]): (f: { type: string; memoryIds: string[]; baselineRef?: string }) => boolean {
-  const keys = new Set(pending.map(e => `${kindOf(e)}:${pairKey(e)}`))
+/**
+ * 发现还没被裁决掉：冲突、漏记的变化、例外要有同种类、同 pairKey 的未决条目；其余类型都算开着。
+ * 「重要、等你定」（important-pending）让它 dreamsHold.fromKind 那种发现保持开着；没有 dreamsHold 的不让任何发现开着。
+ */
+export function isConflictOpen(
+  pending: readonly { kind?: PendingKind; memoryIds: string[]; baselineRef?: string; dreamsHold?: { fromKind: TierFindingKind } }[],
+): (f: { type: string; memoryIds: string[]; baselineRef?: string }) => boolean {
+  const keys = new Set(pending.map(e => `${kindOf(e) === 'important-pending' ? e.dreamsHold?.fromKind : kindOf(e)}:${pairKey(e)}`))
   return f => !(PAIR_FINDING_KINDS as readonly string[]).includes(f.type) || keys.has(`${f.type}:${pairKey(f)}`)
 }
 
@@ -110,10 +116,14 @@ function samePair(a: KindKeyed, b: KindKeyed): boolean {
   return kindOf(a) === kindOf(b) && pairKey(a) === pairKey(b)
 }
 
-/** 三种配对发现的未决条目共用身份，改判时沿用原条目；其他种类仍各自匹配。 */
+/** 等用户裁决的梦境条目仍指原来那一对，与体检共用认领键。 */
+function pairNamespace(entry: KindKeyed): PendingKind {
+  const kind = kindOf(entry)
+  return kind === 'important-pending' || (PAIR_FINDING_KINDS as readonly PendingKind[]).includes(kind) ? 'conflict' : kind
+}
+
 function sameOpenPair(a: KindKeyed, b: KindKeyed): boolean {
-  return samePair(a, b) || ((PAIR_FINDING_KINDS as readonly PendingKind[]).includes(kindOf(a))
-    && (PAIR_FINDING_KINDS as readonly PendingKind[]).includes(kindOf(b)) && pairKey(a) === pairKey(b))
+  return pairNamespace(a) === pairNamespace(b) && pairKey(a) === pairKey(b)
 }
 
 /**
@@ -122,7 +132,7 @@ function sameOpenPair(a: KindKeyed, b: KindKeyed): boolean {
  * （不能当文件名的键认领直接放行、不排他），所以取哈希；`pair_` 前缀与条目 id（`pd_`）分开，不会和裁决认领撞上。
  */
 function pairClaimKey(entry: KindKeyed): string {
-  const kind = (PAIR_FINDING_KINDS as readonly PendingKind[]).includes(kindOf(entry)) ? 'conflict' : kindOf(entry)
+  const kind = pairNamespace(entry)
   return `pair_${createHash('sha1').update(`${kind}\n${pairKey(entry)}`).digest('hex')}`
 }
 
@@ -193,14 +203,24 @@ type UpsertResult = { created: boolean; settled?: true; isSkipped?: true; entry:
  * workspaces 与 memoryIds 一一对应，按已有条目的 id 顺序重排。
  */
 function mergeReport(existing: PendingDecision, input: UpsertInput): PendingDecision {
-  if (kindOf(existing) !== kindOf(input)) {
+  const wsById = new Map(input.memoryIds.map((id, i) => [id, input.workspaces?.[i]]))
+  const workspaces = input.workspaces !== undefined ? existing.memoryIds.map(id => wsById.get(id) ?? '(未知)') : undefined
+  // 方案按原作用域定的：没记成员扫描指纹的旧条目只比内容，换了作用域也会认成同一份，所以另比作用域。
+  const keepHold = existing.kind === 'important-pending' && existing.dreamsHold !== undefined && isSettledSame(existing, input)
+    && (workspaces === undefined || isDeepStrictEqual(workspaces, existing.workspaces))
+  if (!keepHold && kindOf(existing) !== kindOf(input)) {
     // 建议及生成状态只对原种类成立；同指纹改判也要作废，避免改回冲突时重新显示旧建议。
     const { kind: _kind, suggestion: _suggestion, suggestionFailure: _failure, suggestionAttempts: _attempts,
       fingerprint: _fingerprint, memberScanFingerprints: _members, ...rest } = existing
+    if (existing.kind === 'important-pending') {
+      // 依据变了，用户下次裁决时不能再看到旧方案。
+      delete rest.dreamsHold
+      delete rest.dreamsReview
+      delete rest.change
+      delete rest.evidence
+    }
     existing = { ...rest, ...(input.kind !== undefined && input.kind !== 'conflict' ? { kind: input.kind } : {}) }
   }
-  const wsById = new Map(input.memoryIds.map((id, i) => [id, input.workspaces?.[i]]))
-  const workspaces = input.workspaces !== undefined ? existing.memoryIds.map(id => wsById.get(id) ?? '(未知)') : undefined
   const { plan: _plan, sourceCheck: _sourceCheck, via: _via, ...rest } = existing
   return {
     ...rest, summary: input.summary,
@@ -395,7 +415,7 @@ export class PendingDecisionsStore {
           }
           // 删一方的裁决：同一对又被扫到、双方此刻都在，说明败方回来了（快照恢复等），回到待处理，沿用原条目
           const { settled: _settled, changes: _changes, ...open } = existing
-          const reopened = mergeReport(open, input)
+          const reopened = mergeReport(open.dreamsHold === undefined ? open : { ...open, kind: 'important-pending' }, input)
           await this.table.put(reopened.id, reopened)
           return { created: false, entry: reopened }
         }
@@ -446,9 +466,12 @@ export class PendingDecisionsStore {
       isBornSettled?: true; misplacedIgnore?: MisplacedIgnore; proposal?: SettledProposal; droppedLinks?: LinkIds
     } = {},
   ): Promise<boolean> {
-    const entry = await this.table.get(id)
+    let entry = await this.table.get(id)
     if (!entry) return false
-    if (entry.fingerprint === undefined && opts.fingerprint === undefined && verdictLoser(entry, verdict) === undefined) {
+    if (entry.kind === 'important-pending' && entry.dreamsHold !== undefined && verdict !== 'adopt') {
+      entry = { ...entry, kind: entry.dreamsHold.fromKind }
+    }
+    if (!entry.changes?.length && entry.fingerprint === undefined && opts.fingerprint === undefined && verdictLoser(entry, verdict) === undefined) {
       await this.table.delete(id)
       return false
     }
@@ -519,10 +542,11 @@ export class PendingDecisionsStore {
     const restored = isPlanApplied ? settled.priorFingerprint : fingerprint
     // 各成员的内容指纹同理：还原成结清前的，结清前没有的就不留（条目回到未决后，下次再报时照常刷新）
     const members = isPlanApplied ? settled.priorMemberScanFingerprints : memberScanFingerprints
-    await this.table.put(id, { ...open, ...(restored !== undefined ? { fingerprint: restored } : {}), ...(members !== undefined ? { memberScanFingerprints: members } : {}) })
-    // 垂直改写之后重报另挂的那条说的是改写后的记忆，撤销后记忆回到原样，它不再成立：收拢掉，同一条只留回到待处理的这条
-    if (isRewriteSettled(entry)) {
-      const others = (await this.table.list()).filter(([key, e]) => key !== id && e.settled === undefined && samePair(e, entry)).map(([key]) => key)
+    await this.table.put(id, { ...open, ...(open.dreamsHold === undefined ? {} : { kind: 'important-pending' }), ...(restored !== undefined ? { fingerprint: restored } : {}), ...(members !== undefined ? { memberScanFingerprints: members } : {}) })
+    // 改写或采纳方案后重报的发现已不适用于撤销后的记忆，同一对只留回到待处理的这条。
+    if (isRewriteSettled(entry) || entry.dreamsHold !== undefined) {
+      const others = (await this.table.list()).filter(([key, e]) => key !== id && e.settled === undefined
+        && (entry.dreamsHold === undefined ? samePair(e, entry) : sameOpenPair(e, entry))).map(([key]) => key)
       await this.dropDuplicates(others, id, entry)
     }
     return true
@@ -872,6 +896,63 @@ export class PendingDecisionsStore {
 
   async remove(id: string): Promise<boolean> {
     return this.table.delete(id)
+  }
+
+  /**
+   * 记忆梦境核实过一条配对发现之后改写它（改成 important-pending、记下交给用户的原因、锁定通知改回原种类）。模型调用在这之外做，
+   * 这里照 writeSuggestion 的写法：认领条目、在写锁内重读、核对、写。重读的条目不在、已结清、或种类不是 TIER_FINDING_KINDS
+   * 也不是 important-pending → gone，什么都不写。read 按条目的成员逐个读（调用方按作用域精确读那一份）；
+   * revise 拿到重读的条目和成员（读不到的为 undefined），返回要写回的那一版，返回 undefined 表示依据已变、放弃 → stale，什么都不写。
+   * revise 不能改 id。写完（仍在认领内）再读一遍成员，任一条已不在用就删掉这次写下的条目 → gone（同 writeSuggestion：
+   * 删一条记忆的路径不认领条目，核对之后、写入之前被清掉的条目会被这次写回来）。正被别处认领 → claimed，什么都不写。
+   */
+  async reviseFinding(
+    id: string, revise: (entry: PendingDecision, members: ReadonlyArray<MemoryRecord | undefined>) => PendingDecision | undefined, read: ReadMemory,
+  ): Promise<'written' | 'stale' | 'gone' | 'claimed'> {
+    const claimed = await this.withClaim(id, async () => {
+      const entry = await this.get(id)
+      if (entry === undefined || (entry.kind !== 'important-pending' && !(TIER_FINDING_KINDS as readonly PendingKind[]).includes(kindOf(entry)))) return 'gone' as const
+      const members = await Promise.all(entry.memoryIds.map(read))
+      const updated = revise(entry, members)
+      if (updated === undefined) return 'stale' as const
+      await this.table.put(id, { ...updated, id })
+      const after = await Promise.all(entry.memoryIds.map(read))
+      if (after.some(r => r?.status !== 'active')) {
+        await this.table.delete(id)
+        return 'gone' as const
+      }
+      return 'written' as const
+    })
+    return claimed.isClaimed ? claimed.value : 'claimed'
+  }
+
+  /**
+   * 记忆梦境直接处理掉一对之后清账（变更集那个操作提交后的步骤，正常写完和崩溃后补做走同一个处理器，见 op-steps.ts RESOLVED_FINDING_STEP）：
+   * 条目 id 仍未结清就删掉（已结清的不动：用户的裁决和回执要留着撤销）；给了 olderId（状态变化：旧的一方并成了历史版本）时，
+   * 另把成员里有它的其他未决条目一并删掉，同 confirm 并成版本后的 removeByMemoryIds，但只删未决的（批次条目、已结清条目上有撤销要用的回执）。
+   * 不认领条目：调用方可能正占着它（hold），补做时也没人占着；按条件删（deleteIf），不会删掉刚被结清的。重做一遍结果一样。
+   */
+  async dropResolvedFinding(id: string, olderId?: string): Promise<void> {
+    await this.table.deleteIf(id, entry => entry.settled === undefined)
+    if (olderId === undefined) return
+    const refersToOlder = (entry: PendingDecision) => entry.settled === undefined && entry.memoryIds.includes(olderId)
+    for (const [key, entry] of await this.table.list()) {
+      if (key !== id && refersToOlder(entry)) await this.table.deleteIf(key, refersToOlder)
+    }
+  }
+
+  /**
+   * 在记忆梦境的批次条目上追加一条直接处理掉的矛盾（见 schema.ts dreamsResultSchema）：重要的（isImportant）排在不重要的前面，
+   * 同一类里按追加的先后。条目不在、未结清或不是 brewing-dreams-run 返回 false，什么都不写。
+   */
+  async appendDreamsResult(id: string, result: DreamsResult): Promise<boolean> {
+    const entry = await this.table.get(id)
+    if (entry?.settled === undefined || entry.kind !== 'brewing-dreams-run') return false
+    const results = [...entry.dreamsResults ?? []]
+    const before = result.isImportant ? results.findIndex(r => !r.isImportant) : -1
+    results.splice(before < 0 ? results.length : before, 0, result)
+    await this.table.put(id, { ...entry, dreamsResults: results })
+    return true
   }
 
   /**

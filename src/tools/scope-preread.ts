@@ -62,7 +62,8 @@ export async function prereadScopes(
   const filePaths = new Map<string, string>(chosen.map(l => [l.record.id, l.filePath]))
   const cache = new Map(await deps.cache.list())
   // 评分与跨作用域聚合只认冲突；提升候选、超限提醒（GUI 条目）不进
-  const pending = (await deps.decisions.list()).filter(e => kindOf(e) === 'conflict')
+  const pending = (await deps.decisions.list()).filter(e => kindOf(e) === 'conflict'
+    || (kindOf(e) === 'important-pending' && e.dreamsHold?.fromKind === 'conflict'))
 
   const refs = new Set<string>()
   for (const r of byId.values()) if (r.status === 'active') for (const id of r.supersedes ?? []) refs.add(id)

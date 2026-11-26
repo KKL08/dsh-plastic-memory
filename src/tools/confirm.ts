@@ -1,7 +1,7 @@
 import type { MemoryLogger, MemoryStore } from '../store.ts'
 import { conflictFingerprint, isBaselineCurrent, isBasisCurrent, type PendingDecisionsStore } from '../governance/decisions.ts'
 import { baselineFor, type ReadInstructions } from '../governance/instructions.ts'
-import { FINDING_LEDGER_KINDS, VERDICTS_BY_KIND, kindOf, verdictLoser, type FindingLedgerKind, type PendingDecision, type ResolveVerdict, type SettledProposal, type SuggestionBasis } from '../governance/schema.ts'
+import { FINDING_LEDGER_KINDS, resolveVerdictsOf, kindOf, verdictLoser, type PendingDecision, type ResolveVerdict, type SettledProposal, type SuggestionBasis } from '../governance/schema.ts'
 import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
 import { ALREADY_REVIEWED_REASON, NOT_DELEGATED_REASON, isPendingDelegated, type MemoryRecord } from '../record-schema.ts'
 import { verdictOfAction, type AcceptRejectCode, type DecisionRejectCode, type GovernanceRejectCode, type GroupAcceptSkipCode, type ProposalAction } from '../contract-codes.ts'
@@ -15,10 +15,11 @@ import { isCompleteRead } from './dreams-run.ts'
 import type { QueryTokenizerOptions } from '../search/jieba-segmenter.ts'
 import { RecordNotFoundError } from '../errors.ts'
 import { crossWorkspaceNote, gateRecords, locateCopy, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark } from './workspace-gate.ts'
-import { scopeOfMemory, type Scope } from '../scope.ts'
+import { scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
 import { executeForget } from './forget.ts'
 import { memberScanFingerprints } from '../governance/checkup-plan.ts'
 import { hasCriticalSecret, maskSecretSurface } from '../secrets.ts'
+import { copyKey } from '../governance/changeset.ts'
 import { versionPlan } from '../governance/changeset-plans.ts'
 import { applyChangeset } from './changeset.ts'
 
@@ -42,10 +43,11 @@ export interface ConfirmToolDeps {
  * allowCrossWorkspace：用户明确选择「全局整理」时才为 true，放行其他项目的记录（见 workspace-gate.ts）。
  * resolve 的 verdict 按待决项的种类取 VERDICTS_BY_KIND 里的值，表外的组合回 invalid-args、条目不动。
  * current 只给 as-versions 用：留作当前状态页的那一条，必须是这一对里的一条（缺省或不在这一对里回 invalid-args）。
+ * 可用的裁决按条目取 resolveVerdictsOf：「重要、等你定」（important-pending）是它原来那种发现的裁决，带梦境方案的另有 adopt；adopt 只对它有效。
  */
 export type ConfirmArgs =
   | { action: 'refresh'; memoryId: string; allowCrossWorkspace?: boolean }
-  | { action: 'resolve'; decisionId: string; verdict: ResolveVerdict; current?: string; allowCrossWorkspace?: boolean }
+  | { action: 'resolve'; decisionId: string; verdict: ResolveVerdict | 'adopt'; current?: string; allowCrossWorkspace?: boolean }
   | { action: 'accept-subagent'; memoryId: string; memoryIds?: undefined; allowCrossWorkspace?: boolean }
   /** 成组接受：memoryIds 一次接受一批；和 memoryId 只给一个（同时给、给空数组、都不给回 invalid-args）。 */
   | { action: 'accept-subagent'; memoryId?: string; memoryIds?: readonly string[]; allowCrossWorkspace?: boolean }
@@ -441,20 +443,23 @@ async function resolveClaimed(
   locate: (id: string) => Promise<MemoryRecord | undefined>,
   options: ConfirmOptions,
 ): Promise<ConfirmResult> {
-  const entry = await deps.decisions.get(args.decisionId)
+  let entry = await deps.decisions.get(args.decisionId)
   if (!entry) {
     return { kind: 'error', code: 'not-found', message: `待决项不存在：${args.decisionId}（可能已被裁决或涉及的记忆已删除）` }
   }
 
   // 提升候选、超限提醒不是冲突，不能按 memoryIds 位置裁决（否则可能删掉候选记忆）；条目不动
-  if (!(FINDING_LEDGER_KINDS as readonly string[]).includes(kindOf(entry))) {
+  if (kindOf(entry) !== 'important-pending' && !(FINDING_LEDGER_KINDS as readonly string[]).includes(kindOf(entry))) {
     return { kind: 'error', message: `待决项 ${entry.id} 不是冲突（${kindOf(entry)}），不能用 resolve 裁决，账本条目保留。` }
   }
 
-  const allowed: readonly string[] = VERDICTS_BY_KIND[kindOf(entry) as FindingLedgerKind]
+  const allowed: readonly string[] = resolveVerdictsOf(entry)
   if (!allowed.includes(args.verdict)) {
     return { kind: 'error', code: 'invalid-args', message: `这种待决项可用的裁决：${allowed.join('、')}。条目保留。` }
   }
+  if (args.verdict === 'adopt') return adoptDreams(entry, args, context, deps, now)
+  // 仅在内存里按原发现分流；失败时账本仍保留待确认状态，结清时由 settle 转换种类。
+  if (kindOf(entry) === 'important-pending' && entry.dreamsHold !== undefined) entry = { ...entry, kind: entry.dreamsHold.fromKind }
   // 并成版本在落盘前还没有删除回执，须独立认领这一对，不能用 verdictLoser 决定。
   if (args.verdict === 'as-versions') {
     if (entry.baselineRef !== undefined || entry.memoryIds.length !== 2 || entry.memoryIds[0] === entry.memoryIds[1] || args.current === undefined || !entry.memoryIds.includes(args.current)) {
@@ -472,6 +477,40 @@ async function resolveClaimed(
   if (!paired.isClaimed) {
     return { kind: 'error', code: 'claimed', message: `待决项 ${entry.id} 的这一对记忆正在被另一次操作处理，未做任何改动。` }
   }
+  return paired.value
+}
+
+/** 采纳梦境方案时精确读取所有参与副本，跨项目许可通过后再交给变更集核对依据。 */
+async function adoptDreams(
+  entry: PendingDecision,
+  args: Extract<ConfirmArgs, { action: 'resolve' }>,
+  context: GovernanceContext,
+  deps: ConfirmToolDeps,
+  now: number,
+): Promise<ConfirmResult> {
+  const proposal = entry.dreamsHold!.proposal!
+  const copies = new Map(proposal.ops.flatMap(op => [op, ...op.basis, ...(op.into === undefined ? [] : [op.into])])
+    .map(ref => [copyKey(ref), ref]))
+  const records: MemoryRecord[] = []
+  for (const ref of copies.values()) {
+    const record = await locateCopy(deps.store, ref.memoryId, scopeOfLedger(ref.scopeKey))
+    if (record === undefined || hasCriticalSecret(record)) return { kind: 'error', code: 'stale', message: '方案里的记忆已读不到或含高危密钥，保留条目，请重新体检。' }
+    records.push(record)
+  }
+  const { rejected, otherWorkspaces } = gateRecords(records, context, args.allowCrossWorkspace)
+  if (rejected.length > 0) return { kind: 'error', code: 'cross-workspace', rejected, message: `未裁决待决项 ${entry.id}，账本条目保留。${crossWorkspaceNote(rejected, [])}` }
+  const paired = await deps.decisions.withPairClaim(entry, async (): Promise<ConfirmResult> => {
+    const result = await applyChangeset(proposal.ops,
+      { entryId: entry.id, by: 'main', at: now, isSecretChecked: false, isSecret: hasCriticalSecret }, deps)
+    if (result.groups?.[0]?.state !== 'applied') return { kind: 'error', code: 'stale', message: '梦境方案的依据已失效，保留条目，请重新体检。' }
+    await deps.decisions.settle(entry.id, 'adopt', now)
+    const older = entry.memoryIds.find(id => id !== proposal.newer)!
+    const alsoCleared = entry.change === 'state-change' ? await deps.decisions.removeByMemoryIds([older], entry.id) : 0
+    const actions = ['已采纳梦境的处理方案']
+    return { kind: 'resolved', decisionId: entry.id, verdict: 'adopt', actions, alsoCleared, otherWorkspaces,
+      message: `${actions[0]}。${crossWorkspaceNote([], otherWorkspaces)}` }
+  })
+  if (!paired.isClaimed) return { kind: 'error', code: 'claimed', message: `待决项 ${entry.id} 的这一对记忆正在被另一次操作处理，未做任何改动。` }
   return paired.value
 }
 

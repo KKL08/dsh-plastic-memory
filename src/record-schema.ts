@@ -208,6 +208,15 @@ export function isLocked(record: Pick<MemoryRecord, 'locked' | 'lockedUntil'>, n
 }
 
 /**
+ * 旧版本的锚：没有 change（新版本写下的锚都带 change，见 change.ts 的 stampAnchor）。包括 anchorsOf 拿 source 合成的那个
+ * （at 是记录的修改时间）、更早版本写进清单时没盖 change 的、手改清单漏了 change 的。它的 at 不一定是说那句话的时间：
+ * 不按时间重定位出处、不按时间核对窗口，也不当旧的一方说话的时间。出处回看（tools/source.ts）和记忆梦境都只调这一处。
+ */
+export function isLegacyAnchor(_anchor: Pick<SourceAnchor, 'change'>): boolean {
+  return _anchor.change === undefined
+}
+
+/**
  * 出处锚清单。旧版本只认 source：没有 sourceTrail 时 source 就是唯一的锚；source 和清单头一个对不上，
  * 说明旧版本之后写过，把 source 当成一个没有发起方信息的新锚补在最前（时间取 updatedAt）。
  */

@@ -86,6 +86,21 @@ export function changeUndoneStep(entryId: string, receiptOp: string): ChangeUndo
   return { kind: CHANGE_UNDONE_STEP, entryId, receiptOp }
 }
 
+/**
+ * 记忆梦境直接处理掉一对矛盾之后清账：这一对的发现条目（仍未结清才删），状态变化时另清成员里有旧的一方的其他未决发现
+ * （见 PendingDecisionsStore.dropResolvedFinding）。挂在那一组唯一的那个操作上，排在回执步骤后面，和回执同一个操作日志行：
+ * 写成之后、清账之前进程退出，下次进写入段补做。只在文件还是这次写下的原样（isIntact）时清，
+ * 之后又被改过的不清。清账出错时这一步抛错，这一组按出错撤回；撤回之前进写入段的补做可能已经把账清了，这时记忆回到原样、
+ * 发现不在了，下次体检会再报这一对。只保证不留「旧的已并掉、发现还挂着」，不保证撤回后发现还在。
+ */
+export const RESOLVED_FINDING_STEP = 'ledger-resolved-finding'
+
+interface ResolvedFindingStep extends OpStep { kind: typeof RESOLVED_FINDING_STEP; entryId: string; olderId?: string }
+
+export function resolvedFindingStep(input: { entryId: string; olderId?: string }): ResolvedFindingStep {
+  return { kind: RESOLVED_FINDING_STEP, entryId: input.entryId, ...(input.olderId !== undefined ? { olderId: input.olderId } : {}) }
+}
+
 interface ModelChangeStep extends OpStep {
   kind: typeof MODEL_CHANGE_STEP
   change: 'rewrite' | 'supersede'
@@ -153,6 +168,11 @@ export function ledgerSteps(decisions: PendingDecisionsStore, log: MemoryLogger 
     [INDEX_RECEIPT_UNDONE_STEP]: async (raw) => {
       const step = raw as IndexReceiptUndoneStep
       await decisions.dropIndexReceipt(step.entryId, step.receiptOp)
+    },
+    [RESOLVED_FINDING_STEP]: async (raw, { isIntact }) => {
+      if (!isIntact) return
+      const step = raw as ResolvedFindingStep
+      await decisions.dropResolvedFinding(step.entryId, step.olderId)
     },
   }
 }

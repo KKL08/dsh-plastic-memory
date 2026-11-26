@@ -4,7 +4,7 @@ import { scopeKey, type Scope } from '../scope.ts'
 import { DREAMS_ALL_KEY, type UsageRun } from './dreams-gate.ts'
 
 /**
- * 记忆梦境的侧表读写：范围开关、每个范围的运行记录（含用户撤销过的合并结论）、变化基线、用量。表由接线层注入（storage/sidecar.ts 的 dreams、dreamMarks）。
+ * 记忆梦境的侧表读写：范围开关、每个范围的运行记录（含用户撤销过的梦境合并和矛盾处理的结论）、变化基线、用量。表由接线层注入（storage/sidecar.ts 的 dreams、dreamMarks）。
  *
  * 读一律带完整性（listChecked）：有条目读不出时不知道它是不是单独关掉的开关、是不是别的进程刚写的运行记录，
  * 调用方这一轮不跑。写都是单条的读改写（update），收尾的写入核对运行 id，认领过期后被别的进程接着跑时旧的那次不改记录。
@@ -116,7 +116,7 @@ export class DreamsStore {
   }
 
   /**
-   * 这个范围里用户撤销过的合并结论。侧表有条目读不出时返回 undefined：不知道撤销过哪些，这一轮不合并。
+   * 这个范围里用户撤销过的梦境合并和矛盾处理的结论。侧表有条目读不出时返回 undefined：不知道撤销过哪些，这一轮不合并、不处理矛盾。
    */
   async undoneMerges(scope: Scope): Promise<ReadonlySet<string> | undefined> {
     const { entries, isComplete } = await this.records.listChecked()
@@ -125,7 +125,7 @@ export class DreamsStore {
     return new Set((record?.undoneMerges ?? []).map(m => m.key))
   }
 
-  /** 记下用户撤销了这几个梦境合并结论（同一个记过的挪到最后），只留最近的 UNDONE_MERGES_MAX 个。记录里的其他内容不动。 */
+  /** 记下用户撤销了这几个梦境合并和矛盾处理的结论（同一个记过的挪到最后），只留最近的 UNDONE_MERGES_MAX 个。记录里的其他内容不动。 */
   async noteUndoneMerges(scope: Scope, keys: readonly string[], at: number): Promise<void> {
     if (keys.length === 0) return
     const key = scopeKey(scope)

@@ -5,7 +5,7 @@ import { scopeAt, scopeOfLedger } from '../scope.ts'
 import { markDeleted, type MemoryLogger, type MemoryStore } from '../store.ts'
 import { hasSecret } from '../secrets.ts'
 import { mergeLinks, resolveLinks } from '../links.ts'
-import { newWriteOp } from '../storage/table.ts'
+import { newWriteOp, type OpStep } from '../storage/table.ts'
 import { layerOf } from '../storage/history.ts'
 import type { PendingDecisionsStore } from '../governance/decisions.ts'
 import { kindOf, type SnapshotRecord } from '../governance/schema.ts'
@@ -63,6 +63,11 @@ export interface ApplyOptions {
    * 不做、各记一条 quota，后面的照问。记忆梦境按一次运行的改动量上限用它；整批退的那一批不看它。
    */
   admit?: (unit: readonly ChangeOp[], applied: readonly OpOutcome[]) => boolean
+  /**
+   * 一个操作提交之后要补的账（接在它的回执步骤后面，同一个操作日志行：正常写完和中断后补做走同一个处理器）。
+   * 只对真写了文件的操作记（改写、软删、新建）；核对不用写的（no-change、keep）没有提交，不记。缺省没有。
+   */
+  afterCommit?: (op: ChangeOp) => readonly OpStep[]
 }
 
 /**
@@ -192,14 +197,17 @@ const cloneProgress = (p: BatchProgress): BatchProgress => ({
   written: new Map([...p.written].map(([key, fields]) => [key, new Map(fields)])), fingerprints: new Map(p.fingerprints), forgotten: new Set(p.forgotten),
 })
 
+type SegmentOptions = ApplyOptions & { groupTargets?: ReadonlySet<string> }
+
 /** 做一组。第一步之前的核对没过：整组跳过，什么都不写。做到一半不成：撤回组内已做的，批内进度放回组开始之前。 */
 async function applyGroup(
-  group: string, ops: readonly ChangeOp[], isBroken: boolean, opts: ApplyOptions, deps: ChangesetDeps, progress: BatchProgress,
+  group: string, ops: readonly ChangeOp[], isBroken: boolean, batchOpts: ApplyOptions, deps: ChangesetDeps, progress: BatchProgress,
 ): Promise<{ outcomes: OpOutcome[]; result: GroupResult; thrown?: { error: unknown } }> {
   const allSkipped = (failed?: OpOutcome): OpOutcome[] => ops.map(op => (failed !== undefined && failed.opId === op.id
     ? failed
     : { kind: 'skipped', opId: op.id, memoryId: op.memoryId, reason: failed === undefined ? 'unsupported' : 'group' }))
   if (isBroken) return { outcomes: allSkipped(), result: { group, state: 'skipped' } }
+  const opts = { ...batchOpts, groupTargets: new Set(ops.map(copyKey)) }
   const failed = await precheck(ops, opts, deps, progress)
   if (failed !== undefined) return { outcomes: allSkipped(failed), result: { group, state: 'skipped' } }
   if (!(await deps.store.writeSection(() => deps.decisions.openGroup(opts.entryId, group)))) throw new Error(`变更集的条目 ${opts.entryId} 不在账本里，这一组没有做`)
@@ -232,23 +240,39 @@ async function applyGroup(
 /**
  * 一组第一步之前的核对：一个写入段里把组内每个操作的目标和依据读齐，过同一个核对（checkOp）、写入许可、软删的密钥检查。
  * 补丁和现状一样、不用写的那一步也要过写入许可：它锁着时同组别的几步照做，等于绕开了锁。
+ * 依据里不是本组（不分组的操作就是它自己）任何一个操作目标的那几条，同样要过写入许可（并进去的那条、纠错依据的那条）：
+ * 记忆梦境不改锁定的记忆，也不按锁定的记忆改别的。依据里列着、又是本组另一个操作目标的（合并方案第一步的依据列着全部被合并方），
+ * 照旧只由它自己那一步过门，不在别的操作上额外拦。不过的记 locked，memoryId 是锁着的那条。
+ * applyInSection 在写入段里按刚读到的依据、同一个口径再过一次。
  * 返回第一个不过的；都过返回 undefined。同一条记忆在组里的第二个操作不在这里查（它要按前一步写完的样子比）。
  */
-async function precheck(ops: readonly ChangeOp[], opts: ApplyOptions, deps: ChangesetDeps, progress: BatchProgress): Promise<OpOutcome | undefined> {
+async function precheck(ops: readonly ChangeOp[], opts: SegmentOptions, deps: ChangesetDeps, progress: BatchProgress): Promise<OpOutcome | undefined> {
   return deps.store.writeSection(async () => {
     const seen = new Set<string>()
     for (const op of ops) {
       if (seen.has(copyKey(op))) continue
       seen.add(copyKey(op))
-      const { target, check } = await readAndCheck(op, opts, deps, cloneProgress(progress))
+      const { target, basis, check } = await readAndCheck(op, opts, deps, cloneProgress(progress))
       const skipped = (reason: ApplySkipReason, memoryId = op.memoryId): OpOutcome => ({ kind: 'skipped', opId: op.id, memoryId, reason })
       if (check.kind === 'skip' && check.reason !== 'no-change') return skipped(check.reason, check.memoryId)
+      const lockedId = lockedParty(op, target, basis, opts)
+      if (lockedId !== undefined) return skipped('locked', lockedId)
       if (target === undefined) continue
-      if (writeGate(opts.by, target, opts.at) !== undefined) return skipped('locked')
       if (check.kind === 'forget' && (opts.isSecret ?? hasSecret)(target)) return skipped('has-secret')
     }
     return undefined
   })
+}
+
+/** 目标、依据和并入去向都过写入许可，同组的其他目标由自己的操作核对。 */
+function lockedParty(op: ChangeOp, target: MemoryRecord | undefined, basis: ReadonlyMap<string, MemoryRecord>, opts: SegmentOptions): string | undefined {
+  if (target !== undefined && writeGate(opts.by, target, opts.at) !== undefined) return target.id
+  const parties = new Set([...basis.keys(), ...(op.into === undefined ? [] : [copyKey(op.into)])])
+  for (const key of parties) {
+    const record = basis.get(key)!
+    if (!opts.groupTargets?.has(key) && writeGate(opts.by, record, opts.at) !== undefined) return record.id
+  }
+  return undefined
 }
 
 /** 读一个操作的目标和依据（按读到时的作用域找那一份），核对。在写入段里调用。 */
@@ -355,7 +379,7 @@ interface Landed { target?: MemoryRecord; /** 这次要写下的那一版，落�
  * 文件此刻可能已被手改，按重读的算回执会让退回把手改盖掉。
  */
 async function applyOne(
-  op: ChangeOp, opts: ApplyOptions, deps: ChangesetDeps, progress: ReturnType<typeof newProgress>,
+  op: ChangeOp, opts: SegmentOptions, deps: ChangesetDeps, progress: ReturnType<typeof newProgress>,
 ): Promise<{ outcome?: OpOutcome; thrown?: { error: unknown } }> {
   const landed: Landed = {}
   return deps.store.writeSection(async () => {
@@ -392,7 +416,7 @@ async function applyOne(
 }
 
 async function applyInSection(
-  op: ChangeOp, opts: ApplyOptions, deps: ChangesetDeps, progress: ReturnType<typeof newProgress>, landed: Landed,
+  op: ChangeOp, opts: SegmentOptions, deps: ChangesetDeps, progress: ReturnType<typeof newProgress>, landed: Landed,
 ): Promise<OpOutcome> {
   const { store } = deps
   const skipped = (reason: ApplySkipReason, memoryId = op.memoryId, detail?: string): OpOutcome =>
@@ -400,12 +424,12 @@ async function applyInSection(
   return store.writeSection(async (): Promise<OpOutcome> => {
     const { scope, target, basis, check } = await readAndCheck(op, opts, deps, progress)
     // 组里不用写的一步同样按刚读到的这一版过写入许可：第一步之前的核对之后才上的锁，也不能让同组别的几步照做
-    if (check.kind === 'skip' && check.reason === 'no-change' && op.group !== undefined && target !== undefined && writeGate(opts.by, target, opts.at) !== undefined) return skipped('locked')
+    if (check.kind === 'skip' && (check.reason !== 'no-change' || op.group === undefined)) return skipped(check.reason, check.memoryId)
+    const lockedId = lockedParty(op, target, basis, opts)
+    if (lockedId !== undefined) return skipped('locked', lockedId)
     if (check.kind === 'skip') return skipped(check.reason, check.memoryId)
     if (check.kind === 'create') return create(op, check.from, opts, deps, skipped, landed)
     if (target === undefined) return { kind: 'checked', opId: op.id, memoryId: op.memoryId }
-    // 写入许可按刚读到的这一版判（核对过不用写的也算过了一遍：这个发起方本来就不该碰它）
-    if (writeGate(opts.by, target, opts.at) !== undefined) return skipped('locked')
     if (check.kind === 'none') return { kind: 'checked', opId: op.id, memoryId: op.memoryId }
     const opKind = op.kind as ChangeOpKind
     landed.target = target
@@ -459,7 +483,7 @@ async function applyInSection(
       onOp: (opId, planned) => Object.assign(landed, { writeOp: opId, planned }),
       steps: (snapshotId) => {
         Object.assign(landed, { fields, snapshotId, ...(links !== undefined ? { links } : {}) })
-        return [changeReceiptStep({ entryId: opts.entryId, opId: op.id, opKind, fields, snapshotId, ...(links !== undefined ? { links } : {}), ...groupOf(op) })]
+        return [changeReceiptStep({ entryId: opts.entryId, opId: op.id, opKind, fields, snapshotId, ...(links !== undefined ? { links } : {}), ...groupOf(op) }), ...(opts.afterCommit?.(op) ?? [])]
       },
     }, deps)
     if (r.kind === 'stopped') return r.stop
@@ -485,7 +509,7 @@ async function create(
   const parsed = memoryRecordSchema.safeParse(record)
   if (!parsed.success) return skipped('invalid', op.memoryId, parsed.error.issues.map(i => i.message).join('；'))
   const fields: ReceiptField[] = [...CREATE_RECEIPT_FIELDS]
-  const writeOp = newWriteOp({ initiator: opts.by, steps: [changeReceiptStep({ entryId: opts.entryId, opId: op.id, opKind: 'create', fields, ...groupOf(op) })] })
+  const writeOp = newWriteOp({ initiator: opts.by, steps: [changeReceiptStep({ entryId: opts.entryId, opId: op.id, opKind: 'create', fields, ...groupOf(op) }), ...(opts.afterCommit?.(op) ?? [])] })
   Object.assign(landed, { target: record, opKind: 'create', writeOp: writeOp.id, planned: record, fields })
   const written = await deps.store.put(record, scopeOfLedger(op.scopeKey), current => current !== undefined, writeOp)
   if (written === undefined) return skipped('id-taken')
@@ -503,7 +527,7 @@ async function forget(
   const mergedInto = mergedIntoFor(op, target, basis)
   const snapshot = await deps.snapshots.capture({ operation: 'pre-forget', description: `删除记忆 ${target.id} 前`, records: [target] }, at)
   landed.snapshotId = snapshot.id
-  const writeOp = newWriteOp({ initiator: opts.by, steps: [changeReceiptStep({ entryId: opts.entryId, opId: op.id, opKind: 'forget', fields: [], snapshotId: snapshot.id, ...groupOf(op) })] })
+  const writeOp = newWriteOp({ initiator: opts.by, steps: [changeReceiptStep({ entryId: opts.entryId, opId: op.id, opKind: 'forget', fields: [], snapshotId: snapshot.id, ...groupOf(op) }), ...(opts.afterCommit?.(op) ?? [])] })
   const written = { ...markDeleted(target, at), ...(mergedInto !== undefined ? { mergedInto } : {}) }
   Object.assign(landed, { writeOp: writeOp.id, planned: written })
   const outcome = await store.softDeleteUnlessSecret(target, {

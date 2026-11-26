@@ -107,7 +107,7 @@ export interface SingleScanResult {
     created: number
     existing: number
     /** kind：不是冲突的那几种发现（漏记的变化、例外、依据已变、跨项目重复）才带，冲突不带。 */
-    items: Array<{ id: string; kind?: Exclude<FindingLedgerKind, 'conflict'>; memoryIds: string[]; workspaces: string[]; summary: string; isNew: boolean }>
+    items: Array<{ id: string; kind?: Exclude<FindingLedgerKind, 'conflict'> | 'important-pending'; memoryIds: string[]; workspaces: string[]; summary: string; isNew: boolean }>
   }
   stats: { scanned: number; clean: number; issues: number; byType: Record<string, number> }
   /** 用户在记忆页忽略、这次没有列出的建议条数。 */
@@ -149,7 +149,7 @@ export interface CheckupScanResult {
     created: number
     existing: number
     /** kind：不是冲突的那几种发现（漏记的变化、例外、依据已变、跨项目重复）才带，冲突不带。 */
-    items: Array<{ id: string; kind?: Exclude<FindingLedgerKind, 'conflict'>; memoryIds: string[]; workspaces: string[]; summary: string; isNew: boolean }>
+    items: Array<{ id: string; kind?: Exclude<FindingLedgerKind, 'conflict'> | 'important-pending'; memoryIds: string[]; workspaces: string[]; summary: string; isNew: boolean }>
   }
   /** 同一条 global 记忆与 ≥2 个 workspace 的待决冲突：被多数项目反对，优先裁定。 */
   crossLayerConflicts: Array<{ globalId: string; workspaces: string[]; decisionIds: string[] }>
@@ -202,7 +202,7 @@ export function renderScanResult(result: ScanToolResult): string {
     if (result.pendingDecisions.items.length > 0) {
       lines.push('待处理发现（用 memory_confirm resolve 裁决，需 decisionId）：')
       for (const item of result.pendingDecisions.items) {
-        lines.push(`- [${item.id}]（${({ conflict: '矛盾', 'missed-change': '漏记的变化', exception: '例外', 'premise-changed': '依据已变', 'cross-duplicate': '跨项目重复' })[item.kind ?? 'conflict']}）${item.summary}${decisionWorkspacesNote(item.workspaces)}`)
+        lines.push(`- [${item.id}]（${({ conflict: '矛盾', 'missed-change': '漏记的变化', exception: '例外', 'premise-changed': '依据已变', 'cross-duplicate': '跨项目重复', 'important-pending': '重要、等你定' })[item.kind ?? 'conflict']}）${item.summary}${decisionWorkspacesNote(item.workspaces)}`)
       }
     }
     if (result.promoteCandidates.total > 0) {
@@ -239,7 +239,7 @@ export function renderScanResult(result: ScanToolResult): string {
   if (result.pendingDecisions.items.length > 0) {
     lines.push('待处理发现（用 memory_confirm resolve 裁决，需 decisionId）：')
     for (const item of result.pendingDecisions.items) {
-      lines.push(`- [${item.id}]（${({ conflict: '矛盾', 'missed-change': '漏记的变化', exception: '例外', 'premise-changed': '依据已变', 'cross-duplicate': '跨项目重复' })[item.kind ?? 'conflict']}）${item.summary}${decisionWorkspacesNote(item.workspaces)}`)
+      lines.push(`- [${item.id}]（${({ conflict: '矛盾', 'missed-change': '漏记的变化', exception: '例外', 'premise-changed': '依据已变', 'cross-duplicate': '跨项目重复', 'important-pending': '重要、等你定' })[item.kind ?? 'conflict']}）${item.summary}${decisionWorkspacesNote(item.workspaces)}`)
     }
     lines.push('裁决前可用 memory_source 回查双方记忆的原始出处（当时谁说的、什么语境）；与 AGENTS.md 基线的垂直冲突请核对当前基线内容，不必回查旧会话。')
   }
@@ -316,7 +316,7 @@ export interface ScanRoundResult {
 /** 一个作用域的规则检查和说明（不跑内容检查的作用域只有这些）。 */
 interface RoundLedger {
   findings: Finding[]
-  decisionItems: Array<{ id: string; kind?: Exclude<FindingLedgerKind, 'conflict'>; memoryIds: string[]; workspaces: string[]; summary: string; isNew: boolean }>
+  decisionItems: Array<{ id: string; kind?: Exclude<FindingLedgerKind, 'conflict'> | 'important-pending'; memoryIds: string[]; workspaces: string[]; summary: string; isNew: boolean }>
   created: number
   existing: number
   settled: number
@@ -481,7 +481,7 @@ async function recordConflicts(
     if (r.created) created++
     else existing++
     decisionItems.push({
-      id: r.entry.id, ...(kindOf(r.entry) !== 'conflict' ? { kind: kindOf(r.entry) as Exclude<FindingLedgerKind, 'conflict'> } : {}), memoryIds: r.entry.memoryIds, workspaces: decisionWorkspaces(r.entry, id => byId.get(id)),
+      id: r.entry.id, ...(kindOf(r.entry) !== 'conflict' ? { kind: kindOf(r.entry) as Exclude<FindingLedgerKind, 'conflict'> | 'important-pending' } : {}), memoryIds: r.entry.memoryIds, workspaces: decisionWorkspaces(r.entry, id => byId.get(id)),
       summary: r.entry.summary, isNew: r.created,
     })
   }
