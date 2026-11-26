@@ -1,4 +1,5 @@
 import { dirname, isAbsolute } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import { dropRelatedRechecks } from './related-recheck.ts'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { MemoryLogger, MemoryStore } from '../store.ts'
@@ -300,6 +301,11 @@ interface RoundCommit {
   isCommitted: boolean
   /** 这次查成的批都写进了库。 */
   isDbWritten: boolean
+  /**
+   * 视图没写成：别处开始得更晚的扫描已经发布了。这一轮读到的内容更旧，不据它清库、清遗留垂直条目。
+   * 体检记录里的状态不看它，写的时候在写锁里另行核对视图（governance/checkup-records.ts）。
+   */
+  isSuperseded: boolean
 }
 
 /**
@@ -320,6 +326,16 @@ interface RoundLedger {
   created: number
   existing: number
   settled: number
+}
+
+/** 对 ws 的可见集合里有这条记忆：全局记忆总在，项目记忆只在本项目的里。ws 缺省是全局。 */
+function visibleTo(ws: string | undefined): (r: MemoryRecord) => boolean {
+  return r => r.scope === 'global' || (ws !== undefined && r.workspacePath === ws)
+}
+
+/** 依据已变的前提要在决定那条够得着的范围里：项目记忆够得着本项目和全局，全局记忆只够得着全局。 */
+function isReachableFrom(owner: MemoryRecord): (r: MemoryRecord) => boolean {
+  return visibleTo(owner.scope === 'workspace' ? owner.workspacePath : undefined)
 }
 
 /** 提示词里写明的检查对象：项目这一轮写它的路径，全局不写。 */
@@ -436,17 +452,25 @@ async function recordConflicts(
   byId: ReadonlyMap<string, MemoryRecord>,
   baseline: readonly string[] | null,
   now: number,
+  /** 现读这一轮的指令文件（不走这次扫描的缓存）：垂直冲突的入口复核拿它对照发现生成时的那份。 */
+  readBaseline: () => Promise<readonly string[] | null>,
 ): Promise<RoundLedger> {
   const findings = [...semantic]
   let created = 0
   let existing = 0
   let settled = 0
   const decisionItems: RoundLedger['decisionItems'] = []
+  // 成员按预读到的那份副本（作用域加 id）现读：同 id 在别的作用域还有一份时，读到的不是发现说的那一条。作用域算不出按没找到
+  const readCopy = (id: string): Promise<MemoryRecord | undefined> => {
+    const preread = byId.get(id)
+    const scope = preread === undefined ? undefined : scopeOfMemory(preread)
+    return scope === undefined ? Promise.resolve(undefined) : locateCopy(deps.store, id, scope)
+  }
   for (const f of semantic) {
     if (!(FINDING_LEDGER_KINDS as readonly string[]).includes(f.type)) continue
     // 语义层跑的这几十秒里用户可能已经裁决（败方软删、条目 settled 记了快照）：按预读数据挂账会把那条裁决
     // 当成「败方回来了」反撤。挂账前重读成员，任一方已不是 active 就跳过这条发现。
-    const live = await Promise.all(f.memoryIds.map(id => deps.store.get(id)))
+    const live = await Promise.all(f.memoryIds.map(readCopy))
     if (live.some(r => r === undefined || r.status !== 'active')) {
       findings.splice(findings.indexOf(f), 1)
       continue
@@ -457,6 +481,22 @@ async function recordConflicts(
       : members.every(m => m !== undefined)
       ? conflictFingerprint(members, f.baselineRef !== undefined ? baseline ?? [] : undefined)
       : undefined
+    const scanned = f.type !== 'premise-changed' && members.every(m => m !== undefined) ? memberScanFingerprints(members as MemoryRecord[]) : undefined
+    // 入口复核（在这一对的认领和写锁里，和裁决互斥）：上面的预检和挂账之间、扫描开头到现在，用户可能改了记忆又做了裁决。
+    // 依据对不上就丢掉这条旧发现、账本不动，留给下一次扫描按新内容查；否则按旧指纹挂账会把有效裁决当成过时的作废、重新挂出
+    const recheck = f.type === 'premise-changed'
+      ? async () => {
+        const [decision, premise] = await Promise.all(f.memoryIds.map(readCopy))
+        if (decision?.status !== 'active' || premise?.status !== 'active') return false
+        const still = findPremiseChanges([decision], (owner, id) => (id === premise.id && isReachableFrom(owner)(premise) ? premise : undefined))
+        return still.length > 0 && premiseDigest(premise) === premiseDigest(members[1]!)
+      }
+      : async () => {
+        const current = await Promise.all(f.memoryIds.map(readCopy))
+        if (!current.every(r => r?.status === 'active') || !isDeepStrictEqual(memberScanFingerprints(current as MemoryRecord[]), scanned)) return false
+        // 垂直冲突的另一方是指令文件：指令文件改过，旧发现的指纹同样对不上
+        return f.baselineRef === undefined || isDeepStrictEqual(await readBaseline(), baseline)
+      }
     const r = await deps.decisions.upsert({
       memoryIds: f.memoryIds,
       ...(f.type !== 'conflict' ? { kind: f.type as FindingLedgerKind } : {}),
@@ -466,8 +506,9 @@ async function recordConflicts(
       summary: f.summary,
       workspaces: f.memoryIds.map(id => workspaceLabel(byId.get(id))),
       ...(fingerprint !== undefined ? { fingerprint } : {}),
-      ...(f.type !== 'premise-changed' && members.every(m => m !== undefined) ? { memberScanFingerprints: memberScanFingerprints(members as MemoryRecord[]) } : {}),
-    }, now, id => deps.store.get(id))
+      ...(scanned !== undefined ? { memberScanFingerprints: scanned } : {}),
+      recheck,
+    }, now, readCopy)
     // 条目正被裁决、或刚被裁决（败方已删）：不挂账也不进返回的发现
     if (r.isSkipped) {
       findings.splice(findings.indexOf(f), 1)
@@ -640,8 +681,6 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
   const data = await prereadScopes(deps, readScopes, checkup ? undefined : wsPath, { isReadErrorTolerated: true })
   const active = (pred: (r: MemoryRecord) => boolean) =>
     [...data.byId.values()].filter(r => r.status === 'active' && pred(r))
-  const visibleTo = (ws: string | undefined) => (r: MemoryRecord) =>
-    r.scope === 'global' || (ws !== undefined && r.workspacePath === ws)
   const isGlobal = (r: MemoryRecord) => r.scope === 'global'
   // malformed 按扫描的作用域归属（与 memory_health 的 scoreScope 同口径）：隔离文件按读到它的目录归作用域
   const quarantinedIn = (scope: Scope) => data.quarantined.get(scopeCacheKey(scope)) ?? []
@@ -780,9 +819,10 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
     const premiseFindings = layers === 'rule' || layers === 'full'
       ? findPremiseChanges(active(r => scope.kind === 'global' ? isGlobal(r) : r.scope === 'workspace' && r.workspacePath === scope.workspacePath), (owner, id) => {
         const r = data.byId.get(id)
-        return r?.status === 'active' && visibleTo(owner.scope === 'workspace' ? owner.workspacePath : undefined)(r) ? r : undefined
+        return r?.status === 'active' && isReachableFrom(owner)(r) ? r : undefined
       }) : []
-    const premiseLedger = await recordConflicts(deps, premiseFindings, data.byId, null, now)
+    const readBaseline = async () => instructionTexts(await deps.instructions(scope))
+    const premiseLedger = await recordConflicts(deps, premiseFindings, data.byId, null, now, readBaseline)
     if (round === undefined) {
       ledgers.set(scopeKey(scope), { ...premiseLedger, findings: [...ruleFindings, ...premiseLedger.findings] })
       continue
@@ -811,10 +851,11 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
       unresolved: unresolvedOf(round),
     })
     let storageFailure: CheckupCause | undefined
+    let isSuperseded = false
     // 先挂账（只挂有有效结果的批里的冲突；沿用的不重新挂账），再写视图：视图写成是这一轮的提交点
     let ledger: RoundLedger = { findings: [], decisionItems: [], created: 0, existing: 0, settled: 0 }
     try {
-      ledger = await recordConflicts(deps, publishedFindings(valid, []), data.byId, round.baseline, now)
+      ledger = await recordConflicts(deps, publishedFindings(valid, []), data.byId, round.baseline, now, readBaseline)
       // 挂账期间收到取消（插件卸载、认领被接手）：还没到提交点，视图、完成记录都不写；已挂的账留着，同中途退出
       signal?.throwIfAborted()
       // 一批有效结果都没有、也没有沿用的：留着上次的视图（读的时候按记忆现在的样子核对）；本来就没有要查的批照写空视图
@@ -823,7 +864,7 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
         const published = publishedFindings(valid, carried).filter(f => !(LEDGER_ONLY_FINDING_TYPES as readonly string[]).includes(f.type))
         const entry = { id: cacheId, scannedAt: now, scope: scopeKey(scope), findings: published, fingerprints: findingFingerprints(published, data.byId), isTrackedByCheckups: true }
         // 不回退：别的扫描开始得比这次晚、已经写过的，留着它的
-        await deps.cache.update(cacheId, cur => (cur !== undefined && cur.scannedAt > now ? undefined : entry))
+        isSuperseded = !(await deps.cache.update(cacheId, cur => (cur !== undefined && cur.scannedAt > now ? undefined : entry)))
       }
       // 返回里的沿用发现同读侧口径：冲突只留账本里仍未决的（裁决过的照旧进视图，读的时候按账本核对）
       ledger = { ...ledger, findings: publishedFindings([ledger.findings], carried.filter(isConflictOpen(pendingFindings))) }
@@ -840,19 +881,21 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
     const closing = closingRow(coverage, storageFailure !== undefined)
     const cause = storageFailure ?? (closing === 'failed' || closing === 'model-unavailable' ? round.failure ?? runFailure : undefined)
     results.set(scopeKey(scope), { scope, coverage, closing, ...(cause !== undefined ? { cause } : {}) })
-    commits.set(round.round, { isCommitted: storageFailure === undefined, isDbWritten: round.isDbWriteFailed !== true })
+    commits.set(round.round, { isCommitted: storageFailure === undefined, isDbWritten: round.isDbWriteFailed !== true, isSuperseded })
   }
   // 没有内容检查的范围（只有规则层）没有要提交的，算提交了；有内容检查的范围至少一轮提交成了才报
   if (scopes.some(scope => commits.get(scopeKey(scope))?.isCommitted ?? true)) run.onCommitted?.()
 
   // —— 提交之后：清库、清遗留垂直条目、提升候选、完成记录 ——
-  const isSettledFully = (round: SemanticRound) => {
+  // 被更新的扫描取代的轮不算：库里可能有那次写的新行，清理以这次读到的为准会删掉它们，留给更新的那次清
+  const isPublished = (round: SemanticRound) => {
     const commit = commits.get(round.round)
-    return commit !== undefined && commit.isCommitted && isFullyCovered(results.get(round.round)!.coverage)
+    return commit !== undefined && commit.isCommitted && !commit.isSuperseded
   }
+  const isSettledFully = (round: SemanticRound) => isPublished(round) && isFullyCovered(results.get(round.round)!.coverage)
   for (const round of rounds) {
     if (round.history === undefined || !isSettledFully(round) || !commits.get(round.round)!.isDbWritten) continue
-    resultsDb?.prune(round.round, new Set(round.batches.map(b => b.key)), round.recheckBefore)
+    resultsDb?.prune(round.round, new Set(round.batches.map(b => b.key)), round.recheckBefore, now)
   }
   const globalRound = roundByKey.get(GLOBAL_SCOPE_KEY)
   if (globalRound !== undefined && isSettledFully(globalRound)) {
@@ -916,21 +959,30 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
       } else {
         isCrossWsSkipped = true
       }
-      if (cross?.hit !== undefined && isCrossDbWritten && rounds.every(r => r.isReadComplete)) resultsDb?.prune(CROSS_WS_ROUND, new Set([cross.key]), cross.recheckBefore)
+      if (cross?.hit !== undefined && isCrossDbWritten && rounds.every(r => r.isReadComplete && isPublished(r))) {
+        resultsDb?.prune(CROSS_WS_ROUND, new Set([cross.key]), cross.recheckBefore, now)
+      }
     }
 
     for (const item of duplicates.items) {
       if (item.memoryIds === undefined) continue
       const members = item.memoryIds.map(id => data.byId.get(id)!)
       // 模型比较期间成员可能移走，挂账只认原项目里此刻在用的副本。
-      const live = await Promise.all(members.map(r => locateCopy(deps.store, r.id, scopeOfMemory(r)!)))
+      const readLive = () => Promise.all(members.map(r => locateCopy(deps.store, r.id, scopeOfMemory(r)!)))
+      const live = await readLive()
       if (live.some(r => r?.status !== 'active')) continue
       const named = idsToNames(members.map(r => maskSecretSurface(r, { severity: 'suspected' })))
       const text = (value: string) => injectionText(named(maskSecrets(value, { severity: 'suspected' })))
+      const scanned = memberScanFingerprints(members)
       const r = await deps.decisions.upsert({
         kind: 'cross-duplicate', memoryIds: item.memoryIds, workspaces: members.map(workspaceLabel),
         fingerprint: conflictFingerprint(members), summary: `${text(item.topic)}：${text(item.suggestion)}`,
         ...(item.promote !== undefined ? { plan: { kind: 'promote', memoryId: item.promote } } : {}),
+        // 入口复核（同项目内冲突的做法）：比较之后用户改了成员又做了裁决，按旧比较结论挂账会把这次裁决当成过时的重开
+        recheck: async () => {
+          const current = await readLive()
+          return current.every(r => r?.status === 'active') && isDeepStrictEqual(memberScanFingerprints(current as MemoryRecord[]), scanned)
+        },
       }, now, id => deps.store.get(id))
       if (r.isSkipped || r.settled || seenDecisions.has(r.entry.id)) continue
       seenDecisions.add(r.entry.id)

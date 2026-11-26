@@ -1,6 +1,6 @@
 import { sidecarSchemas, createPluginEnv } from './helpers/plugin-env.ts'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -19,7 +19,7 @@ import { AUTO_CHECKUP_FIRST_CHECK_MS, AUTO_CHECKUP_INTERVAL_MS, AutoCheckupSched
 import { CHECKUP_CLAIM_REFRESH_MS } from '../src/gui/checkup-run.ts'
 import { CheckupSuggestions, type CheckupSuggestionsDeps } from '../src/gui/checkup-suggestions.ts'
 import { GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, checkupKey, checkupViewSchema, type AutoCheckupFrequency, type CheckupView, type ScopeOrAll } from '../src/gui/contract.ts'
-import { executeScan } from '../src/tools/scan.ts'
+import { executeScan, runScan } from '../src/tools/scan.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { fakeExec } from './helpers/exec.ts'
 import { legacyCheckupRecordSchema } from './helpers/legacy-checkup-record.ts'
@@ -182,8 +182,10 @@ function env(opts: {
   const clock = { now: NOW }
   // 侧表也用这个时钟：认领的时间和是否残留按它算
   const sidecar = new SidecarStore({ root, schemas: sidecarSchemas, now: () => clock.now })
-  const { store, decisions, ignores, checkups, autoCheckups } = createPluginEnv(sidecar, { root, stats: sidecar.recallStats, now: () => clock.now })
+  const { store, decisions, ignores, autoCheckups } = createPluginEnv(sidecar, { root, stats: sidecar.recallStats, now: () => clock.now })
   const cache = sidecar.scanCache
+  // 体检记录同接线层：写体检状态前在写锁里核对视图
+  const checkups = new CheckupRecordStore(sidecar.checkups, { views: cache, lock: sidecar.lock, log: { info() {}, warn() {}, error() {} } })
   const llm = opts.llm ?? fakeHostLlm()
   const governance = { isEnabled: opts.governanceEnabled ?? true }
   // 宿主默认模型选择的当前值（用例中途可以改）
@@ -1050,6 +1052,39 @@ describe('自动体检调度：模型用不了', () => {
     expect((await e.readView()).scopes.map(s => s.modelUnavailable)).toEqual([null, null])
   })
 
+  it('一次体检中途碰上模型用不了、它那一轮又被更新的语义扫描取代：一次体检不记，调度器收尾按这轮检查补记（兜底不核对视图），后面到期的范围照常记上、不再白试', async () => {
+    let calls = 0
+    let open!: () => void
+    const opened = new Promise<void>(resolve => { open = resolve })
+    const e = env({ llm: fakeHostLlm({
+      gate: () => (++calls === 1 ? opened : Promise.resolve()),
+      reply: () => (calls === 1 ? 'ok' : { code: 'ACCOUNT_SIGN_IN_REQUIRED', message: 'Sign in' }),
+    }) })
+    // 两条长的全局记忆各成一批：第一批查成，第二批碰上未登录
+    for (const [id, createdAt] of [['mem_g1', 1], ['mem_g2', 2]] as const) {
+      await e.store.create(record({ id, createdAt, content: `全局的记忆 ${id}：${'记'.repeat(27_000)}` }))
+    }
+    await e.store.create(record({ id: 'mem_a', content: '项目 a 的记忆', scope: 'workspace', workspacePath: OTHER_A }))
+    await e.set({ kind: 'all' }, 1)
+    e.scheduler.start()
+    e.timers.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    await e.llm.nthStarted(1)
+    // 第一批还在查：一次更新的语义扫描（agent 的 memory_scan，不写完成记录）查完全局并发布
+    e.clock.now += 1000
+    const newer = await runScan({ target: { kind: 'scope', scope: { kind: 'global' } }, layers: 'semantic', llm: { complete: async () => '{"findings":[]}' }, startedAt: e.clock.now },
+      { store: e.store, registry, decisions: e.decisions, cache: e.cache, instructions: noInstructions, now: () => e.clock.now })
+    expect(newer.kind).toBe('single')
+    open()
+    await e.scheduler.whenIdle()
+
+    const cause = { kind: 'model-error', hostCode: 'ACCOUNT_SIGN_IN_REQUIRED', message: 'Sign in' }
+    expect((await e.readView()).scopes.map(s => [s.scope.kind === 'global' ? 'global' : s.scope.workspacePath, s.modelUnavailable, s.failure])).toEqual([
+      ['global', cause, null],
+      [OTHER_A, cause, null],
+    ])
+    expect(e.llm.requests.map(scopeOfRequest).every(s => s === 'global')).toBe(true)
+  })
+
   it('缺凭据（API key 路由）同样记「模型用不了」', async () => {
     const e = env({ llm: fakeHostLlm({ reply: () => ({ code: 'MISSING_CREDENTIAL', message: 'llm-deepseek: no API key' }) }) })
     await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
@@ -1212,5 +1247,76 @@ describe('自动体检调度：体检之后生成处理建议', () => {
     expect((await e.decisions.list())[0]?.suggestion).toBeUndefined()
     expect((await e.completed()).global).toMatchObject({ by: 'auto' })
     open?.()
+  })
+})
+
+describe('自动体检调度：体检状态与视图核对', () => {
+  const GLOBAL = { kind: 'global' as const }
+  const quiet = { info() {}, warn() {}, error() {} }
+  const recordFile = (key: string) => join(root, '.state', 'checkups', `${createHash('sha1').update(key).digest('hex')}.json`)
+  const viewFile = () => join(root, '.state', 'scan-cache', `${createHash('sha1').update(GLOBAL_CACHE_KEY).digest('hex')}.json`)
+
+  /**
+   * 两条长的全局记忆各成一批：第一批查成，第二批由 second 回。认领之后先过一秒（体检晚于这轮检查开始），
+   * 第二批开查时体检记录暂时写不进（同名路径换成目录），放掉认领之后恢复；afterRestore 在恢复之后跑。
+   */
+  async function partialRunWithBrokenRecord(second: HostReply, afterRestore: () => Promise<void> = async () => {}) {
+    let changes = 0
+    let calls = 0
+    const e = env({
+      log: quiet,
+      afterClaimChanged: async () => {
+        if (++changes === 1) {
+          e.clock.now += 1000
+          return
+        }
+        await rm(recordFile(checkupKey(GLOBAL)), { recursive: true, force: true })
+        await afterRestore()
+      },
+      llm: fakeHostLlm({
+        gate: async () => {
+          if (++calls === 2) await mkdir(recordFile(checkupKey(GLOBAL)), { recursive: true })
+        },
+        reply: () => (calls === 1 ? 'ok' : second),
+      }),
+    })
+    for (const [id, createdAt] of [['mem_g1', 1], ['mem_g2', 2]] as const) {
+      await e.store.create(record({ id, createdAt, content: `全局的记忆 ${id}：${'记'.repeat(27_000)}` }))
+    }
+    await e.set(GLOBAL, 1)
+    await e.scheduler.recheck()
+    // 这一轮体检发布了第一批的结果，视图晚于这轮检查开始的时刻
+    expect((await e.cache.get(GLOBAL_CACHE_KEY))?.scannedAt).toBe(NOW + 1000)
+    return e
+  }
+
+  it('体检发布了部分结果、自己记「模型用不了」时存储暂时出错：存储恢复后，调度器收尾补记上', async () => {
+    const e = await partialRunWithBrokenRecord({ code: 'ACCOUNT_SIGN_IN_REQUIRED', message: 'Sign in' })
+    expect((await e.checkups.list()).find(r => r.id === checkupKey(GLOBAL))?.modelUnavailable).toMatchObject({ hostCode: 'ACCOUNT_SIGN_IN_REQUIRED' })
+  })
+
+  it('体检发布了部分结果、自己记失败时存储暂时出错，收尾又抛错：存储恢复后，这一轮的兜底补记上失败', async () => {
+    const e = await partialRunWithBrokenRecord({ code: 'RATE_LIMIT', message: 'too many requests' }, async () => {
+      throw new Error('重写体检视图出错')
+    })
+    expect((await e.checkups.list()).find(r => r.id === checkupKey(GLOBAL))?.failure?.count).toBe(1)
+  })
+
+  it('视图文件坏了、第一批模型就出错：照样记下失败，按一小时退避，退避期间不再调模型', async () => {
+    const e = env({ log: quiet, llm: fakeHostLlm({ reply: () => ({ code: 'RATE_LIMIT', message: 'too many requests' }) }) })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set(GLOBAL, 1)
+    await mkdir(join(root, '.state', 'scan-cache'), { recursive: true })
+    await writeFile(viewFile(), '{坏的')
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    const calls = e.llm.requests.length
+    expect(calls).toBeGreaterThan(0)
+    await e.advance(AUTO_CHECKUP_INTERVAL_MS)
+    await e.advance(AUTO_CHECKUP_INTERVAL_MS)
+
+    expect(e.llm.requests.length).toBe(calls)
+    const [rec] = await e.checkups.list()
+    expect([rec?.failure?.count, rec?.completed]).toEqual([1, undefined])
   })
 })

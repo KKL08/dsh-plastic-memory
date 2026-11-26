@@ -233,6 +233,46 @@ describe('收拢修复前留下的重复条目', () => {
   })
 })
 
+describe('挂账的入口复核', () => {
+  const pair = (over: Partial<PendingDecision>): PendingDecision => ({ id: 'pd_x', memoryIds: ['mem_a', 'mem_b'], summary: '旧', firstSeenAt: 1, fingerprint: 'fp', ...over })
+  const active = async (id: string) => record({ id })
+
+  it('复核不通过：返回跳过，新建、更新、作废旧结论、收拢重复条目都不做，账本原样', async () => {
+    const table = new InMemoryKvTable<PendingDecision>()
+    const kept = pair({ id: 'pd_kept', settled: { verdict: 'keep-both', at: 5 } })
+    const stale = pair({ id: 'pd_stale', fingerprint: 'fp_old', settled: { verdict: 'dismiss', at: 5 } })
+    const open = pair({ id: 'pd_open', kind: 'exception', firstSeenAt: 6 })
+    for (const e of [kept, stale, open]) await table.put(e.id, e)
+    const s = new PendingDecisionsStore(table)
+    const before = Object.fromEntries(await table.list())
+
+    for (const fingerprint of ['fp', 'fp_new']) {
+      const r = await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '新', fingerprint, recheck: async () => false }, 30, active)
+      expect(r.isSkipped, fingerprint).toBe(true)
+    }
+    const fresh = await s.upsert({ memoryIds: ['mem_c', 'mem_d'], summary: '新的一对', fingerprint: 'fp', recheck: async () => false }, 30, active)
+    expect(fresh.isSkipped).toBe(true)
+    expect(Object.fromEntries(await table.list())).toEqual(before)
+  })
+
+  it('复核在这一对的认领里做：复核期间别处挂同一对认领不到；复核通过照常挂账', async () => {
+    const s = makeStore()
+    const input = { memoryIds: ['mem_a', 'mem_b'], summary: '新', fingerprint: 'fp' }
+    let isPairFree: boolean | undefined
+    const r = await s.upsert({
+      ...input,
+      recheck: async () => {
+        isPairFree = (await s.withPairClaim(input, async () => {})).isClaimed
+        return true
+      },
+    }, 30, active)
+    expect(isPairFree).toBe(false)
+    expect(r.created).toBe(true)
+    expect((await s.list()).map(e => e.memoryIds)).toEqual([['mem_a', 'mem_b']])
+    expect(await s.list()).not.toContainEqual(expect.objectContaining({ recheck: expect.anything() }))
+  })
+})
+
 describe('syncOverflow 与「忽略」交错', () => {
   it('读完账本之后、写回说明之前用户点了忽略：只改说明，忽略保留', async () => {
     const table = new InMemoryKvTable<PendingDecision>()
