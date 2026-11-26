@@ -1,3 +1,4 @@
+import { newWriteOp } from '../storage/table.ts'
 import type { MemoryStore } from '../store.ts'
 import type { AgentsMdWriter } from '../storage/agents-md.ts'
 import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
@@ -149,7 +150,10 @@ export async function executePromote(
         const { workspacePath, globalCandidate, ...rest } = withoutLinks(cur, dropped)
         return review({ ...rest, scope: 'global' })
       }
-      const isWritten = (await deps.store.updateIfLive(r, promote, from, { isChanged })) !== undefined   // 没写：读到之后被别处删掉或改过
+      const op = newWriteOp({ topic: { kind: 'carry' } })
+      const written = await deps.store.updateIfLive(r, promote, from, { isChanged, op })
+      if (written !== undefined) await deps.store.finishOp(op, written)
+      const isWritten = written !== undefined   // 没写：读到之后被别处删掉或改过
       if (isWritten && hasDropped(dropped)) droppedLinks.push({ id: r.id, ...dropped })
       return isWritten
     }

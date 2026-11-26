@@ -133,13 +133,13 @@ export class MemoryStore {
    *  isChanged：锁内看到的当前内容过了它（调用方读到之后又被改过）也不写、返回 undefined。 */
   async updateIfLive(
     record: Pick<MemoryRecord, 'id' | 'workspacePath'>, fn: (current: MemoryRecord) => MemoryRecord, from?: LocateTarget,
-    opts: { isChanged?: (current: MemoryRecord) => boolean } = {},
+    opts: { isChanged?: (current: MemoryRecord) => boolean; op?: WriteOp } = {},
   ): Promise<MemoryRecord | undefined> {
     try {
       return await this.update(record, r => {
         if (r.status === 'deleted' || opts.isChanged?.(r) === true) throw new RecordNotFoundError(r.id)
         return fn(r)
-      }, from)
+      }, from, opts.op)
     } catch (err) {
       if (err instanceof RecordNotFoundError) return undefined
       throw err
@@ -243,10 +243,10 @@ export class MemoryStore {
     return scope.kind === 'global' ? this.table.globalDir : (await this.table.workspaceDirs(scope.workspacePath)).dirs[0]
   }
 
-  /** 一个作用域的主题索引文件，原样读出；还没有时为空。 */
-  async readIndex(scope: Scope): Promise<IndexFiles | undefined> {
+  /** 一个作用域的主题索引文件，masked 为真时遮盖手写文字中的密钥；还没有时为空。 */
+  async readIndex(scope: Scope, masked = false): Promise<IndexFiles | undefined> {
     const dir = await this.indexDirOf(scope)
-    return dir === undefined ? undefined : this.table.readIndex?.(dir)
+    return dir === undefined ? undefined : this.table.readIndex?.(dir, masked)
   }
 
   /** 对一个作用域的主题索引做一个操作（见 MemoryTable.applyIndexOp）。 */
@@ -271,6 +271,11 @@ export class MemoryStore {
   /** 操作日志里还等着补做的步骤有没有一个对得上 match（见 MemoryTable.hasPendingStep）。 */
   hasPendingStep(match: (step: OpStep) => boolean): boolean {
     return this.table.hasPendingStep?.(match) ?? false
+  }
+
+  /** 这次写入里文件表自己的 kind 那一步当场没做成（见 MemoryTable.hasUnfinishedOwnStep）；表不支持时为否。 */
+  hasUnfinishedOwnStep(op: string, kind: string): boolean {
+    return this.table.hasUnfinishedOwnStep?.(op, kind) ?? false
   }
 
   /**

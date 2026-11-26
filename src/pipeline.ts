@@ -9,20 +9,24 @@ import { commitChange, isSameRecord } from './commit-change.ts'
 import { UNKNOWN_SESSION_ID } from './session-id.ts'
 import { anchorRangeOf, type AnchorFacts } from './session-log.ts'
 import type { MemoryStore, QueryScope } from './store.ts'
-import { newWriteOp } from './storage/table.ts'
-import { LINK_CHANGE_STEP, MODEL_CHANGE_STEP, ledgerSteps, linkChangeStep, modelChangeStep } from './governance/op-steps.ts'
+import { newWriteOp, type TopicIntent } from './storage/table.ts'
+import { INDEX_RECEIPT_STEP, indexReceiptStep, LINK_CHANGE_STEP, MODEL_CHANGE_STEP, ledgerSteps, linkChangeStep, modelChangeStep } from './governance/op-steps.ts'
 import { linkShapeProblem, mergeLinks, resolveLinks, type ResolvedLinks } from './links.ts'
-import { scopeOfMemory, type Scope } from './scope.ts'
+import { ledgerLabel, scopeOfMemory, type Scope } from './scope.ts'
 import type { TypeRegistry } from './type-registry.ts'
 import type { PendingDecisionsStore } from './governance/decisions.ts'
 import type { SnapshotStore } from './governance/snapshots.ts'
-import { detectSecrets, maskSecretSurface } from './secrets.ts'
+import { maskSecrets, detectSecrets, maskSecretSurface } from './secrets.ts'
 import { RecordNotFoundError } from './errors.ts'
 import { runCreateGate, type SimilarMemory } from './create-gate.ts'
 import type { QueryTokenizerOptions } from './search/jieba-segmenter.ts'
 import { lostFacts, refineRemoval, factsDroppedText, refineShrankText, turnThirdSaveText, contentLongText, TURN_CREATE_HINT_AT, isContentLong, type SaveHints } from './save-signals.ts'
 import { toToolOutput } from './output.ts'
 import { VALIDITY_DATE_FORMAT, VALIDITY_FORMAT, formatValidity, parseValidityInput, roundValidity } from './validity.ts'
+import * as topicText from './save-signals.ts'
+import { INDEX_ROW_STEP } from './storage/file-table.ts'
+import { INDEX_MAX_TOPICS_DEFAULT, resolveTopic, nearestTopics, topicNameProblem, readIndex, entryTopics, keyOf, UNSORTED_TITLE, type IndexFiles } from './topic-index.ts'
+import type { IndexPlan } from './topic-ops.ts'
 
 export interface SaveCandidate {
   action: 'create' | 'update'
@@ -55,6 +59,10 @@ export interface SaveCandidate {
   related?: string[]
   /** 决定依据的前提：被依据记忆的 id；插件记下 id 和那条记忆当时的内容摘要。追加规则同 related。 */
   premises?: string[]
+  /** 这条记忆归哪个主题：现有主题名或它的曾用名（去首尾空白、不分大小写），没有就新建。新建和更新都能带；只传它的 update 是一次索引操作，不写记忆文件。 */
+  topic?: string
+  /** 新建主题时的一句说明；topic 指向现有主题、或没给 topic 时不生效。 */
+  topicAbout?: string
 }
 
 export type { SaveEdit } from './edits.ts'
@@ -342,7 +350,7 @@ async function resolveCorroboration(input: SaveInput, deps: PipelineDeps): Promi
   const { target } = checked
   const candidate: SaveCandidate = {
     action: 'update', id: input.id, change: 'corroborate', sourceMode: input.sourceMode, confidence: input.confidence, confirmGlobal: input.confirmGlobal,
-    name: target.name, type: target.type, scope: target.scope, content: target.content, summary: target.summary, tags: target.tags,
+    name: target.name, type: target.type, scope: target.scope, content: target.content, summary: target.summary, tags: target.tags, topic: input.topic, topicAbout: input.topicAbout,
   }
   return { candidate, base: target, ignored: CORROBORATE_IGNORED.filter(k => input[k] !== undefined) }
 }
@@ -484,6 +492,95 @@ async function checkSubagentWrite(
   return { candidate, warnings }
 }
 
+/** 主题输入只在入口遮盖，换行保留给名字校验。 */
+function topicIntent(input: SaveInput, deps: PipelineDeps): TopicIntent | undefined {
+  return input.topic === undefined || deps.delegation !== undefined ? undefined : { kind: 'choose', name: input.topic, about: input.topicAbout, maxTopics: deps.maxTopics ?? INDEX_MAX_TOPICS_DEFAULT }
+}
+
+function topicNote(code: 'topic-about-ignored' | 'topic-about-alone' | 'topic-deferred-subagent' | 'topic-pending' | 'topic-unreadable' | 'topic-not-indexed' | 'topic-skipped'): SaveWarning[] {
+  const texts = { 'topic-about-ignored': topicText.TOPIC_ABOUT_IGNORED_TEXT, 'topic-about-alone': topicText.TOPIC_ABOUT_ALONE_TEXT,
+    'topic-deferred-subagent': topicText.TOPIC_DEFERRED_SUBAGENT_TEXT, 'topic-pending': topicText.TOPIC_PENDING_TEXT,
+    'topic-unreadable': topicText.TOPIC_UNREADABLE_TEXT, 'topic-not-indexed': topicText.TOPIC_NOT_INDEXED_TEXT, 'topic-skipped': topicText.TOPIC_SKIPPED_TEXT }
+  return [{ code, text: texts[code] }]
+}
+
+function topicWarnings(input: SaveInput, files: IndexFiles, maxTopics: number, kept: boolean): SaveWarning[] {
+  const name = input.topic!
+  const target = resolveTopic(files, name, maxTopics)
+  const quote = (text: string) => `「${maskSecrets(text).replace(/\s+/g, ' ')}」`
+  const nearest = nearestTopics(files, name)
+  const hint = nearest.length === 0 ? '' : topicText.NEAREST_TOPICS_LEAD + nearest.map(quote).join('、') + '。' + topicText.NEAREST_TOPICS_HINT
+  const place = kept ? topicText.TOPIC_PLACE_KEPT : topicText.TOPIC_PLACED_UNSORTED
+  if (target.kind === 'new') return [{ code: 'topic-created', text: topicText.TOPIC_CREATED_LEAD + quote(name) + '。' + hint }]
+  if (target.kind === 'full') return [{ code: 'topic-full', text: topicText.TOPIC_FULL_LEAD + quote(name) + '。' + place + hint }]
+  if (target.kind === 'invalid') return [{ code: 'topic-invalid', text: topicText.TOPIC_INVALID_LEAD + '（' + topicText.TOPIC_NAME_PROBLEM_TEXT[topicNameProblem(name)!] + '）。' + place + hint }]
+  const isListed = entryTopics(files.entry).some(t => t.fileName === target.fileName || (t.fileName === undefined && keyOf(t.name) === keyOf(target.name)))
+  return input.topicAbout === undefined || !isListed ? [] : topicNote('topic-about-ignored')
+}
+
+async function saveTopicWarnings(input: SaveInput, deps: PipelineDeps, scope: Scope, id: string): Promise<SaveWarning[]> {
+  if (input.topic === undefined) return input.topicAbout === undefined ? [] : topicNote('topic-about-alone')
+  if (deps.delegation) return topicNote('topic-deferred-subagent')
+  try {
+    const files = await deps.store.readIndex(scope, true) ?? { entry: '# 记忆索引\n', pages: {} }
+    const index = readIndex(files)
+    return topicWarnings(input, files, deps.maxTopics ?? INDEX_MAX_TOPICS_DEFAULT, index.unsorted.includes(id) || index.topics.some(t => t.memberIds.includes(id)))
+  } catch { return topicNote('topic-pending') }
+}
+
+/** 只改主题在同一写入段复核目标，再交给已有索引操作和回执机制提交。 */
+async function runTopicOnly(input: SaveInput, deps: PipelineDeps, now: number): Promise<PipelineResult> {
+  const { store } = deps
+  const read = input.id === undefined ? undefined : await store.get(input.id, { workspacePath: deps.workspacePath })
+  const notWritable = deps.delegation ? subagentTargetProblem(input.id ?? '(缺 id)', read, deps.session.id) : undefined
+  if (notWritable !== undefined) return { kind: 'rejected', ...notWritable }
+  const checked = await checkUpdateTarget(input.id, read, deps)
+  if ('code' in checked) return { kind: 'rejected', ...checked }
+  const { target } = checked
+  if (deps.delegation) return { kind: 'updated', record: target, warnings: topicNote('topic-deferred-subagent') }
+  if (target.scope === 'global' && deps.workspacePath !== undefined) {
+    const code = globalConfirmCode(deps.session.id, target)
+    if (!isConfirmCodeMatch(input.confirmGlobal, code)) return { kind: 'rejected', code: 'global-update-unconfirmed', reason: globalUpdateGuide(target, code, input.confirmGlobal) }
+  }
+  const scope = scopeOfMemory(target)!
+  return store.writeSection(async () => {
+    const current = await store.get(target.id, scope)
+    if (current === undefined || current.status !== 'active') return changedAfterRead(target.id, current, false)
+    const ignored = LINK_ONLY_IGNORED.filter(k => input[k] !== undefined)
+    const result = (warnings: SaveWarning[]): PipelineResult => ({ kind: 'updated', record: current, warnings: [...warnings, ...(ignored.length ? [{ code: 'topic-only-params-ignored' as const, text: topicText.TOPIC_ONLY_IGNORED_LEAD + ignored.join('、') + '。' }] : [])] })
+    let files: IndexFiles | undefined
+    try { files = await store.readIndex(scope, true) } catch { return result(topicNote('topic-unreadable')) }
+    if (files === undefined) return result(topicNote('topic-not-indexed'))
+    const index = readIndex(files)
+    if (!index.unsorted.includes(current.id) && !index.topics.some(t => t.memberIds.includes(current.id))) return result(topicNote('topic-not-indexed'))
+    const maxTopics = deps.maxTopics ?? INDEX_MAX_TOPICS_DEFAULT
+    const resolved = resolveTopic(files, input.topic!, maxTopics)
+    const warnings = topicWarnings(input, files, maxTopics, true)
+    if (resolved.kind === 'invalid' || resolved.kind === 'full') return result(warnings)
+    const from = index.topics.find(t => t.memberIds.includes(current.id))
+    if (from?.fileName === resolved.fileName) return result(warnings)
+    const decisions = deps.decisions
+    const entry = await decisions?.addSettled({
+      kind: 'index-organize', memoryIds: [], summary: '调整记忆所属主题',
+      workspaces: [ledgerLabel(scope)], indexRun: { receipts: [] },
+    }, 'index-organized', now)
+    if (decisions) {
+      if (!store.hasStep(INDEX_RECEIPT_STEP)) store.registerSteps(ledgerSteps(decisions))
+    }
+    try {
+      const outcome = await store.applyIndexOp(scope, { kind: 'assign', memoryIds: [current.id], from: maskSecrets(from?.name ?? UNSORTED_TITLE), to: input.topic!, ...(resolved.kind === 'new' ? { about: input.topicAbout } : {}) }, {
+        maxTopics, ...(decisions ? { prepare: async (id: string, plan: IndexPlan) => {
+          await decisions.appendIndexReceipt(entry!.id, { op: id, plan })
+          return [indexReceiptStep(entry!.id)]
+        } } : {}),
+      })
+      return result(outcome.kind === 'skipped' ? topicNote('topic-skipped') : warnings)
+    } finally {
+      if (decisions) await decisions.finishIndexRun(entry!.id, op => store.isOpPending(op))
+    }
+  })
+}
+
 /** 带了要挂的关联或前提。 */
 function hasLinks(input: Pick<SaveInput, 'related' | 'premises'>): boolean {
   return (input.related?.length ?? 0) > 0 || (input.premises?.length ?? 0) > 0
@@ -539,7 +636,7 @@ async function runLinkOnly(input: SaveInput, deps: PipelineDeps, now: number): P
   const scope: Scope | undefined = scopeOfMemory(target)
   if (scope === undefined) return { kind: 'rejected', code: 'target-missing', reason: `更新目标不存在或已删除：${target.id}` }
   const by = deps.delegation ? 'subagent' : 'main'
-  return withNotes(await store.writeSection(async (): Promise<PipelineResult> => {
+  return store.writeSection(async (): Promise<PipelineResult> => {
     const current = await store.get(target.id, scope)
     const isSamePlace = current !== undefined && current.status === 'active' && current.scope === target.scope && current.workspacePath === target.workspacePath
     if (!isSamePlace || (deps.delegation !== undefined && notOwnPending(current, session.id) !== undefined)) {
@@ -550,13 +647,14 @@ async function runLinkOnly(input: SaveInput, deps: PipelineDeps, now: number): P
     const merged = mergeLinks(current, links)
     if ('problem' in merged) return linkRejection(merged.problem)
     // 都已经挂着：没有要写的，也没有可撤的
-    if (merged.added.related.length === 0 && merged.added.premises.length === 0) return { kind: 'updated', record: current }
+    if (merged.added.related.length === 0 && merged.added.premises.length === 0) return input.topic !== undefined ? runTopicOnly(input, deps, now) : withNotes({ kind: 'updated', record: current })
     const steps = []
     if (deps.decisions !== undefined) {
       if (!store.hasStep(LINK_CHANGE_STEP)) store.registerSteps(ledgerSteps(deps.decisions))
       steps.push(linkChangeStep({ added: merged.added, at: now, origin: { sessionId: session.id, callId: deps.callId ?? '' } }))
     }
-    const op = newWriteOp({ initiator: by, steps })
+    const warnings = await saveTopicWarnings(input, deps, scope, current.id)
+    const op = newWriteOp({ initiator: by, steps, topic: topicIntent(input, deps) })
     // 写入段挡不住手改文件：落盘那一刻和刚读到的不是同一版就不写、不记回执（回执里的「新加」按刚读到的这版算），让模型重读
     const seen: { latest?: MemoryRecord } = {}
     const isChangedSinceRead = (latest: MemoryRecord | undefined) => {
@@ -565,9 +663,10 @@ async function runLinkOnly(input: SaveInput, deps: PipelineDeps, now: number): P
     }
     const written = await store.put({ ...current, ...merged.fields }, scope, isChangedSinceRead, op)
     if (written === undefined) return changedAfterRead(target.id, seen.latest, deps.delegation !== undefined)
+    const notes = input.topic !== undefined && store.hasUnfinishedOwnStep(op.id, INDEX_ROW_STEP) ? topicNote('topic-pending') : warnings
     await store.finishOp(op, written)
-    return { kind: 'updated', record: written }
-  }))
+    return withNotes({ kind: 'updated', record: written, warnings: notes })
+  })
 }
 
 export async function runSavePipeline(
@@ -599,6 +698,8 @@ export async function runSavePipeline(
     guided?: { has(memoryId: string): boolean; add(memoryId: string): void }
     /** 状态变化的合并窗口，毫秒（配置 history.mergeWindowMinutes，调用时现读）；缺省见 commit-change.ts。 */
     mergeWindowMs?: number
+    /** 主题数上限（配置 index.maxTopics，调用时现读）；缺省 INDEX_MAX_TOPICS_DEFAULT。 */
+    maxTopics?: number
     /** 写入时刻（createdAt、updatedAt、有效期、快照与撤销记录）的时钟，缺省取当前时间。 */
     now?: () => number
     /**
@@ -611,8 +712,10 @@ export async function runSavePipeline(
   const { store, registry, session } = deps
   const now = deps.now?.() ?? Date.now()
   // 关联和前提的每一项先按记忆 id 的形状校验，各条路径（新建、改内容、补证、只挂关联）都过这一道
+  input = { ...input, ...(input.topic !== undefined ? { topic: maskSecrets(input.topic.trim()) } : {}), topicAbout: input.topicAbout?.trim() ? maskSecrets(input.topicAbout.trim()).replace(/\s+/g, ' ') : undefined }
   const badLinks = linkShapeProblem(input)
   if (badLinks !== undefined) return linkRejection(badLinks)
+  if (input.action === 'update' && input.topic !== undefined && input.change !== 'corroborate' && CONTENT_KEYS.every(k => input[k] === undefined) && !hasLinks(input)) return runTopicOnly(input, deps, now)
   if (isLinkOnly(input)) return runLinkOnly(input, deps, now)
 
   // 0. 入参补成完整候选（精确修改在这里读目标、算出新正文），再过子 agent 写入约束（主会话没有 delegation，原样往下走）
@@ -736,7 +839,16 @@ export async function runSavePipeline(
   // 检索可能加载词典，放在写入段外，避免拖住其他写入。
   let similar: SimilarMemory[] = []
   if (candidate.action === 'create') {
+    let topicMemberIds: readonly string[] | undefined
+    if (input.topic !== undefined && deps.delegation === undefined) {
+      try {
+        const files = await store.readIndex({ kind: 'workspace', workspacePath: deps.workspacePath! }, true)
+        const target = files && resolveTopic(files, input.topic, deps.maxTopics ?? INDEX_MAX_TOPICS_DEFAULT)
+        if (files && target?.kind === 'existing') topicMemberIds = readIndex(files).topics.find(t => t.fileName === target.fileName)?.memberIds
+      } catch { /* 锁外候选读取失败不挡保存；锁内步骤会留下待补说明。 */ }
+    }
     const gate = await runCreateGate({
+      topicMemberIds,
       name: candidate.name, summary: candidate.summary, content: candidate.content,
       workspacePath: deps.workspacePath!, skipDuplicate: candidate.force === true,
       excludeIds: new Set(replaced.map(r => r.id)),
@@ -856,6 +968,7 @@ export async function runSavePipeline(
     // 其间不在用了、搬走了、被改写过（修改时间变了）的不替代
     const latest = await Promise.all(replaced.map(old => store.get(old.id, { workspacePath: old.workspacePath })))
     replaced = latest.filter((r, i): r is MemoryRecord => r !== undefined && r.status === 'active' && isSameScope(r) && r.updatedAt === replaced[i]!.updatedAt)
+    let topicNotes = await saveTopicWarnings(input, deps, scopeOfMemory(target ?? parsed.data)!, target?.id ?? parsed.data.id)
     let clean: MemoryRecord
     // 改写、替代前的快照（快照先行）：改写的目标与要替代的旧记忆同拍一份，对话卡与右侧栏的「撤销修改」按它恢复
     let snapshotId: string | undefined
@@ -879,7 +992,10 @@ export async function runSavePipeline(
       }, now)).id
       clean = pruneUndefined(created)
       // 新 id 不定位（create 排他占名）
-      await store.create(clean)
+      const op = newWriteOp({ topic: topicIntent(input, deps) })
+      await store.create(clean, op)
+      if (input.topic !== undefined && store.hasUnfinishedOwnStep(op.id, INDEX_ROW_STEP)) topicNotes = topicNote('topic-pending')
+      await store.finishOp(op, clean)
     } else {
       // 落盘走不带前台门禁的原语：锁内重读、复核目标还在原处（期间被删除、归档、提升、移走的不写）、改前快照、
       // 按改动性质在最新版上拼记录、状态变化留历史版本都在里面。子 agent 的归属按锁内那一份再判：其间被接受、提升的一并拦下。
@@ -887,7 +1003,7 @@ export async function runSavePipeline(
       // 有效期先后和密钥检测按合并后的记录在锁内重做，过不了就不写
       let isRebased = false
       const committed = await commitChange<PipelineResult>({
-        target: target!, kind: change!, anchor, by, at: now,
+        target: target!, kind: change!, anchor, by, at: now, topic: topicIntent(input, deps),
         prepare: (current) => {
           let content = candidate.content
           if (resolved.edits !== undefined && current.content !== target!.content) {
@@ -928,6 +1044,7 @@ export async function runSavePipeline(
       if (committed.kind === 'changed') return changedAfterRead(target!.id, committed.current, deps.delegation !== undefined)
       if (committed.kind === 'stopped') return committed.stop
       if (committed.kind === 'invalid') return { kind: 'rejected', code: 'schema-invalid', reason: `字段校验失败：${committed.reason}` }
+      if (committed.isTopicPending) topicNotes = topicNote('topic-pending')
       clean = committed.record
       snapshotId = committed.snapshotId
       if (!isCorroboration) {
@@ -975,6 +1092,7 @@ export async function runSavePipeline(
       : { kind: 'saved' as const, record: clean, ...(similar.length > 0 ? { similar } : {}) }
 
     const warnings: SaveWarning[] = [
+      ...topicNotes,
       ...subagent.warnings,
       ...scopeWarnings,
       ...(hasCrossScopeSupersede

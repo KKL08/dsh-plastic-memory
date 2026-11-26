@@ -395,6 +395,14 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       return { ok: names.length === 9, detail: `memory_* ${names.length}: ${names.join(',')}` }
     })
 
+    await attempt('SAVE-TOPIC-SCHEMA', async () => {
+      const schema = tools.schemas().find(s => s.name === 'memory_save') as
+        { parameters?: { properties?: { topic?: { type?: string }; topicAbout?: { type?: string } }; required?: string[] } } | undefined
+      const parameters = schema?.parameters
+      return { ok: parameters?.properties?.topic?.type === 'string' && parameters?.properties?.topicAbout?.type === 'string'
+        && !['topic', 'topicAbout'].some(key => (parameters?.required ?? []).includes(key)), detail: JSON.stringify(parameters) }
+    })
+
     await attempt('SAVE-FACT-TIME-SCHEMA', async () => {
       const schema = tools.schemas().find(s => s.name === 'memory_save') as
         { parameters?: { properties?: { factTime?: { type?: string } }; required?: string[] } } | undefined

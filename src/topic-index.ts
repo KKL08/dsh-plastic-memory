@@ -1,3 +1,4 @@
+import { charSimilarity } from './text.ts'
 import { createHash } from 'node:crypto'
 import { slugifyName } from './storage/paths.ts'
 
@@ -82,10 +83,13 @@ export function scan(text: string): Array<{ line: string; isCode: boolean }> {
 }
 const memberOf = (row: { line: string; isCode: boolean }) => (row.isCode ? null : MEMBER_RE.exec(row.line))
 
+/** 记忆 id 对应的成员行键：转义标题属性里的引号和反斜杠，可直接用于 memberLines 的查找。 */
+export const memberKey = (id: string): string => id.replace(/["\\]/g, c => `\\${c}`)
+
 /** 一条成员行：名称链到记忆文件（相对主题页的位置），标题属性里是记忆 id，后面接摘要。 */
 export function memberLine(m: IndexedMemory, bullet = '- '): string {
   const name = oneLine(m.name).replace(/[[\]\\]/g, c => `\\${c}`)
-  return `${bullet}[${name}](../../${encodePath(m.fileName)} "${m.id.replace(/["\\]/g, c => `\\${c}`)}") — ${oneLine(m.summary)}`
+  return `${bullet}[${name}](../../${encodePath(m.fileName)} "${memberKey(m.id)}") — ${oneLine(m.summary)}`
 }
 
 /** 成员行换成的占位：只剩记忆 id（标题属性里的写法，带转义）。 */
@@ -340,6 +344,49 @@ export function isTopicName(name: string): boolean {
   return name !== '' && [...name].length <= TOPIC_NAME_MAX && !reserved.includes(keyOf(name)) && !/[\r\n、,，]|^#/.test(name)
 }
 
+/**
+ * 主题名不能用的原因，按判的先后排：空的、超过 TOPIC_NAME_MAX 个字符、和「未整理」重名、带换行或顿号逗号、以 # 开头。
+ * 同时犯几条时给最前的那一条。
+ */
+export const TOPIC_NAME_PROBLEMS = ['empty', 'too-long', 'reserved', 'bad-char', 'heading'] as const
+export type TopicNameProblem = (typeof TOPIC_NAME_PROBLEMS)[number]
+
+/**
+ * 这个名字（已去首尾空白）为什么不能当主题名；能用返回 undefined。和 isTopicName 是同一个判定：
+ * isTopicName(name) 恒等于 topicNameProblem(name) === undefined。
+ */
+export function topicNameProblem(name: string): TopicNameProblem | undefined {
+  if (name === '') return 'empty'
+  if ([...name].length > TOPIC_NAME_MAX) return 'too-long'
+  if ([UNSORTED_TITLE, UNSORTED_PAGE.replace(/\.md$/, '')].map(keyOf).includes(keyOf(name))) return 'reserved'
+  if (/[\r\n、,，]/.test(name)) return 'bad-char'
+  if (name.startsWith('#')) return 'heading'
+  return undefined
+}
+
+/** 新建主题、主题用不了时，结果里列几个名字最相近的现有主题。 */
+export const NEAREST_TOPICS_LIMIT = 2
+
+/**
+ * 名字最相近的几个现有主题（「未整理」不算），返回主题名。比法：keyOf(name) 和各主题的 keyOf(名字)、keyOf(每个曾用名)
+ * 分别算 charSimilarity，取其中最高的作为这个主题的分；按分降序取前 limit 个，同分按 orderedPages 的先后。
+ * 新建闸用的是同一个相似度函数。
+ */
+export function nearestTopics(files: IndexFiles, name: string, limit: number = NEAREST_TOPICS_LIMIT): string[] {
+  return orderedPages(files).map(t => ({ name: t.name, score: Math.max(...[t.name, ...t.aliases].map(n => charSimilarity(keyOf(name), keyOf(n)))) })).sort((a, b) => b.score - a.score).slice(0, limit).map(t => t.name)
+}
+
+/**
+ * 按名字认主题：去首尾空白、不分大小写（keyOf）。名字优先：有名字对上的就只回它们；一个都没有才回曾用名对上的；
+ * 都没有回空数组。两档里各按 topics 的先后。namesOf 给出一个主题算作「名字」的那几个写法，缺省只有它的名字
+ * （检索还算上显示名）。保存、只改主题、换作用域带上原来的主题、整理索引按名字找页，都取第一个；按主题检索列出每个作用域里回来的全部。
+ */
+export function topicsNamed<T extends { name: string; aliases: readonly string[] }>(topics: readonly T[], name: string, namesOf?: (topic: T) => readonly string[]): T[] {
+  const key = keyOf(name)
+  const named = topics.filter(t => (namesOf?.(t) ?? [t.name]).some(n => keyOf(n) === key))
+  return named.length > 0 ? named : topics.filter(t => t.aliases.some(n => keyOf(n) === key))
+}
+
 export type TopicResolution =
   | { kind: 'existing'; fileName: string; name: string }
   /** 还没有这个主题，可以建：fileName 是要建的主题页。 */
@@ -355,10 +402,9 @@ export type TopicResolution =
  */
 export function resolveTopic(files: IndexFiles, rawName: string, maxTopics: number): TopicResolution {
   const name = rawName.trim()
-  const key = keyOf(name)
   if (!isTopicName(name)) return { kind: 'invalid' }
   const topics = orderedPages(files)
-  const existing = topics.find(t => keyOf(t.name) === key) ?? topics.find(t => t.aliases.some(a => keyOf(a) === key))
+  const existing = topicsNamed(topics, name)[0]
   if (existing) return { kind: 'existing', fileName: existing.fileName, name: existing.name }
   if (topics.length >= maxTopics) return { kind: 'full' }
   // 文件系统可能不分大小写、把写法不同的同一个字当成同名：都按规范化后的小写比

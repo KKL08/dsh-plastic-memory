@@ -84,12 +84,13 @@ const wsRec = (partial: Partial<MemoryRecord> = {}) => baseRecord({
 
 function harness() {
   const sidecar = new SidecarStore({ root, schemas: sidecarSchemas })
-  const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats }), undefined, sidecar.recallStats)
+  const table = new FileTable({ root, stats: sidecar.recallStats })
+  const store = new MemoryStore(table, undefined, sidecar.recallStats)
   // 同接线层：快照落盘后按副本复核
   const snapshots = new SnapshotStore(sidecar.snapshots, { findGone: goneCopies(store) })
   const decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
   return {
-    store, snapshots, sidecar,
+    store, table, snapshots, sidecar,
     forget: (ids: string[], reason = '含密钥', log?: MemoryLogger) =>
       executeForget({ ids, reason }, { workspacePath: WS }, { store, snapshots, decisions, ...(log !== undefined ? { log } : {}) }),
     snapshot: (args: Parameters<typeof executeSnapshotTool>[0]) => executeSnapshotTool(args, { workspacePath: WS }, { store, snapshots }),
@@ -193,6 +194,9 @@ describe('密钥硬删', () => {
     await h.store.create(wsRec({ id: 'mem_x', name: '测试框架', content: '用 vitest' }))
     await h.store.create(wsRec({ id: 'mem_y', name: '提交语言', content: 'commit 用英文' }))
     await h.store.create(wsRec({ id: 'mem_z', name: '数据库口令', summary: `连接串 ${SUSPECTED_TEXT}`, content: '库在 staging' }))
+    // 先建好这一层的主题索引：彻底删除只核对已有的索引，没有 _index/ 的目录不借删除新建
+    await h.table.maintain([wsDir()])
+    expect((await indexedIds(wsDir())).sort()).toEqual(['mem_x', 'mem_y', 'mem_z'])
     const manual = await h.snapshot({ action: 'create', memoryIds: ['mem_x', 'mem_y', 'mem_z'] })
     if (manual.kind !== 'created') throw new Error(manual.kind)
     const xBefore = await rawRecordJson(manual.snapshotId, 'mem_x')

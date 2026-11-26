@@ -4,7 +4,8 @@ import { memoryRecordSchema, type ChangeKind, type MemoryRecord } from './record
 import type { MemoryLogger, MemoryStore } from './store.ts'
 import type { SnapshotStore } from './governance/snapshots.ts'
 import { layerOf, newVersionId, STATE_CHANGE_VERSION, type HistoryVersion } from './storage/history.ts'
-import { newWriteOp, type OpStep, type OpStepHandler } from './storage/table.ts'
+import { INDEX_ROW_STEP } from './storage/file-table.ts'
+import { newWriteOp, type TopicIntent, type OpStep, type OpStepHandler } from './storage/table.ts'
 import { scopeOfMemory, type Scope } from './scope.ts'
 import { toToolOutput } from './output.ts'
 import { isCurrentPremise } from './links.ts'
@@ -85,6 +86,8 @@ export interface CommitChangeDeps {
 }
 
 export interface CommitChangeInput<Stop = never> {
+  /** 本次写入之后归主题的要求。 */
+  topic?: TopicIntent
   /**
    * 只动这个作用域里的那一份：按它定位、按它写回，别的作用域里同 id 的副本不碰。不给时按会话视角（当前项目优先），
    * 写回时顺带清掉另一层的同 id 副本（会话里它们是同一条的重复）。
@@ -128,7 +131,7 @@ type Prepared<Stop> = { fields: ChangeFields } | { stop: Stop }
 
 export type CommitChangeResult<Stop = never> =
   /** snapshotId：改前快照，补证不拍。version：这次状态变化留下或并进去的历史版本。 */
-  | { kind: 'written'; /** 这次写入的操作 id。 */ op: string; record: MemoryRecord; /** 写入段里读到、这次改动拼在它上面的那一版；整条替换时被盖掉的内容以它为准。 */ before: MemoryRecord; snapshotId?: string; version?: { id: string; isMerged: boolean } }
+  | { kind: 'written'; isTopicPending: boolean; /** 这次写入的操作 id。 */ op: string; record: MemoryRecord; /** 写入段里读到、这次改动拼在它上面的那一版；整条替换时被盖掉的内容以它为准。 */ before: MemoryRecord; snapshotId?: string; version?: { id: string; isMerged: boolean } }
   /** 调用方读到之后目标不在了、状态变了、换了作用域，或过不了调用方另给的条件，没写。 */
   | { kind: 'changed'; current: MemoryRecord | undefined }
   /** prepare 看了最新内容之后叫停，没写。 */
@@ -205,7 +208,7 @@ export async function commitChange<Stop = never>(input: CommitChangeInput<Stop>,
     if (history !== undefined && !store.hasStep(HISTORY_STEP)) store.registerSteps(historySteps(store, deps.snapshots, deps.log))
 
     const steps = [...(history !== undefined ? [history] : []), ...(snapshot !== undefined ? input.steps?.(snapshot.id) ?? [] : [])]
-    const op = newWriteOp({ initiator: input.by, steps })
+    const op = newWriteOp({ initiator: input.by, steps, topic: input.topic })
     const reason = kind === 'state-change' ? input.reason?.trim().slice(0, CHANGE_REASON_LIMIT) : undefined
     const change: Change = {
       kind: kind === 'meta' ? 'refine' : kind, fields: prepared.fields, anchor: input.anchor, by: input.by, op: op.id, at,
@@ -229,9 +232,10 @@ export async function commitChange<Stop = never>(input: CommitChangeInput<Stop>,
     try {
       const written = await store.put(next, from, isChangedSinceRead, op)
       if (written === undefined) return { kind: 'changed', current: seen.current }
+      const isTopicPending = input.topic !== undefined && store.hasUnfinishedOwnStep(op.id, INDEX_ROW_STEP)
       await store.finishOp(op, written)
       return {
-        kind: 'written',
+        kind: 'written', isTopicPending,
         op: op.id,
         record: next,
         before: target,

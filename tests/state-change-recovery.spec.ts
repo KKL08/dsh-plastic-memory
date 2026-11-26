@@ -290,10 +290,16 @@ describe('历史版本跟着记忆走，中途进程退出', () => {
 
   it('彻底删除时在哪一次写调用之前退出，恢复后只要记忆已经不在，历史目录也不在', async () => {
     const purge = (w: ReturnType<typeof open>) => w.store.hardDelete({ id: 'mem_a', workspacePath: undefined }, { at: global })
-    const total = await countWrites(purge)
+    const { first: clean } = await withVersion()
+    await clean.store.maintain(global)
+    fault.calls = 0
+    await purge(clean)
+    const total = fault.calls
+    await fresh()
     const outcomes = new Set<string>()
     for (let k = 0; k < total; k++) {
       const { snapshotTable, first } = await withVersion()
+      await first.store.maintain(global)
       fault.remaining = k
       await purge(first).catch(() => undefined)
       alive()

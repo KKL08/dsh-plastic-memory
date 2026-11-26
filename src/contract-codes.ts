@@ -70,6 +70,17 @@ export type WarningCode =
   | 'link-only-params-ignored' // 只挂关联、前提的 update 带了 scope、confidence、change 这类参数：没有生效
   | 'links-empty'             // 只挂关联、前提的 update 给的是空列表：没有要挂的，什么都没写
   | 'edit-rebased'            // 精确修改保存期间正文被别处改过：改在了最新正文上，附合并后的全文
+  | 'topic-created'           // 给的主题还没有：新建了这个主题，附名字最相近的现有主题
+  | 'topic-full'              // 主题数到上限：没有新建，这条放进「未整理」或留在原处，附最相近的现有主题
+  | 'topic-invalid'           // 主题名不能用（空、太长、和「未整理」重名、带换行或顿号逗号、以 # 开头）：同上处理，附原因
+  | 'topic-about-ignored'     // 给的是现有主题：topicAbout 没有生效，主题说明没改
+  | 'topic-about-alone'       // 只给了 topicAbout 没给 topic：没有生效
+  | 'topic-deferred-subagent' // 子 agent 带了 topic：不记，接受后再归主题
+  | 'topic-pending'           // 记忆已保存，归主题这一步没做完（索引读不出或写入失败）：之后自动补做
+  | 'topic-unreadable'        // 只改主题的 update：索引读不出，什么都没动
+  | 'topic-not-indexed'       // 只改主题的 update：这条记忆还不在索引里，什么都没动
+  | 'topic-only-params-ignored' // 只改主题的 update 带了 scope、confidence、change 这类参数：没有生效
+  | 'topic-skipped'           // 只改主题的 update：索引操作没做成（目标页这时放不进这一行、或一直被别处改着），什么都没动
 
 /** memory_scan 的说明性 note（scan.ts）。 */
 export const SCAN_NOTE_CODES = [

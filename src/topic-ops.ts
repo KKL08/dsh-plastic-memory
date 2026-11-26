@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import {
   ALIASES_RE, HEADER_RE, HEADING_RE, LINKED_HEADING_RE, MEMBER_RE, UNSORTED_PAGE, UNSORTED_TITLE,
-  decodePath, encodePath, isTopicName, keyOf, orderedPages, resolveTopic, scan, unescape, withCreatedAt, withMemberText, withoutMemberText,
+  decodePath, encodePath, isTopicName, topicsNamed, keyOf, orderedPages, resolveTopic, scan, unescape, withCreatedAt, withMemberText, withoutMemberText,
   type IndexFiles,
 } from './topic-index.ts'
 
@@ -98,8 +98,11 @@ function takeMembers(text: string, ids: ReadonlySet<string>): { lines: Map<strin
   return { lines, rest: joinPage(header, kept) }
 }
 
-/** 把几行成员插进一页：at 是插在第几个成员前面，超过成员数就接在最后一个成员后面；页里还没有成员时放在末尾。 */
-function insertMembers(text: string, lines: readonly string[], at: number): string {
+/**
+ * 把几行成员插进一页：at 是插在第几个成员前面，超过成员数就接在最后一个成员后面；没有成员时在末尾隔空行插入。
+ * 保留页头并沿用正文换行；调用方仍需确认插入后能认到成员，避免落进未闭合的代码围栏。
+ */
+export function insertMembers(text: string, lines: readonly string[], at: number): string {
   if (lines.length === 0) return text
   const { header, rows } = splitHeader(text)
   const eol = rows.some(r => r.line.endsWith('\r')) ? '\r' : ''
@@ -298,7 +301,7 @@ function aboutWithoutFormerNames(about: string, names: readonly string[]): strin
 }
 
 /** 说明要落成入口里的一行普通文字：以标题记号或代码围栏开头的会改掉入口的结构，不收。 */
-const isAbout = (text: string) => !/^(#{1,6}(\s|$)|```|~~~)/.test(text)
+export const isAbout = (text: string) => !/^(#{1,6}(\s|$)|```|~~~)/.test(text)
 
 // ── 定计划 ──
 
@@ -306,9 +309,7 @@ const skipped = (reason: string): PlanResult => ({ kind: 'skipped', reason })
 
 /** 按名字或曾用名找现有的主题。 */
 function findTopic(files: IndexFiles, name: string) {
-  const key = keyOf(name)
-  const topics = orderedPages(files)
-  return topics.find(t => keyOf(t.name) === key) ?? topics.find(t => t.aliases.some(a => keyOf(a) === key))
+  return topicsNamed(orderedPages(files), name)[0]
 }
 
 /** 这几条记忆现在在 page 页里的、还在用的那些，连同各自的位置。 */
@@ -463,6 +464,21 @@ function reorder<T>(items: readonly T[], keyOfItem: (item: T) => string | undefi
   return out
 }
 
+/** 建出缺失的主题页并补齐入口；已有的页和入口节原样保留，说明由入口格式化统一折行。 */
+export function ensureTopicPage(files: IndexFiles, plan: Pick<Extract<IndexPlan, { kind: 'assign' }>, 'page' | 'name' | 'about' | 'createdAt'>): IndexFiles {
+  let next = files
+  if (next.pages[plan.page] === undefined) {
+    const eol = [files.entry, ...Object.values(files.pages)].some(text => text.includes('\r\n')) ? '\r\n' : '\n'
+    const text = `# ${plan.name}${eol}${eol}`
+    next = { ...next, pages: { ...next.pages, [plan.page]: plan.createdAt === undefined ? text : withCreatedAt(text, plan.createdAt) } }
+  }
+  const entry = splitEntry(next.entry)
+  if (sectionIndex(entry, plan.page, plan.name) === -1) {
+    next = { ...next, entry: joinEntry(insertSection(entry, newSection(plan.page, plan.name, plan.about ?? ''), entry.sections.length)) }
+  }
+  return next
+}
+
 /**
  * 把计划套到索引上。可以重复做：目标页已经写过、别的页还没改的索引，再套一次得到套完的结果；
  * 已经套完的索引再套一次不变。
@@ -471,18 +487,9 @@ export function applyPlan(files: IndexFiles, plan: IndexPlan): AppliedIndex {
   switch (plan.kind) {
     case 'assign': {
       let next = files
-      if (next.pages[plan.page] === undefined) {
-        if (!plan.isNew) return { files, deleted: [] }
-        const text = `# ${plan.name}\n\n`
-        next = { ...next, pages: { ...next.pages, [plan.page]: plan.createdAt === undefined ? text : withCreatedAt(text, plan.createdAt) } }
-      }
+      if (!plan.isNew && next.pages[plan.page] === undefined) return { files, deleted: [] }
+      if (plan.isNew) next = ensureTopicPage(next, plan)
       next = moveInto(next, plan.page, plan.moved, 'top')
-      if (plan.isNew) {
-        const entry = splitEntry(next.entry)
-        if (sectionIndex(entry, plan.page, plan.name) === -1) {
-          next = { ...next, entry: joinEntry(insertSection(entry, newSection(plan.page, plan.name, plan.about ?? ''), entry.sections.length)) }
-        }
-      }
       return { files: next, deleted: [] }
     }
     case 'rename': {

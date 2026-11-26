@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { FileTable } from '../src/storage/file-table.ts'
+import { FileTable, INDEX_ROW_STEP } from '../src/storage/file-table.ts'
 import { OpJournal } from '../src/storage/op-journal.ts'
 import { createRootLock, type SqliteModule } from '../src/storage/root-lock.ts'
 import { ARCHIVE_DIR } from '../src/storage/paths.ts'
@@ -418,7 +418,11 @@ describe('文件表写入时记下的行', () => {
     await withWriteSession('sess-a', () => table.update('mem_a', GLOBAL, r => ({ ...r, summary: '改了' }), op))
     const [row] = journal.pending()
     expect(row!.op).toBe(op.id)
-    expect(row!.steps).toEqual([expect.objectContaining({ kind: RECENT_CHANGE_STEP, memoryId: 'mem_a', change: 'content', session: 'sess-a' })])
+    // 摘要变了，索引里这一行跟着改，同一行里另记一步
+    expect(row!.steps).toEqual([
+      expect.objectContaining({ kind: RECENT_CHANGE_STEP, memoryId: 'mem_a', change: 'content', session: 'sess-a' }),
+      { kind: INDEX_ROW_STEP, memoryId: 'mem_a', dirs: [(await table.locate('mem_a', GLOBAL))!.dir] },
+    ])
   })
 
   it('最近改动记不下（node:sqlite 不可用、记行的那一句失败）：写入照常成功；之后记得下时照常记', async () => {
