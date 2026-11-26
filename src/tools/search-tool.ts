@@ -1,7 +1,6 @@
-import type { HistoryListing, HistoryVersionInfo } from './search-history.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
-import { executeSearch, renderSearchResult, type SearchHit, type SearchToolDeps } from './search.ts'
+import { executeSearch, renderSearchResult, type SearchToolDeps } from './search.ts'
 import { toToolOutput } from './output.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import { SEARCH_SOURCES } from '../contract-codes.ts'
@@ -31,6 +30,13 @@ export const SEARCH_SOURCE_PARAMETER = {
   description: '查哪里，缺省跟随用户的设置。memory：只查长期记忆；dialogue：只查本项目过往对话的原话，能找到没记成记忆的内容；both：两者都查。用户设置成只查记忆时，这里填 dialogue 或 both 仍只查记忆，结果开头会说明',
 } as const
 
+/** 按主题浏览与主题内关键词检索的工具说明。 */
+export const SEARCH_TOPIC_DESCRIPTION = '用 topic 按主题看记忆：只给 topic 时按主题索引的顺序列出这个主题下的记忆，每条带 id、名称、摘要、标签和文件路径，不含正文；同时给 query 时在这个主题里按关键词查。两种用法都用 limit 控制每页条数、offset 翻页。检索结果的头行标出每条记忆所属的主题；不传 topic 时没搜到或命中弱，结果末尾附当下的主题目录。'
+/** 主题参数只选记忆，兼容曾用名。 */
+export const SEARCH_TOPIC_PARAMETER = { type: 'string', description: '主题名或曾用名；传「未整理」看还没归入任何主题的记忆。只给 topic 时按主题索引的顺序列出成员，同时给 query 时在这个主题里按关键词查，都用 limit、offset 翻页。只查记忆，source 不传或设为 memory' } as const
+/** 分页起点以结果给出的 offset 为准。 */
+export const SEARCH_OFFSET_PARAMETER = { type: 'number', description: '配 topic 翻页：跳过前面多少条，填 0 或正整数，缺省 0；结果里会给下一页的 offset' } as const
+
 /**
  * 把 memory_search 工具接到 dsh 框架上。纯逻辑在 search.ts，不依赖框架包，测试直接测它；
  * 本文件由 typecheck + 真机验证保证。types 说明在创建时从类型表生成，类型配置热更新后由 index.ts 重注册。
@@ -45,6 +51,7 @@ export function createSearchTool(deps: SearchToolDeps): ToolDefinition {
       `排在前面的记忆后面可能附着它出处的原话（看用户的设置）。记忆和原话都查时，结果分${MEMORY_SECTION_HEADING}${DIALOGUE_SECTION_HEADING}两段：其他原话是没附在记忆下面的原话，某一轮是某条记忆的出处时会注明对应哪条记忆。`,
       '原话结果里每条消息带引用，可以用 memory_source 看这条消息的更多内容；展开的内容有长度上限，超出会标明截断。',
       '用 id 配 history: true 列出历史版本（新的在前，用 limit 控制条数）；用 id 配 version 读一版的全文，正文里的密钥已遮盖。要读当前内容，把 id 填进 query。',
+      SEARCH_TOPIC_DESCRIPTION,
       '查询写法：',
       '- 查询是空格分隔的关键词，中英文均可，版本号、路径这类原样文字可以直接搜。同时含全部关键词的记忆排在最前，所以一次查询里放预期会在同一条记忆里一起出现的词，排序最准。',
       '- 记忆里的说法可能和用户的不同：开头记忆索引里的说法、用户的原话，以及你判断意思相近或相关的写法，都可以拿来搜。',
@@ -63,6 +70,8 @@ export function createSearchTool(deps: SearchToolDeps): ToolDefinition {
     ].join('\n'),
     parameters: {
       source: SEARCH_SOURCE_PARAMETER,
+      topic: SEARCH_TOPIC_PARAMETER,
+      offset: SEARCH_OFFSET_PARAMETER,
       id: { type: 'string', description: '记忆 id。配 history: true 列历史版本，配 version 读一版；要读当前内容，把 id 填进 query' },
       history: { type: 'boolean', description: '配 id 设为 true 时列历史版本；false 等同未传' },
       version: { type: 'string', description: '配 id 读一版的全文，填列历史（history: true）返回的版本标识，不含 .md 后缀' },
@@ -74,7 +83,7 @@ export function createSearchTool(deps: SearchToolDeps): ToolDefinition {
     },
     output: {
       schema: { type: 'json' },
-      render: (_args, value) => [{ type: 'text', text: renderSearchResult(value as unknown as { hits: SearchHit[]; note?: string; moreNote?: string; history?: HistoryListing; version?: HistoryVersionInfo }) }],
+      render: (_args, value) => [{ type: 'text', text: renderSearchResult(value as unknown as Parameters<typeof renderSearchResult>[0]) }],
     },
     execute: async (args, exec) => toToolOutput(await executeSearch(args, exec, deps)),
   })

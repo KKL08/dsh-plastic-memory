@@ -25,6 +25,7 @@ const LEAF_MODULES = new Set([
 const MEMORY_MODULES = new Set([
   'pipeline', 'create-gate', 'store', 'snapshot', 'snapshot-index', 'snapshot-message', 'runtime', 'type-registry', 'evidence-guidance', 'search/ranking', 'search/coverage',
   'search/window', 'search/dialogue-rank', 'search/memory-quotes', 'search/segments', 'search/dialogue-intake', 'search/memory-candidates', 'search/dialogue-format', 'change', 'commit-change', 'merged-history', 'session-id', 'links',
+  'topic-members', 'search/topic-context',
 ])
 // 接线层：index.ts、交给 ctx.storageDomain.open 的域定义、宿主会话适配器（后两个只被 index.ts 用）
 const ENTRY_MODULES = new Set(['index', 'domain-spec', 'cordis-host-session'])

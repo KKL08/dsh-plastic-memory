@@ -134,6 +134,18 @@ function collectStats(
   return { record, tf, len, hit, hitCount: hit.filter(Boolean).length }
 }
 
+/**
+ * 一组文字对各查询 token 的命中，口径同记录打分里的「token 命中」（见 SearchTier 的说明）：任一段文字分词后含该 token，
+ * 或任一段文字的小写原文以子串含它（substringEligible 为假的 token 除外）。下标同 tokens。
+ * 主题名、曾用名、主题说明是否命中查询用它判，和记忆命中同一个口径。
+ */
+export function tokenHitsIn(texts: readonly string[], tokens: readonly string[], tokenize: (text: string) => string[]): boolean[] {
+  const words = new Set(texts.flatMap(text => tokenize(text)))
+  const lower = texts.map(text => text.toLowerCase())
+  const eligible = substringEligible(tokens)
+  return tokens.map((token, i) => words.has(token) || (eligible[i]! && lower.some(text => text.includes(token))))
+}
+
 // 与分词器的整词同一个字符集：字母、组合附加符、数字、_、-。整词里出现这之外的字符（. / : 等），分词就会把它打散
 const WORD_CHARS_ONLY = /^[\p{L}\p{M}\p{N}_-]*$/u
 const HAS_ALNUM = /[\p{L}\p{N}]/u

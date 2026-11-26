@@ -243,6 +243,22 @@ All notable changes to this project are documented here. The format follows
 - Testing: `pnpm host:contract` checks that a change made in another chat
   reaches the next step of a running chat as one notice ahead of the user's
   message, and is not repeated on the step after.
+- `memory_search` can browse a topic: give `topic` with its name or a
+  former name to list its memories in index order, with name, summary, tags
+  and file path, the total and the `offset` of the next page; `未整理` lists
+  the memories not yet in a topic. Add `query` to search within the topic.
+  The memories loaded into a chat now point to `topic`.
+- When a topic index exists, keyword results name the topic each memory
+  belongs to and how many other memories it holds. When the keywords match a
+  topic's name or description, the result names that topic first; when nothing
+  or little matches, it ends with the current list of topics.
+- When a scope's topic index cannot be read, a search by topic says so
+  instead of reporting that the topic does not exist. Index lines that point
+  to memories that cannot be read are skipped and counted.
+- Testing: `pnpm host:contract` checks that DeepSeek Harness sees `topic` and
+  `offset` as optional parameters of `memory_search`. The scale check also
+  reports how long listing a topic and searching within it take at 5,000
+  memories, without a pass/fail threshold.
 
 ### Changed
 - The memories loaded at the start of a chat now follow the topic index.

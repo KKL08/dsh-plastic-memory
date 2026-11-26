@@ -133,15 +133,13 @@ describe('注入改读索引：主题目录与成员行', () => {
     expect(assembleSnapshot(args).text).not.toContain(SESSION_SEARCH_NOTE)
   })
 
-  it('使用优先级一句、尾部导航一句、使用指引一句；都不计入上限', () => {
+  it('使用优先级一句、尾部导航两句、使用指引一句；都不计入上限', () => {
     const { text, usedTokens } = assembleSnapshot({ ...base, records: [record({ id: 'g1' })], workspacePath: undefined })
     expect(text).toContain(USAGE_PRIORITY_NOTE)
     expect(text).toContain(INDEX_NAV_NOTE)
     expect(text).toContain(INDEX_USAGE_NOTE)
-    expect(INDEX_NAV_NOTE.split('。').filter(s => s !== '')).toHaveLength(1)
-    // 检索还没有按主题浏览的参数：导航不让模型传它；「另有 N 条」没列出的也指到关键词检索
-    expect(INDEX_NAV_NOTE).not.toContain('topic')
-    expect(INDEX_NAV_NOTE).toContain('主题里没列出的记忆')
+    // 尾部导航两句：看某个主题下的全部记忆用 topic 参数（「另有 N 条」没列出的也在里面），找具体内容用关键词
+    expect(INDEX_NAV_NOTE).toBe('要看某个主题下的全部记忆，用 memory_search 的 topic 参数传主题名。要找具体内容，用 memory_search 按关键词查。')
     expect(USAGE_PRIORITY_NOTE).toMatch(/用户当前的要求.*指令文件.*工具结果.*做法和决定.*偏好/)
     // 使用指引正面写该怎么做
     expect(INDEX_USAGE_NOTE).toMatch(/摘要.*相关那几条的全文/)

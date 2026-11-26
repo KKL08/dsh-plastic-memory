@@ -190,6 +190,8 @@ export type SearchNoteCode =
                           // 结果给出读到的几版，不说没有；按版本读时没找到这一版、而历史又读不全，也用这个码
   | 'version-not-found'   // 按版本读：历史读全了，没有这一版（含列出之后被疏化、撤销删掉的）
   | 'version-unreadable'  // 按版本读：这一版的文件在，但读不出或解析不了
+  | 'topic-not-found'     // 给了 topic：范围内读到的主题索引里，没有主题名或曾用名对上它的主题（读不出索引的作用域不在范围里时）；附当下的主题目录（有组时）
+  | 'topic-index-unreadable' // 给了 topic：读到的主题索引里没对上，而范围内有作用域的主题索引读不出：说读不到，不说没有这个主题
 
 /** 表示命中弱的检索说明码：说明里带换词再搜的建议与逐词命中条数。 */
 export const WEAK_SEARCH_NOTE_CODES = ['low-coverage', 'substring-fallback'] as const satisfies readonly SearchNoteCode[]

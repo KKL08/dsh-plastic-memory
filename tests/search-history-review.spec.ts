@@ -146,7 +146,7 @@ it('参数错误和工具说明使用约定的原文', async () => {
     [{ id: '', history: true }, '请在 id 中填写记忆 id。'],
     [{ id: 'mem_x', version: 'bad.md' }, 'version 请填写列历史（history: true）返回的版本标识，由 ASCII 字母、数字或连字符组成，不含 .md 后缀。'],
     [{ id: 'mem_x', history: true, source: 'dialogue' }, '按 id 查历史时，source 请设为 memory 或不传。'],
-    [{}, '请填写 query、非空 types，或用 id 配 history: true 或 version 查历史。'],
+    [{}, '请填写 query、非空 types 或 topic，或用 id 配 history: true 或 version 查历史。'],
   ]
   for (const [args, note] of cases) expect(await search(e, args)).toMatchObject({ noteCode: 'invalid-args', note })
   const tool = createSearchTool(e.deps)
