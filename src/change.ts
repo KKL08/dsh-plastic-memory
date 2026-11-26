@@ -1,5 +1,15 @@
 import { anchorSourceMode, anchorsOf, type ChangeKind, type MemoryRecord, type SourceAnchor } from './record-schema.ts'
 
+/**
+ * 定改动性质的三个问题：保存说明和缺改动性质时的引导共用这一份，界线和 spec 二「改动性质」一致。
+ * 每行一个问题，按顺序问，哪一问定下了性质就停。
+ */
+export const CHANGE_KIND_QUESTIONS = [
+  '1. 正文要不要改？不用改，只是同一件事又被提到：change=corroborate，只传 id 和 sourceMode。',
+  '2. 旧内容现在是否仍全部成立？成立，只是补条件、原因、步骤、例外：change=refine，只增不删。',
+  '3. 旧内容当时成立吗？当时成立、现在变了：change=state-change，旧内容留成历史版本，changeReason 写变化的原因；当时就不对：change=correct。拿不准当时成不成立，按 state-change。',
+].join('\n')
+
 /** 出处清单最多留几个锚：新的在前，超出的从最旧的丢。 */
 export const SOURCE_TRAIL_CAP = 8
 

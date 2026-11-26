@@ -330,6 +330,13 @@ All notable changes to this project are documented here. The format follows
   matching memories and moves the turns they were saved from up the results.
 
 ### Changed
+- `memory_save` now guides the assistant to keep one topic, state or event
+  per memory and to update the same memory when a project or decision
+  changes, so the earlier state stays as a past version. Decisions are
+  written with their reasons, rejected options and premises and linked to the
+  memory that tracks their project; when something to remember contradicts
+  `AGENTS.md` or `CLAUDE.md`, the assistant tells you on the spot. A decision
+  type you have edited keeps your wording until you restore the preset.
 - Testing: `pnpm bench:dialogue` measures the past-conversation index at scale
   on synthetic logs, and CI's scale-bench job runs a small tier of it that
   checks catch-up before a search stays within its time limit and two

@@ -84,11 +84,14 @@ describe('memory_save 绑定', () => {
   const describedParam = (name: string) => (schemaOf(makeTool()) as { properties: Record<string, { description?: string }> }).properties[name]!.description
 
   it('content 的参数说明：结论在前、原因依据接在句号后、第三人称陈述标明主体、概括不搬原话、出处和经过不进正文、只写有依据的内容、具体名称和数值照写、不写很快过时的细节', () => {
-    expect(describedParam('content')).toBe('整条正文，会替换原来的全部正文；只改其中几处用 edits。按所选类型说明里的「正文」写法组织：结论在前，类型说明里的「原因：」「依据：」「背景：」接在句号后面，同一段写完、不换行（类型说明没写正文写法的，写清事实和它的依据或情境）。用第三人称陈述句并标明主体（「用户…」「项目定了…」），提到用户时每次都写「用户」，不用「他」「她」代称，日后读到时能和用户当下的话分开。用自己的话概括清楚，去掉口语和语气词；补充说明直接写进句子，正文里不加括号补注：别名和缩写放进 tags，日期按对话里的精度写，对话里没提到的细节直接略过；人名、地名、数字、单位、命令和路径照原样写，不概括成类别；适用范围和确定程度照对话里的写。正文只写这件事本身：这条是用户告诉你的、什么时候记的，记录会自动保存；第三方出处（同事、文档、通知）照常写进正文或「依据：」；写记忆时的操作经过（写入被拒、重试）留在会话里。只写对话或资料里有依据的内容，不替用户编理由。怎么用由类型统一交代，正文里不另列泛泛的使用场景和注意事项；不写行号、临时路径这类很快过时的细节，改用稳定的位置描述。完整经过可以用 memory_source 回查，不用抄进正文。提到别的记忆时写它的名称，不写记忆 id。create 和整条 update 必填；用 edits 时不传就保留原值。')
+    expect(describedParam('content')).toBe('整条正文，会替换原来的全部正文；只改其中几处用 edits。按所选类型说明里的「正文」写法组织：结论在前，类型说明里的「原因：」「依据：」「背景：」接在句号后面，同一段写完、不换行（类型说明没写正文写法的，写清事实和它的依据或情境）。用第三人称陈述句并标明主体（「用户…」「项目定了…」），提到用户时每次都写「用户」，不用「他」「她」代称，日后读到时能和用户当下的话分开。用自己的话概括清楚，去掉口语和语气词；补充说明直接写进句子，正文里不加括号补注：别名和缩写放进 tags，日期按对话里的精度写，对话里没提到的细节直接略过；人名、地名、数字、单位、命令和路径照原样写，不概括成类别；适用范围和确定程度照对话里的写。正文只写这件事本身：这条是用户告诉你的、什么时候记的，记录会自动保存；第三方出处（同事、文档、通知）照常写进正文或「依据：」；写记忆时的操作经过（写入被拒、重试）留在会话里。只写对话或资料里有依据的内容，不替用户编理由。怎么用由类型统一交代，正文里不另列泛泛的使用场景和注意事项；不写行号、临时路径这类很快过时的细节，改用稳定的位置描述。完整经过可以用 memory_source 回查，不用抄进正文。提到别的记忆时正文写它的名称，它的 id 填进 related 或 premises。create 和整条 update 必填；用 edits 时不传就保留原值。')
   })
 
-  it('supersedes 的参数说明：填被取代的旧记忆 id，和 update 分工', () => {
-    expect(describedParam('supersedes')).toBe('被这条新记忆取代的旧记忆 id（action=create 时用）。旧的随即失效、不再带入；旧说法要留档时用它，只是补充或改正同一条用 action=update。')
+  it('supersedes 的参数说明：填被整个接替的旧记忆 id，同一件事的新状态走 update 声明 change', () => {
+    const supersedes = describedParam('supersedes')!
+    expect(supersedes).toContain('action=create 时用')
+    expect(supersedes).toContain('action=update 并声明 change')
+    expect(supersedes).toContain('历史版本')
   })
 
   it('related 与 premises 的参数说明：追加不删已有、每条的上限、作用域规则，补挂时只传 id 不用填 change', () => {
@@ -98,13 +101,13 @@ describe('memory_save 绑定', () => {
     expect(related).toContain('全局记忆只能指向全局记忆')
     expect(related).toContain('不用填 change')
     const premises = describedParam('premises')!
-    expect(premises).toContain('type=decision')
+    expect(premises).toContain('「前提」')
     expect(premises).toContain(`每条最多 ${LINKS_PER_KIND_MAX} 个`)
   })
 
   it('summary 与 tags 分工：summary 一句话说清讲什么，tags 只写文本里没有的检索词', () => {
     expect(describedParam('summary')).toBe('一句话说清这条记忆讲什么，显示在索引里，供人和模型判断相关不相关；不复述 name，不堆关键词。create 和整条 update 必填；用 edits 时不传就保留原值。')
-    expect(describedParam('tags')).toBe('只写正文、name、summary 里都没出现、但以后可能被拿来搜它的词：同义词、中英文别名、缩写。不写泛化概念。用 edits 时不传就保留原标签。')
+    expect(describedParam('tags')).toBe('只写正文、name、summary 里都没出现、但以后可能被拿来搜它的词：同义词、中英文别名、缩写。不写泛化概念。整条 update 时传的 tags 替换原标签，不传就清空，要保留就一并传回；用 edits 时不传就保留原标签。')
   })
 
   it('confirmGlobal 的参数说明：原样填这条记忆最近一次未保存提示里的确认码，第一次调用不填；不举具体的码，免得模型直接填示例', () => {
@@ -113,12 +116,12 @@ describe('memory_save 绑定', () => {
   })
 
   it('sourceMode 的参数说明逐一定义五种来源，推断链上有一步是推出来的就填 agent-inferred', () => {
-    expect(describedParam('sourceMode')).toBe('信息从哪来，决定置信度上限。user-explicit：用户明说的。agent-action-confirmed：你做的事经用户确认有效，或被采纳。user-behavior：用户反复做出的动作（多次改写、撤销、拒绝同一类做法）；对一次举动揣测动机不算。environment-observed：从文件、命令输出、配置里直接读到的事实。agent-inferred：你自己的推断和解读；只要中间有一步是你推出来的、不是直接看到的，就填它。')
+    expect(describedParam('sourceMode')).toBe('信息从哪来，决定置信度上限。user-explicit：用户明说的。agent-action-confirmed：你做的事经用户确认有效，或被采纳。user-behavior：用户反复做出的动作（多次改写、撤销、拒绝同一类做法）；对一次举动揣测动机不算。environment-observed：从文件、命令输出、配置里直接读到的事实。agent-inferred：你自己的推断和解读；只要中间有一步是你推出来的、不是直接看到的，就填它。这一轮不是用户本人发起的（定时任务、别的 agent 发来的）时，只能填 environment-observed 或 agent-inferred。')
   })
 
   it('有效期的参数说明：什么时候填、两种写法、时分由插件补、到点后的效果', () => {
     expect(describedParam('validFrom')).toBe('生效起始，本机时间。只有用户说了从什么时候开始才填；只有截止时间的，填 validTo 就够。用户说了具体时刻写 "YYYY-MM-DD HH:mm"，没说就只写日期 "YYYY-MM-DD"，插件补上现在的时分。填了将来的时间，到点前这条记忆不带入新对话，也搜不到。')
-    expect(describedParam('validTo')).toBe('失效截止，本机时间。只有用户明确给了截止时间，或信息本身有确定的到期日（一次活动、临时方案）才填，其余不填。用户说了具体时刻写 "YYYY-MM-DD HH:mm"（如「今天下午三点前」写 "2026-10-29 15:00"），没说就只写日期 "YYYY-MM-DD"，插件补上现在的时分；截止在今天的必须写时刻。必须晚于现在和 validFrom。到点后这条记忆不再带入新对话，也搜不到；已带入当前对话的，到下个会话或上下文压缩后才去掉。')
+    expect(describedParam('validTo')).toBe('失效截止，本机时间。只有用户明确给了截止时间，或信息本身有确定的到期日（一次活动、临时方案）才填，其余不填。用户说了具体时刻写 "YYYY-MM-DD HH:mm"（比如今天是 2026-10-29，「今天下午三点前」写 "2026-10-29 15:00"），没说就只写日期 "YYYY-MM-DD"，插件补上现在的时分；截止在今天的必须写时刻。必须晚于现在和 validFrom。到点后这条记忆不再带入新对话，也搜不到；已带入当前对话的，到下个会话或上下文压缩后才去掉。')
   })
 
   it('有效期参数是字符串：数字毫秒在 schema 层就不收', () => {

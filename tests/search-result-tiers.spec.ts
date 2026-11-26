@@ -361,6 +361,8 @@ describe('工具描述', () => {
   })
 
   it('保存工具描述含更新前读全文的引导，少量修改走 edits', () => {
-    expect(registry.renderSaveDescription()).toContain('只改其中几处时传 edits：oldString 从当前正文原样摘取、只命中一处，其余正文和没传的字段保持原样；要重新组织整条时才传 content，它会替换整条正文。两种写法都要先读过目标记忆的全文。')
+    const description = registry.renderSaveDescription()
+    expect(description).toContain('改内容或补证时，先读这条记忆现在的内容（memory_search 的 query 填它的 id）')
+    expect(description).toContain('只改其中几处时传 edits：oldString 从当前正文原样摘取、只命中一处，其余正文和没传的字段保持原样；要重新组织整条时才传 content，它会替换整条正文。')
   })
 })
