@@ -195,6 +195,12 @@ type UpsertInput = {
   sourceCheck?: PendingDecision['sourceCheck']
   /** 依据已变的来源（见 schema.ts PendingDecision.via）：再报时换成这次的，这次没给就去掉。 */
   via?: string
+  /**
+   * 入口复核：拿到这一对的认领、进写锁之后第一步调用，早于读账本和任何匹配、收拢；返回 false 就跳过这次挂账，账本不动。
+   * 体检用它确认这条发现的依据此刻仍成立：发现可能是扫描开头读的旧内容算出来的，用户在这之间改了记忆、做了裁决时，
+   * 按旧指纹挂账会把有效的裁决当成过时的作废。只在内存里，不写进条目。
+   */
+  recheck?: () => Promise<boolean>
 }
 type UpsertResult = { created: boolean; settled?: true; isSkipped?: true; entry: PendingDecision }
 
@@ -374,6 +380,7 @@ export class PendingDecisionsStore {
 
   /** 持有冲突身份的认领时挂账：同一对的查找、新建、收拢同时只有一处在做。 */
   private async upsertClaimed(input: UpsertInput, draft: PendingDecision, read?: ReadMemory): Promise<UpsertResult> {
+    if (input.recheck !== undefined && !(await input.recheck())) return { created: false, isSkipped: true, entry: draft }
     const entries = await this.table.list()
     // 先看已裁决的同一对，再看未决的同一对（垂直冲突的 baselineRef 措辞每次扫描都可能不同，不能按它分开，否则每次重扫都多一条）。
     // 未决的按先出现排：修复前留下的重复条目里沿用最早的那条

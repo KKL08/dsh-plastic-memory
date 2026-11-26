@@ -670,6 +670,12 @@ All notable changes to this project are documented here. The format follows
   to the plugin's settings, closed DeepSeek Harness. The error is now written
   to the log, and an automatic checkup that hit it counts as failed and is
   retried like other failed checkups.
+- A conflict you resolved while a checkup was running could come back as
+  pending when that checkup finished, because it recorded what it had read
+  before your change and treated your verdict as out of date. A checkup now
+  reads the memories again before recording a finding, along with the
+  `AGENTS.md` or `CLAUDE.md` a memory conflicts with, and drops the finding if
+  any of them changed since it first read them.
 
 ## [0.2.0] - 2026-11-21
 
