@@ -121,6 +121,11 @@ export const dreamsRecordSchema = z.object({
   runs: z.array(z.object({ runId: z.string(), at: z.number(), tokens: z.number() })).optional(),
   /** 用户撤销过的梦境合并和矛盾处理的结论（dreams-merge.ts 的 mergeConclusion、dreams-tiers.ts 的 tierConclusion），按记下的先后，只留最近的若干个。 */
   undoneMerges: z.array(z.object({ key: z.string(), at: z.number() })).optional(),
+  /**
+   * 处理矛盾那一步上次最后开始读出处的那个发现（按挂账时刻、条目 id 排序的位置）：下一次从它的严格后继开始，到末尾绕回。
+   * 可选；没有时从头开始。不认识这个字段的构建改写记录时会丢掉它，下一次回到开头。
+   */
+  resolveCursor: z.object({ firstSeenAt: z.number(), id: z.string() }).optional(),
 })
 export type DreamsRecord = z.infer<typeof dreamsRecordSchema>
 

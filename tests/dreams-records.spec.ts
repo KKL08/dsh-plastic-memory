@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { DreamsStore, DREAMS_USAGE_KEY } from '../src/governance/dreams-records.ts'
-import type { DreamMarks, DreamsRecord } from '../src/storage/schema.ts'
+import { dreamsRecordSchema, type DreamMarks, type DreamsRecord } from '../src/storage/schema.ts'
 import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
 
 // 记忆梦境的侧表读写：范围开关、运行记录、变化基线、用量
@@ -109,5 +109,43 @@ describe('用量', () => {
     await w.store.addUsage('r1', NOW + 10, 20)
     await w.store.addUsage('r1', NOW + 20, 0)
     expect((await w.store.read()).usageRuns).toEqual([{ runId: 'r0', at: NOW - DAY, tokens: 5 }, { runId: 'r1', at: NOW + 10, tokens: 120 }])
+  })
+})
+
+describe('处理矛盾的续读位置', () => {
+  const cursor = { firstSeenAt: NOW, id: 'pd_a' }
+
+  it('认领被别的进程接手、那边开始了新的一次：旧的运行写不进续读位置，新的运行写得进', async () => {
+    const w = world()
+    await w.store.begin(GLOBAL, 'r1', NOW)
+    await w.store.begin(GLOBAL, 'r2', NOW + 10)
+    expect(await w.store.saveResolveCursor(GLOBAL, 'r1', cursor)).toBe(false)
+    expect(await w.store.resolveCursor(GLOBAL)).toBeUndefined()
+    expect(await w.store.saveResolveCursor(GLOBAL, 'r2', cursor)).toBe(true)
+    expect(await w.store.resolveCursor(GLOBAL)).toEqual(cursor)
+  })
+
+  it('这个范围没有在跑的运行：不写', async () => {
+    const w = world()
+    expect(await w.store.saveResolveCursor(WS, 'r1', cursor)).toBe(false)
+    expect(await w.records.get('/proj/a')).toBeUndefined()
+  })
+
+  it('续读位置跟着运行记录走：做完、没做完、下一次开始都留着，别的范围不受影响', async () => {
+    const w = world()
+    await w.store.begin(GLOBAL, 'r1', NOW)
+    await w.store.saveResolveCursor(GLOBAL, 'r1', cursor)
+    await w.store.stop(GLOBAL, 'r1', { stoppedAt: NOW + 5, reason: 'yielded', entryIds: [] }, last('r1', 'yielded'))
+    expect(await w.store.resolveCursor(GLOBAL)).toEqual(cursor)
+    await w.store.begin(GLOBAL, 'r2', NOW + 10)
+    expect(await w.store.resolveCursor(GLOBAL)).toEqual(cursor)
+    await w.store.complete(GLOBAL, { runId: 'r2', startedAt: NOW + 10, endedAt: NOW + 20 }, {}, last('r2', 'completed'))
+    expect(await w.store.resolveCursor(GLOBAL)).toEqual(cursor)
+    expect(await w.store.resolveCursor(WS)).toBeUndefined()
+  })
+
+  it('落盘格式：续读位置是可选字段，没有它的旧记录照常读出', () => {
+    expect(dreamsRecordSchema.parse({ id: 'global', resolveCursor: cursor }).resolveCursor).toEqual(cursor)
+    expect(dreamsRecordSchema.parse({ id: 'global' }).resolveCursor).toBeUndefined()
   })
 })
