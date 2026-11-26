@@ -662,9 +662,13 @@ export async function apply(ctx: Context, config: Config) {
     const dreamsCreated = new DreamsScheduler({
       run: {
         store, snapshots, decisions, relatedRecheck, dreams, log: ctx.logger,
-        claimScope: (scope, onLost) => holdCheckups(checkups, [scope], {
-          interval: (callback, delayMs) => timer.interval(callback, delayMs), onLost, onChange: async () => { await views?.requestCheckups() }, log: ctx.logger,
-        }),
+        // 认领和放掉时重写体检状态；放掉时另外重写待处理视图：梦境里的体检和处理矛盾改过账本
+        claimScope: async (scope, onLost) => {
+          const held = await holdCheckups(checkups, [scope], {
+            interval: (callback, delayMs) => timer.interval(callback, delayMs), onLost, onChange: async () => { await views?.requestCheckups() }, log: ctx.logger,
+          })
+          return 'busy' in held ? held : { release: async () => { await held.release(); await views?.request(['pending']) } }
+        },
         activity: maxAgeMs => board.view(maxAgeMs),
         resolveLlm: () => resolveBackgroundLlm('dreams'),
         config: () => dreamsConfig().config,
@@ -672,6 +676,8 @@ export async function apply(ctx: Context, config: Config) {
         plan: dreamsPlan({
           tidy: { store, maxTopics: () => config.index.maxTopics.get(), now: () => Date.now(), typeRecall: type => registry.get(type).recall },
           merge: { store, dreams },
+          // 梦境里的体检用体检选的模型，不写体检完成记录（不传 checkups）
+          checkup: { scan: { store, registry, decisions, cache: scanCache, ignores, instructions, ...incremental, log: ctx.logger }, resolveLlm: () => resolveBackgroundLlm('checkup') },
           drill: { store, decisions, host, noReview, maxDrillDowns: () => config.brewingDreams.maxDrillDowns.get(), now: () => Date.now() },
           resolve: {
             store, decisions, dreams, host, noReview, memoryRoot, homeDir: homedir(),

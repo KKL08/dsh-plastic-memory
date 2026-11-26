@@ -51,6 +51,7 @@ import { AutoCheckupScheduler } from '../src/gui/auto-checkup.ts'
 import { DreamsScheduler } from '../src/tools/dreams-scheduler.ts'
 import { CheckupSuggestions } from '../src/gui/checkup-suggestions.ts'
 import { ViewWriter } from '../src/gui/view-writer.ts'
+import { DreamsStore } from '../src/governance/dreams-records.ts'
 
 // 进程边界的观察：fsTrace.on 期间记下插件对 node:fs、node:fs/promises 的每次调用（函数名 + 第一个参数）。平时原样透传。
 // fsTrace.hold：给了就先问它一次（参数形如 `readFile(<路径>)`），返回 promise 的那次 node:fs/promises 调用等它落定再执行。
@@ -114,6 +115,8 @@ function mockCtx(opts: {
   agentDefaultModel?: { currentSelection(): { provider: string; model: string } }
   /** 宿主会话查询（ctx.get('sessionQuery')）；缺省只有 readSession（每个会话都是用户本人开的一轮，保存照常能填用户明说）。 */
   sessionQuery?: unknown
+  /** 宿主的 agent 列表（ctx.get('agents')）；缺省服务缺席，判不了有没有会话在跑。 */
+  agents?: { list(): Array<{ status: string }> }
 } = {}) {
   // 宿主投影只答 turnBoundary：当轮起点指到 readSession 读回的那个 turn/start
   const userTurnProjections = { stateOf: (_s: object, key: string) => (key === 'turnBoundary' ? USER_TURN_BOUNDARY : undefined) }
@@ -171,7 +174,8 @@ function mockCtx(opts: {
         : name === 'agentDefaultModel' ? opts.agentDefaultModel
           : name === 'sessionQuery' ? opts.sessionQuery ?? { readSession: readUserTurn }
             : name === 'sessionProjections' ? userTurnProjections
-              : undefined),
+              : name === 'agents' ? opts.agents
+                : undefined),
     // 按依赖名分发，像 cordis 一样只在依赖的服务都在时才回调
     inject: (deps: string[], callback: (child: Record<string, unknown>) => unknown) => {
       const collect = (dispose: unknown) => { if (typeof dispose === 'function') disposers.push(dispose as () => unknown) }
@@ -704,6 +708,32 @@ describe('自动体检接线', () => {
     const other = await badConfigWarning({ maxDrillDowns: 3, minIntervalDays: -1 })
     expect(other).toContain('minIntervalDays')
     expect(other).not.toContain('maxDrillDowns')
+  })
+
+  it('记忆梦境跑完一次、放掉认领之后，重写待处理视图', async () => {
+    const memoryRoot = await seedMemory(await makeTmpRoot())
+    const sidecar = sidecarAt(memoryRoot)
+    await new AutoCheckupSettingStore(sidecar.autoCheckups).set({ kind: 'all' }, 1)
+    await new DreamsStore(sidecar.dreams, sidecar.dreamMarks).setEnabled('all', true)
+    const timer = fakeTimer()
+    const ctx = mockCtx({ timer, agentDefaultModel: { currentSelection: () => DEFAULT_ROUTE }, agents: { list: () => [] }, commands: { register: () => () => {} } })
+    const finished = vi.spyOn(DreamsStore.prototype, 'complete')
+    const stopped = vi.spyOn(DreamsStore.prototype, 'stop')
+    const requests = vi.spyOn(ViewWriter.prototype, 'request')
+    try {
+      await apply({ ...ctx, logger: { info() {}, warn() {}, error() {} } } as never, new Config({ memoryRoot, brewingDreams: { minChanges: 1, idleMinutes: 1 } } as never))
+      await fireFirstCheck(timer.timers.find(t => !t.every)!)
+      // 梦境这次运行收了尾（做完或没做完）
+      const ended = [...finished.mock.invocationCallOrder, ...stopped.mock.invocationCallOrder]
+      expect(ended).toHaveLength(1)
+      const pendingAfter = requests.mock.calls.flatMap((args, i) => (args[0]?.includes('pending') === true && requests.mock.invocationCallOrder[i]! > ended[0]! ? [i] : []))
+      expect(pendingAfter).not.toEqual([])
+    } finally {
+      finished.mockRestore()
+      stopped.mockRestore()
+      requests.mockRestore()
+      await ctx.dispose()
+    }
   })
 
   it('没有计时服务的宿主：不创建调度器，插件照常挂载', async () => {
