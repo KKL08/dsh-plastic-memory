@@ -131,6 +131,49 @@ export type DrillOutcome =
   | { kind: 'retry'; reason: DrillRetryReason }
   | { kind: 'missed'; reason: DrillMissReason }
 
+/** 读之前的四步走完：读到了这个会话的整份日志，isArchived 是放行时按存档名单判的。 */
+export type DrillOpened = { kind: 'opened'; log: SessionLog; isArchived: boolean }
+
+/**
+ * 读一处下钻的前四步（下钻补全和核实矛盾共用，见 drillRead 的 1 到 4）：放行、列会话、查不回看、读日志。
+ * refused、retry 不记账；unreadable 记进 log.unreadable 和 log.attempted；读到日志时 used 加一、存档的会话记进 archivedSessions，
+ * 锚不记进 attempted（读到之后能不能用由调用方定）。
+ */
+export async function drillOpen(
+  request: Pick<DrillRequest, 'memoryId' | 'purpose' | 'anchor'> & { pairAnchors?: readonly DrillAnchor[] }, log: DrillLog, deps: DrillSourceDeps,
+): Promise<DrillOpened | Exclude<DrillOutcome, { kind: 'read' | 'missed' }>> {
+  const { anchor, memoryId } = request
+  const sid = anchor.sessionId
+  const archived = log.used >= deps.limit ? null : await deps.host.archivedSessionIds()
+  const gate = drillReadGate({
+    purpose: request.purpose, anchor, archivedOf: id => (archived === null ? undefined : archived.has(id)), used: log.used, limit: deps.limit,
+    ...(request.pairAnchors !== undefined ? { pairAnchors: request.pairAnchors } : {}), attempted: log.attempted,
+  })
+  if (gate.kind !== 'ok') return gate
+  const list = await deps.host.listSessions()
+  if (list === null) return { kind: 'retry', reason: 'sessions-unlisted' }
+  if (!list.some(e => e.id === sid)) return noteUnreadable(log, memoryId, anchor, 'session-gone')
+  let isMarked: boolean
+  try {
+    isMarked = await deps.noReview.isMarkedNoReview(sid)
+  } catch {
+    return { kind: 'retry', reason: 'no-review-unknown' }
+  }
+  if (isMarked) return noteUnreadable(log, memoryId, anchor, 'no-review')
+  const sl = await deps.host.readSessionLog(sid)
+  if (sl === null) return { kind: 'retry', reason: 'log-unreadable' }
+  log.used++
+  if (gate.isArchived) log.archivedSessions.add(sid)
+  return { kind: 'opened', log: sl, isArchived: gate.isArchived }
+}
+
+/** 记下一处确认读不到的锚：进 log.unreadable（锚原来的区间）和 log.attempted。 */
+export function noteUnreadable(log: DrillLog, memoryId: string, anchor: DrillAnchor, reason: DrillUnreadableReason): { kind: 'unreadable'; reason: DrillUnreadableReason } {
+  log.attempted.add(drillAnchorKey(anchor))
+  log.unreadable.push({ memoryId, sessionId: anchor.sessionId, eventRange: [anchor.eventRange[0], anchor.eventRange[1]], at: anchor.at, reason })
+  return { kind: 'unreadable', reason }
+}
+
 /**
  * 读一处下钻，记进 log。顺序（有先后约束）：
  * 1. 放行：archivedSessionIds 为 null 时存档状态按「不知道」交给 drillReadGate（核实矛盾时 pairAnchors 的会话同样按这份名单判）。
@@ -149,36 +192,14 @@ export type DrillOutcome =
  * 8. 两种取法都按日志顺序，正文合计到 DRILL_READ_MAX_CHARS 为止（整条地给，第一条总给）。
  * 9. unreadable 记进 log.unreadable（{ memoryId, sessionId, eventRange（锚原来的）, at, reason }）和 log.attempted；read 的锚记进 attempted；
  *    missed 两样都不记。
- * 只读：不写任何文件、侧表。
+ * 前四步是 drillOpen。只读：不写任何文件、侧表。
  */
 export async function drillRead(request: DrillRequest & { pairAnchors?: readonly DrillAnchor[] }, log: DrillLog, deps: DrillSourceDeps): Promise<DrillOutcome> {
   const { anchor, memoryId } = request
   const sid = anchor.sessionId
-  const unreadable = (reason: DrillUnreadableReason): DrillOutcome => {
-    log.attempted.add(drillAnchorKey(anchor))
-    log.unreadable.push({ memoryId, sessionId: sid, eventRange: [anchor.eventRange[0], anchor.eventRange[1]], at: anchor.at, reason })
-    return { kind: 'unreadable', reason }
-  }
-  const archived = log.used >= deps.limit ? null : await deps.host.archivedSessionIds()
-  const gate = drillReadGate({
-    purpose: request.purpose, anchor, archivedOf: id => (archived === null ? undefined : archived.has(id)), used: log.used, limit: deps.limit,
-    ...(request.pairAnchors !== undefined ? { pairAnchors: request.pairAnchors } : {}), attempted: log.attempted,
-  })
-  if (gate.kind !== 'ok') return gate
-  const list = await deps.host.listSessions()
-  if (list === null) return { kind: 'retry', reason: 'sessions-unlisted' }
-  if (!list.some(e => e.id === sid)) return unreadable('session-gone')
-  let isMarked: boolean
-  try {
-    isMarked = await deps.noReview.isMarkedNoReview(sid)
-  } catch {
-    return { kind: 'retry', reason: 'no-review-unknown' }
-  }
-  if (isMarked) return unreadable('no-review')
-  const sl = await deps.host.readSessionLog(sid)
-  if (sl === null) return { kind: 'retry', reason: 'log-unreadable' }
-  log.used++
-  if (gate.isArchived) log.archivedSessions.add(sid)
+  const opened = await drillOpen(request, log, deps)
+  if (opened.kind !== 'opened') return opened
+  const sl = opened.log
   const own = sl.events.filter(e => typeof e.seq === 'number' && isOwnEvent(sl, e) !== false)
   const isUnknown = own.some(e => isOwnEvent(sl, e) === 'unknown')
   let picked: RawEvent[]
@@ -193,14 +214,14 @@ export async function drillRead(request: DrillRequest & { pairAnchors?: readonly
     const nextTime = own.find(e => e.seq! > end && typeof e.time === 'number')?.time
     if (anchor.change !== undefined && (isUnknown || !anchorTimeMatches(anchor.at, startTime, nextTime))) {
       const relocated = relocateByTime(anchor, own)
-      if (relocated === null) return unreadable('anchor-lost')
+      if (relocated === null) return noteUnreadable(log, memoryId, anchor, 'anchor-lost')
       if (relocated !== start) {
         end = Math.min(relocated + end - start, own.at(-1)!.seq!)
         start = relocated
       }
     }
     picked = own.filter(e => e.seq! >= start && e.seq! <= end && readableText(e) !== undefined).slice(0, DRILL_WINDOW_MESSAGES)
-    if (picked.length === 0) return unreadable('empty')
+    if (picked.length === 0) return noteUnreadable(log, memoryId, anchor, 'empty')
   }
   let chars = 0
   const events: RawEvent[] = []
@@ -211,7 +232,7 @@ export async function drillRead(request: DrillRequest & { pairAnchors?: readonly
     events.push(e)
   }
   log.attempted.add(drillAnchorKey(anchor))
-  return { kind: 'read', sessionId: sid, isArchived: gate.isArchived, events, userSeqs: userSeqsOf(sl, events) }
+  return { kind: 'read', sessionId: sid, isArchived: opened.isArchived, events, userSeqs: userSeqsOf(sl, events) }
 }
 
 /** 可读的消息正文（见 drillRead 第 5 步）；不可读为 undefined。 */
