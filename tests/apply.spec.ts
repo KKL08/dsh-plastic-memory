@@ -46,6 +46,7 @@ import { encodeMemoryCommand } from '../src/gui/contract.ts'
 import { fireUntilSettled, manualTimers } from './helpers/manual-timers.ts'
 import { openUserTurn, readUserTurn, USER_TURN_BOUNDARY } from './helpers/session-log.ts'
 import { MEMORY_TOOL_NAMES } from '../src/contract-codes.ts'
+import { breakModelSelection } from './helpers/model-selection-file.ts'
 
 // 进程边界的观察：fsTrace.on 期间记下插件对 node:fs、node:fs/promises 的每次调用（函数名 + 第一个参数）。平时原样透传。
 // fsTrace.hold：给了就先问它一次（参数形如 `readFile(<路径>)`），返回 promise 的那次 node:fs/promises 调用等它落定再执行。
@@ -717,6 +718,22 @@ describe('自动体检接线', () => {
     const r = JSON.parse((await defs[0]!.handler({ rawInput: ' scan {"layer":{"kind":"global"}}', agent: routed })).text!) as Record<string, unknown>
     expect(r).toMatchObject({ ok: false, cmd: 'scan', code: 'llm-unavailable' })
     expect(ctx.llmRequests).toEqual([])
+  })
+
+  it('体检选的模型读不出：手动体检回失败并说明原因，不调任何模型（不退回宿主默认模型，也不借会话的模型）；选择文件原样留着', async () => {
+    const memoryRoot = await seedMemory(await makeTmpRoot())
+    const broken = await breakModelSelection(memoryRoot, 'checkup', 'bad-json')
+    const defs: Array<{ handler(inv: { rawInput: string; agent: unknown }): Promise<{ text?: string }> }> = []
+    const ctx = mockCtx({
+      commands: { register: (def) => { defs.push(def as (typeof defs)[number]); return () => {} } },
+      agentDefaultModel: { currentSelection: () => DEFAULT_ROUTE },
+    })
+    await apply({ ...ctx, logger: { info() {}, warn() {}, error() {} } } as never, new Config({ memoryRoot } as never))
+    const routed = { session: { header: { id: 'sess-x' }, seq: 1, requestHeader: () => undefined }, options: { provider: 'deepseek', model: 'session-model' } }
+    const r = JSON.parse((await defs[0]!.handler({ rawInput: ' scan {"layer":{"kind":"global"}}', agent: routed })).text!) as Record<string, unknown>
+    expect(r).toMatchObject({ ok: false, code: 'failed', detail: expect.stringContaining('读不出来') })
+    expect(ctx.llmRequests).toEqual([])
+    expect(await readFile(broken.path, 'utf8')).toBe(broken.text)
   })
 
   it('界面全库体检：用体检的模型，不随发命令的会话变；全局与各项目的记忆都交给内容检查', async () => {
@@ -1961,6 +1978,26 @@ describe('配置热生效（loader/volatile-update）', () => {
 
   /** 缺省设置（检索来源两者、记忆带原话开）下各档的下钻引导。 */
   const defaultGuidance = (level: 'strict' | 'active') => evidenceGuidance(level, { memoryQuotes: true, searchSource: 'both' })
+
+  it('处理配置变化时出错（重注册工具时宿主抛错）：只记日志，监听器返回的 promise 不 reject（宿主发事件不接它）', async () => {
+    const errors: unknown[][] = []
+    let isRegisterBroken = false
+    const base = mockCtx()
+    const ctx = {
+      ...base,
+      logger: { info() {}, warn() {}, error: (...args: unknown[]) => { errors.push(args) } },
+      tools: {
+        register: (def: { name: string }) => {
+          if (isRegisterBroken) throw new Error('宿主拒绝注册工具')
+          return base.tools.register(def)
+        },
+      },
+    }
+    await apply(ctx as never, new Config({ memoryRoot: await makeTmpRoot() } as never))
+    isRegisterBroken = true
+    await expect(ctx.listeners.get('loader/volatile-update')!([['governance', 'enabled']])).resolves.toBeUndefined()
+    expect(errors.some(args => args.some(a => a instanceof Error && a.message === '宿主拒绝注册工具'))).toBe(true)
+  })
 
   it('改上限、超限处理、溯源档位后，同一会话下一次组装就按新值（不等压缩）', async () => {
     const t = await setup()

@@ -83,7 +83,7 @@ export interface ExpansionDeps {
   /** 宿主会话：当前会话的模型、按选择建模型、列模型（校验选择还在不在）、读当前会话的日志（取这一轮的用户消息）。 */
   host: Pick<HostSession, 'llmOf' | 'llmForRoute' | 'modelCatalog' | 'readSessionLog'>
   /** 后台模型的选择表，读 EXPANSION_SELECTION_KEY 那一条。 */
-  selections: Pick<ModelSelectionStore, 'get'>
+  selections: Pick<ModelSelectionStore, 'getForCall'>
   /**
    * 计时：ms 毫秒后 resolve。signal 触发后调用方不再等它，它 reject 或永不 resolve 都可以。
    * 缺省用 node:timers/promises 的 setTimeout；测试注入可控的计时。

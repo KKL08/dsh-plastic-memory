@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { MemoryStore } from '../src/store.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
@@ -11,7 +14,10 @@ import { DREAMS_DEFAULTS, dreamContentFingerprint } from '../src/governance/drea
 import { DreamsStore } from '../src/governance/dreams-records.ts'
 import { DreamsModelUnavailable, maintainStep, readDreamMarks, runDreams, type DreamsRunDeps, type DreamsRunOptions, type DreamsStep } from '../src/tools/dreams-run.ts'
 import type { ActivityView, WorkspaceActivity } from '../src/governance/session-activity.ts'
-import type { ResolvedLlm } from '../src/governance/background-llm.ts'
+import { ModelSelectionStore, createBackgroundLlmResolver, type ResolvedLlm } from '../src/governance/background-llm.ts'
+import { SidecarStore } from '../src/storage/sidecar.ts'
+import { sidecarSchemas } from './helpers/plugin-env.ts'
+import { breakModelSelection } from './helpers/model-selection-file.ts'
 import type { DreamMarks, DreamsRecord } from '../src/storage/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import type { Scope } from '../src/scope.ts'
@@ -346,6 +352,36 @@ describe('没做完', () => {
     expect(saved.unfinished?.reason).toBe('model-unavailable')
     expect(saved.failure).toBeUndefined()
     expect(new DreamsModelUnavailable().name).toBe('DreamsModelUnavailable')
+  })
+
+  it.each([
+    ['梦境自己的选择读不出（自动体检选的还在）', 'dreams'],
+    ['梦境没选、跟随的自动体检选择读不出', 'checkup'],
+  ] as const)('%s：不调任何模型、不退回，按出错收、计连续出错；选择文件原样留着', async (_name, broken) => {
+    const root = await mkdtemp(join(tmpdir(), 'pm-dreams-selection-'))
+    try {
+      const w = world(() => [{ name: 'ask', needsChanges: false, run: async (ctx) => { await ctx.llm() } }])
+      await enable(w)
+      // 真的选择表和解析器（同接线层），只把宿主建模型调用换成计数的替身
+      const selections = new ModelSelectionStore(new SidecarStore({ root, schemas: sidecarSchemas }).modelSelections)
+      if (broken === 'dreams') await selections.set('checkup', { provider: 'provider-x', model: 'model-a' })
+      const file = await breakModelSelection(root, broken, 'bad-json')
+      const models: string[] = []
+      const llmOf = (name: string) => { models.push(name); return { complete: async () => 'ok' } }
+      const resolve = createBackgroundLlmResolver({
+        selections, catalog: () => undefined, llmFor: s => llmOf(s.model), defaultLlm: () => llmOf('default'),
+      })
+      w.deps.resolveLlm = () => resolve('dreams')
+      const r = await runDreams(GLOBAL, auto, w.deps)
+      expect(r).toMatchObject({ kind: 'failed', steps: [{ name: 'ask', state: 'not-run' }] })
+      expect(models).toEqual([])
+      const saved = await rec(w)
+      expect(saved.unfinished?.reason).toBe('failed')
+      expect(saved.failure?.count).toBe(1)
+      expect(await readFile(file.path, 'utf8')).toBe(file.text)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it('记结果写不进：结果照常返回，记录停在记开始写的样子，下次按上次没做完处理', async () => {

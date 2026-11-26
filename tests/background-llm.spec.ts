@@ -1,15 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { hostSemanticLlm } from '../src/governance/host-llm.ts'
 import {
-  ModelSelectionStore, checkSelection, createBackgroundLlmResolver, listModelChoices, resolveSelection, type HostModelCatalog,
+  ModelSelectionStore, ModelSelectionUnreadable, checkSelection, createBackgroundLlmResolver, listModelChoices, resolveSelection, type HostModelCatalog,
 } from '../src/governance/background-llm.ts'
 import type { ModelSelection } from '../src/gui/contract.ts'
 import { sidecarSchemas } from './helpers/plugin-env.ts'
+import { breakModelSelection } from './helpers/model-selection-file.ts'
 
 // 后台模型的选择：真实的选择表（.state 侧表文件），只把宿主 llm 服务（列提供方、列模型、模型详情、调模型）换成假的。
 
@@ -243,6 +244,79 @@ describe('解析器：记忆梦境（解析链每一步）', () => {
     const r = await s.resolve('dreams')
     expect(r).toMatchObject({ fellBack: true, reason: 'effort-gone' })
     expect(await s.call(r)).toMatchObject(DEFAULT_ROUTE)
+  })
+})
+
+describe('选择文件在、却读不出', () => {
+  /** 解析时宿主侧被碰过几次：建模型调用（选的、默认的、退回目标）、列提供方。 */
+  function counted() {
+    const s = setup()
+    const calls = { llmFor: 0, defaultLlm: 0, fallback: 0, catalog: 0 }
+    const deps = {
+      selections: s.selections,
+      catalog: () => { calls.catalog++; return s.host.service },
+      llmFor: (selection: ModelSelection) => { calls.llmFor++; return hostSemanticLlm(s.host.service, selection) },
+    }
+    const resolve = createBackgroundLlmResolver({ ...deps, defaultLlm: () => { calls.defaultLlm++; return hostSemanticLlm(s.host.service, DEFAULT_ROUTE) } })
+    const fallback = () => { calls.fallback++; return hostSemanticLlm(s.host.service, DEFAULT_ROUTE) }
+    return { ...s, calls, deps, resolve, fallback }
+  }
+
+  /** 选择文件读不出时的这一条（how 是读不出的造法）。 */
+  const checkupUnreadable = async (how: 'bad-json' | 'no-permission') => {
+    const s = counted()
+    const broken = await breakModelSelection(root, 'checkup', how)
+    await expect(s.resolve('checkup')).rejects.toBeInstanceOf(ModelSelectionUnreadable)
+    expect(s.calls).toEqual({ llmFor: 0, defaultLlm: 0, fallback: 0, catalog: 0 })
+    expect(s.host.requests).toEqual([])
+    if (how === 'bad-json') expect(await readFile(broken.path, 'utf8')).toBe(broken.text)
+  }
+  it('自动体检的选择读不出（bad-json）：抛读不出，不退回默认模型、不建任何模型调用；选择文件原样留着', () => checkupUnreadable('bad-json'))
+  // root 读得了没有读权限的文件
+  it.skipIf(process.getuid?.() === 0)('自动体检的选择读不出（no-permission）：抛读不出，不退回默认模型、不建任何模型调用；选择文件原样留着', () => checkupUnreadable('no-permission'))
+
+  it('梦境自己的选择读不出：不跟随自动体检选的，也不退回默认模型', async () => {
+    const s = counted()
+    await s.selections.set('checkup', { provider: 'provider-x', model: 'model-a' })
+    await breakModelSelection(root, 'dreams', 'bad-json')
+    await expect(s.resolve('dreams')).rejects.toBeInstanceOf(ModelSelectionUnreadable)
+    expect(s.calls).toEqual({ llmFor: 0, defaultLlm: 0, fallback: 0, catalog: 0 })
+  })
+
+  it('梦境没选、自动体检的选择读不出：不退回默认模型', async () => {
+    const s = counted()
+    await breakModelSelection(root, 'checkup', 'bad-json')
+    await expect(s.resolve('dreams')).rejects.toBeInstanceOf(ModelSelectionUnreadable)
+    expect(s.calls).toEqual({ llmFor: 0, defaultLlm: 0, fallback: 0, catalog: 0 })
+  })
+
+  // root 读得了没有读权限的文件
+  it.skipIf(process.getuid?.() === 0)('第三个键（检索扩查）读不出：不退到调用方给的退回目标', async () => {
+    const s = counted()
+    await breakModelSelection(root, 'expansion', 'no-permission')
+    await expect(resolveSelection(['expansion'], s.deps, s.fallback)).rejects.toBeInstanceOf(ModelSelectionUnreadable)
+    expect(s.calls).toEqual({ llmFor: 0, defaultLlm: 0, fallback: 0, catalog: 0 })
+  })
+
+  it.each([
+    ['checkup', '设置里为体检选的模型读不出来，这次没有调用模型。可以在设置里重新选一次'],
+    ['dreams', '设置里为记忆梦境选的模型读不出来，这次没有调用模型'],
+    ['expansion', '设置里为补搜选的模型读不出来，这次没有调用模型'],
+  ] as const)('%s 读不出时的说明用界面上的功能名，不露出选择键', async (key, message) => {
+    const s = counted()
+    await breakModelSelection(root, key, 'bad-json')
+    await expect(resolveSelection([key], s.deps, s.fallback)).rejects.toThrow(new ModelSelectionUnreadable(key).message)
+    expect(new ModelSelectionUnreadable(key).message).toBe(message)
+  })
+
+  it('读不出不当成没选：存取照旧（体检视图等别的读取方读到 undefined），之后重新选一次就恢复', async () => {
+    const s = counted()
+    await breakModelSelection(root, 'checkup', 'bad-json')
+    expect(await s.selections.get('checkup')).toBeUndefined()
+    await s.selections.set('checkup', { provider: 'provider-x', model: 'model-a' })
+    const r = await s.resolve('checkup')
+    expect(r).toMatchObject({ isSelected: true, fellBack: false })
+    expect(await s.call(r)).toMatchObject({ provider: 'provider-x', model: 'model-a' })
   })
 })
 

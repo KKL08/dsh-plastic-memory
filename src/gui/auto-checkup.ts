@@ -2,6 +2,7 @@ import type { MemoryLogger } from '../store.ts'
 import type { SemanticLlm } from '../governance/semantic-scan.ts'
 import type { ResolvedLlm } from '../governance/background-llm.ts'
 import { scopeKey, type Scope } from '../scope.ts'
+import { maskDiagnostic } from '../secrets.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
 import type { CheckupCause, CheckupResult, CheckupView, ModelUnavailableCause } from './contract.ts'
 import { runCheckup, type CheckupRunDeps, type IntervalTimer } from './checkup-run.ts'
@@ -22,7 +23,7 @@ export interface AutoCheckupSchedulerDeps {
   /** 体检核心里和会话无关的依赖（含按范围取指令文件）；模型、所属项目由调度器按无会话给。 */
   scan: CheckupRunDeps['scan']
   /** 体检记录表：一次体检认领、写完成记录、最近一次结果和失败；调度器自己只读状态、记「模型用不了」。 */
-  checkups: CheckupRunDeps['checkups'] & Pick<CheckupRecordStore, 'recordModelUnavailable'>
+  checkups: CheckupRunDeps['checkups'] & Pick<CheckupRecordStore, 'recordModelUnavailable' | 'recordRoundFailure'>
   /** 体检前收集待处理、体检后立刻重写视图（比出这次的新增）。 */
   views: CheckupRunDeps['views']
   /** 每个范围此刻的情况（体检视图的内容：有效频率、是否到期，全局在前、项目按路径排序）。每次检查现读，别的进程改的设置也能读到。 */
@@ -45,6 +46,11 @@ export interface AutoCheckupSchedulerDeps {
   onRoundDone?: () => void
   now: () => number
   log?: MemoryLogger
+}
+
+/** 一轮检查走到了哪：正在处理的范围和这轮的开始时间（还没到逐个范围那一步时没有）。 */
+interface CheckingAt {
+  current?: { scope: Scope; since: number }
 }
 
 /**
@@ -87,7 +93,8 @@ export class AutoCheckupScheduler {
 
   /**
    * 立刻检查一次（设置改了、体检开关打开时也调它）。正在检查或体检时不另起一个：等这一轮做完再查一遍。
-   * 返回这一轮（含补的那遍）做完的时刻。
+   * 返回这一轮（含补的那遍）做完的时刻；不会 reject：发起方（宿主计时器、设置改动的回调）都不接，
+   * 冒出去的 rejection 会让宿主整个退出，所以一轮里没兜住的错误在这里接住（见 recordUnexpected）。
    */
   recheck(): Promise<void> {
     if (this.isDisposed) return Promise.resolve()
@@ -99,7 +106,8 @@ export class AutoCheckupScheduler {
       try {
         do {
           this.isRerunRequested = false
-          await this.checkOnce()
+          const checking: CheckingAt = {}
+          await this.checkOnce(checking).catch((err: unknown) => this.recordUnexpected(err, checking.current))
         } while (this.isRerunRequested && !this.isDisposed)
       } finally {
         this.running = undefined
@@ -123,7 +131,8 @@ export class AutoCheckupScheduler {
     await this.running
   }
 
-  private async checkOnce(): Promise<void> {
+  /** checking：这轮检查走到了哪，出错时 recheck 据它给正在处理的范围记失败。 */
+  private async checkOnce(checking: CheckingAt): Promise<void> {
     // 这轮检查的开始时间：下面的到期范围都按这时读到的状态定
     const startedAt = this.deps.now()
     let status: CheckupView
@@ -138,6 +147,7 @@ export class AutoCheckupScheduler {
     // 到期、且没在等失败后的重试时间的范围
     const due = status.scopes.filter(s => s.isDue && (s.failure === null || s.failure.retryAt <= now))
     for (const [i, { scope }] of due.entries()) {
+      checking.current = { scope, since: startedAt }
       if (this.isDisposed || !this.deps.isGovernanceEnabled()) return
       // 每次开跑现读选择和默认模型：用户在两次之间换了模型（别的进程里换的也算）就用新的
       const { llm, isSelected, fellBack, reason } = await this.deps.resolveLlm()
@@ -153,6 +163,22 @@ export class AutoCheckupScheduler {
       this.log.warn(`[plastic-memory] ${isSelected ? '自动体检选的模型' : '默认模型'}现在用不了，自动体检这次不跑，下次检查再试`, cause)
       await this.recordModelUnavailable(due.slice(i).filter(s => !s.isInProgress).map(s => s.scope), cause, startedAt)
       return
+    }
+  }
+
+  /**
+   * 一轮检查里没兜住的错误：记日志，这一轮到此为止。出错时正在处理某个范围，就照失败给它记一次（连续失败计数、重试时间），
+   * 稳定复现的错误不会每次检查都重来；记不下只记日志，没有失败记录，下一次检查照常到期再试。
+   */
+  private async recordUnexpected(err: unknown, current: CheckingAt['current']): Promise<void> {
+    this.log.warn('[plastic-memory] 自动体检这一轮出错，稍后再试', err)
+    if (current === undefined) return
+    try {
+      // 原话进体检记录和视图：先遮掉疑似密钥。这轮开始之后这个范围已有体检做完、或已记过失败，就不再记（见 recordRoundFailure）
+      await this.deps.checkups.recordRoundFailure(current.scope, { kind: 'error', message: maskDiagnostic(err instanceof Error ? err.message : String(err)) }, this.deps.now(), current.since)
+      await this.deps.onChecked?.()
+    } catch (recordErr) {
+      this.log.warn('[plastic-memory] 记不下自动体检的失败，下次检查再试', recordErr)
     }
   }
 
