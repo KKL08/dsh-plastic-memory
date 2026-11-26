@@ -39,7 +39,8 @@ export interface SettingsDraft {
   migration: MigrationState
   /** 改字段；给了 migrations 时整份替换暂存的迁移。 */
   edit(patch: Partial<SettingsFields>, migrations?: Migrations): void
-  save(): Promise<void>
+  /** 提交草稿；配置写进去了为 true（之后的类型迁移成败另看 migration）。没提交（不可保存）、被拒、失败为 false。 */
+  save(): Promise<boolean>
   retryMigrations(): Promise<void>
   /** 丢掉暂存改动，下一次改动按最新 revision 重新冻结。 */
   discard(): void
@@ -107,7 +108,7 @@ export function useSettingsDraft(form: ConfigForm, migrate?: MigrateType): Setti
   const migrations: Migrations = migration.status === 'failed' ? { ...migration.remaining, ...state.migrations } : state.migrations
 
   const save = async () => {
-    if (ops === undefined || !isDirty || state.saving || state.outcome === 'conflict' || !snapshot.writable) return
+    if (ops === undefined || !isDirty || state.saving || state.outcome === 'conflict' || !snapshot.writable) return false
     const frozen = state.revision
     setState(prev => ({ ...prev, saving: true, outcome: 'idle' }))
     // 只有迁移、配置没变（少见）时不写配置
@@ -122,10 +123,11 @@ export function useSettingsDraft(form: ConfigForm, migrate?: MigrateType): Setti
       setState(IDLE)
       setMigration({ status: 'idle' })
       await runMigrations(pending)
-      return
+      return true
     }
     const conflicted = frozen !== undefined && form.getSnapshot().revision !== frozen
     setState(prev => ({ ...prev, saving: false, outcome: conflicted ? 'conflict' : 'failed' }))
+    return false
   }
 
   return {

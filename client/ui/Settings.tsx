@@ -4,8 +4,11 @@
  *   主按钮没有改动时 .4 置灰）。离开页面丢弃暂存改动由调用方 onDiscard 处理。
  *   和宿主不同：页面长，保存行吸在可视区底部（滚到页尾时回到原位），有改动时按钮后面写还有几项没保存。
  *   bottom 取 -48px：宿主插件页的滚动容器（.page）底部内边距 48px，吸附按内边距内沿算，不抵掉会悬在窗口底上方、下面露出内容。
- * - SettingsGroupCard：我们按用户决定加的分组卡片（「记什么 · 怎么用 · 怎么管 · 外观」），组标题在卡片外。
- * - SettingsItem：卡片里的一项，上下各 14px，项与项之间 0.5px 细线。
+ * - SettingsSection：设置页每个分页里的一个小节（带入、检索、体检…）：标题和一句「什么时候发生、花多少」在卡外上方，卡下可有一行脚注。
+ *   分页本身（「记什么 · 怎么用 · 怎么管 · 外观」）是页内顶部标签，不在这里。
+ * - SettingsCard：小节里的那张卡；「记什么」「外观」两页不分小节，直接一张卡。
+ * - SettingsItem：卡片里的一项，上下各 14px，项与项之间 0.5px 细线（画在卡的左右内边距里，不通栏）；sub 是跟着上一项的子项，
+ *   缩进 16px、和上一项之间不画线。SettingsSwitchItem 是开关一项：标签和说明在左，开关在右（同宿主 Switch 行）。
  * - 「记什么」的卡片里是两段小卡（.pm-subgroup：场景、记忆类型），段与段之间同样一条细线；每段前一个小标题（.pm-subgroup-title），
  *   小卡排成网格（.pm-tiles，同宿主 Agent 预设的卡片网格），卡身 .pm-tile-main、卡脚 .pm-tile-foot（细线隔开的操作），
  *   单选卡的整个卡身是单选框（.pm-tile-radio 盖满卡身），选中同宿主外观方块：平台底色 + bluish-400 描边；新建是网格最后一张虚线卡（.pm-tile-add）。
@@ -56,29 +59,79 @@ export function SettingsForm({ state, pending, onSave, onDiscard, children }: {
   )
 }
 
-export function SettingsGroupCard({ title, children }: { title: ReactNode; children: ReactNode }) {
+/** 一个小节：标题、说明（和标题后的小标签）在卡外上方，项在卡里，脚注在卡下；整节是一个以标题命名的区域。 */
+export function SettingsSection({ title, description, badge, footnote, children }: {
+  title: ReactNode
+  /** 标题后面同一行的一句说明。 */
+  description: ReactNode
+  /** 标题后的小标签（如「实验性」），读屏念在标题里。 */
+  badge?: ReactNode
+  /** 卡下的一行脚注。 */
+  footnote?: ReactNode
+  children: ReactNode
+}) {
+  const titleId = useId()
   return (
-    <section className="pm-group">
-      <h2 className="pm-group-title">{title}</h2>
-      <div className="pm-group-card">{children}</div>
+    <section className="pm-sec" aria-labelledby={titleId}>
+      <div className="pm-sec-head">
+        {/* 标题和小标签之间的空格给读屏断词；标题是 flex 容器，空格不占位 */}
+        <h3 className="pm-sec-title" id={titleId}>{title}{badge !== undefined ? <>{' '}{badge}</> : null}</h3>
+        <p className="pm-sec-desc">{description}</p>
+      </div>
+      <SettingsCard>{children}</SettingsCard>
+      {footnote !== undefined ? <p className="pm-sec-foot">{footnote}</p> : null}
     </section>
   )
 }
 
-export function SettingsItem({ label, hint, htmlFor, disabled = false, children }: {
+/** 设置卡：白底细描边的圆角卡，项与项之间的细线画在卡的左右内边距里。 */
+export function SettingsCard({ children }: { children: ReactNode }) {
+  return <div className="pm-group-card">{children}</div>
+}
+
+interface ItemProps {
   label: ReactNode
   hint?: ReactNode
   /** 控件 id，和标签关联。 */
   htmlFor?: string
+  /** 标签自己的 id：控件是一组按钮时（步进），组用它作名字。 */
+  labelId?: string
   /** 置灰保留（例如体检关闭时依赖它的项）：标签和说明降为次级色，控件由调用方禁用。 */
   disabled?: boolean
-  children: ReactNode
-}) {
+  /** 跟着上一项的子项（只在上一项开着时有用）。 */
+  sub?: boolean
+  /** 标签后的小标签（如「实验性」），不进控件的名字。 */
+  badge?: ReactNode
+}
+
+const itemClass = (base: string, { disabled = false, sub = false }: Pick<ItemProps, 'disabled' | 'sub'>) =>
+  [base, disabled && 'pm-setting--disabled', sub && 'pm-setting--sub'].filter(Boolean).join(' ')
+
+function ItemLabel({ label, htmlFor, labelId, badge }: Pick<ItemProps, 'label' | 'htmlFor' | 'labelId' | 'badge'>) {
+  const text = <label className="pm-setting-label" htmlFor={htmlFor} id={labelId}>{label}</label>
+  return badge === undefined ? text : <span className="pm-setting-head">{text}{badge}</span>
+}
+
+/** 卡里的一项：标签在上，控件和说明在下。 */
+export function SettingsItem({ children, hint, ...props }: ItemProps & { children: ReactNode }) {
   return (
-    <div className={disabled ? 'pm-setting pm-setting--disabled' : 'pm-setting'}>
-      <label className="pm-setting-label" htmlFor={htmlFor}>{label}</label>
+    <div className={itemClass('pm-setting', props)}>
+      <ItemLabel {...props} />
       {children}
       {hint !== undefined ? <p className="pm-setting-hint">{hint}</p> : null}
+    </div>
+  )
+}
+
+/** 开关一项：开关是 children（id 给 htmlFor），放在右边。 */
+export function SettingsSwitchItem({ children, hint, ...props }: ItemProps & { children: ReactNode }) {
+  return (
+    <div className={itemClass('pm-setting pm-setting--switch', props)}>
+      <div className="pm-setting-text">
+        <ItemLabel {...props} />
+        {hint !== undefined ? <p className="pm-setting-hint">{hint}</p> : null}
+      </div>
+      {children}
     </div>
   )
 }
@@ -94,11 +147,20 @@ export const settingsCss = `
 .pm-root .pm-form-footer:focus { outline: none; }
 .pm-form-pending { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-3); }
 .pm-form-failed { flex: 1; min-width: 0; margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-error); }
-.pm-group + .pm-group { margin-top: 32px; }
-.pm-group-title { margin: 0 0 8px; padding-left: 16px; font-size: 16px; font-weight: 500; line-height: 24px; color: var(--pm-text); }
+.pm-sec + .pm-sec { margin-top: 24px; }
+.pm-sec-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; margin: 0 0 8px; padding: 0 16px; }
+.pm-sec-title { display: inline-flex; align-items: center; gap: 8px; margin: 0; font-size: 14px; font-weight: 600; line-height: 20px; color: var(--pm-text); }
+.pm-sec-title .pm-chip { font-weight: 400; }
+.pm-sec-desc { margin: 0; font-size: 12px; line-height: 18px; color: var(--pm-text-3); }
+.pm-sec-foot { margin: 8px 0 0; padding: 0 16px; font-size: 12px; line-height: 1.5; color: var(--pm-text-3); }
 .pm-group-card { padding: 0 16px; border: .5px solid var(--pm-line-card); border-radius: var(--dsw-radius-lg, 16px); background: var(--pm-bg); }
 .pm-setting { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 14px 0; }
 .pm-setting + .pm-setting { border-top: .5px solid var(--pm-line); }
+.pm-setting--sub { padding-left: 16px; }
+.pm-setting + .pm-setting--sub { border-top: 0; padding-top: 0; }
+.pm-setting--switch { flex-direction: row; justify-content: space-between; gap: 24px; }
+.pm-setting-text { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; min-width: 0; }
+.pm-setting-head { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .pm-setting-label { font-size: 13px; font-weight: 500; line-height: 1.5; color: var(--pm-text); }
 .pm-setting-hint { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-3); }
 .pm-setting--disabled .pm-setting-label { color: var(--pm-text-3); }

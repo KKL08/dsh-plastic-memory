@@ -18,9 +18,9 @@ export type { ConfigForm, ConfigFormSnapshot, ConfigPathOp } from '../host.ts'
 
 // —— 配置段 ——
 
-import { ACCENTS, DECAY_DAYS_MAX, GENERAL_SCENE, MAX_SCENES, SCENE_MAX_TYPES } from '../../src/gui/contract.ts'
+import { ACCENTS, DECAY_DAYS_MAX, GENERAL_SCENE, MAX_SCENES, SCENE_MAX_TYPES, SEARCH_SOURCES } from '../../src/gui/contract.ts'
 
-export { ACCENTS, DECAY_DAYS_MAX, GENERAL_SCENE, MAX_SCENES, SCENE_MAX_TYPES }
+export { ACCENTS, DECAY_DAYS_MAX, GENERAL_SCENE, MAX_SCENES, SCENE_MAX_TYPES, SEARCH_SOURCES }
 
 /** 内置五类的英文名，也是通用场景的组成（src/type-registry.ts BUILTIN_TYPES，tests/client-settings-mirror.spec.ts 守一致）。自定义类型不能重名。 */
 export const BUILTIN_TYPE_NAMES = ['profile', 'preference', 'knowledge', 'project', 'reference'] as const
@@ -388,6 +388,16 @@ export interface SettingsFields {
   evidence: (typeof EVIDENCE_LEVELS)[number]
   sensitivity: (typeof SENSITIVITIES)[number]
   promoteTarget: (typeof PROMOTE_TARGETS)[number]
+  /** 体检小节：状态变了时提醒复查相关的决定（实验）。 */
+  relatedRecheck: boolean
+  /** 检索来源（search.source）。 */
+  searchSource: (typeof SEARCH_SOURCES)[number]
+  /** 检索结果附带原话（search.memoryQuotes）。 */
+  memoryQuotes: boolean
+  /** 每次检索带的其他原话（search.dialogueTokenBudget，token），已按服务端的口径取整。 */
+  dialogueBudget: number
+  /** 扩查（search.queryExpansion）。 */
+  queryExpansion: boolean
   accent: (typeof ACCENTS)[number]
 }
 
@@ -399,12 +409,45 @@ const PATHS: Record<Exclude<keyof SettingsFields, 'scenes' | 'customTypes' | 're
   evidence: ['evidenceLookup'],
   sensitivity: ['governance', 'health', 'sensitivity'],
   promoteTarget: ['governance', 'globalPromoteTarget'],
+  relatedRecheck: ['governance', 'relatedRecheck'],
+  searchSource: ['search', 'source'],
+  memoryQuotes: ['search', 'memoryQuotes'],
+  dialogueBudget: ['search', 'dialogueTokenBudget'],
+  queryExpansion: ['search', 'queryExpansion'],
   accent: ['accent'],
 }
 
 const DEFAULTS: SettingsFields = {
   template: 'custom', scenes: PRESET_SCENES, customTypes: {}, removedPresets: [], builtinDecayDays: {}, budget: '4000', overflow: 'relax',
-  evidence: 'strict', sensitivity: 'normal', promoteTarget: 'plugin-global', accent: 'ella',
+  evidence: 'strict', sensitivity: 'normal', promoteTarget: 'plugin-global', relatedRecheck: false,
+  searchSource: 'both', memoryQuotes: true, dialogueBudget: 1500, queryExpansion: true, accent: 'ella',
+}
+
+/** 每次检索带的其他原话：一段的 token 数、缺省上限（src/search/dialogue-format.ts，镜像测试守一致）。 */
+export const DIALOGUE_BUDGET_STEP = 300
+export const DIALOGUE_BUDGET_DEFAULT = DEFAULTS.dialogueBudget
+/** 设置页能调的范围：2–10 段。配置文件里可以写范围外的值，服务端照用，界面照实显示。 */
+export const DIALOGUE_BUDGET_MIN = 2 * DIALOGUE_BUDGET_STEP
+export const DIALOGUE_BUDGET_MAX = 10 * DIALOGUE_BUDGET_STEP
+
+/** 配置里的其他原话上限 → 服务端实际用的值（dialogueBudgetOf 的口径：不是一段的倍数向下取整，最少一段）。 */
+function dialogueBudgetOf(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULTS.dialogueBudget
+  return Math.max(DIALOGUE_BUDGET_STEP, Math.floor(value / DIALOGUE_BUDGET_STEP) * DIALOGUE_BUDGET_STEP)
+}
+
+/** 步进一段（direction 为 1 或 -1），结果停在设置页的范围里：范围外的值点一下就回到最近的一端。 */
+export function stepDialogueBudget(current: number, direction: 1 | -1): number {
+  return Math.min(DIALOGUE_BUDGET_MAX, Math.max(DIALOGUE_BUDGET_MIN, current + direction * DIALOGUE_BUDGET_STEP))
+}
+
+/** 对话记录库用不用得上：检索来源含原话、或检索结果附带原话开着（同服务端 isDialogueEnabled）。 */
+export function isDialogueInUse(fields: Pick<SettingsFields, 'searchSource' | 'memoryQuotes'>): boolean {
+  return fields.searchSource !== 'memory' || fields.memoryQuotes
+}
+
+function booleanOr(value: unknown, fallback: boolean): boolean {
+  return typeof value === 'boolean' ? value : fallback
 }
 
 function at(value: unknown, path: readonly string[]): unknown {
@@ -471,6 +514,11 @@ export function fieldsOf(section: unknown): SettingsFields {
     evidence: oneOf(EVIDENCE_LEVELS, at(section, PATHS.evidence), DEFAULTS.evidence),
     sensitivity: oneOf(SENSITIVITIES, at(section, PATHS.sensitivity), DEFAULTS.sensitivity),
     promoteTarget: oneOf(PROMOTE_TARGETS, at(section, PATHS.promoteTarget), DEFAULTS.promoteTarget),
+    relatedRecheck: booleanOr(at(section, PATHS.relatedRecheck), DEFAULTS.relatedRecheck),
+    searchSource: oneOf(SEARCH_SOURCES, at(section, PATHS.searchSource), DEFAULTS.searchSource),
+    memoryQuotes: booleanOr(at(section, PATHS.memoryQuotes), DEFAULTS.memoryQuotes),
+    dialogueBudget: dialogueBudgetOf(at(section, PATHS.dialogueBudget)),
+    queryExpansion: booleanOr(at(section, PATHS.queryExpansion), DEFAULTS.queryExpansion),
     accent: oneOf(ACCENTS, at(section, PATHS.accent), DEFAULTS.accent),
   }
 }

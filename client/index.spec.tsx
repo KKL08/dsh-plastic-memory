@@ -131,7 +131,7 @@ describe('apply', () => {
     expect(infoCalls()).toHaveLength(1)
   })
 
-  it('记忆页、输入框按钮、右侧栏 tab、设置页共用一个网关：一次页面加载只发一次 info 和一次 refresh-views（设置页另列一次能选的模型）', async () => {
+  it('记忆页、输入框按钮、右侧栏 tab、设置页共用一个网关：一次页面加载只发一次 info 和一次 refresh-views（设置页另列一次能选的模型、取一次对话记录库的状态）', async () => {
     localStorage.clear()
     const { registered, ctx } = setup()
     const info = JSON.stringify({ ok: true, cmd: 'info', info: { memoryRoot: '/home/me/.dsh/memories', viewDir: '/home/me/.dsh/memories/.state/gui', views: { pending: '', health: '', library: '', deleted: '' }, version: 1 } })
@@ -147,7 +147,7 @@ describe('apply', () => {
     const state: SessionListState = { ids: ['s1'], byId: { s1: { id: 's1', displayTitle: 's1', running: true, cwd: '/w/app', updatedAt: 1, retainedBy: { mainView: 1 } } }, phase: 'ready' }
     const session = { ...props(state), sessionId: 's1', useProjection: () => undefined }
     render(<><Page {...props(state)} /><Dock {...session} /><Side {...session} /><Settings {...props(state)} view="page" /></>)
-    await waitFor(() => expect(vi.mocked(ctx.remote.commands.execute).mock.calls.map(([, line]) => line).sort()).toEqual(['/memory info', '/memory list-models', '/memory refresh-views']))
+    await waitFor(() => expect(vi.mocked(ctx.remote.commands.execute).mock.calls.map(([, line]) => line).sort()).toEqual(['/memory dialogue-records-state', '/memory info', '/memory list-models', '/memory refresh-views']))
   })
 
   it('浏览器缓存了根：几个插槽根同时挂上，只有记忆页打开时那一次 refresh-views，不发 info', async () => {
@@ -169,11 +169,11 @@ describe('apply', () => {
     const session = { ...props(state), sessionId: 's1', useProjection: () => undefined }
     const lines = () => vi.mocked(ctx.remote.commands.execute).mock.calls.map(([, line]) => line)
     const { unmount } = render(<><Page {...props(state)} /><Dock {...session} /><Side {...session} /><Settings {...props(state)} view="page" /></>)
-    // 设置页另列一次能选的模型（自动体检的模型选择）
-    await waitFor(() => expect(lines().sort()).toEqual(['/memory list-models', '/memory refresh-views']))
+    // 设置页另列一次能选的模型（体检和扩查的模型选择）、取一次对话记录库的状态
+    await waitFor(() => expect(lines().sort()).toEqual(['/memory dialogue-records-state', '/memory list-models', '/memory refresh-views']))
     unmount()
     render(<Dock {...session} />)
     await act(async () => {})
-    expect(lines().sort()).toEqual(['/memory list-models', '/memory refresh-views'])
+    expect(lines().sort()).toEqual(['/memory dialogue-records-state', '/memory list-models', '/memory refresh-views'])
   })
 })

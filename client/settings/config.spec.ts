@@ -5,7 +5,7 @@ import {
   forgetMigrations, isPresetEdited, isPresetTypeEdited, keepMigrations, memoryCountOf, nextSceneId, pendingNames, presetSceneTypes, presetTypeChanges,
   removeType, renameMigrations, renameType, restorePresetType, sceneChanges, sceneTypes, typePool, validateSceneDraft, validateTypeDraft,
   OVERFLOW_MODES, PROMOTE_TARGETS, toPluginConfig, type CustomType, type SettingsFields,
-  DECAY_DAYS_MAX, decayDaysOf, parseDecayDays, parsePeriodText, withDecayDays,
+  DECAY_DAYS_MAX, decayDaysOf, parseDecayDays, parsePeriodText, withDecayDays, isDialogueInUse, stepDialogueBudget,
 } from './config.ts'
 import { DEFAULT_SECTION } from './config-form.fake.ts'
 
@@ -361,5 +361,52 @@ describe('类型表单里的说明跟着注入的样子写', () => {
     const { settingsZh } = await import('../locales/settings.ts')
     expect(settingsZh['settings.type.decayDaysHint']).not.toContain('带入时')
     expect(settingsZh['settings.type.decayDaysHintRequired']).not.toContain('带入时')
+  })
+})
+
+describe('检索和体检的新设置项', () => {
+  it('旧配置文件没有 search 段、没有 relatedRecheck：按缺省值显示（两者都查、附带原话开、5 段、扩查开、复查提醒关）', () => {
+    expect(fieldsOf(DEFAULT_SECTION)).toMatchObject({ searchSource: 'both', memoryQuotes: true, dialogueBudget: 1500, queryExpansion: true, relatedRecheck: false })
+    expect(fieldsOf({ search: 'bad', governance: null })).toMatchObject({ searchSource: 'both', memoryQuotes: true, dialogueBudget: 1500, queryExpansion: true, relatedRecheck: false })
+  })
+
+  it('读配置里写的值；不认识的取值按缺省', () => {
+    expect(fieldsOf({ search: { source: 'memory', memoryQuotes: false, dialogueTokenBudget: 2400, queryExpansion: false }, governance: { relatedRecheck: true } }))
+      .toMatchObject({ searchSource: 'memory', memoryQuotes: false, dialogueBudget: 2400, queryExpansion: false, relatedRecheck: true })
+    expect(fieldsOf({ search: { source: 'web', memoryQuotes: 'yes', dialogueTokenBudget: '900', queryExpansion: 1 }, governance: { relatedRecheck: 'on' } }))
+      .toMatchObject({ searchSource: 'both', memoryQuotes: true, dialogueBudget: 1500, queryExpansion: true, relatedRecheck: false })
+  })
+
+  it('其他原话的上限按服务端的口径显示：不是 300 的倍数向下取整，最少一段', () => {
+    expect(fieldsOf({ search: { dialogueTokenBudget: 1650 } }).dialogueBudget).toBe(1500)
+    expect(fieldsOf({ search: { dialogueTokenBudget: 100 } }).dialogueBudget).toBe(300)
+    expect(fieldsOf({ search: { dialogueTokenBudget: 4500 } }).dialogueBudget).toBe(4500)
+  })
+
+  it('步进一次 300，停在 600–3000；配置文件里写了范围外的值，点一下回到范围里', () => {
+    expect(stepDialogueBudget(1500, 1)).toBe(1800)
+    expect(stepDialogueBudget(1500, -1)).toBe(1200)
+    expect(stepDialogueBudget(600, -1)).toBe(600)
+    expect(stepDialogueBudget(3000, 1)).toBe(3000)
+    expect(stepDialogueBudget(4500, -1)).toBe(3000)
+    expect(stepDialogueBudget(300, 1)).toBe(600)
+  })
+
+  it('改了写各自的路径，没改的不写', () => {
+    const saved = base()
+    expect(buildOps(saved, { ...saved, searchSource: 'memory', memoryQuotes: false, dialogueBudget: 2100, queryExpansion: false, relatedRecheck: true })).toEqual([
+      { op: 'set', path: ['governance', 'relatedRecheck'], value: true },
+      { op: 'set', path: ['search', 'source'], value: 'memory' },
+      { op: 'set', path: ['search', 'memoryQuotes'], value: false },
+      { op: 'set', path: ['search', 'dialogueTokenBudget'], value: 2100 },
+      { op: 'set', path: ['search', 'queryExpansion'], value: false },
+    ])
+    expect(buildOps(saved, base())).toEqual([])
+  })
+
+  it('对话记录库用不用得上：检索来源含原话、或检索结果附带原话开着', () => {
+    expect(isDialogueInUse(base({ searchSource: 'memory', memoryQuotes: false }))).toBe(false)
+    expect(isDialogueInUse(base({ searchSource: 'memory', memoryQuotes: true }))).toBe(true)
+    expect(isDialogueInUse(base({ searchSource: 'dialogue', memoryQuotes: false }))).toBe(true)
   })
 })

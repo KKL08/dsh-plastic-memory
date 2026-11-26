@@ -24,6 +24,7 @@ import { pendingCss } from './pending/PendingTab.tsx'
 import { proposalCss } from './pending/proposal.tsx'
 import { suggestionCss } from './pending/suggestion.tsx'
 import { controlsCss } from './settings/controls.tsx'
+import { dialogueRecordsCss } from './settings/DialogueRecords.tsx'
 import { modelPickerCss } from './settings/ModelPicker.tsx'
 import { scenesCss } from './settings/Scenes.tsx'
 import { settingsPageCss } from './settings/SettingsPage.tsx'
@@ -39,7 +40,7 @@ export const SLOT_STYLES = {
   },
   sidebar: { confirmCss, modelChangeCss, sidebarTabCss },
   chat: { confirmCss, modelChangeCss, savedMemoriesCardCss },
-  settings: { settingsCss, healthBannerCss, controlsCss, modelPickerCss, scenesCss, settingsPageCss },
+  settings: { settingsCss, healthBannerCss, controlsCss, modelPickerCss, scenesCss, settingsPageCss, dialogueRecordsCss },
   composer: { memoryButtonCss },
 }
 

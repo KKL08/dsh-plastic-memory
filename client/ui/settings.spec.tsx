@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, screen } from '@testing-library/react'
 import { SegmentedControl, SegmentedTabs } from './Segmented.tsx'
-import { SettingsForm, SettingsGroupCard, SettingsItem, type SettingsFormState } from './Settings.tsx'
+import { SettingsCard, SettingsForm, SettingsItem, SettingsSection, SettingsSwitchItem, type SettingsFormState } from './Settings.tsx'
 import { renderInShell } from '../test-utils.tsx'
 
 const state = (patch: Partial<SettingsFormState> = {}): SettingsFormState => ({
@@ -38,20 +38,34 @@ describe('SettingsForm', () => {
   })
 })
 
-describe('SettingsGroupCard', () => {
-  it('组标题在卡片外，卡片里每项一行', () => {
+describe('SettingsSection', () => {
+  it('小节标题和一句说明在卡片外，卡片里每项一行，脚注在卡下；标题后的小标签念在标题里', () => {
     const { container } = renderInShell(
-      <SettingsGroupCard title="怎么用">
+      <SettingsSection title="带入" description="对话开始时给。" badge={<span>实验性</span>} footnote="脚注。">
         <SettingsItem label="上限" hint="默认 4,000。" htmlFor="budget"><input id="budget" /></SettingsItem>
         <SettingsItem label="超出上限时"><span /></SettingsItem>
-      </SettingsGroupCard>,
+      </SettingsSection>,
     )
-    const title = screen.getByRole('heading', { name: '怎么用' })
-    expect(title.parentElement).toHaveClass('pm-group')
-    expect(container.querySelector('.pm-group-card')!.contains(title)).toBe(false)
+    const title = screen.getByRole('heading', { name: '带入 实验性' })
+    const card = container.querySelector('.pm-group-card')!
+    expect(card.contains(title)).toBe(false)
+    expect(card.contains(screen.getByText('对话开始时给。'))).toBe(false)
+    expect(screen.getByRole('region', { name: '带入 实验性' })).toContainElement(screen.getByText('脚注。'))
+    expect(card.contains(screen.getByText('脚注。'))).toBe(false)
     expect(container.querySelectorAll('.pm-group-card > .pm-setting')).toHaveLength(2)
     expect(screen.getByLabelText('上限')).toBeInTheDocument()
     expect(screen.getByText('默认 4,000。')).toHaveClass('pm-setting-hint')
+  })
+
+  it('开关一项：标签和开关关联，标签后的小标签不进开关的名字；子项缩进', () => {
+    renderInShell(
+      <SettingsCard>
+        <SettingsSwitchItem label="扩查" htmlFor="x" hint="说明" badge={<span>实验性</span>}><button id="x" role="switch" aria-checked="true" /></SettingsSwitchItem>
+        <SettingsItem label="扩查用的模型" sub><span /></SettingsItem>
+      </SettingsCard>,
+    )
+    expect(screen.getByRole('switch', { name: '扩查' })).toBeInTheDocument()
+    expect(screen.getByText('扩查用的模型').closest('.pm-setting')).toHaveClass('pm-setting--sub')
   })
 })
 

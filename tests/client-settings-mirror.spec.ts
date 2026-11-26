@@ -5,7 +5,9 @@ import { parse } from 'yaml'
 import {
   BUILTIN_TYPE_NAMES, ENTRY_ID, OVERFLOW_MODES, PACKAGE_NAME, PRESET_SCENES as CLIENT_PRESET_SCENES, PRESET_TYPE_NAMES, PROMOTE_TARGETS,
   RETIRED_TYPE_NAMES, SENSITIVITY_NUMBERS, TYPE_DEFINITIONS, buildOps, fieldsOf, removeType, withDecayDays,
+  DIALOGUE_BUDGET_DEFAULT, DIALOGUE_BUDGET_STEP,
 } from '../client/settings/config.ts'
+import { DIALOGUE_BUDGET_DEFAULT as SERVER_BUDGET_DEFAULT, DIALOGUE_BUDGET_STEP as SERVER_BUDGET_STEP, dialogueBudgetOf } from '../src/search/dialogue-format.ts'
 import { applyOps } from '../client/settings/config-form.fake.ts'
 import { Config } from '../src/index.ts'
 import { SENSITIVITY_PRESETS } from '../src/governance/health-presets.ts'
@@ -88,5 +90,15 @@ describe('设置页手抄的服务端常量', () => {
     const section = { search: { userDictionaryPath: '/opt/dict/domain.txt' } }
     const saved = fieldsOf(section)
     expect(buildOps(saved, { ...saved, budget: '5000' })).toEqual([{ op: 'set', path: ['snapshotTokenBudget'], value: 5000 }])
+  })
+
+  it('原话检索几项、复查提醒的缺省值与 Config 一致；一段的大小、缺省上限与服务端一致', () => {
+    const config = new Config({} as never)
+    const fields = fieldsOf({})
+    expect({ source: config.search.source.get(), memoryQuotes: config.search.memoryQuotes.get(), budget: config.search.dialogueTokenBudget.get(), expansion: config.search.queryExpansion.get(), recheck: config.governance.relatedRecheck.get() })
+      .toEqual({ source: fields.searchSource, memoryQuotes: fields.memoryQuotes, budget: fields.dialogueBudget, expansion: fields.queryExpansion, recheck: fields.relatedRecheck })
+    expect([DIALOGUE_BUDGET_STEP, DIALOGUE_BUDGET_DEFAULT]).toEqual([SERVER_BUDGET_STEP, SERVER_BUDGET_DEFAULT])
+    expect(dialogueBudgetOf(1650)).toBe(fieldsOf({ search: { dialogueTokenBudget: 1650 } }).dialogueBudget)
+    expect(dialogueBudgetOf(100)).toBe(fieldsOf({ search: { dialogueTokenBudget: 100 } }).dialogueBudget)
   })
 })
