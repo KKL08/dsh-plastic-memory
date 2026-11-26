@@ -1,7 +1,12 @@
+import { setTimeout as delay } from 'node:timers/promises'
+import { resolveSelection } from '../governance/background-llm.ts'
+import { turnOpenerOf, isRealUserMessage, messageText } from '../session-log.ts'
+import { quoteTurnKey } from '../search/memory-quotes.ts'
+import type { DialogueTokenizer } from '../search/dialogue-tokenizer.ts'
 import { dirname } from 'node:path'
 import { VERSION_ID_PATTERN } from '../storage/history.ts'
 import type { SearchSource } from '../contract-codes.ts'
-import { retrieveDialogue, finishDialogue, renderDialogueSearch, runPath, catchUpFor, listSessionTable, shareDialogueReads, DIALOGUE_PATH_BUDGET_MS, type DialogueSearchDeps, type FinishedDialogue } from './dialogue-search.ts'
+import { retrieveDialogue, finishDialogue, renderDialogueSearch, runPath, catchUpFor, listSessionTable, shareDialogueReads, DIALOGUE_PATH_BUDGET_MS, type DialogueSearchDeps, type FinishedDialogue, type DialogueRetrieval, type DialogueFusionInput, fusedCandidates, queryAndRank, messageReader } from './dialogue-search.ts'
 import { dialogueNote, renderSearchSections, DIALOGUE_QUERY_REQUIRED, MEMORY_QUOTES_UNAVAILABLE } from '../search/dialogue-format.ts'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { MemoryStore, QueryScope } from '../store.ts'
@@ -10,13 +15,15 @@ import type { QueryTokenizerOptions } from '../search/jieba-segmenter.ts'
 import type { SearchTier } from '../search/ranking.ts'
 import type { MemoryCandidate } from '../search/memory-candidates.ts'
 import { memoryLane, quoteMemories, renderQuoteBlock, withDialogueSegments, type MemoryQuotes } from './memory-quotes.ts'
-import { segmentKey } from '../search/dialogue-rank.ts'
+import { segmentKey, groupHitsByTurn, compareTurns, type DialogueTurnCandidate } from '../search/dialogue-rank.ts'
 import { memoryLabelOf } from '../search/memory-quotes.ts'
 import { matchWindow } from '../search/window.ts'
 import { judgeTopHit, matchedTerms, type TermHitCount } from '../search/coverage.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { ContextHost } from './host-session.ts'
 import type { DialogueCallCap } from './dialogue-call-cap.ts'
+import { type ExpansionDeps, isWeakRound, parseExpansionGroups, memoryBridgeCandidates, MEMORY_BRIDGE_DEADLINE_MS, EXPANSION_TIMEOUT_MS, EXPANSION_SELECTION_KEY, EXPANSION_SYSTEM_PROMPT, EXPANSION_QUERY_LEAD, EXPANSION_USER_MESSAGE_LEAD, EXPANSION_EXCERPTS_LEAD, EXPANSION_MEMORIES_LEAD, EXPANSION_MEMORY_HINTS, EXPANSION_EXCERPT_TURNS, EXPANSION_PINNED_TURNS, EXPANSION_USER_MESSAGE_MAX_CHARS, EXPANSION_LANE_WEIGHT, EXPANSION_FAILED_NOTE, EXPANSION_MODEL_FALLBACK_NOTE } from './query-expansion.ts'
+import { foldToLine, wrapDialogueQuote, renderDialogueLine, DIALOGUE_SEGMENT_GAP } from '../search/dialogue-format.ts'
 import { sourceNote, formatIndexLine, injectionText } from '../index-line.ts'
 import { stalenessNote } from '../record-freshness.ts'
 import { exposedPath, maskSecretSurface, maskSecrets } from '../secrets.ts'
@@ -30,8 +37,11 @@ export interface SearchContext {
   /** 宿主委派信息；子 agent 只读自己的会话。 */
   delegation?: object
   workspacePath: string | undefined
-  /** handle：宿主的 session 对象，快照缓存与召回去重按它分会话；拿不到 session 时缺省。 */
-  session: { id: string; lastSeq: number; handle?: object }
+  /**
+   * handle：宿主的 session 对象，快照缓存与召回去重按它分会话；拿不到 session 时缺省。
+   * turnStartSeq：当轮 turn/start 的位置，扩查取这一轮的用户消息用；读不到时缺省（按会话里最后一个 turn/start 找）。
+   */
+  session: { id: string; lastSeq: number; turnStartSeq?: number; handle?: object }
 }
 
 /** 会话的快照与召回去重（SnapshotCache 满足它）。 */
@@ -60,6 +70,8 @@ export interface SearchToolDeps {
   now?: () => number
   /** 原话检索的连续调用上限，按 `exec.agent.session` 分会话；没传时不限次数。 */
   callCap?: DialogueCallCap
+  /** 原话检索的扩查：第一轮命中弱时调一次模型补关键词。没传时不扩查。 */
+  expansion?: ExpansionDeps
 }
 
 /**
@@ -536,7 +548,11 @@ async function executeMemorySearch(
 /** 记忆一路这次返回的候选（和 hits 逐条对应）和会话上下文：记忆带原话从这里取锚，不再按 id 读记忆。 */
 interface MemoryListing { top: readonly MemoryCandidate[]; context: SearchContext }
 
-type SearchOutcome = Awaited<ReturnType<typeof executeMemorySearch>> & { dialogueText?: string; onlyDialogue?: boolean; pathNote?: string; quoteNote?: string; history?: HistoryListing; version?: HistoryVersionInfo }
+/**
+ * usageTokens：这次检索里扩查调模型的实际用量（宿主报的 token 数，几次相加）；宿主一次都没报、或没扩查时没有。
+ * 只在结构化结果里，不进给模型看的文字。
+ */
+type SearchOutcome = Awaited<ReturnType<typeof executeMemorySearch>> & { dialogueText?: string; onlyDialogue?: boolean; pathNote?: string; quoteNote?: string; history?: HistoryListing; version?: HistoryVersionInfo; usageTokens?: number }
 
 /**
  * 记忆带原话：先走和原话检索同一个追库入口，再给排名靠前的记忆接上出处原话。用检索开头定下的截止时间剩下的部分，
@@ -638,23 +654,44 @@ async function searchSources(args: SearchArgs, exec: ToolRunContext, deps: Searc
     const dialogue = { ...deps.dialogue, isEnabled: () => deps.searchSource?.() !== 'memory' }
     const ctx = await contextOf()
     const retrieval = await retrieveDialogue({ query }, ctx, dialogue)
-    if (retrieval.kind !== 'ready' || source !== 'both') return { result: retrieval.kind === 'ready' ? await finishDialogue(retrieval, dialogue) : retrieval }
+    if (retrieval.kind !== 'ready') return { result: retrieval }
+    const tokenizer = await dialogue.tokenizer()
+    if (source === 'dialogue') {
+      const remainingMs = deadline - (DIALOGUE_PATH_BUDGET_MS - MEMORY_BRIDGE_DEADLINE_MS) - now()
+      const bridge = retrieval.allowed.size > 0 && remainingMs > 0
+        ? await runPath('bridge', async () => {
+          const top = await memoryBridgeCandidates({ query, types: args.types, scope: args.scope }, ctx.workspacePath, deps)
+          // 取记忆时可能删库或切代，投影读库前先复核。
+          const current = dialogue.store.state()
+          if (current.status === 'none' || current.read.gen !== retrieval.gen) return undefined
+          const { lane } = memoryLane(top, query, { store: dialogue.store, gen: retrieval.gen, tokenizer, allowed: retrieval.allowed })
+          return { top, lane }
+        }, remainingMs, now) : undefined
+      // 隔离单元返回也会让出；装填前复核，保持首轮库不可用的返回形状。
+      const current = dialogue.store.state()
+      if (current.status === 'none' || current.read.gen !== retrieval.gen) return { result: { kind: 'unavailable' as const, notes: [], groups: [] } }
+      const top = bridge?.ok ? bridge.value?.top ?? [] : []
+      const lane = bridge?.ok ? bridge.value?.lane : undefined
+      const input: DialogueFusionInput = lane !== undefined && lane.items.length > 0 ? { lanes: [lane] } : {}
+      return { result: await finishDialogue(retrieval, dialogue, input), expansionInput: { retrieval, dialogue, ctx, tokenizer, input, top } }
+    }
     // 两路候选都出自这一次检索：记忆取自这次读盘，原话取自这次追到的库；融合时不再读记忆
     const memoryHits = (await memories()).hits
     const top = listing?.top ?? []
     const shown = shownOf(top, memoryHits)
     const quotes = wantsQuotes && top.length > 0 ? await quoteMemories(shown, query, ctx, quoteDepsOf(dialogue), retrieval.gen) : undefined
     const blocks = quotes?.quotes ?? []
-    const { lane, related } = memoryLane(top, query, { store: dialogue.store, gen: retrieval.gen, tokenizer: await dialogue.tokenizer(), allowed: retrieval.allowed })
+    const { lane, related } = memoryLane(top, query, { store: dialogue.store, gen: retrieval.gen, tokenizer, allowed: retrieval.allowed })
     // 已附在记忆下面的轮对应附它的那条记忆
     for (const [i, block] of blocks.entries()) for (const t of block?.turns ?? []) related.set(t.key, top[i]!.record)
-    const result = await finishDialogue(retrieval, dialogue, {
+    const input: DialogueFusionInput = {
       lanes: [lane],
       attached: new Set(blocks.flatMap(b => b?.turns.map(t => t.key) ?? [])),
       given: new Set(blocks.flatMap(b => b?.turns.flatMap(t => t.view.messages.map(m => segmentKey({ sessionId: t.view.sessionId, seq: m.seq, segment: m.segment }))) ?? [])),
       related: new Map([...related].map(([turn, record]) => [turn, { label: memoryLabelOf(record), content: shown.some(c => c.record === record && c.isExcerpt) ? undefined : record.content }])),
-    })
-    return { result, quotes }
+    }
+    const result = await finishDialogue(retrieval, dialogue, input)
+    return { result, quotes, expansionInput: { retrieval, dialogue, ctx, tokenizer, input, top } }
   }, deadline - now(), now)
   // 只查原话时不提前召回记忆；两路同时查时也立即接住记忆的失败。
   const [path] = await Promise.all([dialogueTask, source === 'both' ? memories() : undefined])
@@ -664,10 +701,143 @@ async function searchSources(args: SearchArgs, exec: ToolRunContext, deps: Searc
     const note = path.ok && path.value.result.notes.length > 0 ? path.value.result.notes.join('\n') : dialogueNote(code)
     return { ...await memories(), ...(source === 'both' ? { dialogueText: note } : { pathNote: note }) }
   }
-  const dialogueText = renderDialogueSearch(path.value.result)
-  if (source === 'dialogue') return { hits: [], dialogueText, onlyDialogue: true }
+  let result = path.value.result
+  let usageTokens: number | undefined
+  const state = path.value.expansionInput
+  if (state && deps.expansion?.isEnabled() && state.retrieval.allowed.size > 0) {
+    const candidates = firstCandidates(state)
+    const expanded = isWeakRound(candidates) ? await expandDialogue(query, exec, deps.expansion, state, result, candidates) : { result }
+    result = expanded.result
+    usageTokens = expanded.usageTokens
+    if (result.kind === 'off') return { ...await memories(), pathNote: dialogueNote('dialogue-source-off'), ...(usageTokens === undefined ? {} : { usageTokens }) }
+  }
+  const usage = usageTokens === undefined ? {} : { usageTokens }
+  const dialogueText = renderDialogueSearch(result)
+  if (source === 'dialogue') return { hits: [], dialogueText, onlyDialogue: true, ...usage }
   const memoryOutcome = await memories()
   const { quotes } = path.value
-  const withQuotes = quotes !== undefined ? withQuoteBlocks(memoryOutcome, quotes, path.value.result.merged, listing!.top) : memoryOutcome
-  return { ...withQuotes, dialogueText, onlyDialogue: false }
+  const withQuotes = quotes !== undefined ? withQuoteBlocks(memoryOutcome, quotes, result.merged, listing!.top) : memoryOutcome
+  return { ...withQuotes, dialogueText, onlyDialogue: false, ...usage }
+}
+
+interface ExpansionState {
+  retrieval: DialogueRetrieval
+  dialogue: DialogueSearchDeps
+  ctx: SearchContext
+  tokenizer: DialogueTokenizer
+  input: DialogueFusionInput
+  top: readonly MemoryCandidate[]
+}
+function firstCandidates(state: ExpansionState): DialogueTurnCandidate[] {
+  return state.input.lanes === undefined ? state.retrieval.candidates : fusedCandidates(state.retrieval, state.input.lanes)
+}
+function shownCandidates(state: ExpansionState, first: FinishedDialogue, candidates: DialogueTurnCandidate[]): DialogueTurnCandidate[] {
+  const shown = new Set(first.groups.flatMap(g => g.turns.map(t => quoteTurnKey(g.sessionId, t.turnSeq))))
+  return candidates.filter(t => shown.has(quoteTurnKey(t.sessionId, t.turnSeq)) && !state.input.attached?.has(quoteTurnKey(t.sessionId, t.turnSeq)))
+    .sort(compareTurns)
+}
+async function expansionRequest(query: string, state: ExpansionState, first: FinishedDialogue, deps: ExpansionDeps, shown: DialogueTurnCandidate[]): Promise<string> {
+  const parts = [EXPANSION_QUERY_LEAD + '\n' + foldToLine(query)]
+  const { ctx, retrieval } = state
+  if (retrieval.allowed.has(ctx.session.id)) {
+    const log = await deps.host.readSessionLog(ctx.session.id)
+    const opener = log && turnOpenerOf(log, ctx.session.turnStartSeq, ctx.session.lastSeq)
+    if (log && opener && isRealUserMessage(log, opener)) {
+      const chars = [...messageText(opener)!.text]
+      const half = EXPANSION_USER_MESSAGE_MAX_CHARS / 2
+      const text = chars.length > EXPANSION_USER_MESSAGE_MAX_CHARS ? chars.slice(0, half).join('') + DIALOGUE_SEGMENT_GAP + chars.slice(-half).join('') : chars.join('')
+      parts.push(EXPANSION_USER_MESSAGE_LEAD + '\n' + wrapDialogueQuote(renderDialogueLine({ speaker: 'user', at: opener.time, text })))
+    }
+  }
+  const keys = new Set(shown.slice(0, EXPANSION_EXCERPT_TURNS).map(t => quoteTurnKey(t.sessionId, t.turnSeq)))
+  const lines = first.groups.flatMap(g => g.turns.filter(t => keys.has(quoteTurnKey(g.sessionId, t.turnSeq))).flatMap(t => t.messages.map(renderDialogueLine)))
+  if (lines.length) parts.push(EXPANSION_EXCERPTS_LEAD + '\n' + wrapDialogueQuote(lines.join('\n')))
+  const hints = state.top.slice(0, EXPANSION_MEMORY_HINTS).map(c => {
+    const record = maskSecretSurface(c.record)
+    const tags = record.tags.map(foldToLine).filter(Boolean)
+    return `- ${foldToLine(record.name)}${tags.length ? `（标签：${tags.join('、')}）` : ''}`
+  })
+  if (hints.length) parts.push(EXPANSION_MEMORIES_LEAD + '\n' + hints.join('\n'))
+  return parts.join('\n\n')
+}
+function expandedRetrieval(groups: string[], state: ExpansionState, shown: DialogueTurnCandidate[]) {
+  const { retrieval, dialogue, tokenizer, input } = state
+  const rounds = groups.map(q => queryAndRank(q, tokenizer, dialogue.store, retrieval.gen, [...retrieval.allowed], retrieval.includeTools))
+  if (rounds.every(r => r.hits.length === 0)) return undefined
+  const original = new Map(retrieval.candidates.map(t => [quoteTurnKey(t.sessionId, t.turnSeq), t]))
+  const hits = new Map(retrieval.candidates.flatMap(t => t.hits.map(h => [segmentKey(h), h] as const)))
+  const added = new Map<string, { hit: DialogueTurnCandidate['hits'][number]; rank: number }>()
+  for (const round of rounds) for (const [i, row] of round.ranked.entries()) {
+    const key = segmentKey(row.segment)
+    if (hits.has(key) || (added.get(key)?.rank ?? Infinity) <= i + 1) continue
+    const turn = original.get(quoteTurnKey(row.segment.sessionId, row.segment.turnSeq))
+    const hit = turn ? { ...row.segment, tier: 'partial' as const, score: Math.max(...turn.hits.map(h => h.score)) + i + 1 } : { ...row.segment, tier: row.tier }
+    added.set(key, { hit, rank: i + 1 })
+  }
+  const candidates = groupHitsByTurn([...hits.values(), ...[...added.values()].map(a => a.hit)])
+  const turnTables: DialogueRetrieval['turnTables'] = new Map()
+  for (const t of candidates) {
+    if (!turnTables.has(t.sessionId)) turnTables.set(t.sessionId, dialogue.store.turnsOf(retrieval.gen, t.sessionId))
+    t.at = turnTables.get(t.sessionId)!.find(row => row.turnSeq === t.turnSeq)?.at
+  }
+  // 扩查读取新段和邻居时用现查轮表，不污染首轮的缓存和失败退回结果。
+  const merged: DialogueRetrieval = { ...retrieval, candidates, turnTables, hits: [...retrieval.hits, ...rounds.flatMap(r => r.hits)], messageOf: messageReader(dialogue.store, retrieval.gen, retrieval.includeTools) }
+  const lanes = [...input.lanes ?? [], ...rounds.map((r, i) => ({ name: `expansion-${i}`, weight: EXPANSION_LANE_WEIGHT, items: r.ranked.map((row, j) => ({ id: segmentKey(row.segment), turn: quoteTurnKey(row.segment.sessionId, row.segment.turnSeq), rank: j + 1 })) }))]
+  const fused = fusedCandidates(merged, lanes)
+  const pinned = shown.slice(0, EXPANSION_PINNED_TURNS)
+  const keys = pinned.map(t => quoteTurnKey(t.sessionId, t.turnSeq))
+  const ordered = [...keys.map(key => fused.find(t => quoteTurnKey(t.sessionId, t.turnSeq) === key)!), ...fused.filter(t => !keys.includes(quoteTurnKey(t.sessionId, t.turnSeq)))].map((t, rank) => ({ ...t, rank }))
+  return { retrieval: merged, input: { ...input, candidates: ordered, pinned: ordered.slice(0, keys.length) } }
+}
+async function expandDialogue(query: string, exec: ToolRunContext, deps: ExpansionDeps, state: ExpansionState, first: FinishedDialogue, candidates: DialogueTurnCandidate[]): Promise<{ result: FinishedDialogue; usageTokens?: number }> {
+  exec.signal?.throwIfAborted()
+  let result = first
+  let usageTokens: number | undefined
+  let fellBack = false
+  let checked = false
+  const timer = new AbortController()
+  const elapsed = new AbortController()
+  const signal = exec.signal ? AbortSignal.any([exec.signal, elapsed.signal]) : elapsed.signal
+  const wait = deps.wait ?? ((ms, s) => delay(ms, undefined, { signal: s }))
+  void wait(EXPANSION_TIMEOUT_MS, timer.signal).then(() => elapsed.abort()).catch(() => {})
+  let onAbort: () => void = () => {}
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason)
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+  const race = <T>(task: Promise<T>) => Promise.race([task, aborted])
+  const off = (): FinishedDialogue => ({ kind: 'off', notes: [], groups: [], merged: [] })
+  try {
+    const selected = await race(resolveSelection([EXPANSION_SELECTION_KEY], { selections: deps.selections, catalog: () => deps.host.modelCatalog(), llmFor: s => deps.host.llmForRoute(s) }, () => deps.host.llmOf(exec)))
+    signal.throwIfAborted()
+    if (selected.llm !== null) {
+      fellBack = selected.fellBack
+      const shown = shownCandidates(state, first, candidates)
+      const user = await race(expansionRequest(query, state, first, deps, shown))
+      signal.throwIfAborted()
+      const text = await selected.llm.complete({ system: EXPANSION_SYSTEM_PROMPT, user }, signal, t => { usageTokens = (usageTokens ?? 0) + t })
+      timer.abort()
+      exec.signal?.throwIfAborted()
+      checked = true
+      if (state.dialogue.isEnabled?.() === false) result = off()
+      else {
+        const groups = parseExpansionGroups(text)
+        if (!groups.length) throw new Error('扩查没有关键词')
+        const current = state.dialogue.store.state()
+        if (current.status === 'none' || current.read.gen !== state.retrieval.gen) throw new Error('原话库已变更')
+        const expanded = expandedRetrieval(groups, state, shown)
+        // 碰库前已复核；读标题之后不再增加第三次开关复核。
+        if (expanded) result = await finishDialogue(expanded.retrieval, { ...state.dialogue, isEnabled: undefined }, expanded.input)
+      }
+    }
+    if (fellBack && result.kind !== 'off') result = { ...result, notes: [...result.notes, EXPANSION_MODEL_FALLBACK_NOTE] }
+  } catch {
+    exec.signal?.throwIfAborted()
+    result = !checked && state.dialogue.isEnabled?.() === false ? off() : { ...first, notes: [...first.notes, ...(fellBack ? [EXPANSION_MODEL_FALLBACK_NOTE] : []), EXPANSION_FAILED_NOTE] }
+  } finally {
+    timer.abort()
+    signal.removeEventListener('abort', onAbort)
+  }
+  exec.signal?.throwIfAborted()
+  return { result, ...(usageTokens === undefined ? {} : { usageTokens }) }
 }

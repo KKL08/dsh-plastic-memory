@@ -101,14 +101,17 @@ export async function resolveSelection(chain: readonly string[], deps: Selection
   return { llm: fallback(), isSelected: false, fellBack: reason !== undefined, ...(reason === undefined ? {} : { reason }) }
 }
 
+/** 退到宿主默认模型的后台功能的选择键；扩查的键不在这里，它退到主对话的模型（resolveSelection 由调用方给退回目标）。 */
+export type BackgroundSelectionKey = Exclude<ModelSelectionKey, 'expansion'>
+
 /** 后台功能的选择链：自动体检只看自己的键；梦境先看自己的，没选或失效就跟随自动体检。链尽头都是宿主默认模型。 */
-const BACKGROUND_CHAINS: Record<ModelSelectionKey, readonly ModelSelectionKey[]> = {
+const BACKGROUND_CHAINS: Record<BackgroundSelectionKey, readonly BackgroundSelectionKey[]> = {
   checkup: ['checkup'],
   dreams: ['dreams', 'checkup'],
 }
 
 /** 不经会话的后台功能（自动体检、梦境）用哪个模型：开跑前现读选择、现查还在不在，失效一路退到宿主默认模型。 */
-export function createBackgroundLlmResolver(deps: SelectionDeps & { defaultLlm: () => SemanticLlm | null }): (selection: ModelSelectionKey) => Promise<ResolvedLlm> {
+export function createBackgroundLlmResolver(deps: SelectionDeps & { defaultLlm: () => SemanticLlm | null }): (selection: BackgroundSelectionKey) => Promise<ResolvedLlm> {
   return selection => resolveSelection(BACKGROUND_CHAINS[selection], deps, deps.defaultLlm)
 }
 

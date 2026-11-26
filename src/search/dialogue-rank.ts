@@ -83,7 +83,7 @@ export function groupHitsByTurn(hits: readonly (DialogueHit & { tier: SearchTier
 export const compareDialogueTurns = (a: { turnSeq: number }, b: { turnSeq: number }): number => a.turnSeq - b.turnSeq
 
 /** 两轮谁在前：都有融合名次时按名次，否则按档位和分数。 */
-const compareTurns = (a: DialogueTurnCandidate, b: DialogueTurnCandidate) => a.rank !== undefined && b.rank !== undefined ? a.rank - b.rank : compare(a, b)
+export const compareTurns = (a: DialogueTurnCandidate, b: DialogueTurnCandidate) => a.rank !== undefined && b.rank !== undefined ? a.rank - b.rank : compare(a, b)
 
 /** 组间按最好轮，组内统一按轮序号；不做预算取舍。 */
 export function orderCandidates(turns: readonly DialogueTurnCandidate[]): DialogueSessionGroup[] {
@@ -99,13 +99,16 @@ export function orderCandidates(turns: readonly DialogueTurnCandidate[]): Dialog
 
 /** 融合的参数 k：名次差在头部影响大、往后变平。 */
 export const RRF_K = 60
-/** 融合的一路：每个候选给稳定身份、所属的轮、这一路里的名次（1 起，可以并列）。原始分数留在各路内部。 */
-export interface FusionLane { name: string; items: ReadonlyArray<{ id: string; turn: string; rank: number }> }
+/**
+ * 融合的一路：每个候选给稳定身份、所属的轮、这一路里的名次（1 起，可以并列）。原始分数留在各路内部。
+ * weight：这一路的 1/(k+名次) 乘的系数，缺省 1；扩查的各路比原查询低。
+ */
+export interface FusionLane { name: string; items: ReadonlyArray<{ id: string; turn: string; rank: number }>; weight?: number }
 /** 融合结果的一轮：合并后的分数，和来自哪几路的哪些候选（按各自的名次）。 */
 export interface FusedTurn { turn: string; score: number; sources: Array<{ lane: string; id: string }> }
 
 /**
- * 多路按名次合并（RRF）：每一路里一轮取它最好的候选的名次，各路的 1/(k+名次) 相加，不比原始分数；名次用候选给的值，并列的同分。
+ * 多路按名次合并（RRF）：每一路里一轮取它最好的候选的名次，各路的 weight/(k+名次) 相加（weight 缺省 1），不比原始分数；名次用候选给的值，并列的同分。
  * pinned 指定一路的前几轮固定在最前、按那一路的顺序，其余按合并分数排；分数相同时先出现的在前。
  */
 export function fuseLanes(lanes: readonly FusionLane[], pinned?: { lane: string; count: number }): FusedTurn[] {
@@ -119,7 +122,7 @@ export function fuseLanes(lanes: readonly FusionLane[], pinned?: { lane: string;
     for (const [turn, rank] of order) {
       let entry = fused.get(turn)
       if (!entry) fused.set(turn, entry = { turn, score: 0, sources: [], order: fused.size })
-      entry.score += 1 / (RRF_K + rank)
+      entry.score += (lane.weight ?? 1) / (RRF_K + rank)
     }
   }
   const ranked = [...fused.values()].sort((a, b) => b.score - a.score || a.order - b.order)
@@ -140,6 +143,11 @@ export interface FillContext {
   attached?: readonly DialogueTurnCandidate[]
   /** 一段占多少预算；缺省按原文估算。输出时从略的段按输出的长度算。 */
   costOf?(segment: DialogueSegment): number
+  /**
+   * 位置固定的轮（都在 groups 里）：按给的先后，各装它最好的一段（同各组首段的比法），再走每个会话保底一段和其余步骤。
+   * 不给时和没有这一项逐字节一样。
+   */
+  pinned?: readonly DialogueTurnCandidate[]
 }
 
 /** 先各组最好轮的最好段，再其余命中，最后邻段和邻轮；放不下的整段跳过。 */
@@ -155,6 +163,10 @@ export function fillBudget(groups: readonly DialogueSessionGroup[], neighbors: N
   }
   const turns = groups.flatMap(g => g.turns)
   const priority = [...groups.map(g => g.best), ...groups.flatMap(g => g.turns.filter(t => t !== g.best))]
+  for (const turn of context.pinned ?? []) {
+    const best = [...turn.hits].sort(compare)[0]
+    if (best) add(best)
+  }
   for (const group of groups) {
     const best = [...group.best.hits].sort(compare)[0]
     if (best) add(best)

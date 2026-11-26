@@ -312,8 +312,8 @@ describe('去重', () => {
       anchored('c', [10, 12], { id: 'mem_4', name: '收尾', content: '收尾时看写锁' }),
     ]
     const { deps } = await setup(records, { sessions: ['big', 'b', 'c'], budget: 3000 })
-    // 只查原话时 b 排在 c 前面
-    const dialogueOnly = (await run({ ...deps, searchSource: () => 'dialogue' }, '写锁 日志')).text
+    // 没有记忆可借时只查原话，b 排在 c 前面
+    const dialogueOnly = (await run({ ...deps, store: new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable()), searchSource: () => 'dialogue' }, '写锁 日志')).text
     expect(dialogueOnly.indexOf('写锁 日志 写锁 日志')).toBeLessThan(dialogueOnly.indexOf('收尾时写锁和日志一起看'))
     const { result } = await run(deps, '写锁 日志')
     expect(result.hits.map(h => h.id)).toEqual(['mem_1', 'mem_2', 'mem_3', 'mem_4'])

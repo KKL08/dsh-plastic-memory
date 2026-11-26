@@ -73,11 +73,11 @@ it('两路成功共享一次宿主上下文且记忆只查一次', async () => {
   expect(host.contextOf).toHaveBeenCalledTimes(1)
 })
 
-it('只查原话成功时不查询记忆也不计记忆召回', async () => {
+it('只查原话成功时为语义桥取一次记忆候选，不计记忆召回', async () => {
   const { deps, host, readScope } = await setup()
   const text = renderSearchResult(await executeSearch({ query: 'needle', source: 'dialogue' }, fakeExec(), deps))
   expect(text).toContain('s#1')
-  expect(readScope).not.toHaveBeenCalled()
+  expect(readScope).toHaveBeenCalledTimes(1)
   expect(host.contextOf).toHaveBeenCalledTimes(1)
   expect((await deps.store.get('mem_a', { workspacePath: '/proj' }))?.recallCount).toBe(0)
 })
