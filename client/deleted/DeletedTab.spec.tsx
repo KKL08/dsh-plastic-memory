@@ -189,6 +189,19 @@ describe('最近删除', () => {
     expect(within(row).getByRole('button', { name: '恢复' })).not.toHaveAttribute('aria-disabled')
   })
 
+  it('并成版本时删掉的旧那条：来源写并进了哪条的历史版本，提示恢复等于撤销整次并成版本、这一对回到处理；不给「撤销本次融合」；恢复成功照这个说', async () => {
+    const view: DeletedView = { version: GUI_VIEW_VERSION, items: [{ ...ruledB, cause: { decisionId: 'pd3', verdict: 'as-versions', counterpartId: 'm9' } }] }
+    const gateway = createFakeGateway({ views: { deleted: view, library }, respond: command => ({ ok: true, cmd: command.cmd, memoryIds: ['d3'], decisionId: 'pd3' }) })
+    renderInShell(<DeletedTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
+    const row = rowOf('缩进用 tab')
+    expect(row.querySelector('.pm-del-meta')).toHaveTextContent(/^并成「postgres-in-tests」的历史版本时删除/)
+    expect(row.querySelector('.pm-del-hint')).toHaveTextContent(/^恢复等于撤销这次并成版本，这一对会回到「处理」里。$/)
+    expect(within(row).queryByRole('button', { name: '撤销本次融合' })).toBeNull()
+    await act(async () => { fireEvent.click(within(row).getByRole('button', { name: '恢复' })) })
+    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'restore', memoryId: 'd3', layer: app }])
+    expect(screen.getByRole('status')).toHaveTextContent('已恢复，这次并成版本已撤销，这一对回到了「处理」。')
+  })
+
   it('体检关闭时：融合时并入删掉的那一行不给「撤销本次融合」，提示也不提撤销融合，照旧可以单独恢复', () => {
     const view: DeletedView = { version: GUI_VIEW_VERSION, items: [{ ...ruledB, cause: { decisionId: 'pd2', verdict: 'plan-applied', counterpartId: 'm9', snapshotId: 'snap2' } }] }
     renderInShell(<DeletedTab nav={createNavStore()} scope={app} session={session} now={NOW} isGovernanceEnabled={false} />, createFakeGateway({ views: { deleted: view, library } }))

@@ -29,10 +29,12 @@ function inScope(item: DeletedItem, scope: PageScope): boolean {
 
 /**
  * 来源：垂直冲突（有基线出处）是「以基线为准」；横向写胜方（counterpartId）的名字，在全部记忆和最近删除里都找不到时写 id；
- * 融合时并入删掉的（plan-applied）写并进了哪条。旧条目没记对方：keep-left 删的是 B（以 A 为准），keep-right 删的是 A。
+ * 融合时并入删掉的（plan-applied）写并进了哪条；并成版本时删掉的旧状态那条（as-versions）写成了哪条的历史版本。
+ * 旧条目没记对方：keep-left 删的是 B（以 A 为准），keep-right 删的是 A。
  */
 function causeLabel(cause: NonNullable<DeletedItem['cause']>, names: ReadonlyMap<string, string>, t: Translate): string {
   if (cause.baselineRef !== undefined) return t('deleted.cause.baseline')
+  if (cause.verdict === 'as-versions') return t('deleted.cause.versions', { name: counterpartName(cause, names) })
   if (cause.counterpartId !== undefined) return t(cause.verdict === 'plan-applied' ? 'deleted.cause.merged' : 'deleted.cause.keep', { name: counterpartName(cause, names) })
   return t(cause.verdict === 'keep-left' ? 'deleted.cause.keepA' : 'deleted.cause.keepB')
 }
@@ -41,10 +43,11 @@ const counterpartName = (cause: NonNullable<DeletedItem['cause']>, names: Readon
   cause.counterpartId === undefined ? '' : names.get(cause.counterpartId) ?? cause.counterpartId
 
 /**
- * 恢复之后会怎样：删一方的裁决恢复即撤销、冲突回到待处理；融合时并入的只带回这一条，融合稿不退回，要两条都退回用「撤销本次融合」
- * （体检关闭时撤销不了，不提）。
+ * 恢复之后会怎样：删一方的裁决恢复即撤销、冲突回到待处理；并成版本时删掉的恢复即撤销整次并成版本、这一对回到待处理（漏记的变化或冲突）；
+ * 融合时并入的只带回这一条，融合稿不退回，要两条都退回用「撤销本次融合」（体检关闭时撤销不了，不提）。
  */
 function restoreHint(cause: NonNullable<DeletedItem['cause']>, names: ReadonlyMap<string, string>, canUndoMerge: boolean, t: Translate): string {
+  if (cause.verdict === 'as-versions') return t('deleted.restoreHintVersions')
   if (cause.verdict !== 'plan-applied') return t('deleted.restoreHint')
   return t(canUndoMerge ? 'deleted.restoreHintMerged' : 'deleted.restoreHintMergedOnly', { name: counterpartName(cause, names) })
 }
@@ -165,7 +168,7 @@ export function DeletedTab({ nav, scope, session, fold, isGovernanceEnabled = tr
               actions.run(
                 memory.id,
                 { cmd: 'restore', memoryId: memory.id, layer: scopeOfMemory(memory) },
-                result => t(result.decisionId !== undefined ? 'deleted.restoredConflict' : 'deleted.restored'),
+                result => t(result.decisionId === undefined ? 'deleted.restored' : cause?.verdict === 'as-versions' ? 'deleted.restoredVersions' : 'deleted.restoredConflict'),
               )
             }}
           >

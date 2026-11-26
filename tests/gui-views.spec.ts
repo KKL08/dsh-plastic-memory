@@ -74,6 +74,8 @@ function harness() {
 const g = (partial: Partial<MemoryRecord>) => record({ lastConfirmedAt: T0, createdAt: T0, updatedAt: T0, ...partial })
 const w = (partial: Partial<MemoryRecord>) => g({ scope: 'workspace', workspacePath: WS, ...partial })
 const wsDir = () => join(root, workspaceDirName(WS))
+/** 体检挂账的四种新发现：这几条用例不造它们（它们的视图见 gui-commands-four-findings.test.ts）。 */
+const FINDING_ITEM_KINDS: readonly string[] = ['premise-changed', 'cross-duplicate', 'missed-change', 'exception']
 
 describe('待处理视图', () => {
   it('五类来源按密钥 → 读不出的文件 → 冲突 → 提升候选 → 超限排序；密钥与读不出的文件派生、不入账本', async () => {
@@ -92,7 +94,7 @@ describe('待处理视图', () => {
 
     const { pending } = await h.views()
     expect(pendingViewSchema.parse(pending)).toEqual(pending)
-    expect(pending.items.map(i => i.kind)).toEqual(PENDING_ITEM_KINDS.filter(k => k !== 'advice'))
+    expect(pending.items.map(i => i.kind)).toEqual(PENDING_ITEM_KINDS.filter(k => k !== 'advice' && !FINDING_ITEM_KINDS.includes(k)))
     expect(pending.dot).toBe('red')
     const [secret, bad, h1, v1, p1, o1] = pending.items
     expect(secret.kind === 'secret' && secret.memory.id).toBe('mem_secret')
@@ -226,7 +228,7 @@ describe('待处理视图：体检关闭', () => {
     expect(off.pending.levelCounts).toEqual({ 'must-fix': 2, 'your-call': 1, 'advice': 0 })
     expect(off.pending.dot).toBe('red')
     // 账本没动：打开体检后冲突、候选都回来
-    expect((await h.views()).pending.items.map(i => i.kind)).toEqual(PENDING_ITEM_KINDS.filter(k => k !== 'conflict-vertical' && k !== 'advice'))
+    expect((await h.views()).pending.items.map(i => i.kind)).toEqual(PENDING_ITEM_KINDS.filter(k => k !== 'conflict-vertical' && k !== 'advice' && !FINDING_ITEM_KINDS.includes(k)))
   })
 
   it('没有密钥时按剩下的条目亮点：超限提醒能处理所以亮琥珀，只剩读不出的文件则不亮', async () => {
@@ -1237,8 +1239,8 @@ describe('视图写入', () => {
     expect(await readMap()).toEqual({ '/w/old': '/w/old', '/w/new': '/w/new' })
   })
 
-  it('PA-16 视图版本为 16，健康视图不含健康页拆掉后的残留字段', async () => {
-    expect(GUI_VIEW_VERSION).toBe(16)
+  it('PA-16 视图版本为 17，健康视图不含健康页拆掉后的残留字段', async () => {
+    expect(GUI_VIEW_VERSION).toBe(17)
     const h = harness()
     await h.store.create(w({ id: 'mem_old', name: '过期', validTo: EXPIRED_AT }))
     await h.decisions.syncOverflow(WS, { mode: 'relax', tier: 1 }, T0, '超限')

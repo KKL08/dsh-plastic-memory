@@ -1,18 +1,18 @@
-import { isAbsolute } from 'node:path'
+import { dirname, isAbsolute } from 'node:path'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { MemoryLogger, MemoryStore } from '../store.ts'
 import type { CheckupInitiator, CodedNote, ScanNoteCode } from '../contract-codes.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { MemoryRecord } from '../record-schema.ts'
-import { maskDiagnostic, maskSecretSurface } from '../secrets.ts'
+import { maskDiagnostic, maskSecretSurface, maskSecrets } from '../secrets.ts'
 import { candidateFingerprint, conflictFingerprint, isConflictOpen, type PendingDecisionsStore } from '../governance/decisions.ts'
-import { parseCopyKey, scanContentFingerprint } from '../governance/changeset.ts'
+import { parseCopyKey, scanLineFingerprint } from '../governance/changeset.ts'
 import { estimateTokens } from '../snapshot.ts'
 import type { CasKvTable } from '../kv-table.ts'
-import type { Finding, ScanCacheEntry } from '../governance/schema.ts'
+import { FINDING_LEDGER_KINDS, LEDGER_ONLY_FINDING_TYPES, kindOf, type Finding, type FindingLedgerKind, type ScanCacheEntry } from '../governance/schema.ts'
 import { runRuleScan, buildMalformedFindings } from '../governance/rule-scan.ts'
 import {
-  buildSemanticPrompt, isAbort, isSemanticAdmitted, planSemanticBatches, scanBatch, SEMANTIC_PROMPT_VERSION,
+  buildSemanticPrompt, idsToNames, isAbort, isSemanticAdmitted, planSemanticBatches, scanBatch, SEMANTIC_PROMPT_VERSION,
   type SemanticFailure, type SemanticLlm,
 } from '../governance/semantic-scan.ts'
 import {
@@ -32,8 +32,12 @@ import { prereadScopes, listingNotes, checkupScanWorkspaces, isScopeUnread as is
 import type { DirectoryNote } from '../storage/table.ts'
 import { isWorkspaceGone } from '../storage/project-folder.ts'
 import { buildCrossWsPrompt, runCrossWsScan, findEntityDuplicates, summaryLine, CROSS_WS_PROMPT_VERSION, type CrossWsDuplicate } from '../governance/cross-ws.ts'
-import { decisionWorkspaces, decisionWorkspacesNote, workspaceLabel } from './workspace-gate.ts'
-import { scopeCacheKey, scopeKey, GLOBAL_SCOPE_KEY, type Scope } from '../scope.ts'
+import { decisionWorkspaces, decisionWorkspacesNote, locateCopy, workspaceLabel } from './workspace-gate.ts'
+import { scopeCacheKey, scopeKey, scopeOfMemory, GLOBAL_SCOPE_KEY, type Scope } from '../scope.ts'
+import { createFindingSourceCheck, type FindingSourceDeps } from './finding-sources.ts'
+import { findPremiseChanges, premiseChangeFingerprint } from '../governance/premise-check.ts'
+import { premiseDigest } from '../links.ts'
+import { injectionText } from '../index-line.ts'
 
 export interface ScanToolDeps {
   store: MemoryStore
@@ -57,6 +61,10 @@ export interface ScanToolDeps {
   /** 提交之后的步骤出错、上限配置不对时记日志；缺省用 console。 */
   log?: MemoryLogger
   now?: () => number
+  /**
+   * 横向疑似矛盾报出之前回查两边出处用（见 finding-sources.ts）。缺省不回查：发现照模型原样挂账，不带回查标记。
+   */
+  sources?: FindingSourceDeps
 }
 
 /** 扫描核心的依赖：工具依赖去掉宿主会话（模型、当前项目由调用方解析好传进 ScanInput）。 */
@@ -92,7 +100,8 @@ export interface SingleScanResult {
   pendingDecisions: {
     created: number
     existing: number
-    items: Array<{ id: string; memoryIds: string[]; workspaces: string[]; summary: string; isNew: boolean }>
+    /** kind：不是冲突的那几种发现（漏记的变化、例外、依据已变、跨项目重复）才带，冲突不带。 */
+    items: Array<{ id: string; kind?: Exclude<FindingLedgerKind, 'conflict'>; memoryIds: string[]; workspaces: string[]; summary: string; isNew: boolean }>
   }
   stats: { scanned: number; clean: number; issues: number; byType: Record<string, number> }
   /** 用户在记忆页忽略、这次没有列出的建议条数。 */
@@ -133,7 +142,8 @@ export interface CheckupScanResult {
   pendingDecisions: {
     created: number
     existing: number
-    items: Array<{ id: string; memoryIds: string[]; workspaces: string[]; summary: string; isNew: boolean }>
+    /** kind：不是冲突的那几种发现（漏记的变化、例外、依据已变、跨项目重复）才带，冲突不带。 */
+    items: Array<{ id: string; kind?: Exclude<FindingLedgerKind, 'conflict'>; memoryIds: string[]; workspaces: string[]; summary: string; isNew: boolean }>
   }
   /** 同一条 global 记忆与 ≥2 个 workspace 的待决冲突：被多数项目反对，优先裁定。 */
   crossLayerConflicts: Array<{ globalId: string; workspaces: string[]; decisionIds: string[] }>
@@ -184,9 +194,9 @@ export function renderScanResult(result: ScanToolResult): string {
       lines.push(`⚠️ 跨层冲突：global ${c.globalId} 与 ${c.workspaces.length} 个项目存在待决冲突（${c.workspaces.join('、')}）——被多数项目反对的全局规则建议优先裁定（memory_confirm resolve：${c.decisionIds.join('、')}）`)
     }
     if (result.pendingDecisions.items.length > 0) {
-      lines.push('待裁决冲突（用 memory_confirm resolve 裁决，需 decisionId）：')
+      lines.push('待处理发现（用 memory_confirm resolve 裁决，需 decisionId）：')
       for (const item of result.pendingDecisions.items) {
-        lines.push(`- [${item.id}] ${item.summary}${decisionWorkspacesNote(item.workspaces)}`)
+        lines.push(`- [${item.id}]（${({ conflict: '矛盾', 'missed-change': '漏记的变化', exception: '例外', 'premise-changed': '依据已变', 'cross-duplicate': '跨项目重复' })[item.kind ?? 'conflict']}）${item.summary}${decisionWorkspacesNote(item.workspaces)}`)
       }
     }
     if (result.promoteCandidates.total > 0) {
@@ -221,9 +231,9 @@ export function renderScanResult(result: ScanToolResult): string {
     lines.push('过期候选可先用 memory_source 回查出处，向用户复述当时语境，再决定 refresh 还是 forget。')
   }
   if (result.pendingDecisions.items.length > 0) {
-    lines.push('待裁决冲突（用 memory_confirm resolve 裁决，需 decisionId）：')
+    lines.push('待处理发现（用 memory_confirm resolve 裁决，需 decisionId）：')
     for (const item of result.pendingDecisions.items) {
-      lines.push(`- [${item.id}] ${item.summary}${decisionWorkspacesNote(item.workspaces)}`)
+      lines.push(`- [${item.id}]（${({ conflict: '矛盾', 'missed-change': '漏记的变化', exception: '例外', 'premise-changed': '依据已变', 'cross-duplicate': '跨项目重复' })[item.kind ?? 'conflict']}）${item.summary}${decisionWorkspacesNote(item.workspaces)}`)
     }
     lines.push('裁决前可用 memory_source 回查双方记忆的原始出处（当时谁说的、什么语境）；与 AGENTS.md 基线的垂直冲突请核对当前基线内容，不必回查旧会话。')
   }
@@ -300,7 +310,7 @@ export interface ScanRoundResult {
 /** 一个作用域的规则检查和说明（不跑内容检查的作用域只有这些）。 */
 interface RoundLedger {
   findings: Finding[]
-  decisionItems: Array<{ id: string; memoryIds: string[]; workspaces: string[]; summary: string; isNew: boolean }>
+  decisionItems: Array<{ id: string; kind?: Exclude<FindingLedgerKind, 'conflict'>; memoryIds: string[]; workspaces: string[]; summary: string; isNew: boolean }>
   created: number
   existing: number
   settled: number
@@ -356,7 +366,7 @@ async function prepareRound(input: {
     scope, round, isReadComplete: input.isReadComplete, files, baseline,
     total: input.records.length, ...(globalTotal !== undefined ? { globalTotal } : {}),
     batches, history, recheckBefore,
-    current: new Map(input.records.map(r => [memberCopyKey(r), scanContentFingerprint(r)])),
+    current: new Map(input.records.map(r => [memberCopyKey(r), scanLineFingerprint(r)])),
   }
 }
 
@@ -427,7 +437,7 @@ async function recordConflicts(
   let settled = 0
   const decisionItems: RoundLedger['decisionItems'] = []
   for (const f of semantic) {
-    if (f.type !== 'conflict') continue
+    if (!(FINDING_LEDGER_KINDS as readonly string[]).includes(f.type)) continue
     // 语义层跑的这几十秒里用户可能已经裁决（败方软删、条目 settled 记了快照）：按预读数据挂账会把那条裁决
     // 当成「败方回来了」反撤。挂账前重读成员，任一方已不是 active 就跳过这条发现。
     const live = await Promise.all(f.memoryIds.map(id => deps.store.get(id)))
@@ -436,16 +446,21 @@ async function recordConflicts(
       continue
     }
     const members = f.memoryIds.map(id => byId.get(id))
-    const fingerprint = members.every(m => m !== undefined)
+    const fingerprint = f.type === 'premise-changed'
+      ? premiseChangeFingerprint(f.memoryIds[0]!, f.memoryIds[1]!, premiseDigest(members[1]!))
+      : members.every(m => m !== undefined)
       ? conflictFingerprint(members, f.baselineRef !== undefined ? baseline ?? [] : undefined)
       : undefined
     const r = await deps.decisions.upsert({
       memoryIds: f.memoryIds,
+      ...(f.type !== 'conflict' ? { kind: f.type as FindingLedgerKind } : {}),
+      ...(f.type === 'missed-change' && f.current !== undefined ? { plan: { kind: 'as-versions' as const, current: f.current } } : {}),
+      ...(f.sourceCheck !== undefined ? { sourceCheck: f.sourceCheck } : {}),
       ...(f.baselineRef !== undefined ? { baselineRef: f.baselineRef } : {}),
       summary: f.summary,
       workspaces: f.memoryIds.map(id => workspaceLabel(byId.get(id))),
       ...(fingerprint !== undefined ? { fingerprint } : {}),
-      ...(members.every(m => m !== undefined) ? { memberScanFingerprints: memberScanFingerprints(members as MemoryRecord[]) } : {}),
+      ...(f.type !== 'premise-changed' && members.every(m => m !== undefined) ? { memberScanFingerprints: memberScanFingerprints(members as MemoryRecord[]) } : {}),
     }, now, id => deps.store.get(id))
     // 条目正被裁决、或刚被裁决（败方已删）：不挂账也不进返回的发现
     if (r.isSkipped) {
@@ -460,7 +475,7 @@ async function recordConflicts(
     if (r.created) created++
     else existing++
     decisionItems.push({
-      id: r.entry.id, memoryIds: r.entry.memoryIds, workspaces: decisionWorkspaces(r.entry, id => byId.get(id)),
+      id: r.entry.id, ...(kindOf(r.entry) !== 'conflict' ? { kind: kindOf(r.entry) as Exclude<FindingLedgerKind, 'conflict'> } : {}), memoryIds: r.entry.memoryIds, workspaces: decisionWorkspaces(r.entry, id => byId.get(id)),
       summary: r.entry.summary, isNew: r.created,
     })
   }
@@ -601,7 +616,7 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
   {
     // 当前项目本来就算认得，所以单个作用域落到它时校验总能过
     const requested = checkup ? requestedWs ?? [] : wsPath !== undefined ? [wsPath] : []
-    const invalid = validateScopePaths(checkupScanWorkspaces(listing), currentWs, requested)
+    const invalid = validateScopePaths([...checkupScanWorkspaces(listing), ...(checkup ? listing.entries.map(e => e.workspacePath) : [])], currentWs, requested)
     if (invalid !== null) return { kind: 'error', message: invalid }
   }
   // 预读范围：与 memory_health 共用 prereadScopes——目标作用域（含 .archive/）的全部状态记录、作用域外引用按 id 定位、
@@ -612,8 +627,9 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
   const checkupWs = checkup ? requestedWs ?? checkupScanWorkspaces(listing) : []
   /** 标记读得到、记忆目录列不出的项目：这次没读全，有没有自己的记忆不知道（按有算）。 */
   const unlistedWs = new Set((listing.unreadable ?? []).map(e => e.workspacePath))
+  const pendingFindings = await deps.decisions.list()
   const readScopes: Scope[] = checkup
-    ? [{ kind: 'global' }, ...checkupWs.map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
+    ? [{ kind: 'global' }, ...(requestedWs ?? [...new Set([...checkupWs, ...listing.entries.map(e => e.workspacePath)])]).map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
     : wsPath !== undefined ? [target, { kind: 'global' }] : [target]
   const data = await prereadScopes(deps, readScopes, checkup ? undefined : wsPath, { isReadErrorTolerated: true })
   const active = (pred: (r: MemoryRecord) => boolean) =>
@@ -705,12 +721,17 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
   let runFailure: SemanticFailure | undefined
   /** 刷新时碰上模型用不了：剩下的刷新这次不再试。 */
   let isRefreshStopped = false
+  const checkSources = deps.sources !== undefined && semanticLlm !== null
+    ? createFindingSourceCheck(deps.sources, semanticLlm, signal, onUsage) : undefined
   for (const step of plan.steps) {
     if (step.kind === 'cross-ws' || semanticLlm === null || (step.isRefresh && isRefreshStopped)) continue
     signal?.throwIfAborted()
     const round = roundByKey.get(step.round)!
     const batch = round.batches[step.index]!
-    const found = await scanBatch(batch.records, round.baseline, semanticLlm, signal, onUsage, projectOf(round.scope))
+    const versions = new Map<string, number | 'unknown'>(await Promise.all(batch.records.map(async r => {
+      return [r.id, await deps.store.history.countVersions(dirname(data.filePaths.get(r.id)!), r.id) ?? 'unknown'] as const
+    })))
+    let found = await scanBatch(batch.records, round.baseline, semanticLlm, signal, onUsage, projectOf(round.scope), versions)
     // 刷新是顺带做的：这一批的旧结论照常有效，没做成（不管什么原因）只记日志，不算这次体检停下；
     // 模型用不了时剩下的刷新也做不成，不再试，别的原因接着试下一批
     if (!Array.isArray(found) && step.isRefresh) {
@@ -725,6 +746,7 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
       runStop = found.kind === 'model-error' && isModelUnavailableCode(found.hostCode) ? 'model-unavailable' : 'batch-failed'
       break
     }
+    if (checkSources !== undefined) found = await checkSources(found, batch.records)
     // 项目这一轮的可见集合含全局记忆：全局记忆对指令文件的冲突只在全局这一轮查（对全局层），这里报出的丢掉
     const findings = round.scope.kind === 'workspace'
       ? found.filter(f => f.baselineRef === undefined || data.byId.get(f.memoryIds[0]!)?.scope === 'workspace')
@@ -749,8 +771,14 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
     const ruleFindings = layers === 'rule' || layers === 'full'
       ? [...runRuleScan(inputOf(scope), id => data.byId.get(id), now), ...buildMalformedFindings(quarantinedIn(scope))]
       : []
+    const premiseFindings = layers === 'rule' || layers === 'full'
+      ? findPremiseChanges(active(r => scope.kind === 'global' ? isGlobal(r) : r.scope === 'workspace' && r.workspacePath === scope.workspacePath), (owner, id) => {
+        const r = data.byId.get(id)
+        return r?.status === 'active' && visibleTo(owner.scope === 'workspace' ? owner.workspacePath : undefined)(r) ? r : undefined
+      }) : []
+    const premiseLedger = await recordConflicts(deps, premiseFindings, data.byId, null, now)
     if (round === undefined) {
-      ledgers.set(scopeKey(scope), { findings: ruleFindings, decisionItems: [], created: 0, existing: 0, settled: 0 })
+      ledgers.set(scopeKey(scope), { ...premiseLedger, findings: [...ruleFindings, ...premiseLedger.findings] })
       continue
     }
     notes.push(...instructionNotes(round.files))
@@ -786,13 +814,13 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
       // 一批有效结果都没有、也没有沿用的：留着上次的视图（读的时候按记忆现在的样子核对）；本来就没有要查的批照写空视图
       if (valid.length > 0 || carried.length > 0 || (round.batches.length === 0 && round.isReadComplete)) {
         const cacheId = scopeCacheKey(scope)
-        const published = publishedFindings(valid, carried)
+        const published = publishedFindings(valid, carried).filter(f => !(LEDGER_ONLY_FINDING_TYPES as readonly string[]).includes(f.type))
         const entry = { id: cacheId, scannedAt: now, scope: scopeKey(scope), findings: published, fingerprints: findingFingerprints(published, data.byId), isTrackedByCheckups: true }
         // 不回退：别的扫描开始得比这次晚、已经写过的，留着它的
         await deps.cache.update(cacheId, cur => (cur !== undefined && cur.scannedAt > now ? undefined : entry))
       }
       // 返回里的沿用发现同读侧口径：冲突只留账本里仍未决的（裁决过的照旧进视图，读的时候按账本核对）
-      ledger = { ...ledger, findings: publishedFindings([ledger.findings], carried.filter(isConflictOpen(data.pending))) }
+      ledger = { ...ledger, findings: publishedFindings([ledger.findings], carried.filter(isConflictOpen(pendingFindings))) }
     } catch (err) {
       // 取消不是存储出错：往上抛，按提交前取消收
       if (isAbort(err, signal)) throw err
@@ -801,7 +829,7 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
       log.warn(`[plastic-memory] 体检记不下 ${scopeKey(scope)} 的结果（挂账或写视图出错），这一轮按没做成算`, err)
       notes.push({ code: 'semantic-failed', text: `体检记不下这一轮的结果（${storageFailure.message}），这一轮按没做成算，下次体检再查`, cause: storageFailure })
     }
-    ledgers.set(scopeKey(scope), { ...ledger, findings: [...ruleFindings, ...ledger.findings] })
+    ledgers.set(scopeKey(scope), { ...ledger, findings: [...ruleFindings, ...premiseLedger.findings, ...ledger.findings], decisionItems: [...premiseLedger.decisionItems, ...ledger.decisionItems], created: premiseLedger.created + ledger.created, existing: premiseLedger.existing + ledger.existing })
     if (ledger.settled > 0) notes.push({ code: 'conflicts-settled', text: `${ledger.settled} 处冲突你之前裁决过两条都留，双方都没改，本次不再列出` })
     const closing = closingRow(coverage, storageFailure !== undefined)
     const cause = storageFailure ?? (closing === 'failed' || closing === 'model-unavailable' ? round.failure ?? runFailure : undefined)
@@ -853,8 +881,8 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
         decisionItems.push(item)
       }
     }
-    const created = decisionItems.filter(i => i.isNew).length
-    const existing = decisionItems.length - created
+    let created = decisionItems.filter(i => i.isNew).length
+    let existing = decisionItems.length - created
 
     // 跨项目重复（global 缺口）：命中用库里的结论；没命中、排进了计划、前面没停下的才调模型；排不进的这次没比。
     // layers=rule 或拿不到模型时只走实体聚类保底，不发语义调用
@@ -882,10 +910,52 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
       if (cross?.hit !== undefined && isCrossDbWritten && rounds.every(r => r.isReadComplete)) resultsDb?.prune(CROSS_WS_ROUND, new Set([cross.key]), cross.recheckBefore)
     }
 
+    for (const item of duplicates.items) {
+      if (item.memoryIds === undefined) continue
+      const members = item.memoryIds.map(id => data.byId.get(id)!)
+      // 模型比较期间成员可能移走，挂账只认原项目里此刻在用的副本。
+      const live = await Promise.all(members.map(r => locateCopy(deps.store, r.id, scopeOfMemory(r)!)))
+      if (live.some(r => r?.status !== 'active')) continue
+      const named = idsToNames(members.map(r => maskSecretSurface(r, { severity: 'suspected' })))
+      const text = (value: string) => injectionText(named(maskSecrets(value, { severity: 'suspected' })))
+      const r = await deps.decisions.upsert({
+        kind: 'cross-duplicate', memoryIds: item.memoryIds, workspaces: members.map(workspaceLabel),
+        fingerprint: conflictFingerprint(members), summary: `${text(item.topic)}：${text(item.suggestion)}`,
+        ...(item.promote !== undefined ? { plan: { kind: 'promote', memoryId: item.promote } } : {}),
+      }, now, id => deps.store.get(id))
+      if (r.isSkipped || r.settled || seenDecisions.has(r.entry.id)) continue
+      seenDecisions.add(r.entry.id)
+      decisionItems.push({ id: r.entry.id, kind: 'cross-duplicate', memoryIds: r.entry.memoryIds,
+        workspaces: r.entry.workspaces!, summary: r.entry.summary, isNew: r.created })
+      if (r.created) created++
+      else existing++
+    }
+    // 只在成员所在范围读全时认定它已不在用；未读的项目保留待决项。
+    for (const entry of await deps.decisions.list()) {
+      if (kindOf(entry) !== 'cross-duplicate') continue
+      await deps.decisions.withClaim(entry.id, async () => {
+        const current = await deps.decisions.get(entry.id)
+        if (current === undefined || current.settled !== undefined) return
+        for (const [i, id] of current.memoryIds.entries()) {
+          const label = current.workspaces?.[i]
+          const scope = readScopes.find(s => scopeKey(s) === label)
+          if (scope === undefined || isScopeUnread(scope)) continue
+          // 认领之后按原作用域重读，恢复的成员或别处的同 id 副本都不能被预读快照误判。
+          // 定位接口会把目录不可读折成未找到；删除前先核对当前目录确实读全。
+          const read = await deps.store.readRaw(scope, { includeArchive: true })
+          if (read.directoryNotes.some(n => n.code === 'dir-unreadable')) continue
+          const member = await locateCopy(deps.store, id, scope)
+          if (member?.status === 'active') continue
+          await deps.decisions.remove(current.id)
+          break
+        }
+      })
+    }
+
     // 按作用域计分（与 memory_health 共用 prereadScopes + scoreScope，两个工具对同一作用域永远同分）。
     // 上面的扫描写了语义缓存与待决账本，计分前重读一份，口径与 health 读到的现状一致；读取抛错的范围同预读，记成没读全、照常计分
-    const scored = await prereadScopes(deps, readScopes, undefined, { isReadErrorTolerated: true })
     const scoredScopes: Scope[] = [{ kind: 'global' }, ...wsList.map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
+    const scored = await prereadScopes(deps, scoredScopes, undefined, { isReadErrorTolerated: true })
     const rows = scoredScopes.map((scope) => {
       const r = scoreScope(deps, scored, scope, now)
       // 这次这个范围没跑内容检查（layers=rule、拿不到模型、没有自己的记忆）：给的是上次体检的覆盖，标明出处
@@ -937,7 +1007,7 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
       ...(isCrossWsSkipped ? { isCrossWsSkipped: true as const } : {}),
       ...(results.size > 0 ? { rounds: [...results.values()] } : {}),
       directoryNotes: uniqueNotes([...listingNotes(listing, { includeEmpty: true }), ...data.directoryNotes]),
-      message: `全库体检完成：global + ${wsList.length} 个 workspace 各自独立扫描计分${created > 0 ? `，新增 ${created} 个待决冲突` : ''}${partialNote(results.values())}。清理需用户确认后执行：删除用 memory_forget，冲突裁决用 memory_confirm，提升全局用 memory_promote。`,
+      message: `全库体检完成：global + ${wsList.length} 个 workspace 各自独立扫描计分${created > 0 ? `，新增 ${created} 个待处理发现` : ''}${partialNote(results.values())}。清理需用户确认后执行：删除用 memory_forget，冲突裁决用 memory_confirm，提升全局用 memory_promote。`,
       ...extras(semanticBatches),
     }
   }
@@ -983,7 +1053,7 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
     semanticCachedAt,
     notes,
     directoryNotes: uniqueNotes([...listingNotes(listing, { includeEmpty: false }), ...data.directoryNotes]),
-    message: `扫描${scopeLabel} ${stats.scanned} 条，${issuesText(stats.issues, results.get(scopeKey(target))?.coverage)}${ledger.created > 0 ? `，新增 ${ledger.created} 个待决冲突` : ''}${promoteCandidates.items.length > 0 ? `，${allCandidates.length} 条建议提升全局` : ''}${noteSuffix}。清理需用户确认后执行：删除用 memory_forget，冲突裁决用 memory_confirm，提升全局用 memory_promote。`,
+    message: `扫描${scopeLabel} ${stats.scanned} 条，${issuesText(stats.issues, results.get(scopeKey(target))?.coverage)}${ledger.created > 0 ? `，新增 ${ledger.created} 个待处理发现` : ''}${promoteCandidates.items.length > 0 ? `，${allCandidates.length} 条建议提升全局` : ''}${noteSuffix}。清理需用户确认后执行：删除用 memory_forget，冲突裁决用 memory_confirm，提升全局用 memory_promote。`,
     ...(results.size > 0 ? { rounds: [...results.values()] } : {}),
     ...extras(semanticBatches),
   }

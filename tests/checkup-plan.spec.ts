@@ -82,7 +82,7 @@ describe('键与上下文', () => {
     // 检查项目时多出的那一段也在护栏里
     const projectPrompt = buildSemanticPrompt([sample], ['基线'], '/work/sample')
     const digest = createHash('sha1').update(`${prompt.system}\n${prompt.user}\n${projectPrompt.user}`).digest('hex')
-    expect({ version: SEMANTIC_PROMPT_VERSION, digest }).toEqual({ version: 3, digest: 'ff9f5030012f6c147dbf2dee8331bbcdf6aec6ff' })
+    expect({ version: SEMANTIC_PROMPT_VERSION, digest }).toEqual({ version: 4, digest: '95311ea6d8c1bffe11245cbd6caeee33bc3ef621' })
   })
 
   it('宿主接线的模型调用透出提供方、模型和推理强度；借会话的模型没有推理强度', () => {

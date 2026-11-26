@@ -108,17 +108,17 @@ describe('待处理：各类卡', () => {
     await waitFor(() => { expect(commands()).toEqual([{ cmd: 'resolve', decisionId: 'd-h', verdict: 'keep-right' }]) })
   })
 
-  it('横向冲突：没有可采纳的建议时三个候选项一排、不带说明行（后果写在各自的原位确认里），决定前按哪条写在标题下；结果带撤销', async () => {
+  it('横向冲突：没有可采纳的建议时五个直接处理一排、不带说明行（后果写在各自的原位确认里），决定前按哪条写在标题下；结果带撤销', async () => {
     const { commands } = setup([horizontal])
-    const row = screen.getByRole('button', { name: '都保留，不算冲突' }).closest('.pm-conflict-actions')!
-    expect([...row.querySelectorAll('button')].map(b => b.textContent)).toEqual(['保留 A', '保留 B', '都保留，不算冲突'])
+    const row = screen.getByRole('button', { name: '确实不冲突' }).closest('.pm-conflict-actions')!
+    expect([...row.querySelectorAll('button')].map(b => b.textContent)).toEqual(['保留 A', '保留 B', '并成版本', '确实不冲突', '记成例外'])
     expect(row.previousElementSibling).toBeNull()
     expect(screen.getByText('决定之前，agent 按你明确说过的 A 来做。')).toBeInTheDocument()
     expect(document.querySelector('.pm-keep-line')).toBeNull()
-    ruleConflict('都保留，不算冲突')
-    await screen.findByText('按你的选择处理。以后体检不再把它们当冲突。')
+    ruleConflict('确实不冲突')
+    await screen.findByText('按你的选择处理。两条都留着；它们都不变时，体检不再报这一对。')
     expect(screen.queryByRole('group')).toBeNull()
-    expect(commands()).toEqual([{ cmd: 'resolve', decisionId: 'd-h', verdict: 'keep-both' }])
+    expect(commands()).toEqual([{ cmd: 'resolve', decisionId: 'd-h', verdict: 'not-conflict' }])
     expect(screen.getByRole('button', { name: '撤销' })).toBeInTheDocument()
   })
 
@@ -127,12 +127,12 @@ describe('待处理：各类卡', () => {
     expect(screen.getByText(/决定之前，agent 按 B 来做。/)).toBeInTheDocument()
   })
 
-  it('垂直冲突：写明指令文件不会被改动、处理只针对这条记忆；直接处理原位确认后走裁决：「都保留，不算冲突」= keep-left、「以文件为准，删除这条」= keep-right', async () => {
+  it('垂直冲突：写明指令文件不会被改动、处理只针对这条记忆；直接处理原位确认后走裁决：「确实不冲突」= not-conflict、「以文件为准，删除这条」= keep-right', async () => {
     const { commands, gateway } = setup([vertical])
     expect(screen.getByText('指令文件不会被改动，处理只针对这条记忆。')).toBeInTheDocument()
     expect(screen.getByText('基线：AGENTS.md：用 pnpm')).toBeInTheDocument()
-    ruleVertical('都保留，不算冲突')
-    await screen.findByText('已保留这条记忆')
+    ruleVertical('确实不冲突')
+    await screen.findByText('已标为不冲突')
     act(() => { gateway.setView('pending', view(vertical)) })
     fireEvent.click(screen.getByRole('button', { name: '撤销' }))
     await waitFor(() => { expect(commands().at(-1)).toEqual({ cmd: 'undo', decisionId: 'd-v' }) })
@@ -140,7 +140,7 @@ describe('待处理：各类卡', () => {
     ruleVertical('以文件为准，删除这条')
     await screen.findByText('这条记忆已删除，14 天内可恢复。')
     expect(commands()).toEqual([
-      { cmd: 'resolve', decisionId: 'd-v', verdict: 'keep-left' },
+      { cmd: 'resolve', decisionId: 'd-v', verdict: 'not-conflict' },
       { cmd: 'undo', decisionId: 'd-v' },
       { cmd: 'resolve', decisionId: 'd-v', verdict: 'keep-right' },
     ])

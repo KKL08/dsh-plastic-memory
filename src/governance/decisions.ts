@@ -4,7 +4,7 @@ import type { RootLock } from '../root-lock.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { OverflowLevel } from '../contract-codes.ts'
 import {
-  genId, kindOf, snapshotIdFor, verdictLoser, type BatchReceipt, type IndexReceipt, type IndexRun, type LinkIds, type PendingDecision, type PendingKind, type SettledProposal, type SettledVerdict, type StoredSuggestion,
+  PAIR_FINDING_KINDS, PAIR_EXCLUDING_VERDICTS, genId, kindOf, snapshotIdFor, verdictLoser, type BatchReceipt, type IndexReceipt, type IndexRun, type LinkIds, type PendingDecision, type PendingKind, type SettledProposal, type SettledVerdict, type StoredSuggestion,
   type SuggestionBasis, type SuggestionFailure,
 } from './schema.ts'
 import { isUndoExpired } from './undo-rules.ts'
@@ -99,10 +99,10 @@ export function pairKey(entry: { memoryIds: string[]; baselineRef?: string }): s
   return dedupKey(entry.memoryIds) + (entry.baselineRef !== undefined ? '#baseline' : '')
 }
 
-/** 发现还没被裁决掉：冲突要仍在待决账本里（pairKey 匹配，不看 baselineRef 措辞），不是冲突的都算。体检的读侧计分和工具返回同一口径。 */
-export function isConflictOpen(pending: readonly { memoryIds: string[]; baselineRef?: string }[]): (f: { type: string; memoryIds: string[]; baselineRef?: string }) => boolean {
-  const keys = new Set(pending.map(pairKey))
-  return f => f.type !== 'conflict' || keys.has(pairKey(f))
+/** 发现还没被裁决掉：冲突、漏记的变化、例外要有同种类、同 pairKey 的未决条目；其余类型都算开着。 */
+export function isConflictOpen(pending: readonly { kind?: PendingKind; memoryIds: string[]; baselineRef?: string }[]): (f: { type: string; memoryIds: string[]; baselineRef?: string }) => boolean {
+  const keys = new Set(pending.map(e => `${kindOf(e)}:${pairKey(e)}`))
+  return f => !(PAIR_FINDING_KINDS as readonly string[]).includes(f.type) || keys.has(`${f.type}:${pairKey(f)}`)
 }
 
 /** 两个条目是否同一种类、指同一组记忆、同一类冲突（横向 / 垂直），不看 baselineRef 措辞。 */
@@ -110,12 +110,20 @@ function samePair(a: KindKeyed, b: KindKeyed): boolean {
   return kindOf(a) === kindOf(b) && pairKey(a) === pairKey(b)
 }
 
+/** 三种配对发现的未决条目共用身份，改判时沿用原条目；其他种类仍各自匹配。 */
+function sameOpenPair(a: KindKeyed, b: KindKeyed): boolean {
+  return samePair(a, b) || ((PAIR_FINDING_KINDS as readonly PendingKind[]).includes(kindOf(a))
+    && (PAIR_FINDING_KINDS as readonly PendingKind[]).includes(kindOf(b)) && pairKey(a) === pairKey(b))
+}
+
 /**
- * 挂账时按冲突身份（samePair 的口径）认领用的键。侧表认领按键建 `<键>.claim`，pairKey 里的 `|`、`#` 不能当文件名
+ * 挂账时按配对身份认领用的键：冲突、漏记的变化、例外共用冲突命名空间，配对排除与挂账互斥。
+ * 侧表认领按键建 `<键>.claim`，pairKey 里的 `|`、`#` 不能当文件名
  * （不能当文件名的键认领直接放行、不排他），所以取哈希；`pair_` 前缀与条目 id（`pd_`）分开，不会和裁决认领撞上。
  */
 function pairClaimKey(entry: KindKeyed): string {
-  return `pair_${createHash('sha1').update(`${kindOf(entry)}\n${pairKey(entry)}`).digest('hex')}`
+  const kind = (PAIR_FINDING_KINDS as readonly PendingKind[]).includes(kindOf(entry)) ? 'conflict' : kindOf(entry)
+  return `pair_${createHash('sha1').update(`${kind}\n${pairKey(entry)}`).digest('hex')}`
 }
 
 /** 先出现的在前，同一时刻按 id：收拢重复条目时留下排第一的那条。 */
@@ -171,6 +179,10 @@ type UpsertInput = {
   kind?: PendingKind; memoryIds: string[]; baselineRef?: string; summary: string; workspaces?: string[]; fingerprint?: string
   /** 冲突：各成员此刻的扫描指纹（见 schema.ts PendingDecision.memberScanFingerprints）。 */
   memberScanFingerprints?: Record<string, string>
+  /** 体检给的方案（见 schema.ts PendingDecision.plan）：再报时换成这次的，这次没给就去掉。 */
+  plan?: PendingDecision['plan']
+  /** 横向冲突回查出处的结果（见 schema.ts PendingDecision.sourceCheck）：再报时换成这次的，这次没回查就去掉。 */
+  sourceCheck?: PendingDecision['sourceCheck']
 }
 type UpsertResult = { created: boolean; settled?: true; isSkipped?: true; entry: PendingDecision }
 
@@ -179,10 +191,19 @@ type UpsertResult = { created: boolean; settled?: true; isSkipped?: true; entry:
  * workspaces 与 memoryIds 一一对应，按已有条目的 id 顺序重排。
  */
 function mergeReport(existing: PendingDecision, input: UpsertInput): PendingDecision {
+  if (kindOf(existing) !== kindOf(input)) {
+    // 建议及生成状态只对原种类成立；同指纹改判也要作废，避免改回冲突时重新显示旧建议。
+    const { kind: _kind, suggestion: _suggestion, suggestionFailure: _failure, suggestionAttempts: _attempts,
+      fingerprint: _fingerprint, memberScanFingerprints: _members, ...rest } = existing
+    existing = { ...rest, ...(input.kind !== undefined && input.kind !== 'conflict' ? { kind: input.kind } : {}) }
+  }
   const wsById = new Map(input.memoryIds.map((id, i) => [id, input.workspaces?.[i]]))
   const workspaces = input.workspaces !== undefined ? existing.memoryIds.map(id => wsById.get(id) ?? '(未知)') : undefined
+  const { plan: _plan, sourceCheck: _sourceCheck, ...rest } = existing
   return {
-    ...existing, summary: input.summary,
+    ...rest, summary: input.summary,
+    ...(input.plan !== undefined ? { plan: input.plan } : {}),
+    ...(input.sourceCheck !== undefined ? { sourceCheck: input.sourceCheck } : {}),
     ...(input.baselineRef !== undefined ? { baselineRef: input.baselineRef } : {}),
     ...(workspaces !== undefined ? { workspaces } : {}),
     ...(input.fingerprint !== undefined ? { fingerprint: input.fingerprint } : {}),
@@ -316,6 +337,8 @@ export class PendingDecisionsStore {
       memoryIds: input.memoryIds,
       ...(input.baselineRef !== undefined ? { baselineRef: input.baselineRef } : {}),
       summary: input.summary,
+      ...(input.plan !== undefined ? { plan: input.plan } : {}),
+      ...(input.sourceCheck !== undefined ? { sourceCheck: input.sourceCheck } : {}),
       firstSeenAt: now,
       ...(input.workspaces !== undefined ? { workspaces: input.workspaces } : {}),
       ...(input.fingerprint !== undefined ? { fingerprint: input.fingerprint } : {}),
@@ -330,14 +353,31 @@ export class PendingDecisionsStore {
     const entries = await this.table.list()
     // 先看已裁决的同一对，再看未决的同一对（垂直冲突的 baselineRef 措辞每次扫描都可能不同，不能按它分开，否则每次重扫都多一条）。
     // 未决的按先出现排：修复前留下的重复条目里沿用最早的那条
-    const opens = entries.filter(([, e]) => e.settled === undefined && samePair(e, input)).sort(([, a], [, b]) => byFirstSeen(a, b))
+    const opens = entries.filter(([, e]) => e.settled === undefined && sameOpenPair(e, input)).sort(([, a], [, b]) => byFirstSeen(a, b))
+    // 配对排除和挂账共用认领段；裁决中的条目要等下轮再判，避免按旧结论重新挂账。
+    if ((PAIR_FINDING_KINDS as readonly PendingKind[]).includes(kindOf(input))) {
+      const excludes = (e: PendingDecision) => (PAIR_FINDING_KINDS as readonly PendingKind[]).includes(kindOf(e))
+        && pairKey(e) === pairKey(input) && e.settled !== undefined
+        && (PAIR_EXCLUDING_VERDICTS as readonly string[]).includes(e.settled.verdict) && isSettledSame(e, input)
+      for (const [id, seen] of entries.filter(([, e]) => excludes(e))) {
+        const claimed = await this.withClaim(id, async () => {
+          const current = await this.table.get(id)
+          return current !== undefined && excludes(current) ? current : undefined
+        })
+        if (!claimed.isClaimed) return { created: false, isSkipped: true, entry: seen }
+        if (claimed.value !== undefined) {
+          await this.dropDuplicates(opens.map(([openId]) => openId), id, input)
+          return { created: false, settled: true, entry: claimed.value }
+        }
+      }
+    }
     const matches = [...entries.filter(([, e]) => e.settled !== undefined && samePair(e, input)), ...opens]
     const holds = async () => read === undefined || await holdsNow(input, read)
     let result: UpsertResult | undefined
     for (const [id, seen] of matches) {
       const claimed = await this.withClaim(id, async (): Promise<{ created: false; settled?: true; isSkipped?: true; entry: PendingDecision } | undefined> => {
         const existing = await this.table.get(id)
-        if (existing === undefined || !samePair(existing, input)) return undefined
+        if (existing === undefined || !(existing.settled === undefined ? sameOpenPair(existing, input) : samePair(existing, input))) return undefined
         if (existing.settled !== undefined) {
           if (!isDeletionSettled(existing) && isSettledSame(existing, input)) {
             return { created: false, settled: true, entry: existing }
@@ -350,7 +390,7 @@ export class PendingDecisionsStore {
             return undefined
           }
           // 删一方的裁决：同一对又被扫到、双方此刻都在，说明败方回来了（快照恢复等），回到待处理，沿用原条目
-          const { settled: _settled, ...open } = existing
+          const { settled: _settled, changes: _changes, ...open } = existing
           const reopened = mergeReport(open, input)
           await this.table.put(reopened.id, reopened)
           return { created: false, entry: reopened }
@@ -384,7 +424,7 @@ export class PendingDecisionsStore {
       if (id === keepId) continue
       await this.withClaim(id, async () => {
         const e = await this.table.get(id)
-        if (e !== undefined && e.settled === undefined && samePair(e, input)) await this.table.delete(id)
+        if (e !== undefined && e.settled === undefined && sameOpenPair(e, input)) await this.table.delete(id)
       })
     }
   }
@@ -501,7 +541,7 @@ export class PendingDecisionsStore {
     const isSameBaseline = (b: SuggestionBasis) => basis.baseline === undefined || b.baseline?.fingerprint === basis.baseline.fingerprint
     const claimed = await this.withClaim(id, async () => {
       const entry = await this.table.get(id)
-      if (entry === undefined || entry.settled !== undefined) return 'gone' as const
+      if (entry === undefined || entry.settled !== undefined || kindOf(entry) !== 'conflict') return 'gone' as const
       const records = await Promise.all(entry.memoryIds.map(read))
       const live = records.map(r => (r?.status === 'active' ? r : undefined))
       if (entry.suggestion !== undefined && isBasisCurrent(entry, entry.suggestion.basis, live) && isSameBaseline(entry.suggestion.basis)) return 'has-current' as const

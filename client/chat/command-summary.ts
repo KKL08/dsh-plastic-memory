@@ -2,9 +2,10 @@
  * 面板发的 `/memory` 命令在对话里那一行的摘要。宿主每执行一条命令都在会话日志里记下参数原文和结果文本，
  * 对话界面默认把结果 JSON 原样摊开；这里按子命令写成一句话，失败原因和面板走同一套文案（interpret）。纯函数，不碰 React。
  */
-import { maskSecrets, memoryCommandResultSchema, parseMemoryCommand, type MaskOptions, type MemoryCommand } from '../../src/gui/contract.ts'
+import { maskSecrets, memoryCommandResultSchema, parseMemoryCommand, type MaskOptions, type MemoryCommand, type ResolveVerdict } from '../../src/gui/contract.ts'
 import { interpret } from '../command/protocol.ts'
 import { baseName } from '../path.ts'
+import type { LocaleKey } from '../locales.ts'
 import type { Summary } from './tool-summary.ts'
 
 /** 宿主 CommandNode.outcome：还在跑时为 null。 */
@@ -18,6 +19,17 @@ export type CommandLine =
   | { state: 'running' | 'ok'; action?: Summary | undefined; note?: 'awaiting' | 'elsewhere' | 'busy' }
   | { state: 'error'; action?: Summary | undefined; reason: Summary | string }
 
+/** resolve 按裁决值写：保留一方、两条都留（旧取值）、并成版本、确实不冲突、记成例外、不再提醒（体检发现的忽略，含「仍然成立」「留在各自项目」）。 */
+const RESOLVE_SUMMARY = {
+  'keep-left': 'chat.command.resolve.one',
+  'keep-right': 'chat.command.resolve.one',
+  'keep-both': 'chat.command.resolve.both',
+  'as-versions': 'chat.command.resolve.versions',
+  'not-conflict': 'chat.command.resolve.notConflict',
+  'exception': 'chat.command.resolve.exception',
+  'dismiss': 'chat.command.resolve.dismiss',
+} as const satisfies Record<ResolveVerdict, LocaleKey>
+
 function actionOf(command: MemoryCommand): Summary {
   switch (command.cmd) {
     case 'info': return { key: 'chat.command.info' }
@@ -29,7 +41,7 @@ function actionOf(command: MemoryCommand): Summary {
     case 'suggest': return { key: 'chat.command.suggest' }
     case 'draft-proposal': return { key: 'chat.command.draftProposal' }
     case 'apply-proposal': return { key: command.proposal !== undefined ? 'chat.command.applyRequestedProposal' : 'chat.command.applyProposal' }
-    case 'resolve': return { key: command.verdict === 'keep-both' ? 'chat.command.resolve.both' : 'chat.command.resolve.one' }
+    case 'resolve': return { key: RESOLVE_SUMMARY[command.verdict] }
     case 'undo': return { key: 'chat.command.undo' }
     case 'promote':
     case 'promote-memory': return { key: command.target === 'agents-md' ? 'chat.command.promote.agentsMd' : 'chat.command.promote.global' }

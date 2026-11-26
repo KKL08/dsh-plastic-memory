@@ -140,21 +140,49 @@ describe('命中与重查', () => {
     expect(m.calls.length).toBe(from)
   })
 
-  it('补证（只换出处和改动性质、取代关系，发给模型的内容没变）：批照常命中，不调模型', async () => {
+  it('补证只换了模型看不到的（出处会话、事件区间、取代关系，来源方式和改动性质不变）：批照常命中，不调模型', async () => {
     const e = await env()
-    const target = record({ id: 'mem_t', name: '原名', content: '原文' })
+    const target = record({
+      id: 'mem_t', name: '原名', content: '原文',
+      source: { sessionId: 'sess_1', eventRange: [0, 1], sourceMode: 'user-explicit' },
+      lastChange: { kind: 'corroborate', at: CHECKUP_NOW - DAY_MS, op: 'op_corroborate_1' },
+    })
     await e.store.put(target)
     const m = stubModel()
     await e.scan({ llm: m })
+    expect(m.calls).toHaveLength(1)
     await e.store.put({
       ...target, updatedAt: CHECKUP_NOW,
       source: { sessionId: 'sess_2', eventRange: [3, 4], sourceMode: 'user-explicit' },
-      lastChange: { kind: 'corroborate', at: CHECKUP_NOW, op: 'op_corroborate' },
+      lastChange: { kind: 'corroborate', at: CHECKUP_NOW, op: 'op_corroborate_2' },
       supersedes: ['mem_old'],
     })
     e.clock.now += 1000
     await e.scan({ llm: m })
     expect(m.calls).toHaveLength(1)
+  })
+
+  it('补证改了来源方式或改动性质（模型看得到的线索）：这一批重发一次，之后照常命中', async () => {
+    const changes: Array<Partial<MemoryRecord>> = [
+      { source: { sessionId: 'sess_2', eventRange: [3, 4], sourceMode: 'agent-inferred' } },
+      { lastChange: { kind: 'state-change', at: CHECKUP_NOW, op: 'op_state' } },
+    ]
+    for (const change of changes) {
+      const e = await env()
+      const target = record({ id: 'mem_t', name: '原名', content: '原文', source: { sessionId: 'sess_1', eventRange: [0, 1], sourceMode: 'user-explicit' } })
+      await e.store.put(target)
+      const m = stubModel()
+      await e.scan({ llm: m })
+      expect(m.calls, JSON.stringify(change)).toHaveLength(1)
+      await e.store.put({ ...target, updatedAt: CHECKUP_NOW, ...change })
+      e.clock.now += 1000
+      await e.scan({ llm: m })
+      expect(m.calls, JSON.stringify(change)).toHaveLength(2)
+      expect(m.calls[1], JSON.stringify(change)).toContain('mem_t')
+      e.clock.now += 1000
+      await e.scan({ llm: m })
+      expect(m.calls, JSON.stringify(change)).toHaveLength(2)
+    }
   })
 
   it('记忆过期：不进模型、语义发现消失，规则层的过期提示还在；有效期延到未来：重新进；还没生效的照常进', async () => {

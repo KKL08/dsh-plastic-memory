@@ -13,8 +13,8 @@
  * 「等你决定」标题下两条以上没有建议时有「全部补上」那一行（SuggestAll）；它正在生成的那一条，卡上的建议块写「正在生成」。
  * 带 newItem 进来时（状态条结果行的链接）跳到第一条带「新」的条目：滚到视野中间、闪一次、接住焦点；没有就落在顶部。
  */
-import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactElement, type ReactNode, type RefObject } from 'react'
-import { PENDING_LEVELS, pendingItemKey, pendingItemScopes, type CheckupView, type HealthView, type LibraryView, type PendingItem, type PendingLevel } from '../../src/gui/contract.ts'
+import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState, type ReactElement, type ReactNode, type RefObject } from 'react'
+import { PENDING_LEVELS, pendingItemKey, pendingItemScopes, scopeOfMemory, type CheckupView, type HealthView, type LibraryView, type PendingItem, type PendingLevel } from '../../src/gui/contract.ts'
 import { isNewItem, markSeen, newItemIndex, readSeen, type Seen } from '../checkup/seen.ts'
 import { partialOf } from '../checkup/coverage.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
@@ -32,6 +32,7 @@ import { StatusMarker } from '../ui/StatusMarker.tsx'
 import {
   AdviceCard, adviceTitle, HorizontalCard, ItemIsNew, ItemScopeNames, OverflowCard, PromoteCard, ResultCard, SecretCard, titleOf, UnreadableCard, useCardAction, VerticalCard, type Outcome,
 } from './cards.tsx'
+import { CrossDuplicateCard, ExceptionCard, MissedChangeCard, PremiseCard } from './findings.tsx'
 import { RequestSlotsContext, useRequestSlots } from './proposal.tsx'
 import { BatchSuggesting, isMissingSuggestion, SuggestAll } from './suggestion.tsx'
 
@@ -47,11 +48,18 @@ function memoryIdsOf(item: PendingItem): string[] {
     case 'conflict-vertical':
     case 'promote-candidate': return item.memory === null ? [] : [item.memory.id]
     case 'advice': return item.memories.map(m => m.id)
+    case 'missed-change': return [item.left?.id, item.right?.id].filter((id): id is string => id !== undefined)
+    case 'exception':
+    case 'cross-duplicate': return item.memories.flatMap(m => (m === null ? [] : [m.id]))
+    case 'premise-changed': return [item.decision?.id, item.premise?.id].filter((id): id is string => id !== undefined)
     default: return []
   }
 }
 
-interface Recent { item: PendingItem; index: number; outcome: Outcome; undone: boolean }
+/**
+ * 刚处理完、留在原位的结果卡。isGone：处理之后视图里已经没有这一条（视图跟上了），之后同一条目再出现就是新挂出的。
+ */
+interface Recent { item: PendingItem; index: number; outcome: Outcome; undone: boolean; isGone?: true }
 
 /** 没有生效的那次动作：哪一条（标题写进说明，卡片没了也认得出）、在列表里的位置、在哪一组。 */
 interface Refused { key: string; index: number; title: string; level: PendingLevel }
@@ -142,14 +150,23 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
   // 体检、对话在页面开着时带来的新条目：撑开位置再落进来
   const arrivals = useArrivals(pending.status === 'ready' ? viewItems.map(pendingItemKey) : undefined)
   const recentKey = recent === undefined ? undefined : pendingItemKey(recent.item)
-  const backInView = recentKey !== undefined && viewItems.some(i => pendingItemKey(i) === recentKey)
-  // 撤销后视图把条目带回来了：本地那张让位
-  useEffect(() => { if (recent?.undone && backInView) setRecent(undefined) }, [recent, backInView])
+  // 按整份视图找（不按范围过滤）：换范围不算视图跟上了
+  const recentInView = recentKey === undefined || pending.status !== 'ready' ? undefined : pending.data.items.find(i => pendingItemKey(i) === recentKey)
+  const backInView = recentInView !== undefined
+  // 处理之后视图里又有同一条目：视图刷掉过它，或种类变了（体检改判、旧命令迟到成功），都是新挂出的，结果卡让位给新卡。
+  // 同一种类、视图还没刷掉过的是命令成功前的旧视图，照旧藏起来、留着结果卡
+  const isSuperseded = recent !== undefined && !recent.undone && recentInView !== undefined && (recent.isGone === true || recentInView.kind !== recent.item.kind)
+  useEffect(() => {
+    if (recent === undefined || pending.status !== 'ready') return
+    // 撤销后视图把条目带回来了、或有了新挂出的同一条目：本地那张让位
+    if (recent.undone ? backInView : isSuperseded) setRecent(undefined)
+    else if (!recent.undone && !backInView && recent.isGone !== true) setRecent({ ...recent, isGone: true })
+  }, [recent, backInView, isSuperseded, pending.status])
 
   if (pending.status !== 'ready' && recent === undefined) return <ViewMessage state={pending} idle={t('session.none.title')} className="pm-page-placeholder" />
 
   // 视图还没重写时刚处理的条目仍在里面：先藏起来，原位放结果卡
-  const items = viewItems.filter(i => recent === undefined || recent.undone || pendingItemKey(i) !== recentKey)
+  const items = viewItems.filter(i => recent === undefined || recent.undone || isSuperseded || pendingItemKey(i) !== recentKey)
   const cardRow = (item: PendingItem, index: number): Row => {
     const key = pendingItemKey(item)
     const isNewRow = isNew(item)
@@ -170,7 +187,10 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
       node: (
         <ItemSending.Provider value={onSending}>
           <ItemIsNew.Provider value={isNewRow}>
-            <ItemScopeNames.Provider value={scopeNames(item)}><BatchSuggesting.Provider value={batchCurrent}><RequestSlotsContext.Provider value={requestSlots}>{renderCard(item, (outcome) => { done({ item, index, outcome, undone: false }) }, refuse(item, index))}</RequestSlotsContext.Provider></BatchSuggesting.Provider></ItemScopeNames.Provider>
+            <ItemScopeNames.Provider value={scopeNames(item)}><BatchSuggesting.Provider value={batchCurrent}><RequestSlotsContext.Provider value={requestSlots}>
+              {/* 体检改判时同一条目原地换种类（id 不变）：按种类重挂，上一种卡里的本地状态（补充要求的草稿、展开的面板）不带过去 */}
+              <Fragment key={item.kind}>{renderCard(item, (outcome) => { done({ item, index, outcome, undone: false }) }, refuse(item, index))}</Fragment>
+            </RequestSlotsContext.Provider></BatchSuggesting.Provider></ItemScopeNames.Provider>
           </ItemIsNew.Provider>
         </ItemSending.Provider>
       ),
@@ -182,7 +202,7 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
     const key = pendingItemKey(item)
     if (key !== recentKey && !items.some(i => pendingItemKey(i) === key)) rows.splice(Math.min(index, rows.length), 0, cardRow(item, index))
   }
-  if (recent !== undefined && !(recent.undone && backInView)) {
+  if (recent !== undefined && !(recent.undone && backInView) && !isSuperseded) {
     rows.splice(Math.min(recent.index, rows.length), 0, recent.undone
       // 撤销已生效、视图还没带回来：按原样显示，可以接着处理；和视图带回的那张同 key 同结构，带回时不重挂，焦点不丢
       ? cardRow(recent.item, recent.index)
@@ -237,6 +257,12 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
       )
       case 'unreadable-file': return <UnreadableCard item={item} {...props} />
       case 'advice': return <AdviceCard item={item} {...props} projects={projects} defaultProject={defaultProject} />
+      case 'missed-change': return <MissedChangeCard item={item} {...props} />
+      case 'exception': return <ExceptionCard item={item} {...props} />
+      case 'premise-changed': return (
+        <PremiseCard item={item} {...props} onEditDecision={(decision) => { nav.update({ view: 'library', scope: scopeOfMemory(decision), memoryId: decision.id }) }} />
+      )
+      case 'cross-duplicate': return <CrossDuplicateCard item={item} {...props} />
     }
   }
 
@@ -508,6 +534,8 @@ export const pendingCss = `
 .pm-pending-advice-memories .pm-mc-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
 .pm-pending-advice-group { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .pm-pending-advice-side { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.pm-finding-label { margin: 0; font-size: 12px; font-weight: 600; line-height: 1.5; color: var(--pm-text-2); }
+.pm-advice-text .pm-link { margin-left: 8px; font-size: 12px; }
 .pm-pending-group-count { font-weight: 400; color: var(--pm-text-2); }
 .pm-pending-row { position: relative; }
 .pm-pending-row + .pm-pending-row { border-top: .5px solid var(--pm-line); }

@@ -64,7 +64,9 @@ function localKeyOf(command: MemoryCommand, code: GuiErrorCode): LocaleKey | und
     case 'stale':
       return command.cmd === 'undo' || command.cmd === 'restore' ? 'pending.undo.stale'
         : command.cmd === 'ignore-advice' ? 'pending.ignore.stale'
-        : command.cmd === 'forget' || command.cmd === 'hard-delete' ? 'pending.delete.stale' : 'pending.edit.stale'
+        : command.cmd === 'forget' || command.cmd === 'hard-delete' ? 'pending.delete.stale'
+        // 裁决（并成版本）：两条在体检之后改过或不在用，条目留着等下次体检
+        : command.cmd === 'resolve' ? 'pending.resolve.stale' : 'pending.edit.stale'
     // 按记忆动手的：要动的记忆已经不在（多半在外面删了），服务端已重写视图。待决项的在前面算别处已处理；
     // 撤销的是这次操作已撤销过、条目已不在或快照过期，原话里只有账本 id，换成本地说法
     case 'not-found': return command.cmd === 'undo' ? 'pending.undo.gone' : 'memoryId' in command || 'memories' in command ? 'pending.memory.gone' : undefined

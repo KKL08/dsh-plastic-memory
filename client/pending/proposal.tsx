@@ -1,8 +1,9 @@
 /**
  * 冲突卡的「补充要求」（spec 故事 7–19、32）：写一句要求或点常用处理 → 借来的会话的模型按原文和要求出处理方案 → 看结论、说明和对照 → 点「应用」才落盘。
- * 垂直冲突（记忆和指令文件，只有一条记忆 left）同一套：常用处理是「以文件为准，删除这条」「改写这条记忆」（填要求）「都保留，不算冲突」，
+ * 垂直冲突（记忆和指令文件，只有一条记忆 left）同一套：常用处理是「以文件为准，删除这条」「改写这条记忆」（填要求）「确实不冲突」「记成例外」，
  * 生成时带这一条的卡片版本，服务端按这条记忆对应的指令文件出方案。
- * - 常用处理里「保留 A / 保留 B / 都保留，不算冲突」不过模型，交回卡片走原来的裁决（原位确认）；「两者融合」把要求填进文本框，可以接着改。
+ * - 常用处理里「保留 A / 保留 B / 并成版本 / 确实不冲突 / 记成例外」（垂直是两个直接处理）不过模型，交回卡片走原来的裁决（原位确认，并成版本先选留作当前的那条）；
+ *   「两者融合」把要求填进文本框，可以接着改。垂直没有「并成版本」。
  * - 生成发 draft-proposal（只读，方案只在这个组件的内存里），带条目 id、要求、两条的卡片版本；「改要求」后再带此前的要求和上一份方案（只作参照）。
  *   服务端回的方案带依据版本，应用时原样带回，由卡片发 apply-proposal。
  * - 「停止」只是不再等：之后到达的结果按请求序号认出来丢掉。生成中只锁这块，别的卡照常可点。
@@ -24,26 +25,31 @@ import { ACTION_LABEL } from './suggestion.tsx'
 
 type DraftCommand = Extract<MemoryCommand, { cmd: 'draft-proposal' }>
 type Previous = NonNullable<DraftCommand['previous']>
-type Verdict = 'keep-left' | 'keep-right' | 'keep-both'
+/** 常用处理里交回卡片的直接处理（不过模型）。横向的「并成版本」由卡片再选留作当前的那条。 */
+export type DirectVerdict = 'keep-left' | 'keep-right' | 'not-conflict' | 'exception' | 'as-versions'
 
 const { horizontal, vertical } = CONFLICT_ACTION_VERDICTS
 
-/** 常用处理，按显示顺序：直接处理三个（不过模型）和「两者融合」（填要求）。 */
+/** 常用处理，按显示顺序：保留一方两个、「两者融合」（填要求）、并成版本、确实不冲突、记成例外（后三个和保留一方一样不过模型）。 */
 const CANDIDATES = [
   { id: horizontal.keepA, label: 'pending.conflict.keepA' },
   { id: horizontal.keepB, label: 'pending.conflict.keepB' },
   { id: 'merge', label: 'pending.proposal.merge', template: 'pending.proposal.merge.template' },
-  { id: horizontal.keepBoth, label: 'pending.conflict.keepBoth' },
+  { id: horizontal.asVersions, label: 'pending.conflict.asVersions' },
+  { id: horizontal.notConflict, label: 'pending.conflict.notConflict' },
+  { id: horizontal.exception, label: 'pending.conflict.exception' },
 ] as const satisfies readonly Intent[]
 
-/** 垂直冲突的常用处理：直接处理两个（不过模型，都保留同卡上的直接处理记 keep-left）和「改写这条记忆」（填要求）。 */
+/** 垂直冲突的常用处理：「以文件为准，删除这条」、「改写这条记忆」（填要求）、确实不冲突、记成例外（后两个同横向，不过模型）。 */
 const VERTICAL_CANDIDATES = [
   { id: vertical.keepBaseline, label: 'pending.vertical.delete' },
   { id: 'rewrite', label: 'pending.vertical.rewrite', template: 'pending.vertical.rewrite.template' },
-  { id: vertical.keepMemory, label: 'pending.conflict.keepBoth' },
+  { id: vertical.notConflict, label: 'pending.conflict.notConflict' },
+  { id: vertical.exception, label: 'pending.conflict.exception' },
 ] as const satisfies readonly Intent[]
 
-const isVerdict = (id: string): id is Verdict => id === horizontal.keepA || id === horizontal.keepB || id === horizontal.keepBoth
+const DIRECT_VERDICTS: readonly string[] = [horizontal.keepA, horizontal.keepB, horizontal.asVersions, horizontal.notConflict, horizontal.exception]
+const isVerdict = (id: string): id is DirectVerdict => DIRECT_VERDICTS.includes(id)
 
 type Phase =
   /** notice：方案因两条被改过而作废的说明；error：这次没生成成。 */
@@ -67,7 +73,7 @@ export function ProposalRequest({ decisionId, left, right, session, unavailable,
   /** 别的卡想展开输入区、这块写了内容时，卡片给的原位确认。 */
   discardAsk?: ReactNode
   onClose: () => void
-  onPick: (verdict: Verdict) => void
+  onPick: (verdict: DirectVerdict) => void
   onApply: (proposal: RequestedProposal) => void
   onRefused: () => void
   onDirtyChange: (isDirty: boolean) => void

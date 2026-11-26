@@ -399,7 +399,7 @@ describe('横向冲突卡：采纳建议、直接处理（票 05）', () => {
     // 融合稿的名称和两条原名都不同：锁住结果里各处取的是融合前还是融合后的名称
     ops: [{ kind: 'edit', memoryId: 'a', content: '集成测试用真实 Postgres。', name: 'db-in-tests', summary: A.summary, tags: [] }, { kind: 'forget', memoryId: 'b' }],
   }
-  const DIRECT = ['保留 A', '保留 B', '都保留，不算冲突']
+  const DIRECT = ['保留 A', '保留 B', '并成版本', '确实不冲突', '记成例外']
   const rowOf = () => document.querySelector('.pm-conflict-actions') as HTMLElement
   const labelsOf = (row: HTMLElement) => [...row.querySelectorAll('button')].map(b => b.textContent)
   const press = async (button: HTMLElement) => {
@@ -538,7 +538,7 @@ describe('横向冲突卡：采纳建议、直接处理（票 05）', () => {
     ['生成失败', { noSuggestion: { code: 'failed', cause: { kind: 'unparseable' } } }],
     ['模型判断不了', { noSuggestion: { code: 'undecided', reason: '两条都没写日期。' } }],
     ['含高危密钥', { right: { ...B, hasSecret: true }, noSuggestion: { code: 'has-secret' } }],
-  ] as const)('没有建议（%s）：按钮行是直接处理的三个按钮，没有「采纳建议」', (_label, extra) => {
+  ] as const)('没有建议（%s）：按钮行是直接处理的五个按钮，没有「采纳建议」', (_label, extra) => {
     setup([withState(extra as Partial<Horizontal>)])
     expect(screen.queryByRole('button', { name: '采纳建议' })).toBeNull()
     expect(labelsOf(rowOf())).toEqual(DIRECT)
@@ -565,13 +565,13 @@ describe('横向冲突卡：采纳建议、直接处理（票 05）', () => {
     expect(commands()).toEqual([{ cmd: 'resolve', decisionId: 'd-h', verdict: 'keep-right' }])
   })
 
-  it('「都保留，不算冲突」：确认「都保留？以后体检不再把它们当冲突」后发 resolve keep-both', async () => {
+  it('「确实不冲突」：确认「确实不冲突？两条都留着，以后体检不再报它们」后发 resolve not-conflict', async () => {
     const { commands } = setup([withState({ noSuggestion: { code: 'not-generated' } })])
-    fireEvent.click(screen.getByRole('button', { name: '都保留，不算冲突' }))
-    fireEvent.click(within(screen.getByRole('group', { name: '都保留？以后体检不再把它们当冲突' })).getByRole('button', { name: '都保留' }))
-    expect(await screen.findByText('两条都保留')).toBeInTheDocument()
-    expect(screen.getByText('按你的选择处理。以后体检不再把它们当冲突。')).toBeInTheDocument()
-    expect(commands()).toEqual([{ cmd: 'resolve', decisionId: 'd-h', verdict: 'keep-both' }])
+    fireEvent.click(screen.getByRole('button', { name: '确实不冲突' }))
+    fireEvent.click(within(screen.getByRole('group', { name: '确实不冲突？两条都留着，以后体检不再报它们' })).getByRole('button', { name: '确实不冲突' }))
+    expect(await screen.findByText('已标为不冲突')).toBeInTheDocument()
+    expect(screen.getByText('按你的选择处理。两条都留着；它们都不变时，体检不再报这一对。')).toBeInTheDocument()
+    expect(commands()).toEqual([{ cmd: 'resolve', decisionId: 'd-h', verdict: 'not-conflict' }])
   })
 
   it('原位确认点「取消」：什么都不发，焦点回到原来的按钮', async () => {
@@ -692,7 +692,7 @@ describe('横向冲突卡：采纳建议、直接处理（票 05）', () => {
     const gateway = createFakeGateway({ session: SESSION, config, views: { pending: view(withState({ suggestion: keepA })), health: scannedHealth(NOW) } })
     render(<PanelShell gateway={gateway} t={createTranslator(en)}><PendingTab nav={createNavStore()} session={SESSION} scope={ALL_SCOPE} workspacePath="/w/app" now={NOW} /></PanelShell>)
     expect(screen.getByText('If you adopt it, “mock-db-in-tests” moves to Recently deleted and can be restored within 14 days.')).toBeInTheDocument()
-    expect(labelsOf(rowOf())).toEqual(['Adopt suggestion', 'Keep A', 'Keep B', 'Keep both, not a conflict'])
+    expect(labelsOf(rowOf())).toEqual(['Adopt suggestion', 'Keep A', 'Keep B', 'Merge as versions', 'Not a conflict', 'Mark as exception'])
     fireEvent.click(screen.getByRole('button', { name: 'Adopt suggestion' }))
     expect(await screen.findByText('Kept “postgres-in-tests”')).toBeInTheDocument()
     expect(screen.getByText('Done as the model suggested. “mock-db-in-tests” was deleted and can be restored within 14 days.')).toBeInTheDocument()

@@ -1,4 +1,5 @@
-import type { MemoryRecord } from '../record-schema.ts'
+import { anchorsOf, anchorSourceMode, readChangeKind, type MemoryRecord } from '../record-schema.ts'
+import { injectionText } from '../index-line.ts'
 import { isExpired } from '../record-freshness.ts'
 import { SEVERITY_BY_TYPE, type Finding } from './schema.ts'
 import { maskDiagnostic, maskSecretSurface, maskSecrets } from '../secrets.ts'
@@ -48,24 +49,32 @@ export function isAbort(err: unknown, signal?: AbortSignal): boolean {
  * 体检提示词的版本：改系统提示词、记忆行格式（semanticMemoryLine）或基线段落的写法时加一。
  * 体检结果按它区分，换了版本，按旧提示词查出的结论不再沿用。
  */
-export const SEMANTIC_PROMPT_VERSION = 3
+export const SEMANTIC_PROMPT_VERSION = 4
 
 /** 一次调用里记忆列表的 token 预算（snapshot.estimateTokens 估算）。整库塞进一条消息会撑爆上下文窗口，超了就分批。 */
 export const SEMANTIC_BATCH_TOKEN_BUDGET = 30_000
 
-const SEMANTIC_TYPES = new Set(['conflict', 'redundancy', 'misplaced', 'unclear'])
+const SEMANTIC_TYPES = new Set(['conflict', 'missed-change', 'exception', 'redundancy', 'misplaced', 'unclear'])
 
-const SYSTEM_PROMPT = `你是记忆库治理审查员。对给出的记忆列表做四类语义问题检测：
+const SYSTEM_PROMPT = `你是记忆库治理审查员。对给出的记忆列表检查以下六类问题。
 
-- conflict 冲突：两条记忆互相矛盾（横向，memoryIds 填两条），或一条记忆与权威配置基线矛盾（垂直，memoryIds 填一条 + baselineRef 注明基线出处）。判定顺序：先看 scope 是否真的重叠 → 再看时间线索 → 垂直冲突对照基线。
-- redundancy 冗余：行为判据——删掉其中一条，模型行为不变。记忆与基线重复也算（纵向冗余）。注意区分规则与 Why：解释"为什么"的记忆有独立价值，倾向保留不报。
-- misplaced 错位：记忆放错了 scope（项目特定的放了 global，或全局偏好锁在了项目里）。
+两条说法对不上时，依次判断：
+1. 先看适用范围，横向两条记忆、纵向记忆与基线都适用：通用规则和更窄范围的特别做法能同时成立，报 exception（例外）。
+2. 再看时间，这一步只比较两条记忆：结合 recordedAt、factTime、validFrom、validTo、lastChange、versions，若一条是旧状态、一条是新状态，报 missed-change（漏记的变化），current 填代表现在状态那条记忆的 id。
+3. 横向两条记忆、纵向记忆与基线在同一范围、同一时间条件下互相排斥，报 conflict（冲突）；纵向以权威配置基线为准。
+
+- conflict、exception：横向 memoryIds 填两条；纵向填一条，并用 baselineRef 注明基线出处。
+- missed-change：memoryIds 填两条不同的记忆，current 填其中代表当前状态那条记忆的 id；这类发现只比较记忆，输出字段为 type、memoryIds、summary、suggestedAction、current。
+- redundancy 冗余：删掉其中一条，模型行为不变；记忆与基线重复也算，纵向 memoryIds 填一条，baselineRef 注明基线出处。解释为什么的记忆有独立价值，判断时保留这份价值。
+- misplaced 错位：项目特定的记忆放了 global，或全局偏好锁在了项目里。
 - unclear 模糊：新会话没有额外上下文时无法据此行动；或者只有一句结论，看不出是在什么情况下定的，因此判断不了它管到哪里。短本身不算问题；看得出管到哪里、也能照着做的短记忆不报。
 
+recordedAt 是记下这条记忆的时间；事情发生的时间看 factTime，生效时间看 validFrom、validTo。lastChange 是最近一次改动的性质。versions 是这条已有的历史版本数，unknown 表示数量读不出。结合这些时间和改动线索判断新旧状态。
+sourceMode 是内容的来源方式，用来判断依据的可靠度。
 summary、suggestedAction 是给用户看的：提到记忆时写它的 name，id 只写在 memoryIds 里。
 
-只报有把握的问题，不确定就不报。只输出 JSON，不要任何其他文字，格式：
-{"findings":[{"type":"conflict","memoryIds":["mem_x","mem_y"],"summary":"一句话描述","suggestedAction":"建议动作","baselineRef":"仅垂直冲突填，如 AGENTS.md：某规则"}]}
+只报有把握的问题。只输出 JSON，格式：
+{"findings":[{"type":"missed-change","memoryIds":["mem_x","mem_y"],"summary":"一句话描述","suggestedAction":"建议动作","current":"mem_y"},{"type":"conflict","memoryIds":["mem_z"],"summary":"一句话描述","suggestedAction":"建议动作","baselineRef":"AGENTS.md：某规则"}]}
 没有问题输出 {"findings":[]}`
 
 /**
@@ -76,6 +85,11 @@ export function buildSemanticPrompt(
   records: MemoryRecord[],
   baseline: readonly string[] | null,
   project?: string,
+  /**
+   * 每条记忆的历史版本数（按 id）：大于 0 的在记忆行里写 versions 一行，读不出的写 unknown，0 和没给的不写。
+   * 体检时由调用方按记忆所在层的历史现读；不给时整批都不写这一行。
+   */
+  versions?: VersionCounts,
 ): { system: string; user: string } {
   // 判断冲突用不到密钥原值，明确密钥不发给模型（与注入同口径）。指令文件整份原样给：长度由读取时的上限管，超了另有截断说明
   const baselineSection = baseline
@@ -83,7 +97,10 @@ export function buildSemanticPrompt(
     : '## 权威配置基线\n（无权威配置基线，跳过垂直冲突检测）'
   return {
     system: SYSTEM_PROMPT,
-    user: `${project !== undefined ? `${projectSection(maskSecrets(project), baseline !== null)}\n\n` : ''}${baselineSection}\n\n## 记忆列表（共 ${records.length} 条）\n${records.map(semanticMemoryLine).join('\n')}`,
+    user: `${project !== undefined ? `${projectSection(maskSecrets(project), baseline !== null)}\n\n` : ''}${baselineSection}\n\n## 记忆列表（共 ${records.length} 条）\n${records.map(r => {
+      const count = versions?.get(r.id)
+      return semanticMemoryLine(r) + (count === 'unknown' || (count !== undefined && count > 0) ? `\n  versions: ${count}` : '')
+    }).join('\n')}`,
   }
 }
 
@@ -102,10 +119,10 @@ function projectSection(project: string, hasBaseline: boolean): string {
  */
 const LINE_FIELDS: Record<ScanContentField, (r: MemoryRecord) => string | undefined> = {
   type: r => r.type,
-  name: r => r.name,
-  content: r => r.content,
-  summary: r => r.summary,
-  factTime: r => (r.factTime === undefined ? undefined : maskSecrets(r.factTime)),
+  name: r => injectionText(r.name),
+  content: r => injectionText(r.content),
+  summary: r => injectionText(r.summary),
+  factTime: r => (r.factTime === undefined ? undefined : injectionText(maskSecrets(r.factTime))),
   validFrom: r => (r.validFrom === undefined ? undefined : formatValidity(r.validFrom)),
   validTo: r => (r.validTo === undefined ? undefined : formatValidity(r.validTo)),
 }
@@ -120,8 +137,16 @@ export function semanticMemoryLine(record: MemoryRecord): string {
     const value = LINE_FIELDS[field](r)
     return value === undefined ? [] : [`  ${field}: ${value}`]
   })
+  lines.push(`  recordedAt: ${new Date(r.createdAt).toISOString().slice(0, 16)}Z`)
+  const latest = anchorsOf(r)[0]
+  if (latest !== undefined) lines.push(`  sourceMode: ${anchorSourceMode(latest)}`)
+  const change = readChangeKind(r.lastChange?.kind)
+  if (change !== undefined) lines.push(`  lastChange: ${change}`)
   return [`- id=${r.id} type=${LINE_FIELDS.type(r)} scope=${r.scope}${r.workspacePath ? `(${r.workspacePath})` : ''}`, ...lines].join('\n')
 }
+
+/** 记忆的历史版本数（按 id）：读不出的是 'unknown'。见 buildSemanticPrompt。 */
+export type VersionCounts = ReadonlyMap<string, number | 'unknown'>
 
 /** 语义检查准入：在用、没过期（还没生效的照常进）。只管交给模型的输入；规则层照旧看全部记忆。 */
 export function isSemanticAdmitted(r: MemoryRecord, now: number): boolean {
@@ -226,7 +251,8 @@ export function parseSemanticFindings(raw: string, knownIds: Set<string>): Findi
     // 空字符串 baselineRef 不算"有基线"：下游 dedupKey 用真值判断、pairKey 与 executeConfirm 用
     // !== undefined 判断，两者对空字符串的态度不一致，必须在这里收口成"要么是非空字符串要么不存在"。
     const baselineRef = typeof f.baselineRef === 'string' && f.baselineRef.length > 0 ? maskText(f.baselineRef) : undefined
-    if (type === 'conflict') {
+    if (type === 'missed-change' && (memoryIds.length !== 2 || baselineRef !== undefined)) continue
+    if (type === 'conflict' || type === 'exception') {
       // 冲突的基数必须在产出侧收口——消费方 memory_confirm 的横向分支只认
       // memoryIds[0]/[1]，多出或缺少都会导致"用户以为裁决了、实际什么都没发生"。
       const horizontal = memoryIds.length === 2 && baselineRef === undefined
@@ -241,6 +267,7 @@ export function parseSemanticFindings(raw: string, knownIds: Set<string>): Findi
       summary: typeof f.summary === 'string' ? maskText(f.summary) : '',
       suggestedAction: typeof f.suggestedAction === 'string' ? maskText(f.suggestedAction) : '',
       ...(baselineRef !== undefined ? { baselineRef } : {}),
+      ...(type === 'missed-change' && typeof f.current === 'string' && memoryIds.includes(f.current) ? { current: f.current } : {}),
     })
   }
   return out
@@ -306,11 +333,13 @@ export async function scanBatch(
   onUsage: ((tokens: number) => void) | undefined,
   /** 这次检查的项目（见 buildSemanticPrompt）；检查全局时不给。 */
   project?: string,
+  /** 这一批记忆的历史版本数（见 buildSemanticPrompt）。 */
+  versions?: VersionCounts,
 ): Promise<Finding[] | SemanticFailure> {
   const knownIds = new Set(records.map(r => r.id))
-  const prompt = buildSemanticPrompt(records, baseline, project)
+  const prompt = buildSemanticPrompt(records, baseline, project, versions)
   const named = idsToNames(records.map(r => maskSecretSurface(r, { severity: 'suspected' })))
-  const withNames = (findings: Finding[]) => findings.map(f => ({ ...f, summary: named(f.summary), suggestedAction: named(f.suggestedAction) }))
+  const withNames = (findings: Finding[]) => findings.map(f => ({ ...f, summary: injectionText(named(f.summary)), suggestedAction: injectionText(named(f.suggestedAction)) }))
 
   // LLM 调用本身可能抛（限流/超时/上下文超限/网络），必须与"输出无法解析"同等降级——
   // 否则 layers=full 时已经算好的规则层结果会被一起丢掉。

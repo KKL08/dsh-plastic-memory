@@ -42,7 +42,7 @@ describe('参数解析', () => {
     ['参数不是 JSON', ' resolve {decisionId'],
     ['参数不是对象', ' resolve [1]'],
     ['缺必填字段', ' resolve {"decisionId":"pd_x"}'],
-    ['verdict 取值非法', ' resolve {"decisionId":"pd_x","verdict":"dismiss"}'],
+    ['verdict 取值非法', ' resolve {"decisionId":"pd_x","verdict":"keep-all"}'],
   ])('%s → invalid-args，账本与视图不动', async (_label, raw) => {
     const e = env()
     const entry = await seedPair(e)

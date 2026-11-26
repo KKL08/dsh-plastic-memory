@@ -5,7 +5,7 @@ import type { DirectoryNote, LocatedRecord } from '../storage/table.ts'
 import { RETENTION_MS } from '../retention.ts'
 import { hasCriticalSecret, maskSecretSurface, maskSecrets } from '../secrets.ts'
 import { editFingerprint } from '../governance/snapshots.ts'
-import { FINDING_TYPES, kindOf, verdictLoser, type FindingType, type MemorySnapshot, type PendingDecision } from '../governance/schema.ts'
+import { FINDING_TYPES, kindOf, snapshotIdFor, verdictLoser, type FindingType, type MemorySnapshot, type PendingDecision } from '../governance/schema.ts'
 import { candidateFingerprint, isBasisCurrent, overflowLevelOf, overflowScopeOf } from '../governance/decisions.ts'
 import { asUndoable, isModelChange, undoStateOf } from '../governance/undo-rules.ts'
 import { runRuleScan } from '../governance/rule-scan.ts'
@@ -55,6 +55,8 @@ export interface ViewInput {
    * 只列 data.byId 取到的是别的作用域里那份的；那个作用域里已经没有的不列，按 byId 是否在那个作用域判。
    */
   entryCopies?: ReadonlyMap<string, LocatedRecord>
+  /** 跨项目重复的成员在它记下的作用域里的那一份（键见 copyKey）：只列 data.byId 取到的是别的作用域里那份的。 */
+  memberCopies?: ReadonlyMap<string, LocatedRecord>
   /** 本进程正在给哪些条目生成处理建议（体检之后的后续段，按条目 id）；缺省没有。 */
   generatingSuggestions?: ReadonlySet<string>
 }
@@ -100,6 +102,25 @@ function cardOf(id: string | undefined, data: ScopePreread): MemoryCard | null {
   return r === undefined ? null : card(r, data)
 }
 
+/** memberCopies 的键：作用域 + id。 */
+export function copyKey(at: Scope, memoryId: string): string {
+  return `${scopeCacheKey(at)}\n${memoryId}`
+}
+
+/** 记忆在 at 那个作用域里的那一份：预读留下的就在那里用它，否则取 memberCopies 补读的；都没有算没读到。 */
+function memberCopyIn(input: ViewInput, memoryId: string, at: Scope): { record: MemoryRecord; filePath: string | undefined } | undefined {
+  const r = input.data.byId.get(memoryId)
+  if (r !== undefined && isCopyOf(r, at)) return { record: r, filePath: input.data.filePaths.get(memoryId) }
+  const copy = input.memberCopies?.get(copyKey(at, memoryId))
+  return copy === undefined ? undefined : { record: copy.record, filePath: copy.filePath }
+}
+
+/** 这个作用域这次没读全：没在读取之列、读取出错或有目录读不了，或有读不出的文件（缺的那份可能就在里面）。 */
+function isScopeIncomplete(input: ViewInput, at: Scope): boolean {
+  const key = scopeCacheKey(at)
+  return !input.readScopes.some(s => scopeCacheKey(s) === key) || (input.data.unreadScopes?.has(key) ?? false) || (input.data.quarantined.get(key) ?? []).length > 0
+}
+
 function activeRecords(data: ScopePreread): MemoryRecord[] {
   return [...data.byId.values()].filter(r => r.status === 'active').sort(byNameThenId)
 }
@@ -134,6 +155,41 @@ export function buildPendingView(input: ViewInput): PendingView {
       const scope = label === undefined ? undefined : scopeOfLedger(label)
       items.push({ kind, level: PENDING_LEVEL_OF_KIND[kind], ...base, ...overflowLevelOf(e), ...(scope?.kind === 'workspace' ? { workspacePath: scope.workspacePath } : {}) })
     }
+    else if (kind === 'missed-change') {
+      const current = e.plan?.kind === 'as-versions' && e.memoryIds.includes(e.plan.current) ? { current: e.plan.current } : {}
+      items.push({ kind, level: PENDING_LEVEL_OF_KIND[kind], ...base, summary: e.summary, left: cardOf(e.memoryIds[0], data), right: cardOf(e.memoryIds[1], data), ...current })
+    }
+    else if (kind === 'exception') {
+      // 至少一条（契约 min 1）：账本里成员数不合的跳过
+      if (e.memoryIds.length === 0) continue
+      items.push({
+        kind, level: PENDING_LEVEL_OF_KIND[kind], ...base, summary: e.summary, memories: e.memoryIds.map(id => cardOf(id, data)),
+        ...(e.baselineRef !== undefined ? { baselineRef: e.baselineRef } : {}),
+      })
+    }
+    else if (kind === 'premise-changed') {
+      items.push({ kind, level: PENDING_LEVEL_OF_KIND[kind], ...base, summary: e.summary, decision: cardOf(e.memoryIds[0], data), premise: cardOf(e.memoryIds[1], data) })
+    }
+    else if (kind === 'cross-duplicate') {
+      // 提升、删掉、挪走之后账本里的条目还未决（memory_promote 不碰账本）：有一条已不在它记下的项目里就不显示，下次体检清掉。
+      // 按「作用域 + id」认那一份，同 id 在别的作用域的副本不算；那个作用域这次没读全、没读到它时照常显示，那一条为 null
+      const members = e.memoryIds.map((id, i): MemoryCard | null | undefined => {
+        const label = e.workspaces?.[i]
+        const at = label === undefined ? undefined : scopeOfLedger(label)
+        if (at === undefined) return undefined
+        const copy = memberCopyIn(input, id, at)
+        if (copy === undefined) return isScopeIncomplete(input, at) ? null : undefined
+        return copy.record.status === 'active' ? card(copy.record, data, copy.filePath) : undefined
+      })
+      if (members.length >= 2 && members.every(m => m !== undefined)) {
+        const promoteId = e.plan?.kind === 'promote' && e.memoryIds.includes(e.plan.memoryId) ? { promoteId: e.plan.memoryId } : {}
+        items.push({ kind, level: PENDING_LEVEL_OF_KIND[kind], ...base, summary: e.summary, memories: members as Array<MemoryCard | null>, ...promoteId })
+      }
+    }
+    else if (kind !== 'conflict') {
+      // 生来就已结清的种类（直接改、移动、模型改写等）不该是未决的；认不出的种类不画成冲突
+      continue
+    }
     else if (e.baselineRef !== undefined) {
       items.push({
         kind: 'conflict-vertical', level: PENDING_LEVEL_OF_KIND['conflict-vertical'], ...base, summary: e.summary, memory: cardOf(e.memoryIds[0], data), baselineRef: e.baselineRef,
@@ -147,6 +203,7 @@ export function buildPendingView(input: ViewInput): PendingView {
         ...(preferred !== undefined ? { preferredId: preferred.id } : {}),
         ...suggestionState(e, data),
         ...(input.generatingSuggestions?.has(e.id) === true ? { isGeneratingSuggestion: true as const } : {}),
+        ...(e.sourceCheck !== undefined ? { sourceCheck: e.sourceCheck } : {}),
       })
     }
   }
@@ -169,7 +226,14 @@ export function buildPendingView(input: ViewInput): PendingView {
   items.sort((a, b) => rank(a) - rank(b))
   const dot = items.some(i => i.kind === 'secret') ? 'red'
     : items.some(isAwaitingDecision) ? 'amber' : 'none'
-  const cards = items.flatMap(i => i.kind === 'conflict-horizontal' ? [i.left, i.right] : i.kind === 'advice' ? i.memories : 'memory' in i ? [i.memory] : [])
+  const cards = items.flatMap((i) => {
+    switch (i.kind) {
+      case 'conflict-horizontal': case 'missed-change': return [i.left, i.right]
+      case 'premise-changed': return [i.decision, i.premise]
+      case 'advice': case 'cross-duplicate': case 'exception': return i.memories
+      default: return 'memory' in i ? [i.memory] : []
+    }
+  })
   const levelCounts = Object.fromEntries(PENDING_LEVELS.map(level => [level, items.filter(i => i.level === level).length])) as PendingView['levelCounts']
   return { version: GUI_VIEW_VERSION, generatedAt: input.now, dot, items, levelCounts, typeLabels: typeLabels(input.registry, cards.map(m => m?.type)) }
 }
@@ -551,10 +615,12 @@ export function buildDeletedView(input: ViewInput): DeletedView {
       const latest = causeById.get(r.id)
       const e = latest === undefined || !isLoserCopy(latest, r) || (latest.settled!.verdict === 'plan-applied' && latest.settled!.at !== deletedAt) ? undefined : latest
       const verdict = e?.settled?.verdict
-      const cause = e === undefined || (verdict !== 'keep-left' && verdict !== 'keep-right' && verdict !== 'plan-applied') ? undefined : {
+      // 并成版本的改前快照按删除回执记在 changes 上，其余在 settled 上
+      const snapshotId = e === undefined ? undefined : verdict === 'as-versions' ? snapshotIdFor(e, r.id) : e.settled!.snapshotId
+      const cause = e === undefined || (verdict !== 'keep-left' && verdict !== 'keep-right' && verdict !== 'plan-applied' && verdict !== 'as-versions') ? undefined : {
         decisionId: e.id, verdict,
         ...(e.baselineRef !== undefined ? { baselineRef: e.baselineRef } : { counterpartId: e.memoryIds.find(id => id !== r.id) }),
-        ...(e.settled!.snapshotId !== undefined ? { snapshotId: e.settled!.snapshotId } : {}),
+        ...(snapshotId !== undefined ? { snapshotId } : {}),
       }
       return { memory: card(r, input.data, filePath), deletedAt, purgeAt: deletedAt + RETENTION_MS, ...(cause !== undefined ? { cause } : {}) }
     })
