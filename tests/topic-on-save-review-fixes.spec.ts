@@ -3,6 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from 'no
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
+import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
@@ -189,10 +190,15 @@ describe('保存时归主题的边界', () => {
 
 // 只在入口原子替换之前中断：主题页已落盘，日志仍保留索引行步骤。
 const entryFault = vi.hoisted(() => ({ path: '' }))
+const removeFault = vi.hoisted(() => ({ path: '' }))
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
   return {
     ...actual,
+    rm: async (...args: Parameters<typeof actual.rm>) => {
+      if (String(args[0]) === removeFault.path) throw new Error('删不掉')
+      return actual.rm(...args)
+    },
     rename: async (...args: Parameters<typeof actual.rename>) => {
       if (entryFault.path !== '' && String(args[1]) === entryFault.path) throw new Error('入口写入前退出')
       return actual.rename(...args)
@@ -200,6 +206,7 @@ vi.mock('node:fs/promises', async importOriginal => {
   }
 })
 afterEach(() => { entryFault.path = '' })
+afterEach(() => { removeFault.path = '' })
 
 const topicOp = (name: string) => newWriteOp({ topic: { kind: 'choose', name, maxTopics: 30 } })
 
@@ -374,5 +381,64 @@ describe('手写索引的保存回归', () => {
     const files = (await readIndexFiles(dir()))!
     expect(Object.keys(files.pages).sort()).toEqual(['_unsorted.md', 't0.md'])
     expect(readIndex(files).topics.find(t => t.fileName === 't0.md')!.memberIds).toEqual([r.record.id, 'mem_a'])
+  })
+})
+
+describe('不完整清单中的彻底删除', () => {
+  it('彻底删除后同层仍有在用副本时保留原主题并更新成员行', async () => {
+    const e = env()
+    const target = ws({ id: 'mem_twin', name: '选中的名称', summary: '选中的摘要', updatedAt: T0 })
+    await e.store.create(target)
+    await writeTopicIndex(dir(), [{ name: '上线', members: [target.id] }])
+    await e.table.maintain([dir()])
+    const selected = (await e.table.locate(target.id, at()))!
+    const twin = join(dir(), '另一份.md')
+    const survivor = { ...target, name: '剩余副本名称', summary: '剩余副本摘要', updatedAt: T0 - MINUTE }
+    const text = encodeRecord(survivor, {})
+    await writeFile(twin, text)
+    expect((await e.table.locate(target.id, at()))!.filePath).toBe(selected.filePath)
+    expect((await placement(dir()))[target.id]).toEqual(['上线'])
+    removeFault.path = twin
+    try { await expect(e.table.delete(target.id, at())).rejects.toThrow('删不掉') }
+    finally { removeFault.path = '' }
+    await expect(readFile(selected.filePath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(e.journal.hasPending()).toBe(true)
+    const resumed = env()
+    await resumed.table.maintain([])
+    expect(resumed.journal.hasPending()).toBe(false)
+    expect(await readFile(twin, 'utf8')).toBe(text)
+    expect((await resumed.table.locate(target.id, at()))!.filePath).toBe(twin)
+    expect((await placement(dir()))[target.id]).toEqual(['上线'])
+    expect(await membersOf(dir(), UNSORTED_TITLE)).not.toContain(target.id)
+    const row = await rowOf(dir(), target.id)
+    expect(row).toBe(await expectedRow(resumed.table, target.id, at()))
+    expect(row).toContain(encodeURIComponent('另一份.md'))
+    expect(row).toContain(survivor.name)
+    expect(row).toContain(survivor.summary)
+  })
+
+  it('已有主题索引且另有文件解析失败时只清掉明确删除的成员', async () => {
+    const e = env()
+    const target = ws({ id: 'mem_purged', name: '待清除的名称', summary: '待清除的摘要' })
+    await e.store.create(target)
+    await e.store.create(ws({ id: 'mem_broken', name: '损坏记录', summary: '仍需保留的摘要' }))
+    await writeTopicIndex(dir(), [{ name: '上线', members: [target.id, 'mem_broken'] }], [target.id, 'mem_broken'])
+    await e.table.maintain([dir()])
+    const files = (await readIndexFiles(dir()))!
+    const row = await expectedRow(e.table, target.id, at())
+    // 同一个成员手写进两个页面，彻底删除要把两处和总览一起清掉。
+    await writeFile(join(dir(), INDEX_DIR, INDEX_TOPICS_DIR, UNSORTED_PAGE), files.pages[UNSORTED_PAGE]! + row + '\n')
+    await writeFile(join(dir(), 'MEMORY.md'), '# 记忆索引\n' + row + '\n')
+    const broken = await e.table.locate('mem_broken', at())
+    await writeFile(broken!.filePath, '无法解析的记忆文件')
+    expect(await e.store.hardDelete(target, { at: at() })).toBe(true)
+    const after = (await readIndexFiles(dir()))!
+    const overview = await readFile(join(dir(), 'MEMORY.md'), 'utf8')
+    for (const text of [...Object.values(after.pages), overview]) {
+      for (const value of [target.id, target.name, target.summary]) expect(text).not.toContain(value)
+    }
+    expect(after.pages['t0.md']).toContain('mem_broken')
+    expect(after.pages['t0.md']).toContain('仍需保留的摘要')
+    expect(overview).toContain('## [上线](_index/topics/t0.md)\n\n1 条')
   })
 })

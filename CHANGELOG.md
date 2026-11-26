@@ -421,6 +421,9 @@ All notable changes to this project are documented here. The format follows
   again once after the update.
 
 ### Fixed
+- Permanently deleting a memory left its name and summary in the topic index
+  and `MEMORY.md` when another memory file in the same folder could not be
+  read. Its line is now removed; lines for the unreadable files stay.
 - A memory write that was cut short and whose file was then edited by hand
   or removed was treated as never written, so the record that lets you undo
   it was not added. It is now added the next time a memory is written.

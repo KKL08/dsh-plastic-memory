@@ -1545,7 +1545,7 @@ export class FileTable implements MemoryTable {
           if (!isListed(read.directoryNotes)) throw new Error('记忆目录读不出')
           const result = await this.syncTopicIndex(
             dir, read.slots.filter(s => s.record.status === 'active'),
-            this.now(), read.quarantined.length === 0,
+            this.now(), read.quarantined.length === 0, step.memoryId,
           )
           if (result !== 'retry') { done = true; break }
           continue
@@ -1623,13 +1623,15 @@ export class FileTable implements MemoryTable {
     return dirname(slot.filePath) === slot.dir && record.status === 'active' && !isPendingDelegated(record)
   }
 
-  private async syncTopicIndex(dir: string, active: readonly LocatedRecord[], now: number, isComplete: boolean): Promise<'written' | 'unchanged' | 'retry'> {
+  private async syncTopicIndex(dir: string, active: readonly LocatedRecord[], now: number, isComplete: boolean, purgedId?: string): Promise<'written' | 'unchanged' | 'retry'> {
     try {
       const listed = resolveDuplicates(active).filter(l => !isPendingDelegated(l.record))
       // 手建的记忆文件名称、摘要里可能带着密钥：进索引的这一份先遮
       const members = listed.map((l): IndexedMemory => ({ id: l.record.id, name: maskSecrets(l.record.name), summary: maskSecrets(l.record.summary), fileName: basename(l.filePath) }))
       const before = await readIndexFiles(dir)
-      const { files } = reconcileIndex(before, members, isComplete)
+      // 清单读不全时仍清掉明确删除的成员；同层还有在用副本时保留主题归属。
+      const remaining = before !== undefined && purgedId !== undefined && !members.some(m => m.id === purgedId) ? withoutMember(before, purgedId) : before
+      const { files } = reconcileIndex(remaining, members, isComplete)
       const next = {
         entry: maskSecrets(files.entry),
         pages: Object.fromEntries(Object.entries(files.pages).map(([name, text]) => [name, maskIndexText(text, maskSecrets)])),
