@@ -2,7 +2,7 @@ import { mkdir, readdir, readFile, rm, stat } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import type { ZodType } from 'zod'
-import type { BatchKvTable, CasKvTable, CheckedListKvTable, ClaimKvTable, KvTable, RefreshableClaim, RefreshableClaimKvTable } from '../kv-table.ts'
+import type { BatchKvTable, CasKvTable, CheckedGetKvTable, CheckedListKvTable, ClaimKvTable, KvTable, RefreshableClaim, RefreshableClaimKvTable } from '../kv-table.ts'
 import type { MemoryLogger } from './table.ts'
 import {
   activityEntrySchema, autoCheckupSettingSchema, checkupRecordSchema, dreamMarksSchema, dreamsRecordSchema, modelSelectionRowSchema, recallStatsSchema,
@@ -90,7 +90,7 @@ interface TableEnv {
 }
 
 /** 每条一个 JSON 文件的表。键从文件内容的 id 还原，所以 put 要求键等于值的 id。 */
-class EntryFileTable<T extends { id: string }> implements ClaimKvTable<T>, CasKvTable<T>, RefreshableClaimKvTable<T>, CheckedListKvTable<T> {
+class EntryFileTable<T extends { id: string }> implements ClaimKvTable<T>, CasKvTable<T>, RefreshableClaimKvTable<T>, CheckedListKvTable<T>, CheckedGetKvTable<T> {
   private readonly dir: string
   private readonly fileNameOf: (key: string) => string | undefined
   private readonly schema: ZodType<T>
@@ -134,6 +134,14 @@ class EntryFileTable<T extends { id: string }> implements ClaimKvTable<T>, CasKv
     await this.env.ready()
     const path = this.pathOf(key)
     return path === undefined ? undefined : this.read(path)
+  }
+
+  async getChecked(key: string): Promise<{ value: T | undefined; isReadable: boolean }> {
+    const value = await this.get(key)
+    if (value !== undefined) return { value, isReadable: true }
+    const path = this.pathOf(key)
+    // 读不出的：文件还在、或连有没有都查不出（同 listChecked）；读完之后刚被删掉的算没有
+    return { value: undefined, isReadable: path === undefined || !(await stat(path).then(() => true, err => errnoCode(err) !== 'ENOENT')) }
   }
 
   /** 文件签名：写入都是换文件（原子改名），换过 inode 就变；同一文件被就地改写看大小和时间。文件不在或 stat 不了为 undefined。 */
@@ -420,7 +428,7 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
   readonly adviceIgnores: CasKvTable<I>
   readonly checkups: CasKvTable<CheckupRecord> & RefreshableClaimKvTable<CheckupRecord>
   readonly autoCheckups: KvTable<AutoCheckupSetting>
-  readonly modelSelections: KvTable<ModelSelectionRow>
+  readonly modelSelections: CheckedGetKvTable<ModelSelectionRow>
   readonly dreams: CasKvTable<DreamsRecord> & CheckedListKvTable<DreamsRecord>
   readonly dreamMarks: CasKvTable<DreamMarks> & CheckedListKvTable<DreamMarks>
   readonly activity: CasKvTable<ActivityEntry> & CheckedListKvTable<ActivityEntry>

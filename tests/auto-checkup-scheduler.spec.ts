@@ -28,6 +28,7 @@ import { DAY, NOW } from './helpers/clock.ts'
 import { instructionsOf, noInstructions } from './helpers/instructions.ts'
 import type { ReadInstructions } from '../src/governance/instructions.ts'
 import type { MemoryLogger } from '../src/store.ts'
+import { breakModelSelection } from './helpers/model-selection-file.ts'
 
 // 自动体检调度（测试切入点 2）：真实记忆根（FileTable + .state 侧表 + 视图文件），只在进程边界换成假的：
 // 时钟、宿主计时服务、宿主默认模型选择和宿主 llm 服务（按宿主真实的流形状回 text-delta / usage / finish）。
@@ -406,6 +407,29 @@ describe('自动体检调度：选用的模型', () => {
     // 选择本身不动：模型回来后照样用它
     expect((await e.readView()).model).toEqual({ provider: 'provider-x', model: 'model-gone' })
   })
+
+  /** 选择文件读不出时的这一条（how 是读不出的造法）。 */
+  const pickedUnreadable = async (how: 'bad-json' | 'no-permission') => {
+    const e = env({ llm: fakeHostLlm({ catalog: CATALOG }), log: { info() {}, warn() {}, error() {} } })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 1)
+    const broken = await breakModelSelection(root, 'checkup', how)
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    expect(e.llm.requests).toEqual([])
+    expect(await e.completed()).toEqual({})
+    expect((await e.readView()).scopes[0]).toMatchObject({
+      isDue: true, modelUnavailable: null,
+      failure: { count: 1, retryAt: e.clock.now + HOUR, cause: { kind: 'error', message: expect.stringContaining('读不出来') } },
+    })
+    await e.advance(6 * AUTO_CHECKUP_INTERVAL_MS)
+    expect(e.llm.requests).toEqual([])
+    expect((await e.readView()).scopes[0]!.failure?.count).toBe(2)
+    if (how === 'bad-json') expect(await readFile(broken.path, 'utf8')).toBe(broken.text)
+  }
+  it('选的模型读不出（bad-json）：不调任何模型、不退回默认模型，记一次失败（1 小时后再试）；选择文件原样留着', () => pickedUnreadable('bad-json'))
+  // root 读得了没有读权限的文件
+  it.skipIf(process.getuid?.() === 0)('选的模型读不出（no-permission）：不调任何模型、不退回默认模型，记一次失败（1 小时后再试）；选择文件原样留着', () => pickedUnreadable('no-permission'))
 
   it('选的提供方被删了：同样退回默认模型、照常体检并说明', async () => {
     const e = env({ llm: fakeHostLlm({ catalog: CATALOG }) })

@@ -1,4 +1,4 @@
-import type { KvTable } from '../kv-table.ts'
+import type { CheckedGetKvTable } from '../kv-table.ts'
 import type { ModelSelectionRow } from '../storage/schema.ts'
 import type { ModelChoices, ModelSelection, ModelSelectionKey } from '../gui/contract.ts'
 import type { SemanticLlm } from './semantic-scan.ts'
@@ -16,23 +16,46 @@ export interface HostModelCatalog {
   resolveModelInfo(provider: string, model: string): Promise<{ reasoning?: { efforts: ReadonlyArray<{ id: string; name: string }>; defaultEffort?: string } }>
 }
 
+/** 说明里各选择键对应的功能，用界面和插件其他说明里的叫法。 */
+const SELECTION_FEATURES: Record<ModelSelectionKey, string> = { checkup: '体检', dreams: '记忆梦境', expansion: '补搜' }
+
+/**
+ * 选择文件在、却读不出（没有读权限、内容坏了、读到半个文件）：不知道用户选了哪个，这次不调模型，
+ * 交给各入口按自己的失败处理报出来；不当成没选，也不清、不改这份选择。
+ * 说明会显示给用户：用功能名，不露出选择键；设置页只有体检的模型选择器，只对它说去设置里重选。
+ */
+export class ModelSelectionUnreadable extends Error {
+  constructor(key: ModelSelectionKey) {
+    super(`设置里为${SELECTION_FEATURES[key]}选的模型读不出来，这次没有调用模型${key === 'checkup' ? '。可以在设置里重新选一次' : ''}`)
+    this.name = 'ModelSelectionUnreadable'
+  }
+}
+
 /**
  * 模型选择表的读写：一个选择键一条，几个宿主进程共用（表由接线层注入，storage/sidecar.ts 的 modelSelections）。
  * 每次现读，不缓存：别的进程改了，下次开跑就读到。
  */
 export class ModelSelectionStore {
-  private readonly table: KvTable<ModelSelectionRow>
+  private readonly table: CheckedGetKvTable<ModelSelectionRow>
 
-  constructor(table: KvTable<ModelSelectionRow>) {
+  constructor(table: CheckedGetKvTable<ModelSelectionRow>) {
     this.table = table
   }
 
-  /** 这个键存的选择；没存（跟随）为 undefined。 */
+  /** 这个键存的选择；没存（跟随）、读不出都为 undefined。给只显示选择的读取方用（体检视图）。 */
   async get(key: string): Promise<ModelSelection | undefined> {
     const row = await this.table.get(key)
-    if (row === undefined) return undefined
-    const { id: _id, ...selection } = row
-    return selection
+    return row === undefined ? undefined : withoutId(row)
+  }
+
+  /**
+   * 调模型前读这个键的选择：没存（跟随）为 undefined；文件在却读不出时抛 ModelSelectionUnreadable。
+   * 「没设置」和「读不出」只在这里分，体检、梦境、检索扩查解析模型都经它。
+   */
+  async getForCall(key: ModelSelectionKey): Promise<ModelSelection | undefined> {
+    const { value, isReadable } = await this.table.getChecked(key)
+    if (!isReadable) throw new ModelSelectionUnreadable(key)
+    return value === undefined ? undefined : withoutId(value)
   }
 
   /** 存一份选择；null 删掉这个键、改回跟随（本来就没有也算成功）。 */
@@ -40,6 +63,10 @@ export class ModelSelectionStore {
     if (selection === null) await this.table.delete(key)
     else await this.table.put(key, { id: key, ...selection })
   }
+}
+
+function withoutId({ id: _id, ...selection }: ModelSelectionRow): ModelSelection {
+  return selection
 }
 
 /** 选择失效的原因：提供方已从宿主里删掉、模型已不在提供方的列表里、模型已不支持选的推理强度。 */
@@ -77,7 +104,7 @@ export interface ResolvedLlm {
 }
 
 export interface SelectionDeps {
-  selections: Pick<ModelSelectionStore, 'get'>
+  selections: Pick<ModelSelectionStore, 'getForCall'>
   /** 宿主 llm 服务的列模型部分，每次现取；宿主没有时为 undefined。 */
   catalog: () => HostModelCatalog | undefined
   /** 按一份选择建模型调用（无会话：宿主会话适配器的 llmForRoute）；拿不到为 null。 */
@@ -87,11 +114,12 @@ export interface SelectionDeps {
 /**
  * 按选择链解析：依次看 chain 里每个键存的选择，没选的跳过，选了且还在就用它，失效就往下一个键退；
  * 都没有可用的就用 fallback()。fellBack 只在有选了却失效的一步时为 true（全都没选不算退回）。
+ * 链上有一个键的选择读不出就抛 ModelSelectionUnreadable：不往下退、不建任何模型调用，免得把内容发给用户没选的模型。
  */
-export async function resolveSelection(chain: readonly string[], deps: SelectionDeps, fallback: () => SemanticLlm | null): Promise<ResolvedLlm> {
+export async function resolveSelection(chain: readonly ModelSelectionKey[], deps: SelectionDeps, fallback: () => SemanticLlm | null): Promise<ResolvedLlm> {
   let reason: SelectionProblem | undefined
   for (const key of chain) {
-    const selection = await deps.selections.get(key)
+    const selection = await deps.selections.getForCall(key)
     if (selection === undefined) continue
     const problem = await checkSelection(deps.catalog(), selection)
     const llm = problem === undefined ? deps.llmFor(selection) : null

@@ -50,6 +50,14 @@ export interface CheckedListKvTable<T> extends KvTable<T> {
   listChecked(): Promise<{ entries: Array<[string, T]>; isComplete: boolean }>
 }
 
+/**
+ * 带可读性的单条读取：文件在（或连在不在都查不出）却读不了、解析不了时 isReadable 为假、value 为 undefined；
+ * 没有这一键是读得出的「没有」。给「读不出不等于没设置」的调用方用（get 把两种都当成没有）。
+ */
+export interface CheckedGetKvTable<T> extends KvTable<T> {
+  getChecked(key: string): Promise<{ value: T | undefined; isReadable: boolean }>
+}
+
 /** 带批量写的 KV：只给召回统计用（单文件表，一次 markRecalled 只该换一次文件）。KvTable 本身不加批量。 */
 export interface BatchKvTable<T> extends KvTable<T> {
   /** 一次写入多条，与已有条目合并（同键覆盖）。 */

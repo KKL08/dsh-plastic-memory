@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { existsSync } from 'node:fs'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -14,6 +14,7 @@ import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { createCordisHostSession } from '../src/cordis-host-session.ts'
 import { ModelSelectionStore } from '../src/governance/background-llm.ts'
+import { SidecarStore } from '../src/storage/sidecar.ts'
 import { MODEL_UNAVAILABLE_HOST_CODES } from '../src/governance/host-llm.ts'
 import type { ModelSelection } from '../src/gui/contract.ts'
 import type { MemoryRecord, SourceAnchor } from '../src/record-schema.ts'
@@ -31,6 +32,8 @@ import { InMemoryBatchKvTable, InMemoryKvTable } from './helpers/in-memory-kv.ts
 import { SOURCE_TIME, assistant, event, user } from './helpers/source-host.ts'
 import { fakeExec } from './helpers/exec.ts'
 import { record } from './helpers/record.ts'
+import { sidecarSchemas } from './helpers/plugin-env.ts'
+import { breakModelSelection } from './helpers/model-selection-file.ts'
 
 // 原话检索第一轮命中弱时调一次模型补关键词再搜：模型调用在宿主 llm 服务这一层替身，断言发出去的请求；
 // 记忆一路的候选给原话检索当语义桥。计时由测试注入，不依赖真实时间。
@@ -360,7 +363,7 @@ describe('什么时候扩查', () => {
 
   it('第一轮全中、扩查关着：不读选择表、不列模型；第一轮弱时读一次', async () => {
     const { deps, expansion } = await setup()
-    const get = vi.spyOn(expansion.selections, 'get')
+    const get = vi.spyOn(expansion.selections, 'getForCall')
     const catalog = vi.fn(expansion.host.modelCatalog)
     expansion.host.modelCatalog = catalog
     await run(deps, '写锁')
@@ -827,7 +830,7 @@ describe('用哪个模型', () => {
 
   it('选择键是扩查自己的那一个', async () => {
     const { deps, calls, expansion } = await setup()
-    const get = vi.spyOn(expansion.selections, 'get')
+    const get = vi.spyOn(expansion.selections, 'getForCall')
     await run(deps, WEAK)
     expect(calls).toHaveLength(1)
     expect(get.mock.calls.map(c => c[0])).toEqual([EXPANSION_SELECTION_KEY])
@@ -937,7 +940,7 @@ describe('失败与超时', () => {
     // 计时永不到点：取消只能靠工具调用的 signal 收住
     const wait = (ms: number) => { waits.push(ms); return new Promise<void>(() => {}) }
     const { deps, calls, expansion } = await setup({ wait })
-    const get = vi.spyOn(expansion.selections, 'get').mockReturnValue(new Promise(() => {}))
+    const get = vi.spyOn(expansion.selections, 'getForCall').mockReturnValue(new Promise(() => {}))
     const abort = new AbortController()
     const pending = run(deps, WEAK, {}, mainExec(sessionObject(), abort.signal))
     let settled = false
@@ -1016,7 +1019,7 @@ describe('失败与超时', () => {
     const wait = (ms: number) => { waits.push(ms); return new Promise<void>(resolve => { fire = resolve }) }
     const { deps, calls, expansion } = await setup({ wait })
     const base = await firstRound(deps, WEAK)
-    if (stuck === '读选择表') vi.spyOn(expansion.selections, 'get').mockReturnValue(new Promise(() => {}))
+    if (stuck === '读选择表') vi.spyOn(expansion.selections, 'getForCall').mockReturnValue(new Promise(() => {}))
     else expansion.host.readSessionLog = vi.fn(() => new Promise<SessionLog | null>(() => {}))
     const pending = run(deps, WEAK)
     await vi.waitFor(() => expect(waits).toEqual([EXPANSION_TIMEOUT_MS]))
@@ -1032,7 +1035,7 @@ describe('失败与超时', () => {
     const gate = gatedReply('限流 阈值')
     const { deps, calls, expansion, host } = await setup({ records, reply: gate.reply })
     const base = await firstRound(deps, WEAK)
-    if (where === '读选择表出错') vi.spyOn(expansion.selections, 'get').mockRejectedValue(new Error('选择表读不出'))
+    if (where === '读选择表出错') vi.spyOn(expansion.selections, 'getForCall').mockRejectedValue(new Error('选择表读不出'))
     const pending = run(deps, WEAK)
     if (where !== '读选择表出错') {
       await vi.waitFor(() => expect(calls).toHaveLength(1))
@@ -1046,6 +1049,24 @@ describe('失败与超时', () => {
     expect(occurrences(text, EXPANSION_FAILED_NOTE)).toBe(1)
     expect(withoutFailedNote(text)).toBe(base.text)
   })
+
+  /** 选择文件读不出时的这一条（how 是读不出的造法）。 */
+  const expansionUnreadable = async (how: 'bad-json' | 'no-permission') => {
+    const { deps, calls, expansion } = await setup()
+    const base = await firstRound(deps, WEAK)
+    const file = await breakModelSelection(dir, 'expansion', how)
+    // 真的选择表（侧表文件），同接线层
+    expansion.selections = new ModelSelectionStore(new SidecarStore({ root: dir, schemas: sidecarSchemas }).modelSelections)
+    const { result, text } = await run(deps, WEAK)
+    expect(calls).toHaveLength(0)
+    expect(result.hits).toEqual(base.result.hits)
+    expect(occurrences(text, EXPANSION_FAILED_NOTE)).toBe(1)
+    expect(withoutFailedNote(text)).toBe(base.text)
+    if (how === 'bad-json') expect(await readFile(file.path, 'utf8')).toBe(file.text)
+  }
+  it('为补搜选的模型读不出（bad-json）：不调任何模型（不改用当前对话的模型），退回第一轮结果、说明一句；选择文件原样留着', () => expansionUnreadable('bad-json'))
+  // root 读得了没有读权限的文件
+  it.skipIf(process.getuid?.() === 0)('为补搜选的模型读不出（no-permission）：不调任何模型（不改用当前对话的模型），退回第一轮结果、说明一句；选择文件原样留着', () => expansionUnreadable('no-permission'))
 
   it('等模型期间删了对话记录库：不把库建回来，退回第一轮结果、说明一句', async () => {
     const gate = gatedReply('限流 阈值')
