@@ -43,6 +43,8 @@ export const SAMPLE_COMMANDS: { [K in MemoryCommand['cmd']]: Extract<MemoryComma
   'organize-index': { cmd: 'organize-index', scope: { kind: 'global' } },
   'set-auto-checkup': { cmd: 'set-auto-checkup', scope: { kind: 'all' }, frequency: 'manual' },
   'list-models': { cmd: 'list-models' },
+  'memory-detail': { cmd: 'memory-detail', memoryId: 'm1', layer: ws },
+  'read-version': { cmd: 'read-version', memoryId: 'm1', layer: ws, versionId: '20261017T020000000Z' },
   'set-model-selection': { cmd: 'set-model-selection', key: 'checkup', selection: { provider: 'p1', model: 'm1', reasoningEffort: 'high' } },
   'refresh-views': { cmd: 'refresh-views' },
   'delete-dialogue-records': { cmd: 'delete-dialogue-records' },

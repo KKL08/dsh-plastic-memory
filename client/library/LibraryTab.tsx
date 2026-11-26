@@ -6,6 +6,10 @@
  * 「修改」在这一行下展开两段切换的面板（同待处理卡），同一时刻只展开一个，换行前有没保存的输入先原位问；
  * 应用或保存发 edit-memory，之后行内换成新内容、高亮一次、标「已改写」，结果行可撤销（发 undo）；结果行在展开别的面板或离开后收起。
  * 含密钥或没有版本的记忆不给「修改」（同待处理卡）。
+ * 行尾「详情」把列表原位换成这一条的详情（MemoryDetail.tsx），「返回列表」回来时高亮来的那一行（在关联图里换过中心也是），
+ * 焦点落在那一行；那一行已经不在列表里时落在搜索框。返回的高亮只记在这一页，不写导航（「全部」范围里写了会被当成直达、切走左栏）。
+ * 导航目标带 detail 时直接打开那一条的详情；详情开着时来了不带 detail 的导航目标（对话、侧栏这些入口），关掉详情、回到列表按它定位。
+ * 有没保存的修改时点「详情」先原位问（同换行修改），免得面板连同写了一半的输入一起没了。
  * 项目和全局范围的搜索框右侧有「选择」：进多选后每行左侧出勾选框、行尾按钮收起，勾选的行用选中行底色；列表底部浮起操作条
  * （已选条数 · 全选当前结果 · 取消 · 整理所选…）。「整理所选…」把列表换成整理工作区（batch-edit.tsx）。「全部」范围不能多选。
  * 工作区「应用全部」发 apply-edits；成功回到列表、退出多选，顶部结果条「已整理 N 条……」带「撤销全部」（发 undo，整批一起撤），
@@ -17,7 +21,7 @@ import { useEffect, useId, useRef, useState, type RefObject } from 'react'
 import { checkupKey, MAX_BATCH_EDIT, scopeOfMemory, type LibraryView, type MemoryCard as MemoryCardData } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, useT, type Translate } from '../i18n.tsx'
-import { isInScope, scopeLabel, type NavStore, type PageScope } from '../nav.ts'
+import { isInScope, samePageScope, scopeLabel, useNavTarget, type NavStore, type NavTarget, type PageScope } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
 import { Chip } from '../ui/Chip.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
@@ -30,6 +34,7 @@ import { EditModes, type EditState } from '../pending/edit-modes.tsx'
 import { ModelEditPanel } from '../pending/model-edit.tsx'
 import { BatchEdit, toBatchItems, type BatchApplication, type BatchItem } from './batch-edit.tsx'
 import { useDeletedPlaceholders } from './deleted-placeholders.ts'
+import { MemoryDetail, type DetailCenter } from './MemoryDetail.tsx'
 import { bucketize, GROUP_PREVIEW, groupByType, MemoryGroup, RECENT_BUCKETS, recentBucketOf, useFold, type FoldMemory } from './groups.tsx'
 import { FlashRow, matchesQuery, SearchBox, useFlashTarget, useRowActions, useTypeLabel, ViewMessage } from './shared.tsx'
 
@@ -189,6 +194,8 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
   const panel = useRef<EditState>(IDLE_EDIT)
   /** 有没保存的输入时点了别的行的「修改」：在那一行原位问。 */
   const [asking, setAsking] = useState<string>()
+  /** 有没保存的输入时点了某一行的「详情」：在那一行原位问。 */
+  const [askingDetail, setAskingDetail] = useState<string>()
   const [edited, setEdited] = useState<EditedRow>()
   /** 这次打开期间改过的，标「已改写」。 */
   const [fresh, setFresh] = useState<ReadonlySet<string>>(new Set())
@@ -215,6 +222,24 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
   /** 这一次渲染里展开着的组露出的行（id）。整理应用成功后只给这些行留高亮，收起的组里的行之后展开时不再突然高亮、滚过去。 */
   const drawnRows = useRef<ReadonlySet<string>>(new Set())
   const isTidyFlashNew = useRef(false)
+  /**
+   * 打开着的详情：中心那一条，和从哪一行打开的（返回列表时高亮它）。导航目标带 detail 时一挂载就打开（左栏范围刚切过来）；
+   * 目标的范围不是这一页的范围时不接（那一页换范围后会重新挂载，由新的一页打开）。
+   */
+  const navTarget = useNavTarget(nav)
+  const detailTarget = (target: NavTarget): (DetailCenter & { originId: string }) | undefined =>
+    target.detail === true && target.memoryId !== undefined && scope.kind !== 'all' && (target.scope === undefined || samePageScope(target.scope, scope))
+      ? { id: target.memoryId, scope, originId: target.memoryId }
+      : undefined
+  const [detail, setDetail] = useState(() => detailTarget(navTarget))
+  const handledDetail = useRef<NavTarget>(navTarget)
+  useEffect(() => {
+    if (handledDetail.current === navTarget) return
+    handledDetail.current = navTarget
+    setDetail(detailTarget(navTarget))
+  }, [navTarget])
+  /** 从详情返回列表时来的那一行：高亮、接住焦点，同直达的目标。 */
+  const [backId, setBackId] = useState<string>()
   const viewItems = view.status === 'ready' ? view.data.layers.filter(l => isInScope([l.layer], scope)).flatMap(l => l.items) : []
   const { items: scopeItems, hasPlaceholders, isDeleted, mark } = useDeletedPlaceholders(viewItems, scope, actions.isBusy)
   const isSearching = query.trim() !== ''
@@ -258,7 +283,21 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
       return next.length === prev.size ? prev : new Set(next)
     })
   }, [editFlash])
-  const { flashId, revealId, targetId, clear } = useFlashTarget(nav, items.map(m => m.id))
+  const navFlash = useFlashTarget(nav, items.map(m => m.id))
+  const flashId = backId ?? navFlash.flashId
+  const revealId = backId ?? navFlash.revealId
+  const targetId = backId ?? navFlash.targetId
+  const clear = () => {
+    setBackId(undefined)
+    navFlash.clear()
+  }
+  // 返回时来的那一行已经不在列表里（别处删了、被搜索滤掉）：焦点落在搜索框
+  const isBackGone = backId !== undefined && detail === undefined && isViewReady && !items.some(m => m.id === backId)
+  useEffect(() => {
+    if (!isBackGone) return
+    setBackId(undefined)
+    libBar.current?.querySelector<HTMLElement>('input[type="search"]')?.focus()
+  }, [isBackGone])
   const typeLabel = useTypeLabel(session)
   const folds = useFold(fold, `library|${checkupKey(scope)}`, isSearching)
   /**
@@ -311,6 +350,23 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
       </div>
     )
   }
+  if (detail !== undefined) {
+    return (
+      <div className="pm-lib">
+        <MemoryDetail
+          center={detail}
+          session={session}
+          now={now}
+          nav={nav}
+          onBack={() => {
+            setDetail(undefined)
+            setBackId(detail.originId)
+          }}
+          onCenter={(next) => { setDetail({ ...next, originId: detail.originId }) }}
+        />
+      </div>
+    )
+  }
   if (view.status !== 'ready') return <ViewMessage state={view} idle={null} />
 
   const data = view.data
@@ -332,6 +388,14 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
     clear()
   }
 
+  /** 打开详情：展开着的修改面板随之收起（有没保存的输入时已经先原位问过）。 */
+  const openDetail = (id: string, at: DetailCenter['scope']) => {
+    panel.current = IDLE_EDIT
+    setEditing(undefined)
+    setAsking(undefined)
+    setAskingDetail(undefined)
+    setDetail({ id, scope: at, originId: id })
+  }
   const startEdit = (memory: MemoryCardData) => {
     panel.current = IDLE_EDIT
     setAsking(undefined)
@@ -586,6 +650,27 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
                   />
                 )
                 : <Button size="sm" unavailable={actions.unavailable(memory.id)} onClick={() => { modify(memory) }}>{t('pending.modify')}</Button>}
+              {own === undefined ? null : askingDetail === memory.id
+                ? (
+                  <SoftDeleteConfirm
+                    question={t('library.edit.discard')}
+                    confirmLabel={t('library.edit.discardConfirm')}
+                    onCancel={() => { setAskingDetail(undefined) }}
+                    onConfirm={() => { openDetail(memory.id, own) }}
+                  />
+                )
+                : (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      if (editing !== undefined && panel.current.isDirty) { setAskingDetail(memory.id); return }
+                      openDetail(memory.id, own)
+                    }}
+                  >
+                    {t('library.detail')}
+                  </Button>
+                )}
               <DeleteWithConfirm
                 onDelete={() => {
                   // 删的是正在高亮的那一条：当作播完，所在的组记成展开，结果行和「撤销」不缩回「展开其余」里

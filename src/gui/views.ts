@@ -77,8 +77,12 @@ export const GLOBAL_VIEW_NAMES: readonly GlobalViewName[] = ['pending', 'health'
 const byNameThenId = (a: MemoryRecord, b: MemoryRecord) =>
   a.name < b.name ? -1 : a.name > b.name ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0
 
-/** 记忆卡：四个文字面遮盖密钥片段，路径原样；digest 按原文算（直接改的版本核对用）。 */
 function card(r: MemoryRecord, data: ScopePreread, filePath = data.filePaths.get(r.id) ?? ''): MemoryCard {
+  return toMemoryCard(r, filePath)
+}
+
+/** 记忆卡：四个文字面遮盖密钥片段，路径原样；digest 按原文算（直接改的版本核对用）。视图和记忆详情共用。 */
+export function toMemoryCard(r: MemoryRecord, filePath: string): MemoryCard {
   const m = maskSecretSurface(r)
   return {
     id: r.id, name: m.name, type: r.type, scope: r.scope,

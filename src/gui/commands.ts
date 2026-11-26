@@ -52,6 +52,10 @@ import { INDEX_MAX_TOPICS_DEFAULT } from '../topic-index.ts'
 import { sameScope, scopeAt, scopeKey, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
 import { UNKNOWN_SESSION_ID, type ContextHost, type HostSession } from '../tools/host-session.ts'
 import { scanOutcome } from './views.ts'
+import { readMemoryDetail, readVersionDetail } from './memory-detail.ts'
+import { VERSION_ID_PATTERN } from '../storage/history.ts'
+
+const VERSION_ID_RE = new RegExp(`^${VERSION_ID_PATTERN}$`)
 
 /**
  * `/memory` 人类命令（GUI 的动作通道）：解析契约参数 → 调现有执行器 → 返回契约 JSON 文本。
@@ -161,6 +165,11 @@ const fail = (cmd: string | undefined, code: GuiErrorCode, detail?: string, reje
   ...(detail !== undefined ? { detail } : {}),
 })
 
+/** 记忆详情找不到中心那一条：作用域读全了回 not-found；没读全回 failed，说明读不出，不说它不在。 */
+const centerMissFail = (cmd: string, miss: 'missing' | 'unreadable', memoryId: string): Err => (miss === 'missing'
+  ? fail(cmd, 'not-found', `这个作用域里找不到记忆 ${memoryId}`)
+  : fail(cmd, 'failed', `这个作用域有读不出的文件或目录，记忆 ${memoryId} 读不出来`))
+
 export function createMemoryCommand(deps: MemoryCommandDeps): MemoryCommandDefinition {
   return {
     name: MEMORY_COMMAND_NAME,
@@ -190,6 +199,18 @@ async function run(deps: MemoryCommandDeps, invocation: MemoryCommandInvocation)
   }
   // 只读，和借来的会话无关：子 agent 会话也能列
   if (command.cmd === 'list-models') return { ok: true, cmd: command.cmd, providers: await listModelChoices(deps.host.modelCatalog?.()) }
+  // 记忆详情：只读、打开时现取，和借来的会话无关，不受体检开关影响
+  if (command.cmd === 'memory-detail') {
+    const detail = await readMemoryDetail(deps.store, command.layer, command.memoryId)
+    if (typeof detail === 'string') return centerMissFail(command.cmd, detail, command.memoryId)
+    return { ok: true, cmd: command.cmd, detail }
+  }
+  if (command.cmd === 'read-version') {
+    if (!VERSION_ID_RE.test(command.versionId)) return fail(command.cmd, 'invalid-args', 'versionId 不是版本标识的写法')
+    const version = await readVersionDetail(deps.store, command.layer, command.memoryId, command.versionId)
+    if (typeof version === 'string') return centerMissFail(command.cmd, version, command.memoryId)
+    return { ok: true, cmd: command.cmd, version }
+  }
   if (GOVERNANCE_COMMANDS.has(command.cmd) && deps.isGovernanceEnabled?.() === false && !(await isEditUndo(deps.decisions, command))) {
     return fail(command.cmd, 'governance-disabled', '体检已关闭，可在配置文件里把 governance.enabled 改成 true 打开')
   }
@@ -455,7 +476,7 @@ async function info(deps: MemoryCommandDeps, sessionId: string): Promise<Ok> {
 
 async function dispatch(
   deps: MemoryCommandDeps,
-  command: Exclude<MemoryCommand, { cmd: 'info' | 'model-info' | 'list-models' }>,
+  command: Exclude<MemoryCommand, { cmd: 'info' | 'model-info' | 'list-models' | 'memory-detail' | 'read-version' }>,
   gov: GovernanceContext,
   exec: ToolRunContext,
   now: number,

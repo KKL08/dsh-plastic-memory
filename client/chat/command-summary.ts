@@ -63,6 +63,8 @@ function actionOf(command: MemoryCommand): Summary {
     case 'organize-index': return { key: 'chat.command.organizeIndex' }
     case 'set-auto-checkup': return { key: 'chat.command.autoCheckup' }
     case 'list-models': return { key: 'chat.command.listModels' }
+    case 'memory-detail': return { key: 'chat.command.memoryDetail' }
+    case 'read-version': return { key: 'chat.command.readVersion' }
     case 'set-model-selection': return { key: 'chat.command.modelSelection' }
     case 'migrate-type': return { key: 'chat.command.migrateType', params: { name: command.from } }
   }

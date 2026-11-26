@@ -327,6 +327,29 @@ describe('按版本标识读一版', () => {
     expect(await read()).toEqual(during)
   })
 
+  it('保留方有过状态变化后并成版本：两版号不同，按号读回各自的正文；物理删除前后一样', async () => {
+    const e = env()
+    const keeper = await made(e, { name: '留下的', content: '甲一', scope: 'workspace', workspacePath: WS })
+    const changed = await changeState(e, keeper, '甲二', '甲换了')
+    const gone = await made(e, { name: '并进去的', content: '乙一', scope: 'workspace', workspacePath: WS })
+    const mergedInto = { id: keeper.id, scopeKey: WS, as: 'version' as const, endedAt: changed.stateSince! }
+    expect(await e.store.softDeleteUnlessSecret(gone, { at: scopeAt(WS), now: e.now(), mergedInto })).toBe('deleted')
+    const read = async () => {
+      const { versions } = (await search(e, { id: keeper.id, history: true })).history!
+      return Promise.all(versions.map(async (v) => {
+        const r = await search(e, { id: keeper.id, version: v.versionId })
+        return [v.versionId, r.version?.mergedFrom ?? null, r.hits.map(h => h.content)]
+      }))
+    }
+    const during = await read()
+    expect(new Set(during.map(([id]) => id)).size).toBe(2)
+    expect(during.map(([, from, content]) => [from, content])).toContainEqual([gone.id, ['乙一']])
+    expect(during.map(([, from, content]) => [from, content])).toContainEqual([null, ['甲一']])
+    e.clock.now += RETENTION_MS + MINUTE
+    await e.store.maintain(scopeAt(WS))
+    expect(await read()).toEqual(during)
+  })
+
   it('软删期间按版本也读不到：说找不到这条记忆', async () => {
     const e = env()
     const m = await made(e)

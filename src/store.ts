@@ -3,7 +3,7 @@ import type { MemoryRecord, MergedInto } from './record-schema.ts'
 import { RecordNotFoundError } from './errors.ts'
 import { expandQueryTerms, matchScore } from './text.ts'
 import {
-  byPosition, newWriteOp, outgoingLinks, resolveLiveFirst, sortLinkRefs,
+  byPosition, isIncompleteNote, newWriteOp, outgoingLinks, resolveLiveFirst, sortLinkRefs,
   type LinkQuery, type MemoryLogger, type MemoryTable, type LocateTarget, type LocateOptions, type ScopeReadOptions, type ScopeReadResult, type KeywordMatch,
   type DirectoryNote, type QuarantineEntry, type OpStep, type OpStepHandler, type WriteOp, type IndexOpOptions, type IndexOpOutcome, type IndexUndoOutcome,
 } from './storage/table.ts'
@@ -303,11 +303,11 @@ export class MemoryStore {
     return isListed ? found : { ...found, isComplete: false }
   }
 
-  /** 反向查询看的目录：全局记忆看全局和所有项目，项目记忆看本项目。列项目目录失败时 isListed 为假。 */
+  /** 反向查询看的目录：全局记忆看全局和所有项目，项目记忆看本项目。列项目目录有读不全的（读不了、缺标记）时 isListed 为假。 */
   private async linkDirsOf(scope: Scope): Promise<{ dirs: string[]; isListed: boolean }> {
     if (scope.kind === 'global') {
       const listing = await this.table.listWorkspaceDirs()
-      return { dirs: [this.table.globalDir, ...listing.entries.map(e => e.dir)], isListed: !listing.directoryNotes.some(n => n.code === 'dir-unreadable') }
+      return { dirs: [this.table.globalDir, ...listing.entries.map(e => e.dir)], isListed: !listing.directoryNotes.some(isIncompleteNote) }
     }
     const own = await this.table.workspaceDirs(scope.workspacePath)
     return { dirs: own.dirs, isListed: own.directoryNotes.length === 0 }
@@ -316,10 +316,10 @@ export class MemoryStore {
   /** 表不提供反向查询时逐个读目录算。 */
   private async readLinksTo(id: string, dirs: string[]): Promise<LinkQuery> {
     const read = await this.table.readScope(dirs, { includeArchive: true })
-    const refs = sortLinkRefs(read.records.flatMap(({ record }) => outgoingLinks(record)
+    const refs = sortLinkRefs(read.records.flatMap(({ record, dir }) => outgoingLinks(record)
       .filter(link => link.targetId === id)
-      .map(link => ({ sourceId: record.id, kind: link.kind, ...(link.digest !== undefined ? { digest: link.digest } : {}) }))))
-    return { refs, isComplete: read.quarantined.length === 0 && !read.directoryNotes.some(n => n.code === 'dir-unreadable') }
+      .map(link => ({ sourceId: record.id, kind: link.kind, ...(link.digest !== undefined ? { digest: link.digest } : {}), sourceDir: dir }))))
+    return { refs, isComplete: read.quarantined.length === 0 && !read.directoryNotes.some(isIncompleteNote) }
   }
 
   /** 维护点入口（快照冻结时调用）：scope 决定维护哪些目录；未解析 workspace 时只有 global。 */
