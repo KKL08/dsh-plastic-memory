@@ -1,6 +1,6 @@
 import type { CheckedGetKvTable } from '../kv-table.ts'
 import type { ModelSelectionRow } from '../storage/schema.ts'
-import type { ModelChoices, ModelSelection, ModelSelectionKey } from '../gui/contract.ts'
+import type { ModelChoices, ModelSelection, ModelSelectionKey, SelectionRead } from '../gui/contract.ts'
 import type { SemanticLlm } from './semantic-scan.ts'
 
 /**
@@ -42,10 +42,11 @@ export class ModelSelectionStore {
     this.table = table
   }
 
-  /** 这个键存的选择；没存（跟随）、读不出都为 undefined。给只显示选择的读取方用（体检视图）。 */
-  async get(key: string): Promise<ModelSelection | undefined> {
-    const row = await this.table.get(key)
-    return row === undefined ? undefined : withoutId(row)
+  /** 这个键存的选择，给只显示选择的读取方用（体检视图）：没存（跟随）为 null，文件在却读不出为 unreadable。 */
+  async read(key: ModelSelectionKey): Promise<SelectionRead> {
+    const { value, isReadable } = await this.table.getChecked(key)
+    if (!isReadable) return 'unreadable'
+    return value === undefined ? null : withoutId(value)
   }
 
   /**

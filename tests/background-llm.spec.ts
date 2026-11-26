@@ -73,26 +73,26 @@ function setup(catalog: Parameters<typeof fakeHostLlm>[0] = CATALOG) {
 }
 
 describe('选择的存取：不绑具体键', () => {
-  it('任意键各存一份，null 删掉改回跟随；没存过读到 undefined', async () => {
+  it('任意键各存一份，null 删掉改回跟随；没存过读到 null', async () => {
     const { selections } = setup()
-    expect(await selections.get('checkup')).toBeUndefined()
+    expect(await selections.read('checkup')).toBeNull()
     await selections.set('checkup', { provider: 'provider-x', model: 'model-a', reasoningEffort: 'low' })
     await selections.set('expansion', { provider: 'provider-y', model: 'model-b' })
-    expect(await selections.get('checkup')).toEqual({ provider: 'provider-x', model: 'model-a', reasoningEffort: 'low' })
-    expect(await selections.get('expansion')).toEqual({ provider: 'provider-y', model: 'model-b' })
+    expect(await selections.read('checkup')).toEqual({ provider: 'provider-x', model: 'model-a', reasoningEffort: 'low' })
+    expect(await selections.read('expansion')).toEqual({ provider: 'provider-y', model: 'model-b' })
     await selections.set('checkup', null)
-    expect(await selections.get('checkup')).toBeUndefined()
+    expect(await selections.read('checkup')).toBeNull()
     await selections.set('checkup', null)
-    expect(await selections.get('expansion')).toEqual({ provider: 'provider-y', model: 'model-b' })
+    expect(await selections.read('expansion')).toEqual({ provider: 'provider-y', model: 'model-b' })
   })
 
   it('几个进程读到同一个：一个进程存的选择，另一个进程的选择表（同一个记忆根）现读就是它', async () => {
     const a = new ModelSelectionStore(new SidecarStore({ root, schemas: sidecarSchemas }).modelSelections)
     const b = new ModelSelectionStore(new SidecarStore({ root, schemas: sidecarSchemas }).modelSelections)
     await a.set('checkup', { provider: 'provider-y', model: 'model-b', reasoningEffort: 'high' })
-    expect(await b.get('checkup')).toEqual({ provider: 'provider-y', model: 'model-b', reasoningEffort: 'high' })
+    expect(await b.read('checkup')).toEqual({ provider: 'provider-y', model: 'model-b', reasoningEffort: 'high' })
     await b.set('checkup', null)
-    expect(await a.get('checkup')).toBeUndefined()
+    expect(await a.read('checkup')).toBeNull()
   })
 })
 
@@ -309,10 +309,10 @@ describe('选择文件在、却读不出', () => {
     expect(new ModelSelectionUnreadable(key).message).toBe(message)
   })
 
-  it('读不出不当成没选：存取照旧（体检视图等别的读取方读到 undefined），之后重新选一次就恢复', async () => {
+  it('读不出不当成没选：给显示用的读取方读到 unreadable，之后重新选一次就恢复', async () => {
     const s = counted()
     await breakModelSelection(root, 'checkup', 'bad-json')
-    expect(await s.selections.get('checkup')).toBeUndefined()
+    expect(await s.selections.read('checkup')).toBe('unreadable')
     await s.selections.set('checkup', { provider: 'provider-x', model: 'model-a' })
     const r = await s.resolve('checkup')
     expect(r).toMatchObject({ isSelected: true, fellBack: false })

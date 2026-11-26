@@ -546,7 +546,7 @@ export const directoryIssueSchema = z.object({
 export { MODEL_CHANGE_KINDS, type ModelChangeKind } from '../contract-codes.ts'
 
 /** 场景：通用场景 id、每个场景的类型上限、通用以外的场景个数上限（设置页用）。 */
-export { DECAY_DAYS_MAX, GENERAL_SCENE, MAX_SCENES, SCENE_MAX_TYPES } from '../contract-codes.ts'
+export { DECAY_DAYS_MAX, GENERAL_SCENE, MAX_SCENES, SCENE_MAX_TYPES, SEARCH_SOURCES } from '../contract-codes.ts'
 
 /** 模型改写、替代此刻能不能撤：undoable 能；changed 之后又被改过（手改、模型再改、删除），不覆盖；undone 已撤销。 */
 export const MODEL_CHANGE_STATES = ['undoable', 'changed', 'undone'] as const
@@ -887,6 +887,13 @@ export const modelChoicesSchema = z.array(z.object({
 }))
 export type ModelChoices = z.infer<typeof modelChoicesSchema>
 
+/**
+ * 设置页模型选择器显示的一份选择：选了为那份选择，没选（跟随）为 null，选择文件在却读不出为 unreadable
+ * （这时后台功能不调模型、等用户重选，见 governance/background-llm.ts ModelSelectionUnreadable）。
+ */
+export const selectionReadSchema = z.union([modelSelectionSchema, z.null(), z.literal('unreadable')])
+export type SelectionRead = z.infer<typeof selectionReadSchema>
+
 /** 体检视图的文件名（在视图目录里，与全局视图并列）。 */
 export const GUI_CHECKUP_VIEW_FILE = 'checkups.json'
 
@@ -909,6 +916,11 @@ export const checkupViewSchema = z.object({
    * 只加可选字段不换版本号，换了两边会互相把对方写的视图判成过期。
    */
   model: modelSelectionSchema.nullable().optional(),
+  /**
+   * 设置页两个模型选择器的当前值（选择键 checkup、expansion），能分出「读不出」。读不出时 model 仍写 null：上一个发布版只认 model。
+   * 可缺省：上一个发布版的进程写的视图没有。读的一方不按 model 或「没选」猜，设置页两个选择器写「无法确认当前选择」并置灰，等这一版重写视图。
+   */
+  selections: z.object({ checkup: selectionReadSchema, expansion: selectionReadSchema }).optional(),
   /** 全局在前，项目按路径排序：目录里的全部项目，含没有活跃记忆的（它们的设置和上次体检照样给界面看）。 */
   scopes: z.array(z.object({
     scope: scopeSchema,
@@ -1244,6 +1256,8 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   z.object({ cmd: z.literal('read-version'), memoryId: z.string(), layer: scopeSchema, versionId: z.string() }),
   /** 删掉对话记录库（过往对话的本地副本）。原话功能还开着的话，下次用到时从会话日志重建。 */
   z.object({ cmd: z.literal('delete-dialogue-records') }),
+  /** 读对话记录库的状态（设置页打开时、删库之后各现取一次），结果在 dialogueRecords。只读，不建库；库读不出回 failed。 */
+  z.object({ cmd: z.literal('dialogue-records-state') }),
   /**
    * 设置页改名或删除自建类型时处理已有记忆（全库：全局和所有项目，等同 allowCrossWorkspace）。retype 把这一类的记忆
    * （在用的和最近删除里的）改成 to，不刷新更新、确认时间；forget 把在用的这一类移到最近删除，含密钥的不动、计数返回。
@@ -1407,6 +1421,11 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
     version: versionReadSchema.optional(),
     /** list-models：能选的模型，按提供方分组。 */
     providers: modelChoicesSchema.optional(),
+    /** dialogue-records-state：对话记录库的状态（见 DialogueStoreState）；第一次在建时带已收进来的会话数。 */
+    dialogueRecords: z.union([
+      z.object({ status: z.enum(['none', 'ready', 'rebuilding']) }),
+      z.object({ status: z.literal('building'), sessions: z.number().int().nonnegative() }),
+    ]).optional(),
     /** migrate-type：这次改了类型或移到最近删除的条数。 */
     migrated: z.number().int().nonnegative().optional(),
     /** migrate-type forget：含密钥、没有移动的条数。 */

@@ -20,7 +20,7 @@ import {
   ADVICE_TYPES, GUI_VIEW_VERSION, PENDING_ITEM_KINDS, PENDING_LEVEL_OF_KIND, PENDING_LEVELS, SCOPE_KEYS, checkupKey, isAwaitingDecision, resolveAutoCheckup,
   pendingItemKey, pendingItemScopes,
   type AdviceType, type AutoCheckupFrequency, type CheckupAdded, type CheckupCause, type CheckupCoverage, type CheckupResult, type CheckupView, type DeletedView, type MemoryPromotion, type GlobalViewName, type HealthView, type LibraryView, type MemoryCard,
-  type MemoryCommandResult, type ModelChange, type ModelSelection, type PendingItem, type PendingView, type SessionView,
+  type MemoryCommandResult, type ModelChange, type PendingItem, type PendingView, type SessionView,
 } from './contract.ts'
 import { isInScope, scopeCacheKey, scopeKey, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
 import { isCopyOf, workspaceLabel } from '../tools/workspace-gate.ts'
@@ -462,8 +462,8 @@ export function buildCheckupView(input: {
   isInProgress: (scope: Scope) => boolean
   record: (scope: Scope) => CheckupRecord | undefined
   allRecord: CheckupRecord | undefined
-  /** 自动体检选的模型；没选为 null。 */
-  model: ModelSelection | null
+  /** 设置页两个模型选择器的当前值（体检视图的 selections）。 */
+  selections: NonNullable<CheckupView['selections']>
 }): CheckupView {
   return {
     version: GUI_VIEW_VERSION,
@@ -471,7 +471,9 @@ export function buildCheckupView(input: {
     governanceEnabled: input.governanceEnabled,
     defaultFrequency: resolveAutoCheckup(input.settings, { kind: 'all' }).frequency,
     allResult: input.allRecord?.lastResult ?? null,
-    model: input.model,
+    // 上一个发布版只认 model：读不出时写成没选
+    model: input.selections.checkup === 'unreadable' ? null : input.selections.checkup,
+    selections: input.selections,
     scopes: input.scopes.map(scope => {
       const { frequency, isOwn } = resolveAutoCheckup(input.settings, scope)
       const lastCheckupAt = input.lastCheckupAt(scope)
