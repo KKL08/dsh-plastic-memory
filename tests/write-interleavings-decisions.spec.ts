@@ -11,7 +11,8 @@ vi.mock('node:fs/promises', async () => (await import('./helpers/interleave.ts')
 beforeAll(() => { vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(STORE_NOW) })
 afterAll(() => { vi.useRealTimers() })
 
-// 单次贵，缺省次数比别处少，整个文件在跑全量测试的负载下也在 5 秒内；调大 PM_INTERLEAVE_RUNS 时按次数放宽
+// 单轮包含多次串行重放，耗时随机器负载起伏大（跑全量时单条可到十几秒）；默认各跑 10 轮，
+// 每条性质的超时至少 20 秒，调大 PM_INTERLEAVE_RUNS 时按次数放宽
 const DEFAULT_RUNS = 10
 const TIMEOUT_MS = Math.max(20_000, interleaveRuns(DEFAULT_RUNS) * 600)
 
