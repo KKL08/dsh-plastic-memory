@@ -103,6 +103,12 @@ All notable changes to this project are documented here. The format follows
   to a memory you stated yourself whose type is in `brewingDreams.focusTypes`
   (`preference`, `profile` and `decision` by default) waits for you, and
   `memory_confirm` can adopt it; with `trust`, such changes are applied too.
+  Before settling conflicts, each pass runs an incremental checkup of its
+  scope, so new conflicts are found and settled in the same pass even with
+  automatic checkups off;
+  memories that have not changed are not sent to the model again. Sources in
+  archived conversations count too, and a pass reads the sources of at most
+  20 pairs, starting after the pair where the previous pass stopped.
 - Experimental: when a Brewing Dreams pass refreshes summaries and adjusts
   how each memory is injected, it also sees how the memory has been used:
   how often it was recalled, in how many chats it was read in full by its id,
