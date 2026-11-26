@@ -260,6 +260,12 @@ export const pendingDecisionSchema = z.object({
    * 用户标了不回看）；unchecked 这次没读（超出一次体检的回查上限，或核实那次调用没做成）。没回查过的（纵向冲突、旧条目）没有这一项。
    */
   sourceCheck: z.enum(['checked', 'unreadable', 'unchecked']).optional(),
+  /**
+   * 依据已变（premise-changed）条目是怎么来的：'related' 是沿关联发的复查信号（实验，见 tools/related-recheck.ts），
+   * 实验开关关掉后体检按它认出、删掉未结清的；没有这个字段的是体检按前提判的。读的一侧放开取值：不认识的值照读，不据此动手。
+   * 上一个发布版不认识 premise-changed 种类，整条跳过。
+   */
+  via: z.string().optional(),
   /** 冲突：处理建议最近一次没生成成的原因；生成成功时清掉。 */
   suggestionFailure: suggestionFailureSchema.optional(),
   /** 冲突：体检自己发起的生成对这个冲突指纹试过几次（用户点「补上建议」不计）；指纹变了从头算。 */

@@ -1,5 +1,5 @@
 import type { ChangeAnchor, ChangeFields } from '../change.ts'
-import { commitChange, isSameRecord } from '../commit-change.ts'
+import { commitChange, isSameRecord, type RelatedRecheckHook } from '../commit-change.ts'
 import { isPendingDelegated, memoryRecordSchema, type LinkIds, type MemoryRecord, type MergedInto } from '../record-schema.ts'
 import { scopeAt, scopeOfLedger } from '../scope.ts'
 import { markDeleted, type MemoryLogger, type MemoryStore } from '../store.ts'
@@ -29,6 +29,8 @@ export interface ChangesetDeps {
   decisions: PendingDecisionsStore
   mergeWindowMs?: number
   log?: MemoryLogger
+  /** 沿关联发复查信号的钩子，随 deps 交给落盘原语（见 commit-change.ts）；不给就不发。 */
+  relatedRecheck?: RelatedRecheckHook
 }
 
 export interface ApplyOptions {

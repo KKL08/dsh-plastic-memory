@@ -28,6 +28,7 @@ import { executePromote, type PromoteResult } from '../tools/promote.ts'
 import { hasDropped, linksOutside, withoutLinks } from '../links.ts'
 import { executeUndo, restoreDeleted, type UndoResult } from '../tools/undo.ts'
 import { applyChangeset, receiptsOfEntry, rollBackEntry } from '../tools/changeset.ts'
+import type { RelatedRecheckHook } from '../commit-change.ts'
 import { basisOf, scopeKeyOf, type ChangeOp } from '../governance/changeset.ts'
 import {
   copyHistory, crossWorkspaceNote, gateRecords, locateCopy, workspaceLabel, type CrossWorkspaceRejection, type GovernanceContext,
@@ -95,7 +96,7 @@ export interface MemoryCommandDeps {
   /** 按作用域取指令文件（AGENTS.md / CLAUDE.md）：体检、垂直冲突的建议与采纳都按记忆对应的那份，和借来的会话在哪个项目无关。 */
   instructions: ReadInstructions
   /** 增量体检：体检结果库和整次的 token 上限（见 tools/scan.ts ScanToolDeps）。缺省每次整批重查、用默认上限。 */
-  incremental?: Pick<ScanCoreDeps, 'checkupCache' | 'tokenCap' | 'sources'>
+  incremental?: Pick<ScanCoreDeps, 'checkupCache' | 'tokenCap' | 'sources' | 'isRelatedRecheckEnabled'>
   /** 体检开关（用时读配置）；关闭时治理类子命令返回 governance-disabled。缺省视为开启。 */
   isGovernanceEnabled?: () => boolean
   /** 旧 KV 导入是否已结清（导完且旧行已删）；缺省视为已结清。没结清时彻底删除回 failed：续传会把旧快照里的明文放回来。 */
@@ -104,6 +105,8 @@ export interface MemoryCommandDeps {
   getReadEvent?: () => ReadEventFn | null
   /** 记忆梦境的侧表：撤销梦境的合并组时记下撤销过的结论。缺省不记。 */
   dreams?: Pick<DreamsStore, 'noteUndoneMerges'>
+  /** 沿关联发复查信号的钩子，随变更集交给落盘原语（见 commit-change.ts）；不给就不发。 */
+  relatedRecheck?: RelatedRecheckHook
   log?: MemoryLogger
   now?: () => number
 }
@@ -351,7 +354,7 @@ type BatchOutcome = BatchResult & { release: () => Promise<void> }
  */
 async function runBatch(
   items: readonly BatchItem[], also: readonly MemoryRecord[], input: { summary: string; isSecret?: (current: MemoryRecord) => boolean },
-  deps: Pick<MemoryCommandDeps, 'store' | 'snapshots' | 'decisions'>, now: number,
+  deps: Pick<MemoryCommandDeps, 'store' | 'snapshots' | 'decisions' | 'relatedRecheck'>, now: number,
 ): Promise<BatchOutcome> {
   const runId = genId('pd')
   // 依据按卡片上的版本指纹比，和进来时的版本核对同一个口径：两处之间落进来的改动（别的会话补证）同样算被改过

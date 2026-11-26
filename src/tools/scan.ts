@@ -1,4 +1,5 @@
 import { dirname, isAbsolute } from 'node:path'
+import { dropRelatedRechecks } from './related-recheck.ts'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { MemoryLogger, MemoryStore } from '../store.ts'
 import type { CheckupInitiator, CodedNote, ScanNoteCode } from '../contract-codes.ts'
@@ -65,6 +66,11 @@ export interface ScanToolDeps {
    * 横向疑似矛盾报出之前回查两边出处用（见 finding-sources.ts）。缺省不回查：发现照模型原样挂账，不带回查标记。
    */
   sources?: FindingSourceDeps
+  /**
+   * 沿关联发复查信号的实验开关（配置 governance.relatedRecheck，每次现读）。给了且为假时，这次体检提交之后删掉账本里
+   * 沿关联发的、还没结清的条目（见 tools/related-recheck.ts 的 dropRelatedRechecks）。不给时不碰这些条目。
+   */
+  isRelatedRecheckEnabled?: () => boolean
 }
 
 /** 扫描核心的依赖：工具依赖去掉宿主会话（模型、当前项目由调用方解析好传进 ScanInput）。 */
@@ -853,6 +859,9 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
     await afterCommit('清理全局记忆的遗留垂直条目', () => deps.decisions.dropStaleGlobalVertical(globalRound.baseline, id => data.byId.get(id)))
   }
   await afterCommit('同步提升候选', () => syncPromoteCandidates(deps, checkup ? wsList : wsPath !== undefined ? [wsPath] : [], now, log))
+  if (deps.isRelatedRecheckEnabled?.() === false) {
+    await afterCommit('清理沿关联发的复查信号', () => dropRelatedRechecks(deps.decisions))
+  }
   if (deps.checkups !== undefined && layers === 'full') {
     const checkups = deps.checkups
     // 约下次接着查只给界面手动体检、自动体检（它们按约的时间排自动体检）；memory_scan 不约

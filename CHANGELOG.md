@@ -7,6 +7,12 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Experimental: when the assistant saves a memory as a state change or a
+  correction, active decisions that list it under `related` are added to the
+  To do tab on the Memory page for review; the decisions themselves are not
+  changed. Enable `governance.relatedRecheck` in the config file while
+  governance is on (off by default). Turning it off clears the unresolved
+  entries at the next checkup.
 - `memory_confirm` with `action: accept-subagent` takes `memoryIds` to accept a
   subagent's whole batch of pending memories in one call. The result groups
   them by the topic of the closest existing memory, marks near-duplicates
