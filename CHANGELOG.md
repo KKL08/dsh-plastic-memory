@@ -330,6 +330,12 @@ All notable changes to this project are documented here. The format follows
   matching memories and moves the turns they were saved from up the results.
 
 ### Changed
+- Testing: `pnpm bench:dialogue` measures the past-conversation index at scale
+  on synthetic logs, and CI's scale-bench job runs a small tier of it that
+  checks catch-up before a search stays within its time limit and two
+  processes indexing at once end up with the same index. Unit tests check the
+  same time limit by counting log reads, and that a full disk is reported as
+  past conversations being unavailable while memory search works as usual.
 - Testing: `pnpm host:contract` checks how model errors are reported by
   answering requests to the model API with fixed responses instead of using
   a real invalid key, so the check also runs without a model key. A 401 must
