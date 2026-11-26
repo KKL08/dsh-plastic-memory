@@ -108,7 +108,18 @@ export class InMemoryTable implements MemoryTable {
   /** 落槽位（与 FileTable.persist 同规则）：status 离开 active 进 .archive/（deleted 缺 deletedAt 补 now）；目录、层、slug 都没变
    *  就留在原路径，否则在目标层重新取名；落下后清掉可见集合（global + 该记录的目录）里同 id 的其余副本，给作用域时只清该目录。返回实际落下的记录。 */
   private async place(prev: LocatedFile | undefined, value: MemoryRecord, isOwnDirOnly = false): Promise<MemoryRecord> {
-    const next = value.status === 'deleted' && value.deletedAt === undefined ? { ...value, deletedAt: this.now() } : value
+    const { lastWriteOp: _stale, ...stripped } = value
+    if (prev) {
+      const previous = byPosition(prev)
+      const proj = (r: MemoryRecord) => { const { recallCount, lastRecalledAt, ...rest } = r; return rest }
+      if (JSON.stringify(proj(previous)) === JSON.stringify(proj(stripped))) {
+        if (previous.recallCount !== stripped.recallCount || previous.lastRecalledAt !== stripped.lastRecalledAt) {
+          this.slots.set(prev.filePath, { ...prev, record: { ...prev.record, recallCount: stripped.recallCount, lastRecalledAt: stripped.lastRecalledAt } })
+        }
+        return stripped
+      }
+    }
+    const next = stripped.status === 'deleted' && stripped.deletedAt === undefined ? { ...stripped, deletedAt: this.now() } : stripped
     if (prev) this.slots.delete(prev.filePath)
     const sameLocation = prev !== undefined && prev.record.scope === next.scope && prev.record.workspacePath === next.workspacePath
     const dir = sameLocation ? prev.dir : this.dirOf(next)
@@ -172,7 +183,7 @@ export class InMemoryTable implements MemoryTable {
   async update(id: string, from: LocateTarget, fn: (c: MemoryRecord) => MemoryRecord) {
     const current = await this.locate(id, from)
     if (!current) throw new RecordNotFoundError(id)
-    return this.place(current, fn(current.record), isScopeTarget(from))
+    return this.place(current, fn(byPosition(current)), isScopeTarget(from))
   }
   private carryHistory(record: MemoryRecord, dir: string) {
     return carryMergedHistory(this.history, record, dir, async (id, scope) => {

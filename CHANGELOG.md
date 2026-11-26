@@ -461,6 +461,10 @@ All notable changes to this project are documented here. The format follows
   again once after the update.
 
 ### Fixed
+- A memory you moved into the `.archive/` folder by hand while its file still
+  said it was in use came back into use when it was accepted or rewritten,
+  and restoring it from Recently deleted left it in `.archive/`. Both now
+  treat it as deleted, as reads already did.
 - Accepting a subagent's memory that was moved to another scope after it was
   looked up accepted the moved copy. It is now reported as missing and the
   moved copy is left alone.

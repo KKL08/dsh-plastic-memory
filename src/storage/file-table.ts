@@ -1768,10 +1768,12 @@ export class FileTable implements MemoryTable {
    */
   private async persist(key: string, prev: LocatedSlot | undefined, value: MemoryRecord, isOwnDirOnly = false, given?: WriteOp): Promise<MemoryRecord> {
     const { lastWriteOp: _stale, ...stripped } = value
-    const next: MemoryRecord = stripped.status === 'deleted' && stripped.deletedAt === undefined ? { ...stripped, deletedAt: this.now() } : stripped
-    const volatileChanged = !prev || !this.volatileEqual(prev.record, next)
-    const stableChanged = !prev || !this.stableEqual(prev.record, next)
+    const previous = prev && byPosition(prev)
+    let next: MemoryRecord = stripped
+    const volatileChanged = !previous || !this.volatileEqual(previous, next)
+    const stableChanged = !previous || !this.stableEqual(previous, next)
     if (stableChanged) {
+      if (next.status === 'deleted' && next.deletedAt === undefined) next = { ...next, deletedAt: this.now() }
       // 提交标记：这个文件带着这次的操作 id 出现在目标目录里，这次写入就算提交了
       const op = given ?? newWriteOp()
       // 位置没变就留在原目录（覆盖手工改名的 workspace 目录），变了才按 scope 选目录
@@ -1789,7 +1791,6 @@ export class FileTable implements MemoryTable {
       // 这次会动到的几层：新文件那层、原文件那层、要清的副本那几层，还有改索引的顶层
       const current = await this.currentLevels([level, dir, ...(prev === undefined ? [] : [dirname(prev.filePath), prev.dir, ...prev.copies.map(c => dirname(c.filePath))])])
       const changes: Array<{ path: string; id?: string }> = []
-      const previous = prev && byPosition(prev)
       const rowBefore = prev && this.hasIndexRow(prev) ? [prev.dir, maskSecrets(previous!.name), maskSecrets(previous!.summary), basename(prev.filePath)] : undefined
       const rowAfter = next.status === 'active' && !isPendingDelegated(next) ? [dir, maskSecrets(next.name), maskSecrets(next.summary), renamed ? '' : prev ? basename(prev.filePath) : ''] : undefined
       const indexRow: IndexRowStep | undefined = op.topic !== undefined || JSON.stringify(rowBefore) !== JSON.stringify(rowAfter)
@@ -1798,7 +1799,7 @@ export class FileTable implements MemoryTable {
       const recent: RecentChangeStep | undefined = classified && { kind: RECENT_CHANGE_STEP, ...classified, memoryId: key, session: currentWriteSession(), at: this.now() }
       const historyMove: HistoryMoveStep | undefined = moved ? { kind: HISTORY_MOVE_STEP, memoryId: key, from: prev.dir, to: dir } : undefined
       this.beginOp(op, {
-        kind: 'write', memoryId: key, dir: level, fields: changedFields(prev?.record, next),
+        kind: 'write', memoryId: key, dir: level, fields: changedFields(previous, next),
         ...(prev !== undefined ? { before: fingerprintOf(prev.raw) } : {}), after: fingerprintOf(text),
         ...(prev !== undefined && !isInPlace ? { source: { dir: dirname(prev.filePath), nameHash: fingerprintOf(basename(prev.filePath)) } } : {}),
       }, [...(historyMove === undefined ? [] : [historyMove]), ...(recent === undefined ? [] : [recent]), ...(indexRow === undefined ? [] : [indexRow])])
@@ -1807,19 +1808,32 @@ export class FileTable implements MemoryTable {
       const markCommitted = () => { if (this.isJournaling()) this.journal!.markCommitted(op.id) }
       if (prev !== undefined && isInPlace) {
         filePath = prev.filePath
-        if (!(await this.unchangedSince(prev))) throw new StaleReadError()
+        if (!(await this.unchangedSince(prev))) {
+          this.endOp(op.id)
+          throw new StaleReadError()
+        }
         await this.atomicWrite(filePath, text)   // 自己的文件：rename 只覆盖同一记录自己的文件
         markCommitted()
       } else {
-        if (prev !== undefined && !(await this.unchangedSince(prev))) throw new StaleReadError()
+        if (prev !== undefined && !(await this.unchangedSince(prev))) {
+          this.endOp(op.id)
+          throw new StaleReadError()
+        }
         await mkdir(level, { recursive: true })
-        const claim = await this.claimAndWrite(next, level, text, prev?.copies ?? [])
+        let claim: Claim
+        try {
+          claim = await this.claimAndWrite(next, level, text, prev?.copies ?? [])
+        } catch (err) {
+          if (err instanceof StaleReadError) this.endOp(op.id)
+          throw err
+        }
         filePath = claim.path
         // 先写新后删旧；崩溃窗口由读路径的同 id 取舍兜底。占名可能落回原路径（候选名正被自己占着），
         // 路径比较忽略大小写：大小写不敏感文件系统上不能删掉刚写的自己。
         const isSourceLeft = prev !== undefined && prev.filePath.toLowerCase() !== filePath.toLowerCase()
         if (isSourceLeft && !(await this.unchangedSince(prev))) {
           await this.withdrawClaim(prev.filePath, claim, text)   // 占名期间旧文件被改或不见了：按规则撤回新文件，重来
+          this.endOp(op.id)
           throw new StaleReadError()
         }
         // 记在删旧文件之前：旧文件一时删不掉，这次写入也已经成了，剩下的那份由补做清
@@ -1859,7 +1873,7 @@ export class FileTable implements MemoryTable {
       // 调用方给的操作还有账要记，由它做完再结（finishOp）；自己建的到这里就做完了
       if (unfinished.length > 0 && given !== undefined) this.unfinishedOwn.set(op.id, unfinished)
       if (given === undefined && unfinished.length === 0) this.endOp(op.id)
-    } else if (given?.topic !== undefined && prev !== undefined) {
+    } else if (given?.topic !== undefined && prev !== undefined && previous?.status === 'active') {
       const step: IndexRowStep = { kind: INDEX_ROW_STEP, memoryId: key, dirs: [prev.dir], topic: given.topic }
       this.beginOp(given, { kind: 'write', memoryId: key, dir: dirname(prev.filePath), fields: [], before: fingerprintOf(prev.raw), after: fingerprintOf(prev.raw) }, [step])
       if (this.isJournaling()) this.journal!.markCommitted(given.id)
@@ -2084,7 +2098,7 @@ export class FileTable implements MemoryTable {
     // 锁内重读磁盘：外部编辑不丢；写盘前又被改就在新内容上重算 fn
     return this.locked(() => this.withFreshLocate(id, from, async current => {
       if (!current) throw new RecordNotFoundError(id)
-      return this.persist(id, current, fn(current.record), isScopeTarget(from), op)
+      return this.persist(id, current, fn(byPosition(current)), isScopeTarget(from), op)
     }))
   }
 

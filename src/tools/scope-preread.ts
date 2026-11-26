@@ -9,7 +9,7 @@ import { scopeCacheKey, type Scope } from '../scope.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { dirname, join } from 'node:path'
 import { SECRET_MASK, exposedPath, maskSecrets } from '../secrets.ts'
-import { resolveDuplicates, resolveLiveFirst, type DirectoryNote, type LocatedRecord, type QuarantineEntry, type WorkspaceDirListing } from '../storage/table.ts'
+import { byPosition, resolveDuplicates, resolveLiveFirst, type DirectoryNote, type LocatedRecord, type QuarantineEntry, type WorkspaceDirListing } from '../storage/table.ts'
 
 /**
  * memory_health 与 memory_scan 共用的预读：两个工具从同一个函数取评分输入，对同一作用域永远同分。
@@ -73,7 +73,7 @@ export async function prereadScopes(
     if (byId.has(id)) continue
     const hit = await deps.store.locate(id, hint)
     if (hit) {
-      byId.set(id, hit.record)
+      byId.set(id, byPosition(hit))
       filePaths.set(id, hit.filePath)
     }
   }
