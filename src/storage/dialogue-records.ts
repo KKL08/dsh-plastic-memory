@@ -165,6 +165,7 @@ export class DialogueRecordStore {
   private readonly log: MemoryLogger
   private readonly loadSqlite: () => SqliteModule | undefined
   private db: DatabaseSync | undefined
+  private warnedReason: number | string | undefined
 
   constructor(opts: DialogueRecordStoreOptions) {
     // 懒打开：构造不做 I/O
@@ -398,12 +399,23 @@ export class DialogueRecordStore {
       if (opts.speakers !== undefined) among('s.speaker', opts.speakers)
       if (opts.cwds !== undefined) among('se.cwd', opts.cwds)
       if (opts.excludeSessionIds !== undefined && opts.excludeSessionIds.length > 0) among('s.session_id', opts.excludeSessionIds, true)
-      const rows = db.prepare(`SELECT s.session_id, s.turn_seq, s.seq, s.segment, s.at, s.speaker, CAST(s.text AS BLOB) AS text, se.cwd, se.is_subagent,
+      // 两步共用只读快照；全文索引放在最外层，避免逐段重复计算查询式。
+      db.exec('BEGIN')
+      const ranked = db.prepare(`SELECT s.id,
           bm25(segments_fts, ?, ?, ?) AS score
-        FROM segments_fts JOIN segments s ON s.id = segments_fts.rowid
+        FROM segments_fts CROSS JOIN segments s ON s.id = segments_fts.rowid
         JOIN sessions se ON se.gen = s.gen AND se.session_id = s.session_id
-        WHERE ${where.join(' AND ')} ORDER BY score, s.id LIMIT ?`).all(...opts.weights, ...args, opts.limit) as unknown as HitRow[]
-      return rows.map(r => ({ ...toSegment(r), cwd: r.cwd ?? undefined, isSubagent: r.is_subagent === 1, score: r.score }))
+        WHERE ${where.join(' AND ')} ORDER BY score, s.id LIMIT ?`).all(...opts.weights, ...args, opts.limit) as Array<{ id: number; score: number }>
+      const rows = db.prepare(`SELECT s.id, s.session_id, s.turn_seq, s.seq, s.segment, s.at, s.speaker, CAST(s.text AS BLOB) AS text, se.cwd, se.is_subagent
+        FROM segments s JOIN sessions se ON se.gen = s.gen AND se.session_id = s.session_id
+        WHERE s.id IN (SELECT value FROM json_each(?))`).all(JSON.stringify(ranked.map(r => r.id))) as unknown as HitRow[]
+      db.exec('COMMIT')
+      const byId = new Map(rows.map(r => [r.id, r]))
+      return ranked.map(({ id, score }) => {
+        // 同一快照内，第一步命中的行在第二步一定取得到。
+        const r = byId.get(id)!
+        return { ...toSegment(r), cwd: r.cwd ?? undefined, isSubagent: r.is_subagent === 1, score }
+      })
     })
   }
 
@@ -458,7 +470,11 @@ export class DialogueRecordStore {
   private run<T>(fn: (db: DatabaseSync) => T): T {
     const db = this.open()
     try {
-      return fn(db)
+      // 盘满时仍可能读成功；只有本次操作写成了行才算恢复，不计开库时的配置写入。
+      const before = this.warnedReason === undefined ? undefined : (db.prepare('SELECT total_changes() AS n').get() as { n: number }).n
+      const result = fn(db)
+      if (before !== undefined && (db.prepare('SELECT total_changes() AS n').get() as { n: number }).n > before) this.warnedReason = undefined
+      return result
     } catch (err) {
       this.close()
       if (isSqliteCorrupt(err)) this.removeFiles()
@@ -496,8 +512,14 @@ export class DialogueRecordStore {
   private unavailable(err: unknown): DialogueStoreUnavailable {
     if (err instanceof DialogueStoreUnavailable) return err
     if (isSqliteBusy(err)) return new DialogueStoreUnavailable('正被别的连接占着', true)
-    this.log.warn(`[plastic-memory] 对话记录库读写失败，这一次只查记忆：${this.path}（${describeError(err)}）`)
-    return new DialogueStoreUnavailable(describeError(err))
+    const message = describeError(err)
+    const e = err as { code?: unknown; errcode?: unknown } | null | undefined
+    const reason = e?.code === 'ERR_SQLITE_ERROR' && typeof e.errcode === 'number' ? e.errcode & 0xff : message
+    if (reason !== this.warnedReason) {
+      this.log.warn(`[plastic-memory] 对话记录库读写失败，这一次只查记忆：${this.path}（${message}）`)
+      this.warnedReason = reason
+    }
+    return new DialogueStoreUnavailable(message)
   }
 
   private removeFiles(): void {
@@ -511,7 +533,7 @@ interface SegmentRow { session_id: string; turn_seq: number; seq: number; segmen
 
 /** 正文按字节取回再解码：按文本取的话，遇到正文里的 NUL 字符会被截断。 */
 const textOf = (bytes: Uint8Array) => Buffer.from(bytes).toString('utf8')
-interface HitRow extends SegmentRow { cwd: string | null; is_subagent: number; score: number }
+interface HitRow extends SegmentRow { id: number; cwd: string | null; is_subagent: number }
 
 const toSegment = (r: SegmentRow) => ({ sessionId: r.session_id, turnSeq: r.turn_seq, seq: r.seq, segment: r.segment, at: r.at ?? undefined, speaker: r.speaker, text: textOf(r.text) })
 
@@ -617,6 +639,8 @@ function openStore(sqlite: SqliteModule, path: string): DatabaseSync {
       if (!/no such (table|column)/i.test(describeError(err))) throw err
       throw new SchemaMismatchError(version)
     }
+    // 旧库也补索引，让最晚时刻按代定位；先核对结构，缺列时才能按原路径重建。
+    db.exec('CREATE INDEX IF NOT EXISTS segments_gen_at ON segments(gen, at)')
     // 全文索引自己的删除也当场抹掉词。设不上（库忙、SQLite 太老）这一次就不用：不能在删掉的词还留在文件里的状态下收对话
     db.exec("INSERT INTO segments_fts(segments_fts, rank) VALUES ('secure-delete', 1)")
     return db
