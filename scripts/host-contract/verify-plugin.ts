@@ -20,8 +20,8 @@
  * 指令文件按项目现读（H14）：无 key 时装好的插件取到项目的 AGENTS.md，和宿主函数直接取到的一致（agent 工具裁决旧式条目时现算的指纹不用模型，
  * 无 key 也能比）；有 key 时再在真会话里跑一轮，
  * 模型收到的指令文件正文和宿主函数返回的逐字相同。
- * 有官方 key 时 run.sh 再把凭据换成无效 key 起第三趟（HOST_CONTRACT_PHASE=bad-key）跑 H18：宿主报 AUTH，
- * 扫描结果和体检视图只记 hostCode、不带宿主原话；没有 key 或走替代路由时第一趟把 H18 标 SKIPPED。
+ * run.sh 始终用合成凭据起第三趟（HOST_CONTRACT_PHASE=bad-key），仅替换 HTTP 响应：
+ * 验证认证错误脱敏、普通 550 记失败，以及 550 带认证类型时仍归 AUTH。
  *
  * 只用可擦除的 TypeScript 语法（engines 要求的 Node 22.19+/24 原生 strip-types 直接加载，不需要构建）。
  */
@@ -50,6 +50,7 @@ import { workspaceDirName } from '../../src/storage/paths.ts'
 import { readIndex } from '../../src/topic-index.ts'
 import { dialogueNote } from '../../src/search/dialogue-format.ts'
 import type { TestModelState } from './test-model.ts'
+import { httpFixture } from './http-fixture.ts'
 
 export const name = 'dsh-plastic-memory-host-contract'
 export const inject = ['tools', 'sessions']
@@ -263,15 +264,14 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
     }
 
     if (process.env.HOST_CONTRACT_PHASE === 'bad-key') {
-      // 第三趟（只在有 key 时跑）：run.sh 把同一 DSH_HOME 的凭据换成一个格式合法、但服务端不认的 key。
-      // 宿主把 401 归为 AUTH；它的原话可能回显部分凭据，插件对齐宿主不留原话：
-      // 给模型的扫描结果（memory_scan）和自动体检写的体检视图里，都只有 model-unavailable + hostCode AUTH。
-      await attempt('H18-AUTH-ERROR-MASKED', async () => {
-        const sel = readDefaultModel()
-        if (!sel.provider || !sel.model) return { ok: false, detail: `换成无效 key 后宿主未选出默认模型（agentDefaultModel.currentSelection → ${JSON.stringify(sel)}）` }
-        // 先直调宿主 llm 一次，拿到它给的错误码和原话：前提是宿主确实报 AUTH，原话用来比对插件输出里没有它
-        const llm = ctx.get('llm') as LlmService | undefined
-        if (!llm) return { ok: false, detail: '宿主缺 llm 服务' }
+      if (httpFixture === undefined || globalThis.fetch !== httpFixture.fetch) throw new Error('HTTP 拦截器没有预加载')
+      const fixture = httpFixture
+      const expected = fixture.config
+      const sel = readDefaultModel()
+      if (sel.provider !== expected.provider || sel.model !== expected.model) throw new Error(`默认模型不符：${JSON.stringify(sel)}`)
+      const llm = ctx.get('llm') as LlmService | undefined
+      if (!llm) throw new Error('宿主缺 llm 服务')
+      const probe = async () => {
         let raw: { code?: string; message?: string } = {}
         try {
           for await (const chunk of llm.stream({ provider: sel.provider, model: sel.model, system: 'ping', messages: [{ role: 'user', content: [{ type: 'text', text: 'ping' }] }] })) {
@@ -280,30 +280,103 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
         } catch (e) {
           raw = { code: (e as { code?: string }).code, message: e instanceof Error ? e.message : String(e) }
         }
-        if (raw.code !== 'AUTH') return { ok: false, detail: `前提不成立：无效 key 下宿主报的错误码是 ${raw.code ?? '（无）'}，不是 AUTH` }
+        return raw
+      }
+      // 每个调用阶段都必须真的发出对话请求；前一阶段的请求不能替后一阶段作证。
+      const requestsSince = (start: number, status: number) => {
+        const records = fixture.requests.slice(start)
+        return records.some(r => r.url === expected.messagesUrl && r.method === 'POST' && r.status === status)
+          && records.every(r => r.matched && r.provider === expected.provider && r.credential === expected.credential && r.authorization === null
+            && (r.url === expected.modelsUrl ? r.method === 'GET' && r.model === null && r.status === 401
+              : r.url === expected.messagesUrl && r.method === 'POST' && r.model === expected.model && r.status === status))
+      }
+      const disableAutoCheckup = async (workspacePath: string) => {
+        const r = await runMemoryCommand(workspacePath, `/memory set-auto-checkup ${JSON.stringify({ scope: { kind: 'workspace', workspacePath }, frequency: 'manual' })}`)
+        if (typeof r === 'string' || r.kind !== 'success') throw new Error(`关闭自动体检失败：${JSON.stringify(r)}`)
+      }
+      await attempt('H18-AUTH-ERROR-MASKED', async () => {
+        const probeStart = fixture.requests.length
+        const raw = await probe()
+        if (raw.code !== 'AUTH') return { ok: false, detail: `前提不成立：401 下宿主报的错误码是 ${raw.code ?? '（无）'}，不是 AUTH` }
         const rawText = raw.message ?? ''
         const leaks = (text: string) => rawText !== '' && text.includes(rawText)
+        const hasSentinel = (text: string) => text.includes(expected.sentinel)
+        const probeOk = hasSentinel(rawText) && requestsSince(probeStart, 401)
         const isMaskedAuth = (cause: CheckupCauseShape | undefined) => cause?.kind === 'model-error' && cause.hostCode === 'AUTH' && cause.message === undefined
 
-        // memory_scan：语义层被拒，说明码 model-unavailable，原因只带 hostCode
         const wsD = mkWs('d')
         await seedMemories(wsD, 'd')
+        const scanStart = fixture.requests.length
         const scan = await call('memory_scan', { layers: 'full' }, mkExec(wsD, sel)) as { notes?: Array<{ code: string; cause?: CheckupCauseShape }> }
         const scanNote = (scan.notes ?? []).find(n => n.code === 'model-unavailable')
-        const scanOk = isMaskedAuth(scanNote?.cause) && !leaks(JSON.stringify(scan))
+        const scanText = JSON.stringify(scan)
+        const scanOk = isMaskedAuth(scanNote?.cause) && !leaks(scanText) && !hasSentinel(scanText) && requestsSince(scanStart, 401)
 
-        // 自动体检：同一个无效 key，体检视图记「模型用不了」，原因只带 hostCode，整份视图里没有原话
         const wsE = mkWs('e')
         await seedMemories(wsE, 'e')
-        const enabled = await enableAutoCheckup(wsE)
-        if (enabled !== undefined) return { ok: false, detail: `scan: note=${JSON.stringify(scanNote)} | auto: ${enabled}` }
-        const auto = await waitAutoCheckup(wsE)
-        const viewText = existsSync(checkupViewPath) ? readFileSync(checkupViewPath, 'utf8') : ''
-        const autoOk = auto !== undefined && isMaskedAuth(auto.modelUnavailable ?? undefined) && !leaks(viewText)
+        const autoStart = fixture.requests.length
+        let auto: CheckupScopeShape | undefined
+        let viewText = ''
+        let autoOk = false
+        try {
+          const enabled = await enableAutoCheckup(wsE)
+          if (enabled !== undefined) return { ok: false, detail: `scan: note=${JSON.stringify(scanNote)} | auto: ${enabled}` }
+          auto = await waitAutoCheckup(wsE)
+          viewText = existsSync(checkupViewPath) ? readFileSync(checkupViewPath, 'utf8') : ''
+          autoOk = auto !== undefined && isMaskedAuth(auto.modelUnavailable ?? undefined) && auto.failure === null
+            && viewText !== '' && !leaks(viewText) && !hasSentinel(viewText) && requestsSince(autoStart, 401)
+        } finally {
+          // AUTH 会在后续调度重试；下一组换响应前先停掉这个项目。
+          await disableAutoCheckup(wsE)
+        }
         return {
-          ok: scanOk && autoOk,
-          detail: `raw: code=${raw.code} messageLength=${rawText.length} | scan: note=${JSON.stringify(scanNote)} rawInOutput=${leaks(JSON.stringify(scan))}`
-            + ` | auto: ${auto === undefined ? `${AUTO_CHECKUP_WAIT_MS / 1000}s 内没有结局` : `modelUnavailable=${JSON.stringify(auto.modelUnavailable)} failure=${JSON.stringify(auto.failure)} rawInView=${leaks(viewText)}`}`,
+          ok: probeOk && scanOk && autoOk,
+          detail: `raw: code=${raw.code} messageLength=${rawText.length} sentinelInRaw=${hasSentinel(rawText)} requestsMatch=${probeOk && requestsSince(scanStart, 401)}`
+            + ` | scan: note=${JSON.stringify(scanNote)} rawInOutput=${leaks(scanText)} sentinelInOutput=${hasSentinel(scanText)}`
+            + ` | auto: ${auto === undefined ? `${AUTO_CHECKUP_WAIT_MS / 1000}s 内没有结局` : `modelUnavailable=${JSON.stringify(auto.modelUnavailable)} failure=${JSON.stringify(auto.failure)} rawInView=${leaks(viewText)} sentinelInView=${hasSentinel(viewText)}`}`,
+        }
+      })
+      await attempt('H18-550-SERVER', async () => {
+        fixture.mode = 'server'
+        const start = fixture.requests.length
+        const raw = await probe()
+        const probeOk = raw.code === 'SERVER' && requestsSince(start, 550)
+        const ws = mkWs('server')
+        await seedMemories(ws, 'server')
+        const autoStart = fixture.requests.length
+        try {
+          const enabled = await enableAutoCheckup(ws)
+          if (enabled !== undefined) return { ok: false, detail: enabled }
+          const auto = await waitAutoCheckup(ws)
+          const autoOk = auto !== undefined && auto.failure?.cause.kind === 'model-error' && auto.failure.cause.hostCode === 'SERVER'
+            && auto.modelUnavailable === null && requestsSince(autoStart, 550)
+          return {
+            ok: probeOk && autoOk,
+            detail: `raw: code=${raw.code} | auto: failure=${JSON.stringify(auto?.failure)} modelUnavailable=${JSON.stringify(auto?.modelUnavailable)} requestsMatch=${requestsSince(start, 550)}`,
+          }
+        } finally {
+          await disableAutoCheckup(ws)
+        }
+      })
+      await attempt('H18-550-AUTH-TYPE', async () => {
+        fixture.mode = 'auth-type'
+        const start = fixture.requests.length
+        const raw = await probe()
+        return { ok: raw.code === 'AUTH' && requestsSince(start, 550), detail: `raw: code=${raw.code} requestsMatch=${requestsSince(start, 550)}` }
+      })
+      await attempt('H18-HTTP-REQUESTS', async () => {
+        const records = fixture.requests
+        const models = records.filter(r => r.url === expected.modelsUrl && r.method === 'GET')
+        const messages = records.filter(r => r.url === expected.messagesUrl && r.method === 'POST')
+        const unmatched = records.filter(r => !r.matched)
+        const credentialsMatch = records.every(r => r.credential === expected.credential && r.authorization === null)
+        const routeMatches = records.every(r => r.provider === expected.provider)
+          && messages.every(r => r.model === expected.model) && models.every(r => r.model === null && r.status === 401)
+        // 只记录合成凭据；保留日志时可逐条复核实际 HTTP 输入。
+        writeFileSync(join(home, 'http-requests.json'), JSON.stringify(records, null, 2))
+        return {
+          ok: models.length > 0 && messages.length > 0 && unmatched.length === 0 && credentialsMatch && routeMatches,
+          detail: `provider=${sel.provider} model=${sel.model} models=${models.length} messages=${messages.length} unmatched=${unmatched.length} credentialsMatch=${credentialsMatch} routeMatches=${routeMatches}`,
         }
       })
       finish()
@@ -1603,9 +1676,6 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
         await handle.dispose()
       }
     })
-    // H18 在第三趟（凭据换成无效 key）跑；没有 key 或走替代路由时第三趟不起，结果在这里标 SKIPPED
-    if (!hasKey) push({ id: 'H18-AUTH-ERROR-MASKED', ok: true, skipped: true, detail: 'SKIPPED: 无 DEEPSEEK_API_KEY' })
-    if (modelState.kind === 'alternate') push({ id: 'H18-AUTH-ERROR-MASKED', ok: true, skipped: true, detail: 'SKIPPED: 只对官方 provider 有意义（这次走替代路由）' })
     // 交接给第二趟（重启验证）：恢复过的记录 id、它的 workspace、H7 拍的快照 id
     if (handoffPath) writeFileSync(handoffPath, JSON.stringify({ savedId, wsA, snapshotId, cold, archivedSessionId } satisfies Handoff))
   } catch (e) {

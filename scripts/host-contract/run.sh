@@ -13,14 +13,13 @@
 #                     contract schema
 #   semantic layer    model-backed checks; they run only when DEEPSEEK_API_KEY
 #                     is set and the host can pick a default model, otherwise
-#                     they are reported as SKIPPED. With a key, a third boot
-#                     swaps in an invalid key to check that AUTH errors leave
-#                     no raw host text in plugin output.
+#                     they are reported as SKIPPED.
+# 第三趟始终运行：只用合成凭据和预加载的 HTTP 响应，验证认证脱敏及 550 分类。
 # Model-backed checks can also run on another provider route the host ships
 # (scripts/host-contract/test-model.ts): set TEST_LLM_PROVIDER, TEST_LLM_MODEL
 # and TEST_LLM_API_KEY together. That route then takes precedence over
-# DEEPSEEK_API_KEY, the default model points at it, and checks that only mean
-# something for the official provider (the invalid-key boot) are SKIPPED.
+# DEEPSEEK_API_KEY, and the default model points at it.
+# 第三趟独立指定官方路由，不继承替代路由或真实凭据。
 # Never touches ~/.dsh.
 #
 #   scripts/host-contract/run.sh              run (temp dir removed on exit)
@@ -113,23 +112,27 @@ if [ ! -f "$RESULTS2" ]; then
   grep -iE "error|fatal" "$LOGS/restart.log" | head -n 10 >&2 || true
   exit 1
 fi
-# Third boot (H18, only with the official key): same isolated home, credentials swapped for a
-# well-formed key the provider rejects (401 → AUTH). Generated here, never a real key.
+# 第三趟始终运行，官方适配器照常解析合成凭据，只有 HTTP 响应由预加载模块提供。
 RESULTS3="$TMP/results-bad-key.json"
-code3=0
-if [ "$MODEL_KIND" = official ]; then
-  STEP=bad-key
-  ( umask 077; printf 'version: %s\nrefs:\n  DEEPSEEK_API_KEY: "%s"\nrecords: {}\n' "$CREDENTIALS_SCHEMA_VERSION" "host-contract-invalid-key-$RANDOM$RANDOM" > "$HOMEDIR/.credentials.yaml" )
-  chmod 600 "$HOMEDIR/.credentials.yaml"
-  set +e
-  env DSH_HOME="$HOMEDIR" DSH_AGENTS_HOME="$AGENTS_HOME" HOST_CONTRACT_OUT="$RESULTS3" HOST_CONTRACT_MODEL_STATE="$MODEL_STATE" HOST_CONTRACT_PHASE=bad-key "$DSH" --profile host --patch "$PATCH" >"$LOGS/bad-key.log" 2>&1
-  code3=$?
-  set -e
-  if [ ! -f "$RESULTS3" ]; then
-    echo "$HOST_TAG: bad-key host exited ($code3) without results; bad-key.log errors:" >&2
-    grep -iE "error|fatal" "$LOGS/bad-key.log" | head -n 10 >&2 || true
-    exit 1
-  fi
+STEP=bad-key
+HTTP_FIXTURE="$TMP/http-fixture.json"
+HTTP_MODEL_STATE="$TMP/http-model.json"
+HTTP_PATCH="$TMP/http.cordis.patch.yml"
+node "$REPO/scripts/host-contract/http-fixture.ts" "$HOMEDIR" "$CREDENTIALS_SCHEMA_VERSION" "$HTTP_MODEL_STATE" "$HTTP_PATCH" "$HTTP_FIXTURE"
+# file URL 可包含空格；NODE_OPTIONS 仅作用于这一趟，不传给前两趟或安装步骤。
+HTTP_IMPORT="$(node -e 'process.stdout.write(require("node:url").pathToFileURL(process.argv[1]).href)' "$REPO/scripts/host-contract/http-fixture.ts")"
+set +e
+env -u DEEPSEEK_API_KEY -u TEST_LLM_API_KEY -u HOST_CONTRACT_HTTP_KEY \
+  DSH_HOME="$HOMEDIR" DSH_AGENTS_HOME="$AGENTS_HOME" HOST_CONTRACT_OUT="$RESULTS3" \
+  HOST_CONTRACT_MODEL_STATE="$HTTP_MODEL_STATE" HOST_CONTRACT_PHASE=bad-key \
+  HOST_CONTRACT_HTTP_FIXTURE="$HTTP_FIXTURE" NODE_OPTIONS="--import=$HTTP_IMPORT" \
+  "$DSH" --profile host --patch "$PATCH" --patch "$HTTP_PATCH" >"$LOGS/bad-key.log" 2>&1
+code3=$?
+set -e
+if [ ! -f "$RESULTS3" ]; then
+  echo "$HOST_TAG: bad-key host exited ($code3) without results; bad-key.log errors:" >&2
+  grep -iE "error|fatal" "$LOGS/bad-key.log" | head -n 10 >&2 || true
+  exit 1
 fi
 # Each results file comes from one boot; a failed case is reported against the
 # boot that ran it, with that boot's log tail, not against the last boot started.
