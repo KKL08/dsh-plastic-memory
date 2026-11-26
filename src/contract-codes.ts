@@ -52,6 +52,16 @@ export type DecisionRejectCode =
 /** memory_confirm accept-subagent 什么都没动的原因（tools/confirm.ts）。 */
 export type AcceptRejectCode =
   | 'not-subagent-pending' // 目标不是在用的待确认记录：主档（主会话写的、手建的）、已接受、已删除、已取代
+  | 'invalid-args'         // memoryId 和 memoryIds 同时传、memoryIds 为空、两个都没传；什么都没动
+
+/** memory_confirm accept-subagent 带 memoryIds 成组接受时，一条没接受的原因（tools/confirm.ts）。其余几条照常接受。 */
+export type GroupAcceptSkipCode =
+  | 'not-subagent-pending' // 同单条：主档、已接受、已删除、已取代；写入段内按磁盘上的当前内容判
+  | 'cross-workspace'      // 属于其他项目，没带 allowCrossWorkspace
+  | 'not-found'            // 定位不到，且把全部记忆目录完整读了一遍也没有这个 id
+  | 'unreadable'           // 定位时出错，或定位不到而记忆目录读不全：分不出有没有
+  | 'missing-at-write'     // 读到了，进写入段时在原来的作用域里找不到了（被删除、挪走或读不出）
+  | 'write-failed'         // 写入出错（核对之外的错误）：不确定接受上没有，可以单独重发
 
 /** memory_save 成功但附带的警告（pipeline.ts）。 */
 export type WarningCode =

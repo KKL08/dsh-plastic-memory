@@ -7,6 +7,15 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- `memory_confirm` with `action: accept-subagent` takes `memoryIds` to accept a
+  subagent's whole batch of pending memories in one call. The result groups
+  them by the topic of the closest existing memory, marks near-duplicates
+  within a group and overlaps with existing memories, and lists any it could
+  not accept with the reason, while the rest are still accepted. Grouping is
+  only for review: accepted memories go to the unsorted page until the topic
+  index is organized.
+- Testing: `pnpm host:contract` accepts a real subagent's batch through
+  `memoryIds` and checks the grouped result and the files.
 - `memory_save` can record when a fact happened or held true, preserving the
   precision and time zone supplied by the user.
 - `memory_search` can show a memory's past versions: give its `id` with
@@ -433,6 +442,9 @@ All notable changes to this project are documented here. The format follows
   again once after the update.
 
 ### Fixed
+- Accepting a subagent's memory that was moved to another scope after it was
+  looked up accepted the moved copy. It is now reported as missing and the
+  moved copy is left alone.
 - Permanently deleting a memory left its name and summary in the topic index
   and `MEMORY.md` when another memory file in the same folder could not be
   read. Its line is now removed; lines for the unreadable files stay.

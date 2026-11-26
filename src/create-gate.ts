@@ -4,7 +4,8 @@ import { isPendingDelegated, type MemoryRecord } from './record-schema.ts'
 import { maskSecretSurface } from './secrets.ts'
 import { charSimilarity, normalizeForDuplicate } from './text.ts'
 import { clipText } from './save-signals.ts'
-import { findMemoryCandidates } from './search/memory-candidates.ts'
+import { injectionText } from './index-line.ts'
+import { findMemoryCandidates, type MemoryCandidateSet } from './search/memory-candidates.ts'
 import type { QueryTokenizerOptions } from './search/jieba-segmenter.ts'
 
 /** 只拦接近逐字重复的内容，留出少量字词变化。 */
@@ -29,10 +30,80 @@ export type CreateGateOutcome =
 
 function shown(record: MemoryRecord): SimilarMemory {
   const masked = maskSecretSurface(record, { severity: 'suspected' })
-  return { id: record.id, name: masked.name.replace(/\s+/g, ' ').trim(), summary: clipText(masked.summary, SIMILAR_SUMMARY_LIMIT), scope: record.scope }
+  return { id: record.id, name: injectionText(masked.name), summary: clipText(injectionText(masked.summary), SIMILAR_SUMMARY_LIMIT), scope: record.scope }
 }
 
-const comparison = (record: { content: string; summary: string }) => normalizeForDuplicate(record.content) + normalizeForDuplicate(record.summary)
+/** 判重和列相近时拿来比的那段文字：名称不参与。 */
+export interface GateText { name: string; summary: string; content: string }
+
+/** 判重、相近列表共用的选项：新建闸和成组接受（tools/confirm.ts）各自给。 */
+export interface GateJudgeOptions {
+  /** 判重和列相近都不算的 id：新建闸是这次要替代的旧记忆；成组接受是这一批自己和候选里其余的待确认记录。 */
+  excludeIds: ReadonlySet<string>
+  /** 子 agent 判重只看主档；相近列表还保留本会话的待确认记录。成组接受不给。 */
+  subagentSessionId?: string
+  /**
+   * 新记忆要归的现有主题里的成员：调用方已按 runCreateGate 的口径读好、过滤好（在用的主档、没过期、不在 excludeIds 里）。
+   * 不过罕见词否决，按和输入的比较文字相似度降序排在检索候选之后；判重同样对它们做。成组接受不给。
+   */
+  topicMembers?: readonly MemoryRecord[]
+}
+
+/**
+ * 判重和列相近用的比较文字：正文和摘要各自 normalizeForDuplicate 后拼接。新建闸、成组接受组内两两比较都用它。
+ */
+export function duplicateComparison(record: { content: string; summary: string }): string {
+  return normalizeForDuplicate(record.content) + normalizeForDuplicate(record.summary)
+}
+
+function candidateWindow(set: MemoryCandidateSet, excludeIds: ReadonlySet<string>) {
+  // 两段各取前十再排除，保持新建闸的窗口边界。
+  const settled = set.candidates.filter(c => !isPendingDelegated(c.record))
+  const pending = set.candidates.filter(c => isPendingDelegated(c.record))
+  return [...settled.slice(0, GATE_CANDIDATE_WINDOW), ...pending.slice(0, GATE_CANDIDATE_WINDOW)].filter(c => !excludeIds.has(c.record.id))
+}
+
+function sortedTopicMembers(input: GateText, opts: GateJudgeOptions): MemoryRecord[] {
+  const text = duplicateComparison(input)
+  return [...(opts.topicMembers ?? [])].sort((a, b) => charSimilarity(text, duplicateComparison(b)) - charSimilarity(text, duplicateComparison(a)))
+}
+
+/**
+ * 新建闸的判重，吃一份已取好的候选集：主档、待确认两段各取前 GATE_CANDIDATE_WINDOW 条（去掉 excludeIds），再接 topicMembers；
+ * 和输入的比较文字相似度 ≥ NEAR_DUPLICATE_THRESHOLD 的里取最高的一条（同分取先出现的），遮盖后返回；没有为 undefined。
+ * 给了 subagentSessionId 时待确认记录不参与。
+ */
+export function findNearDuplicate(input: GateText, set: MemoryCandidateSet, opts: GateJudgeOptions): SimilarMemory | undefined {
+  const neighbors = candidateWindow(set, opts.excludeIds)
+  const text = duplicateComparison(input)
+  let highest = 0
+  let existing: MemoryRecord | undefined
+  for (const record of [...neighbors.map(c => c.record), ...sortedTopicMembers(input, opts)]) {
+    if (opts.subagentSessionId !== undefined && isPendingDelegated(record)) continue
+    const similarity = charSimilarity(text, duplicateComparison(record), NEAR_DUPLICATE_THRESHOLD)
+    if (similarity >= NEAR_DUPLICATE_THRESHOLD && similarity > highest) {
+      highest = similarity
+      existing = record
+    }
+  }
+  return existing === undefined ? undefined : shown(existing)
+}
+
+/**
+ * 新建闸的相近列表，吃一份已取好的候选集：上面那个窗口里过罕见词否决的（常见词门槛同 runCreateGate），按检索名次；
+ * 给了 subagentSessionId 时别的会话的待确认记录不列；再按相似度降序补 topicMembers，按 id 去重，合计封顶 SIMILAR_LIMIT，遮盖后返回。
+ */
+export function listSimilar(input: GateText, set: MemoryCandidateSet, opts: GateJudgeOptions): SimilarMemory[] {
+  const { candidates, diagnostics } = set
+  const commonAt = Math.max(COMMON_TERM_MIN_DF, Math.ceil(COMMON_TERM_RATIO * Math.max(diagnostics.listedCount, candidates.length)))
+  const df = diagnostics.tokens.map((_, i) => candidates.reduce((n, c) => n + Number(c.tokenHits[i]), 0))
+  const similar = candidateWindow(set, opts.excludeIds).filter(c => {
+    if (opts.subagentSessionId !== undefined && isPendingDelegated(c.record) && c.record.delegation?.sessionId !== opts.subagentSessionId) return false
+    return c.tokenHits.some((hit, i) => hit && df[i]! < commonAt)
+  }).slice(0, SIMILAR_LIMIT).map(c => shown(c.record))
+  for (const record of sortedTopicMembers(input, opts)) if (similar.length < SIMILAR_LIMIT && !similar.some(s => s.id === record.id)) similar.push(shown(record))
+  return similar
+}
 
 /** 只读检索近邻；调用方在写入段之外执行，避免词典加载占住写锁。 */
 export async function runCreateGate(
@@ -54,44 +125,23 @@ export async function runCreateGate(
   },
   deps: { store: Pick<MemoryStore, 'readRaw' | 'get'>; tokenizer?: QueryTokenizerOptions; now: () => number },
 ): Promise<CreateGateOutcome> {
-  const { candidates, diagnostics } = await findMemoryCandidates({
+  const set = await findMemoryCandidates({
     query: `${input.name}\n${input.summary}\n${input.content}`,
     scope: { kind: 'visible', workspacePath: input.workspacePath },
     includesNotYetInEffect: true,
   }, deps)
-  // 检索把待确认记录排在全部主档之后，两段各取前十，免得主档一多待确认记录就进不了窗口
-  const settled = candidates.filter(c => !isPendingDelegated(c.record))
-  const pending = candidates.filter(c => isPendingDelegated(c.record))
-  const neighbors = [...settled.slice(0, GATE_CANDIDATE_WINDOW), ...pending.slice(0, GATE_CANDIDATE_WINDOW)].filter(c => !input.excludeIds.has(c.record.id))
   const members: MemoryRecord[] = []
   for (const id of input.topicMemberIds ?? []) {
     if (input.excludeIds.has(id)) continue
     const record = await deps.store.get(id, { kind: 'workspace', workspacePath: input.workspacePath })
     if (record && record.status === 'active' && !isPendingDelegated(record) && !isExpired(record, deps.now())) members.push(record)
   }
-  members.sort((a, b) => charSimilarity(comparison(input), comparison(b)) - charSimilarity(comparison(input), comparison(a)))
+  const opts = { excludeIds: input.excludeIds, subagentSessionId: input.subagentSessionId, topicMembers: members }
   if (!input.skipDuplicate) {
-    const text = comparison(input)
-    let highest = 0
-    let existing: MemoryRecord | undefined
-    for (const record of [...neighbors.map(c => c.record), ...members]) {
-      if (input.subagentSessionId !== undefined && isPendingDelegated(record)) continue
-      const similarity = charSimilarity(text, comparison(record), NEAR_DUPLICATE_THRESHOLD)
-      if (similarity >= NEAR_DUPLICATE_THRESHOLD && similarity > highest) {
-        highest = similarity
-        existing = record
-      }
-    }
-    if (existing !== undefined) return { kind: 'duplicate', existing: shown(existing) }
+    const existing = findNearDuplicate(input, set, opts)
+    if (existing !== undefined) return { kind: 'duplicate', existing }
   }
-  const commonAt = Math.max(COMMON_TERM_MIN_DF, Math.ceil(COMMON_TERM_RATIO * Math.max(diagnostics.listedCount, candidates.length)))
-  const df = diagnostics.tokens.map((_, i) => candidates.reduce((n, c) => n + Number(c.tokenHits[i]), 0))
-  const similar = neighbors.filter(c => {
-    if (input.subagentSessionId !== undefined && isPendingDelegated(c.record) && c.record.delegation?.sessionId !== input.subagentSessionId) return false
-    return c.tokenHits.some((hit, i) => hit && df[i]! < commonAt)
-  }).slice(0, SIMILAR_LIMIT).map(c => shown(c.record))
-  for (const record of members) if (similar.length < SIMILAR_LIMIT && !similar.some(s => s.id === record.id)) similar.push(shown(record))
-  return { kind: 'pass', similar }
+  return { kind: 'pass', similar: listSimilar(input, set, opts) }
 }
 
 /** 相近列表最后一句集中维护，子 agent 把归并决定交给委派方。 */

@@ -4,13 +4,21 @@ import { baselineFor, type ReadInstructions } from '../governance/instructions.t
 import { FINDING_LEDGER_KINDS, VERDICTS_BY_KIND, kindOf, verdictLoser, type FindingLedgerKind, type PendingDecision, type ResolveVerdict, type SettledProposal, type SuggestionBasis } from '../governance/schema.ts'
 import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
 import { ALREADY_REVIEWED_REASON, NOT_DELEGATED_REASON, isPendingDelegated, type MemoryRecord } from '../record-schema.ts'
-import { verdictOfAction, type AcceptRejectCode, type DecisionRejectCode, type GovernanceRejectCode, type ProposalAction } from '../contract-codes.ts'
+import { verdictOfAction, type AcceptRejectCode, type DecisionRejectCode, type GovernanceRejectCode, type GroupAcceptSkipCode, type ProposalAction } from '../contract-codes.ts'
+import { duplicateComparison, findNearDuplicate, listSimilar, NEAR_DUPLICATE_THRESHOLD, type SimilarMemory } from '../create-gate.ts'
+import { findTopicCandidates, topicGroupOf, type TopicScope } from '../search/topic-context.ts'
+import { topicDisplayName } from '../topic-members.ts'
+import { UNSORTED_TITLE } from '../topic-index.ts'
+import { injectionText } from '../index-line.ts'
+import { charSimilarity } from '../text.ts'
+import { isCompleteRead } from './dreams-run.ts'
+import type { QueryTokenizerOptions } from '../search/jieba-segmenter.ts'
 import { RecordNotFoundError } from '../errors.ts'
 import { crossWorkspaceNote, gateRecords, locateCopy, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark } from './workspace-gate.ts'
-import type { Scope } from '../scope.ts'
+import { scopeOfMemory, type Scope } from '../scope.ts'
 import { executeForget } from './forget.ts'
 import { memberScanFingerprints } from '../governance/checkup-plan.ts'
-import { hasCriticalSecret } from '../secrets.ts'
+import { hasCriticalSecret, maskSecretSurface } from '../secrets.ts'
 import { versionPlan } from '../governance/changeset-plans.ts'
 import { applyChangeset } from './changeset.ts'
 
@@ -26,6 +34,8 @@ export interface ConfirmToolDeps {
    * 用来核对采纳的依据、给没有指纹的旧条目现算两边都留的指纹；界面和 agent 工具用同一个来源。
    */
   instructions: ReadInstructions
+  /** 成组接受分组、比重叠时的候选检索分词器选项（用户词典、降级日志），同新建闸；缺省不带用户词典。 */
+  tokenizer?: QueryTokenizerOptions
 }
 
 /**
@@ -36,7 +46,96 @@ export interface ConfirmToolDeps {
 export type ConfirmArgs =
   | { action: 'refresh'; memoryId: string; allowCrossWorkspace?: boolean }
   | { action: 'resolve'; decisionId: string; verdict: ResolveVerdict; current?: string; allowCrossWorkspace?: boolean }
-  | { action: 'accept-subagent'; memoryId: string; allowCrossWorkspace?: boolean }
+  | { action: 'accept-subagent'; memoryId: string; memoryIds?: undefined; allowCrossWorkspace?: boolean }
+  /** 成组接受：memoryIds 一次接受一批；和 memoryId 只给一个（同时给、给空数组、都不给回 invalid-args）。 */
+  | { action: 'accept-subagent'; memoryId?: string; memoryIds?: readonly string[]; allowCrossWorkspace?: boolean }
+
+/** 成组接受里一条的结果。 */
+export type GroupAcceptOutcome =
+  | { kind: 'accepted'; lastConfirmedAt: number }
+  /** reason 是给模型看的原因：not-subagent-pending 取 notPendingReason 那句，其余取 GROUP_ACCEPT_REASONS。 */
+  | { kind: 'skipped'; code: GroupAcceptSkipCode; reason: string }
+
+/** 一条和在用记忆的重叠，按新建闸同一套判法（create-gate 的 findNearDuplicate、listSimilar）。 */
+export interface GroupAcceptOverlap {
+  /** 近乎重复的那条；没有时不带。 */
+  duplicateOf?: SimilarMemory
+  /** 相近的，不含 duplicateOf 那条。 */
+  similar: SimilarMemory[]
+}
+
+/** 进了分组的一条（定位到、过了跨项目门的）。名称、摘要遮盖密钥后折成一行（injectionText）。 */
+export interface GroupAcceptItem {
+  memoryId: string
+  name: string
+  summary: string
+  outcome: GroupAcceptOutcome
+  /** 这条的候选检索出错时不带。 */
+  overlap?: GroupAcceptOverlap
+}
+
+/** 一组：一个主题（作用域 + 主题页）、「未整理」，或分组数据读不到时的唯一一组。 */
+export interface GroupAcceptGroup {
+  /** 全局主题组是「global:主题页文件名」，项目主题组是「workspace:项目路径:主题页文件名」；「未整理」是 unsorted，读不到时是 flat。一次结果里不重复。 */
+  key: string
+  kind: 'topic' | 'unsorted' | 'flat'
+  /** 主题组：topicDisplayName，全局主题后面加 GROUP_ACCEPT_TEXT.globalMark；「未整理」：UNSORTED_TITLE；flat：GROUP_ACCEPT_TEXT.unreadable。 */
+  title: string
+  /** 只有主题组带：主题所在的作用域。 */
+  scope?: TopicScope
+  /** 按 memoryIds 去重后的先后。 */
+  items: GroupAcceptItem[]
+  /** 组内两两比较文字相似度 ≥ NEAR_DUPLICATE_THRESHOLD 的成对 id，每对按批内先后，各对按（前一个，后一个）的批内先后。 */
+  nearDuplicatePairs: Array<[string, string]>
+}
+
+/** 成组接受的结果。没有一条接受上也是这个 kind。 */
+export interface GroupAcceptResult {
+  kind: 'group-accepted'
+  /** topics：按主题分组；unreadable：分组数据读不到，groups 只有一组 flat。 */
+  grouping: 'topics' | 'unreadable'
+  /** 主题组按其第一条在批内的先后，「未整理」最后；没有定位到任何一条时为空。 */
+  groups: GroupAcceptGroup[]
+  /** 没进分组的：not-found、unreadable、cross-workspace，按批内先后。 */
+  ungrouped: Array<{ memoryId: string; outcome: Extract<GroupAcceptOutcome, { kind: 'skipped' }> }>
+  /** 接受上的 id，按批内先后。 */
+  acceptedIds: string[]
+  /** 带 allowCrossWorkspace 放行的其他项目的记录。 */
+  otherWorkspaces: OtherWorkspaceMark[]
+  /** 被跨项目门挡下的记录。 */
+  rejected: CrossWorkspaceRejection[]
+  message: string
+}
+
+/** 成组接受结果文字里的固定片段：措辞由提示词审查定稿，测试按常量比较。 */
+export const GROUP_ACCEPT_TEXT = {
+  accepted: '已接受',
+  skipped: '没接受',
+  duplicateOf: '和已有记忆近乎重复',
+  similar: '相近的已有记忆',
+  pairs: '组内近乎重复',
+  ungrouped: '没有分组的',
+  globalMark: '（全局）',
+  groupingNote: '分组只用于这次查看：接受的记忆先进「未整理」，整理索引时再归主题。',
+  unreadable: '分组数据读不到，下面逐条列出',
+  mergeGuide: '要把重叠的几条合成一条：先对留下的那条调 memory_save（action=update），写进合并后的内容；再对其余几条调 memory_forget。',
+} as const
+
+/** 成组接受一条没接受的原因（not-subagent-pending 用 notPendingReason 的那几句，不在这里）。 */
+export const GROUP_ACCEPT_REASONS = {
+  'cross-workspace': '属于其他项目，只有用户明确选择「全局整理」后才能带 allowCrossWorkspace: true 操作',
+  'not-found': '不存在',
+  unreadable: '读不到',
+  'missing-at-write': '读到之后在原来的作用域里找不到了（被删除、挪走或读不出）',
+  'write-failed': '写入出错，不确定接受上没有；可以单独重发这一条，已经接受过的会回「已经被接受了」',
+} as const satisfies Record<Exclude<GroupAcceptSkipCode, 'not-subagent-pending'>, string>
+
+/** accept-subagent 参数组合不合法时的说法（code 为 invalid-args，什么都没动）。 */
+export const GROUP_ACCEPT_INVALID = {
+  both: 'memoryId 和 memoryIds 只给一个：接受一条用 memoryId，接受一批用 memoryIds。未做改动。',
+  empty: 'memoryIds 是空的：给出要接受的待确认记忆 id。未做改动。',
+  none: 'accept-subagent 要给 memoryId（接受一条）或 memoryIds（接受一批）。未做改动。',
+} as const
 
 /** 只给 GUI 用的选项，不在工具参数里，模型传不进来。 */
 export interface ConfirmOptions {
@@ -59,6 +158,7 @@ export interface ConfirmOptions {
 export type ConfirmResult =
   | SettleResult
   | { kind: 'accepted'; memoryId: string; lastConfirmedAt: number; otherWorkspaces: OtherWorkspaceMark[]; message: string }
+  | GroupAcceptResult
   | ConfirmError<AcceptRejectCode>
 
 /** refresh、resolve 的结果，不带 accept-subagent 的拒绝码（GUI 只调这两个动作）。 */
@@ -114,7 +214,10 @@ export async function executeConfirm(
     }
   }
 
-  if (args.action === 'accept-subagent') return acceptSubagent(args, context, deps, now, locate)
+  if (args.action === 'accept-subagent') {
+    if (args.memoryIds !== undefined || args.memoryId === undefined) return acceptSubagentGroup(args, context, deps, now)
+    return acceptSubagent({ ...args, memoryId: args.memoryId }, context, deps, now, locate)
+  }
 
   // 先认领条目再裁决：两条相反的裁决同时到（两个标签页、两个宿主进程），只让一条删败方，另一条什么都不动
   const claimed = await deps.decisions.withClaim(args.decisionId, () => resolveClaimed(args, context, deps, now, locate, options))
@@ -142,7 +245,7 @@ function notPendingReason(record: MemoryRecord): string | undefined {
  * 内容没变，要撤就删。
  */
 async function acceptSubagent(
-  args: Extract<ConfirmArgs, { action: 'accept-subagent' }>,
+  args: { memoryId: string; allowCrossWorkspace?: boolean },
   context: GovernanceContext,
   deps: ConfirmToolDeps,
   now: number,
@@ -154,12 +257,9 @@ async function acceptSubagent(
   if (rejected.length > 0) {
     return { kind: 'error', code: 'cross-workspace', rejected, message: `未接受记忆 ${args.memoryId}。${crossWorkspaceNote(rejected, [])}` }
   }
+  let accepted: MemoryRecord
   try {
-    await deps.store.update(target, (cur) => {
-      const why = notPendingReason(cur)
-      if (why !== undefined) throw new NotPendingError(why)
-      return { ...cur, lastConfirmedAt: now, delegation: { ...cur.delegation!, reviewed: { by: 'main', at: now } } }
-    })
+    accepted = await writeSubagentAcceptance(target, deps.store, now)
   } catch (err) {
     if (err instanceof RecordNotFoundError) return { kind: 'error', message: `记忆不存在：${args.memoryId}` }
     if (!(err instanceof NotPendingError)) throw err
@@ -169,9 +269,167 @@ async function acceptSubagent(
     }
   }
   return {
-    kind: 'accepted', memoryId: args.memoryId, lastConfirmedAt: now, otherWorkspaces,
+    kind: 'accepted', memoryId: args.memoryId, lastConfirmedAt: accepted.lastConfirmedAt, otherWorkspaces,
     message: `已接受子 agent 存的记忆 ${args.memoryId}，不再待确认，和本项目其他记忆一样注入、检索。${crossWorkspaceNote([], otherWorkspaces)}`,
   }
+}
+
+/** 单条和成组共用锁内写回：只动定位到的那一层，接受时间不早于当前记录的修改、确认时间。 */
+async function writeSubagentAcceptance(target: MemoryRecord, store: MemoryStore, now: number): Promise<MemoryRecord> {
+  const scope = scopeOfMemory(target)
+  if (scope === undefined) throw new RecordNotFoundError(target.id)
+  return store.update(target, (cur) => {
+    const why = notPendingReason(cur)
+    if (why !== undefined) throw new NotPendingError(why)
+    const at = Math.max(now, cur.updatedAt, cur.lastConfirmedAt)
+    return { ...cur, lastConfirmedAt: at, delegation: { ...cur.delegation!, reviewed: { by: 'main', at } } }
+  }, scope)
+}
+
+/**
+ * accept-subagent 带 memoryIds（或参数组合不合法）：先核参数组合，再逐条（按去重后的先后、一条一次写入段）照单条的口径接受，
+ * 一条没接受不影响其余几条、不回滚已接受的；再按主题分组、标出组内近重复和与在用记忆的重叠。分组只读、不调模型、不写索引，
+ * 分组出错不影响接受。不入账本、不拍快照、不写回执。
+ */
+async function acceptSubagentGroup(
+  args: Extract<ConfirmArgs, { action: 'accept-subagent' }>,
+  context: GovernanceContext,
+  deps: ConfirmToolDeps,
+  now: number,
+): Promise<ConfirmResult> {
+  if (args.memoryId !== undefined && args.memoryIds !== undefined) return { kind: 'error', code: 'invalid-args', message: GROUP_ACCEPT_INVALID.both }
+  if (args.memoryIds === undefined) return { kind: 'error', code: 'invalid-args', message: GROUP_ACCEPT_INVALID.none }
+  if (args.memoryIds.length === 0) return { kind: 'error', code: 'invalid-args', message: GROUP_ACCEPT_INVALID.empty }
+
+  const ids = [...new Set(args.memoryIds)]
+  const acceptedIds: string[] = []
+  const ungrouped: GroupAcceptResult['ungrouped'] = []
+  const rejected: CrossWorkspaceRejection[] = []
+  const otherWorkspaces: OtherWorkspaceMark[] = []
+  const located: Array<{ record: MemoryRecord; item: GroupAcceptItem }> = []
+  let isReadComplete: boolean | undefined
+  const skip = (memoryId: string, code: keyof typeof GROUP_ACCEPT_REASONS) => {
+    ungrouped.push({ memoryId, outcome: { kind: 'skipped', code, reason: GROUP_ACCEPT_REASONS[code] } })
+  }
+  for (const memoryId of ids) {
+    let target: MemoryRecord | undefined
+    try {
+      target = await deps.store.get(memoryId, { workspacePath: context.workspacePath })
+    } catch {
+      skip(memoryId, 'unreadable')
+      continue
+    }
+    if (target === undefined) {
+      // 会话视角会查其他项目和归档；只有这些目录都读全了，才能把定位不到说成不存在。
+      if (isReadComplete === undefined) {
+        try {
+          isReadComplete = isCompleteRead(await deps.store.readRaw(undefined, { includeArchive: true }))
+        } catch {
+          isReadComplete = false
+        }
+      }
+      skip(memoryId, isReadComplete ? 'not-found' : 'unreadable')
+      continue
+    }
+    const gate = gateRecords([target], context, args.allowCrossWorkspace)
+    rejected.push(...gate.rejected)
+    otherWorkspaces.push(...gate.otherWorkspaces)
+    if (gate.rejected.length > 0) {
+      skip(memoryId, 'cross-workspace')
+      continue
+    }
+    let outcome: GroupAcceptOutcome
+    try {
+      const accepted = await writeSubagentAcceptance(target, deps.store, now)
+      outcome = { kind: 'accepted', lastConfirmedAt: accepted.lastConfirmedAt }
+      acceptedIds.push(memoryId)
+    } catch (err) {
+      if (err instanceof NotPendingError) outcome = { kind: 'skipped', code: 'not-subagent-pending', reason: err.message }
+      else {
+        const code = err instanceof RecordNotFoundError ? 'missing-at-write' : 'write-failed'
+        outcome = { kind: 'skipped', code, reason: GROUP_ACCEPT_REASONS[code] }
+      }
+    }
+    const masked = maskSecretSurface(target, { severity: 'suspected' })
+    located.push({ record: target, item: { memoryId, name: injectionText(masked.name), summary: injectionText(masked.summary), outcome } })
+  }
+
+  const grouped = new Map<string, GroupAcceptGroup>()
+  let grouping: GroupAcceptResult['grouping'] = 'topics'
+  for (const { record, item } of located) {
+    let set: Awaited<ReturnType<typeof findTopicCandidates>>
+    try {
+      set = await findTopicCandidates({
+        query: `${record.name}\n${record.summary}\n${record.content}`,
+        scope: { kind: 'visible', workspacePath: record.workspacePath },
+        includesNotYetInEffect: true,
+      }, { store: deps.store, tokenizer: deps.tokenizer, now: () => now })
+    } catch {
+      grouping = 'unreadable'
+      continue
+    }
+    const excludeIds = new Set([...ids, ...set.candidates.filter(c => isPendingDelegated(c.record)).map(c => c.record.id)])
+    const duplicateOf = findNearDuplicate(record, set, { excludeIds })
+    const similar = listSimilar(record, set, { excludeIds }).filter(s => s.id !== duplicateOf?.id)
+    item.overlap = { ...(duplicateOf === undefined ? {} : { duplicateOf }), similar }
+    const nearest = set.candidates.find(c => !excludeIds.has(c.record.id))?.record
+    if (nearest !== undefined && set.topics.unreadable.includes(nearest.scope === 'global' ? 'global' : 'workspace')) {
+      grouping = 'unreadable'
+      continue
+    }
+    const topic = nearest === undefined ? undefined : topicGroupOf(set.topics, nearest)
+    const group: GroupAcceptGroup = topic === undefined || topic.isUnsorted
+      ? { key: 'unsorted', kind: 'unsorted', title: UNSORTED_TITLE, items: [], nearDuplicatePairs: [] }
+      : {
+        key: topic.scope === 'global' ? `global:${topic.fileName}` : `workspace:${record.workspacePath}:${topic.fileName}`, kind: 'topic', scope: topic.scope,
+        title: topicDisplayName(topic) + (topic.scope === 'global' ? GROUP_ACCEPT_TEXT.globalMark : ''), items: [], nearDuplicatePairs: [],
+      }
+    if (!grouped.has(group.key)) grouped.set(group.key, group)
+    grouped.get(group.key)!.items.push(item)
+  }
+  const groups: GroupAcceptGroup[] = grouping === 'unreadable'
+    ? [{ key: 'flat', kind: 'flat', title: GROUP_ACCEPT_TEXT.unreadable, items: located.map(l => l.item), nearDuplicatePairs: [] }]
+    : [...grouped.values()].sort((a, b) => Number(a.kind === 'unsorted') - Number(b.kind === 'unsorted'))
+  // 比较始终用定位时的原文，展示的遮盖、折行不会影响近重复判定。
+  const comparisons = new Map(located.map(l => [l.item.memoryId, duplicateComparison(l.record)]))
+  for (const group of groups) {
+    for (let i = 0; i < group.items.length; i++) {
+      for (let j = i + 1; j < group.items.length; j++) {
+        const first = group.items[i]!.memoryId
+        const second = group.items[j]!.memoryId
+        if (charSimilarity(comparisons.get(first)!, comparisons.get(second)!, NEAR_DUPLICATE_THRESHOLD) >= NEAR_DUPLICATE_THRESHOLD) group.nearDuplicatePairs.push([first, second])
+      }
+    }
+  }
+  const result: GroupAcceptResult = { kind: 'group-accepted', grouping, groups, ungrouped, acceptedIds, otherWorkspaces, rejected, message: '' }
+  result.message = groupAcceptMessage(result, ids.length)
+  return result
+}
+
+function groupAcceptMessage(result: GroupAcceptResult, total: number): string {
+  const lines = [`已接受 ${result.acceptedIds.length} 条，没接受 ${total - result.acceptedIds.length} 条。`]
+  if (result.grouping === 'topics' && result.groups.length > 0) lines.push(GROUP_ACCEPT_TEXT.groupingNote)
+  for (const group of result.groups) {
+    lines.push('', `【${group.title}】`)
+    for (const item of group.items) {
+      const outcome = item.outcome.kind === 'accepted' ? GROUP_ACCEPT_TEXT.accepted : `${GROUP_ACCEPT_TEXT.skipped}：${item.outcome.reason}`
+      lines.push(`- ${injectionText(item.memoryId)}「${item.name}」：${item.summary}——${outcome}`)
+      if (item.overlap?.duplicateOf !== undefined) {
+        const duplicate = item.overlap.duplicateOf
+        lines.push(`  ${GROUP_ACCEPT_TEXT.duplicateOf}：${injectionText(duplicate.id)}「${duplicate.name}」`)
+      }
+      if (item.overlap !== undefined && item.overlap.similar.length > 0) {
+        lines.push(`  ${GROUP_ACCEPT_TEXT.similar}：${item.overlap.similar.map(s => `${injectionText(s.id)}「${s.name}」${s.scope === 'global' ? GROUP_ACCEPT_TEXT.globalMark : ''}`).join('、')}`)
+      }
+    }
+    for (const [first, second] of group.nearDuplicatePairs) lines.push(`${GROUP_ACCEPT_TEXT.pairs}：${injectionText(first)} 和 ${injectionText(second)}`)
+  }
+  if (result.ungrouped.length > 0) {
+    lines.push('', `【${GROUP_ACCEPT_TEXT.ungrouped}】`)
+    for (const item of result.ungrouped) lines.push(`- ${injectionText(item.memoryId)}——${GROUP_ACCEPT_TEXT.skipped}：${item.outcome.reason}`)
+  }
+  lines.push('', GROUP_ACCEPT_TEXT.mergeGuide)
+  return lines.join('\n')
 }
 
 /** 持有认领时裁决：条目在认领之后重读，刚被别人裁决完的这里读不到。 */
