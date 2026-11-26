@@ -7,6 +7,7 @@
  * 当轮锚来自宿主 turnBoundary 投影（H13）、定时任务开的轮只能按观察或推断写且锚记着发起方（H33）、外部直接写进记忆目录的文件出现在新会话第一步的快照消息里（H15）、
  * 宿主 grep 工具搜记忆根目录时顶层命中、.archive/ 不命中（H16）、
  * 带委派 header 的真子会话存入待确认记忆、检索排在主档后、溯源只限自己的会话、父会话接受后进新会话的注入（H19）。
+ * 父会话经 memoryIds 一次接受子会话存的一批待确认记忆，结果的分组和逐条结构过宿主无损 JSON，子会话带 memoryIds 照旧只读（H38）。
  * 无 key 也跑的宿主服务契约：经宿主 commands 服务执行 `/memory` 命令，结果过 GUI 契约 schema；自动体检调度器在宿主计时服务登记了定时器。
  * 对话记录库（H34，无 key）：从真会话的日志建库，用同一套分词搜到用户本人说的话，定时任务发的不收；按宿主的会话清单把库建完。
  * 原话检索的连续调用上限（H36，无 key）：连续、并行、和别的工具交错三种调用形态，清零靠宿主真会话的事件。
@@ -448,6 +449,16 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       return { ok: isShaped && !['topic', 'offset'].some(k => required.includes(k)), detail: JSON.stringify(parameters) }
     })
 
+    // 成组接受的参数：memoryIds 是可选的字符串数组，和 memoryId 都不必填，由执行器校验二选一。
+    await attempt('CONFIRM-MEMORY-IDS-SCHEMA', async () => {
+      const schema = tools.schemas().find(s => s.name === 'memory_confirm') as
+        { parameters?: { properties?: Record<string, { type?: string; items?: { type?: string } }>; required?: string[] } } | undefined
+      const parameters = schema?.parameters
+      const memoryIds = parameters?.properties?.memoryIds
+      const isShaped = memoryIds?.type === 'array' && memoryIds.items?.type === 'string'
+      return { ok: isShaped && !['memoryId', 'memoryIds'].some(k => (parameters?.required ?? []).includes(k)), detail: JSON.stringify(parameters) }
+    })
+
     // H2 无 cwd 会话 create 拒存（Ungrouped 会话不落 global）
     await attempt('H2-NO-CWD-REJECTED', async () => {
       const r = await call('memory_save', { action: 'create', name: 'no-cwd', summary: 's', content: 'c', ...MEMORY_BASE }, mkExec(undefined)) as { kind: string; code?: string }
@@ -839,6 +850,52 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
         detail: `file.delegation=${JSON.stringify(block.trim())} fileOk=${fileOk} | search order=${JSON.stringify(order)} pendingNote=${pendingHit?.sourceNote} | `
           + `source own=${own.kind} hasToolResult=${ownOk} other=${other.kind}/${other.code} | accept=${accepted.kind} reviewedOnDisk=${reviewedOnDisk} | `
           + `injected before=${beforeAccept.includes(id)} after=${afterAccept.includes(id)}`,
+      }
+    })
+
+    // H38 成组接受：真子会话存三条待确认记忆（前两条几乎一样），父会话带 memoryIds（含一个重复 id）一次接受。
+    // 结果过宿主无损 JSON；分组和逐条结果是结构化字段：三条都接受、各出现一次、前两条在同一组里成对标为近重复；
+    // 文件里都记着 reviewed by main；memoryId 和 memoryIds 同时传回 invalid-args；子会话带 memoryIds 回 subagent-readonly。
+    await attempt('H38-SUBAGENT-GROUP-ACCEPT', async () => {
+      const ws = mkWs('h38')
+      const parent = sessions.create(undefined, { meta: { cwd: ws } })
+      const child = sessions.create(undefined, { meta: { cwd: ws, delegationDepth: 1, parentSession: parent.header.id } })
+      const execOf = (session: SessionLike): Exec => ({ agent: { session, options: {} }, signal: new AbortController().signal })
+      const token = `H38PROBE${Math.random().toString(36).slice(2, 8)}`
+      child.append('turn/start', { turn: 1 })
+      type Saved = { kind: string; record?: { id: string } }
+      const childSave = (name: string, content: string) => call('memory_save', {
+        action: 'create', name, summary: `${token} 子会话观察`, content, type: 'knowledge', scope: 'workspace', sourceMode: 'environment-observed', tags: [],
+      }, execOf(child)) as Promise<Saved>
+      const saved = [
+        await childSave('h38-a', `子会话看到 ${token} 的部署脚本先发金丝雀主机再发整批机器`),
+        await childSave('h38-b', `子会话看到 ${token} 的部署脚本先发金丝雀主机再发整批机器了`),
+        await childSave('h38-c', `子会话看到 ${token} 的测试夹具放在用例旁边`),
+      ]
+      const ids = saved.map(x => x.record?.id ?? '')
+      if (saved.some(x => x.kind !== 'saved' || x.record === undefined)) return { ok: false, detail: `child saves: ${saved.map(x => x.kind).join(',')}` }
+
+      type Item = { memoryId: string; outcome: { kind: string } }
+      type Grouped = { kind: string; grouping?: string; acceptedIds?: string[]; ungrouped?: unknown[]; groups?: Array<{ key: string; kind: string; items: Item[]; nearDuplicatePairs: string[][] }>; message?: string }
+      const raw = await call('memory_confirm', { action: 'accept-subagent', memoryIds: [...ids, ids[0]] }, execOf(parent))
+      const lossless = snapshotJsonValue(raw) !== undefined
+      const out = raw as Grouped
+      const items = (out.groups ?? []).flatMap(g => g.items)
+      const groupOf = (id: string) => (out.groups ?? []).find(g => g.items.some(i => i.memoryId === id))
+      const shapeOk = out.kind === 'group-accepted' && (out.grouping === 'topics' || out.grouping === 'unreadable')
+        && JSON.stringify(out.acceptedIds) === JSON.stringify(ids) && (out.ungrouped ?? []).length === 0
+        && JSON.stringify(items.map(i => i.memoryId).sort()) === JSON.stringify([...ids].sort()) && items.every(i => i.outcome.kind === 'accepted')
+        && new Set((out.groups ?? []).map(g => g.key)).size === (out.groups ?? []).length && typeof out.message === 'string'
+      const pairOk = groupOf(ids[0]!) !== undefined && groupOf(ids[0]!) === groupOf(ids[1]!)
+        && JSON.stringify(groupOf(ids[0]!)!.nearDuplicatePairs) === JSON.stringify([[ids[0], ids[1]]])
+      const reviewedOnDisk = ids.every(id => /^delegation:\n(?: {2}.*\n)*? {2}reviewed:\n {4}by: main\n/m.test(readMemoryFile(id) ?? ''))
+      const both = await call('memory_confirm', { action: 'accept-subagent', memoryId: ids[2], memoryIds: [ids[2]] }, execOf(parent)) as { kind: string; code?: string }
+      const fromChild = await call('memory_confirm', { action: 'accept-subagent', memoryIds: [ids[2]] }, execOf(child)) as { kind: string; code?: string }
+      const gateOk = both.kind === 'error' && both.code === 'invalid-args' && fromChild.kind === 'rejected' && fromChild.code === 'subagent-readonly'
+      return {
+        ok: lossless && shapeOk && pairOk && reviewedOnDisk && gateOk,
+        detail: `lossless=${lossless} shape=${shapeOk} pair=${pairOk} reviewedOnDisk=${reviewedOnDisk} | kind=${out.kind} grouping=${out.grouping} accepted=${JSON.stringify(out.acceptedIds)} `
+          + `groups=${JSON.stringify((out.groups ?? []).map(g => [g.kind, g.items.map(i => i.memoryId), g.nearDuplicatePairs]))} | both=${both.kind}/${both.code} child=${fromChild.kind}/${fromChild.code}`,
       }
     })
 

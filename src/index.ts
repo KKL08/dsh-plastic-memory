@@ -498,7 +498,10 @@ export async function apply(ctx: Context, config: Config) {
     for (const dispose of governanceTools.splice(0)) dispose()
     if (!config.governance.enabled.get()) return
     governanceTools = [
-      registerWrite(createConfirmTool({ store, decisions, snapshots, log: ctx.logger, host, instructions })),
+      registerWrite(createConfirmTool({
+        store, decisions, snapshots, log: ctx.logger, host, instructions,
+        tokenizer: { userDictionaryPath: () => config.search.userDictionaryPath.get(), log: ctx.logger },
+      })),
       // 垂直冲突对照每条记忆所在项目的指令文件，和触发调用的会话无关。
       // 扫描会写语义缓存、登记待决冲突，归写工具；health 纯读，不套门
       registerWrite(createScanTool({
