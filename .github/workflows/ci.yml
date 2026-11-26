@@ -85,8 +85,11 @@ jobs:
       - run: pnpm host:contract
 
   # Compares refine, corroborate and state-change write medians for 1,000 and
-  # 5,000 memories within the same run. It is not a required check because
-  # timing on shared runners is noisy: a red run needs a look but does not block merging.
+  # 5,000 memories within the same run, then measures the conversation record
+  # store at a small scale and checks that catch-up before a search stays within
+  # its time limit and two concurrent builders produce identical contents.
+  # It is not a required check because timing on shared runners
+  # is noisy: a red run needs a look but does not block merging.
   scale-bench:
     runs-on: ubuntu-latest
     steps:
@@ -98,3 +101,4 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm bench:scale
+      - run: pnpm bench:dialogue --tier ci --rounds 5
