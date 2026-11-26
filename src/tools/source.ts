@@ -1,5 +1,5 @@
 import type { MemoryStore } from '../store.ts'
-import { anchorsOf, anchorSourceMode } from '../record-schema.ts'
+import { anchorsOf, anchorSourceMode, isLegacyAnchor } from '../record-schema.ts'
 import type { MemoryRecord, SourceAnchor } from '../record-schema.ts'
 import type { DialogueSpeaker, SourceRejectCode } from '../contract-codes.ts'
 import { maskSecretSurface } from '../secrets.ts'
@@ -269,7 +269,7 @@ export async function readSource(target: Extract<SourceTarget, { via: 'anchor' }
     const nextTime = events.find(e => e.seq > end && typeof e.event.time === 'number')?.event.time
     const validRange = !loaded.unknown && anchorTimeMatches(target.anchorTime, startTime, nextTime)
     // 旧锚的时间来自记录更新时间，不能拿它重定位原始出处。
-    if (anchor.change !== undefined && !validRange) {
+    if (!isLegacyAnchor(anchor) && !validRange) {
       const relocated = relocateByTime({ at: target.anchorTime }, events.map(e => e.event))
       if (relocated !== null && relocated !== start) {
         end = Math.min(relocated + end - start, events.at(-1)?.seq ?? end)

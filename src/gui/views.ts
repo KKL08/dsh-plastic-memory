@@ -614,7 +614,7 @@ export function buildDeletedView(input: ViewInput): DeletedView {
     .map(({ r, filePath, deletedAt }) => {
       const latest = causeById.get(r.id)
       const e = latest === undefined || !isLoserCopy(latest, r) || (latest.settled!.verdict === 'plan-applied' && latest.settled!.at !== deletedAt) ? undefined : latest
-      const verdict = e?.settled?.verdict
+      const verdict = e?.settled?.verdict === 'adopt' ? 'as-versions' : e?.settled?.verdict
       // 并成版本的改前快照按删除回执记在 changes 上，其余在 settled 上
       const snapshotId = e === undefined ? undefined : verdict === 'as-versions' ? snapshotIdFor(e, r.id) : e.settled!.snapshotId
       const cause = e === undefined || (verdict !== 'keep-left' && verdict !== 'keep-right' && verdict !== 'plan-applied' && verdict !== 'as-versions') ? undefined : {
