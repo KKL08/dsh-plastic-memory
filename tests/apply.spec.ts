@@ -47,6 +47,10 @@ import { fireUntilSettled, manualTimers } from './helpers/manual-timers.ts'
 import { openUserTurn, readUserTurn, USER_TURN_BOUNDARY } from './helpers/session-log.ts'
 import { MEMORY_TOOL_NAMES } from '../src/contract-codes.ts'
 import { breakModelSelection } from './helpers/model-selection-file.ts'
+import { AutoCheckupScheduler } from '../src/gui/auto-checkup.ts'
+import { DreamsScheduler } from '../src/tools/dreams-scheduler.ts'
+import { CheckupSuggestions } from '../src/gui/checkup-suggestions.ts'
+import { ViewWriter } from '../src/gui/view-writer.ts'
 
 // 进程边界的观察：fsTrace.on 期间记下插件对 node:fs、node:fs/promises 的每次调用（函数名 + 第一个参数）。平时原样透传。
 // fsTrace.hold：给了就先问它一次（参数形如 `readFile(<路径>)`），返回 promise 的那次 node:fs/promises 调用等它落定再执行。
@@ -390,6 +394,24 @@ async function startupViews(memoryRoot: string): Promise<void> {
   }, { timeout: 3_000 })
 }
 
+/** 会话归属对照是旁路写入（不 await）：触发之后，等登记这个 cwd 的那次请求落盘。经原型上的透传 spy 拿到那次请求的返回值。 */
+async function workspaceMapWritten(cwd: string, trigger: () => unknown): Promise<void> {
+  const original = ViewWriter.prototype.requestWorkspace
+  let markRequested!: (written: Promise<void>) => void
+  const requested = new Promise<void>(resolve => { markRequested = resolve })
+  const requests = vi.spyOn(ViewWriter.prototype, 'requestWorkspace').mockImplementation(function (this: ViewWriter, requestedCwd: string, workspacePath: string) {
+    const written = original.call(this, requestedCwd, workspacePath)
+    if (requestedCwd === cwd) markRequested(written)
+    return written
+  })
+  try {
+    await trigger()
+    await requested
+  } finally {
+    requests.mockRestore()
+  }
+}
+
 /** GUI 半侧的服务端接线：commands 服务在时注册 /memory 命令处理器，缺席时静默跳过；加载期都不碰磁盘。 */
 describe('GUI 命令接线', () => {
   type CommandDef = { name: string; handler(inv: { rawInput: string; agent: unknown }): Promise<{ kind: string; text?: string }> }
@@ -522,11 +544,9 @@ describe('GUI 命令接线', () => {
     const link = join(await makeTmpRoot(), 'link')
     await symlink(real, link)
     const sub = join(link, 'sub')
-    await defs[0]!.handler({ rawInput: ' info', agent: { session: { header: { id: 'sess-sub', cwd: sub }, seq: 1 } } })
+    await workspaceMapWritten(sub, () => defs[0]!.handler({ rawInput: ' info', agent: { session: { header: { id: 'sess-sub', cwd: sub }, seq: 1 } } }))
     const file = join(memoryRoot, GUI_VIEW_DIR, GUI_WORKSPACE_MAP_FILE)
-    await vi.waitFor(async () => {
-      expect(workspaceMapViewSchema.parse(JSON.parse(await readFile(file, 'utf8'))).cwds).toEqual({ [sub]: await realpath(sub) })
-    })
+    expect(workspaceMapViewSchema.parse(JSON.parse(await readFile(file, 'utf8'))).cwds).toEqual({ [sub]: await realpath(sub) })
   })
 
   it('会话归属对照：session/created 预热解析时也记下', async () => {
@@ -536,11 +556,9 @@ describe('GUI 命令接线', () => {
     const real = await makeTmpRoot()
     const link = join(await makeTmpRoot(), 'link')
     await symlink(real, link)
-    ctx.listeners.get('session/created')!({ header: { id: 'sess-link', cwd: link } })
+    await workspaceMapWritten(link, () => ctx.listeners.get('session/created')!({ header: { id: 'sess-link', cwd: link } }))
     const file = join(memoryRoot, GUI_VIEW_DIR, GUI_WORKSPACE_MAP_FILE)
-    await vi.waitFor(async () => {
-      expect(workspaceMapViewSchema.parse(JSON.parse(await readFile(file, 'utf8'))).cwds).toEqual({ [link]: await realpath(real) })
-    })
+    expect(workspaceMapViewSchema.parse(JSON.parse(await readFile(file, 'utf8'))).cwds).toEqual({ [link]: await realpath(real) })
   })
 
   it('执行回调：未知子命令返回 error 与 invalid-args', async () => {
@@ -624,6 +642,24 @@ describe('自动体检接线', () => {
     }
     return { timers, timeout: add(false), interval: add(true) }
   }
+  /**
+   * 到点触发第一次检查（一次性定时器触发后就不在了），等它起的这一轮体检、和这一轮做完后梦境查的那一轮都做完。
+   * 定时器回调不交出 promise：经原型上原样透传的 spy 拿到这两轮各自的返回值，不另调一次 recheck（会多补查一遍）。
+   */
+  async function fireFirstCheck(first: { callback: () => void; isLive: boolean }) {
+    const checkupRounds = vi.spyOn(AutoCheckupScheduler.prototype, 'recheck')
+    const dreamsRounds = vi.spyOn(DreamsScheduler.prototype, 'recheck')
+    try {
+      first.isLive = false
+      first.callback()
+      expect(checkupRounds).toHaveBeenCalledTimes(1)
+      await checkupRounds.mock.results[0]!.value
+      await Promise.all(dreamsRounds.mock.results.map(r => r.value))
+    } finally {
+      checkupRounds.mockRestore()
+      dreamsRounds.mockRestore()
+    }
+  }
 
   it('到期的范围在后台体检：不借会话，用宿主当前的默认模型，写自动体检的完成记录；卸载后定时器停掉', async () => {
     const memoryRoot = await seedMemory(await makeTmpRoot())
@@ -636,15 +672,14 @@ describe('自动体检接线', () => {
     const first = timer.timers.find(t => !t.every)!
     expect(first.delayMs).toBe(3 * 60_000)
     // 到点：一次性定时器触发后就不在了
-    first.isLive = false
-    first.callback()
-    await vi.waitFor(async () => expect((await new CheckupRecordStore(sidecar.checkups).list()).map(r => r.completed?.by)).toEqual(['auto']))
+    await fireFirstCheck(first)
+    expect((await new CheckupRecordStore(sidecar.checkups).list()).map(r => r.completed?.by)).toEqual(['auto'])
     expect(ctx.llmRequests).toHaveLength(1)
     expect(ctx.llmRequests[0]).toMatchObject(DEFAULT_ROUTE)
     // 不借会话：请求带的是这次体检另起的 id，不是哪个对话的
     expect(ctx.llmRequests[0]).toHaveProperty('sessionId', expect.stringMatching(/^plastic-memory-checkup-/))
     // 完成记录由执行器写；之后还要重写视图、放掉认领，认领的心跳停了只剩每 10 分钟的检查
-    await vi.waitFor(() => expect(timer.timers.filter(t => t.isLive).map(t => [t.delayMs, t.every])).toEqual([[5_000, true], [10 * 60_000, true]]))
+    expect(timer.timers.filter(t => t.isLive).map(t => [t.delayMs, t.every])).toEqual([[5_000, true], [10 * 60_000, true]])
     await ctx.dispose()
     expect(timer.timers.filter(t => t.isLive)).toEqual([])
   })
@@ -659,10 +694,8 @@ describe('自动体检接线', () => {
       const ctx = mockCtx({ timer, agentDefaultModel: { currentSelection: () => DEFAULT_ROUTE } })
       await apply({ ...ctx, logger: { info() {}, warn: (msg: string) => { warnings.push(msg) }, error() {} } } as never, new Config({ memoryRoot, brewingDreams } as never))
       // 自动体检的第一轮做完后，梦境调度查一轮（onRoundDone），配置有坏值时记一条告警
-      const first = timer.timers.find(t => !t.every)!
-      first.isLive = false
-      first.callback()
-      await vi.waitFor(() => expect(warnings.some(w => w.includes(DREAMS_BAD_CONFIG))).toBe(true))
+      await fireFirstCheck(timer.timers.find(t => !t.every)!)
+      expect(warnings.some(w => w.includes(DREAMS_BAD_CONFIG))).toBe(true)
       await ctx.dispose()
       return warnings.find(w => w.includes(DREAMS_BAD_CONFIG))!
     }
@@ -805,6 +838,25 @@ describe('体检后续段接线', () => {
     const ledger = () => new PendingDecisionsStore(sidecarAt(memoryRoot).pending).list()
     return { ctx, tools, scanGlobal, pendingView, ledger, memoryRoot }
   }
+  /**
+   * 后续段在后台跑（手动体检不等它）：经原型上原样透传的 spy 记下之后每一段的返回值，用例结束时恢复。
+   * settled() 确认只起了一段，等它跑完（写完账本、重写完待处理视图）。
+   */
+  let suggestionRuns: { mockRestore(): void } | undefined
+  afterEach(() => {
+    suggestionRuns?.mockRestore()
+    suggestionRuns = undefined
+  })
+  function watchSuggestionRuns() {
+    const runs = vi.spyOn(CheckupSuggestions.prototype, 'run')
+    suggestionRuns = runs
+    return {
+      async settled() {
+        expect(runs).toHaveBeenCalledTimes(1)
+        await runs.mock.results[0]!.value
+      },
+    }
+  }
 
   it('手动体检扫出横向冲突后，后续段在后台用同一个模型生成建议：账本条目记上建议，待处理视图带着它', async () => {
     const t = await boot()
@@ -812,14 +864,14 @@ describe('体检后续段接线', () => {
       { type: 'text-delta', index: 0, text: '{"action":"keep-a","reason":"A 是明确说过的"}' },
       { type: 'finish', reason: { kind: 'stop' } },
     ])
+    const suggestions = watchSuggestionRuns()
     expect(await t.scanGlobal()).toMatchObject({ ok: true, cmd: 'scan' })
-    await vi.waitFor(async () => {
-      const [entry] = await t.ledger()
-      expect(entry).toMatchObject({ memoryIds: ['mem_a', 'mem_b'], suggestion: { action: 'keep-a' } })
-      const item = (await t.pendingView()).items.find(i => i.kind === 'conflict-horizontal')
-      expect(item).toMatchObject({ decisionId: entry!.id, suggestion: { action: 'keep-a' } })
-      expect(item).not.toHaveProperty('isGeneratingSuggestion')
-    })
+    await suggestions.settled()
+    const [entry] = await t.ledger()
+    expect(entry).toMatchObject({ memoryIds: ['mem_a', 'mem_b'], suggestion: { action: 'keep-a' } })
+    const item = (await t.pendingView()).items.find(i => i.kind === 'conflict-horizontal')
+    expect(item).toMatchObject({ decisionId: entry!.id, suggestion: { action: 'keep-a' } })
+    expect(item).not.toHaveProperty('isGeneratingSuggestion')
     expect(t.ctx.llmRequests).toHaveLength(2)
     expect(t.ctx.llmRequests[1]).toMatchObject({ provider: 'deepseek', model: 'deepseek-v4-flash' })
   })
@@ -840,10 +892,10 @@ describe('体检后续段接线', () => {
       { type: 'text-delta', index: 0, text: '{"action":"keep-a","reason":"A 是明确说过的"}' },
       { type: 'finish', reason: { kind: 'stop' } },
     ])
+    const suggestions = watchSuggestionRuns()
     expect(await t.scanGlobal()).toMatchObject({ ok: true, cmd: 'scan' })
-    await vi.waitFor(async () => {
-      expect((await t.ledger())[0]).toMatchObject({ sourceCheck: 'checked', suggestion: { action: 'keep-a', isSourced: true } })
-    })
+    await suggestions.settled()
+    expect((await t.ledger())[0]).toMatchObject({ sourceCheck: 'checked', suggestion: { action: 'keep-a', isSourced: true } })
     expect(reads.sort()).toEqual(['sess-mem_a', 'sess-mem_a', 'sess-mem_b', 'sess-mem_b'])
     expect(t.ctx.llmRequests).toHaveLength(3)
     expect(t.ctx.llmRequests[1]).toMatchObject({ system: SOURCE_CHECK_SYSTEM_PROMPT })
@@ -877,15 +929,15 @@ describe('体检后续段接线', () => {
     const exec = fakeExec({
       agent: { session: { header: { id: 'sess-chat', cwd }, seq: 0, requestHeader: () => undefined }, options: { provider: 'deepseek', model: 'chat-model' } } as unknown as ToolRunContext['agent'],
     })
+    const suggestions = watchSuggestionRuns()
     await t.tools.get('memory_scan')!.execute({ layers: 'semantic' }, exec)
     const [entry] = await t.ledger()
     expect(entry).toMatchObject({ memoryIds: ['mem_a', 'mem_b'] })
     expect(entry!.suggestion).toBeUndefined()
     // 对话里那次如果也跟出一段，会先于下面这段用对话的模型生成；这里只该有记忆页这一段、用体检的模型
     expect(await t.scanGlobal()).toMatchObject({ ok: true, cmd: 'scan' })
-    await vi.waitFor(async () => {
-      expect((await t.ledger())[0]).toMatchObject({ id: entry!.id, suggestion: { action: 'keep-a' } })
-    })
+    await suggestions.settled()
+    expect((await t.ledger())[0]).toMatchObject({ id: entry!.id, suggestion: { action: 'keep-a' } })
     expect(suggestionModels).toEqual(['deepseek-v4-flash'])
   })
 
@@ -2533,9 +2585,13 @@ describe('写锁接线', () => {
     const lockDir = join(memoryRoot, STATE_DIR, 'lock')
     const arrivals: Array<{ name: string; release: () => void }> = []
     let lockAttempts = 0
+    let onLockAttempt: (() => void) | undefined
     let onArrive: (() => void) | undefined
     fsTrace.hold = call => {
-      if (call === `mkdir(${lockDir})`) lockAttempts++
+      if (call === `mkdir(${lockDir})`) {
+        lockAttempts++
+        onLockAttempt?.()
+      }
       if (!call.startsWith(prefix) || !call.includes('.md.tmp-') || isIndexPath(call.slice('writeFile('.length).split('.tmp-')[0]!)) return undefined
       return new Promise<void>(release => {
         arrivals.push({ name: call.slice(prefix.length).split('.md.tmp-')[0]!, release })
@@ -2543,6 +2599,7 @@ describe('写锁接线', () => {
       })
     }
     const nextArrival = async (n: number) => { while (arrivals.length < n) await new Promise<void>(resolve => { onArrive = resolve }) }
+    const lockAttemptsReach = async (n: number) => { while (lockAttempts < n) await new Promise<void>(resolve => { onLockAttempt = resolve }) }
 
     const old = await boot()
     const alpha = old.save('alpha')
@@ -2558,7 +2615,8 @@ describe('写锁接线', () => {
     const attemptsBefore = lockAttempts
     const gamma = fresh.save('gamma')
     // 新实例拿锁撞上旧实例正持着的锁、退避后又试了一次；这期间它的写入没有落盘
-    await vi.waitFor(() => { expect(lockAttempts - attemptsBefore).toBeGreaterThanOrEqual(2) })
+    await lockAttemptsReach(attemptsBefore + 2)
+    expect(lockAttempts - attemptsBefore).toBeGreaterThanOrEqual(2)
     expect(arrivals.map(a => a.name)).toEqual([first])
 
     for (let n = 1; n <= 3; n++) {
