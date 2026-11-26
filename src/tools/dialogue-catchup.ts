@@ -1,6 +1,7 @@
 import { DIALOGUE_INTAKE_VERSION, intakeOf, type DialogueRow, type DialogueTurn } from '../search/dialogue-intake.ts'
 import type { DialogueTokenizer } from '../search/dialogue-tokenizer.ts'
 import { SEGMENT_RULE_VERSION } from '../search/segments.ts'
+import type { SessionLog } from '../session-log.ts'
 import {
   DialogueStoreUnavailable, type DialogueCoverage, type DialogueRecordStore, type DialogueStoreState, type DialogueVersions,
 } from '../storage/dialogue-records.ts'
@@ -18,6 +19,8 @@ import type { HostSession, HostSessionEntry } from './host-session.ts'
  *   照常整份读一次，收期间新增的事件、没有新事件就出队。库里的代、修订号和水位对不上就不用它，照常整份读。
  * - 几个进程、几次调用同时追同一个会话不加锁：提交时库核对代、修订号和起算水位，对不上的那一批作废，这次不再追它。
  * - 读不到日志的会话留在队尾，不当成会话没了；会话没了只由对账（宿主列得出会话清单时）认定。队里只剩读不到的，这一代照样算建完。
+ * - 宿主读日志、列会话清单最多等 CATCHUP_LOG_READ_TIMEOUT_MS，超时按读不到、列不出处理：检索和后台推进都不会被一次挂住的读取卡住；
+ *   超时的调用底层没结束前，同一个会话的日志、会话清单不再重新请求。
  * - 换了词典：库记下新词典和整词列重算到哪，之后只收按新词典算的批；重算的进度在库里，换进程接着算。
  * - 范围只管收不收：对账只移出宿主那边已经没有的和标了不回看的会话。别的进程按它自己的当前项目收进来的会话，这里不删。
  * - 重建期间新消息写进新的一代，查询读旧的一代，建完才切过去。
@@ -38,6 +41,13 @@ export const CATCHUP_FOCUS_BUDGET_MS = 300
 export const CATCHUP_QUEUE_BUDGET_MS = 150
 /** 两次对账至少隔这么久：对账要列全部会话，不必每次检索都做。 */
 export const RECONCILE_INTERVAL_MS = 60_000
+/**
+ * 等宿主读一个会话的日志、列会话清单最多这么久，超时按读不到、列不出处理。这是硬截止：超过它才返回的结果也丢掉，
+ * 哪怕底层最后读成功了。宿主接口不能取消，超时后底层调用照样跑。
+ * 取值是暂定的：正常一次整份读加交批均摊几十毫秒（按内存里的假宿主测的，真宿主读磁盘的耗时还没核实）；
+ * 要大于检索的 2 秒兜底，检索返回之后读完照样能交批；后台每 5 秒一拍，挂住一次最多跳过两拍。前台、后台用同一个值。
+ */
+export const CATCHUP_LOG_READ_TIMEOUT_MS = 10_000
 
 /** 这一次原话能不能用。off：功能关着；unavailable：库这一次用不了，只查记忆。 */
 export type DialogueReadiness =
@@ -132,6 +142,11 @@ export class DialogueCatchup {
    * 没取到的那一次照常整份读。放回见 keep。检索前追点名的会话不用它。
    */
   private snapshot: Pending | undefined
+  /**
+   * 超时之后底层还没结束的宿主调用有几笔，键是会话日志（按会话 id，与代无关）或会话清单。宿主不能取消调用：
+   * 有挂着的就不再发起新的，直接按超时处理；每笔底层调用结束（成功或失败）减一，归零才放行。
+   */
+  private readonly hung = new Map<string, number>()
 
   /** 共享同一个对话记录库，只向读取入口提供查询方法。 */
   get readStore(): Pick<DialogueRecordStore, 'state' | 'search' | 'segmentsOf' | 'turnsOf' | 'queued' | 'isQueued' | 'session'> {
@@ -315,15 +330,15 @@ export class DialogueCatchup {
 
   /**
    * 对账：按宿主此刻的会话清单，把宿主那边已经没有的、标了不回看的会话移出，范围里还没收的排进待建队列。
-   * 范围是记忆根见过的项目加上本进程里当过当前会话的项目。宿主列不出清单时这一次不对账。返回这次对账列到的会话清单。
+   * 范围是记忆根见过的项目加上本进程里当过当前会话的项目。宿主列不出清单、或超时没列出来时这一次不对账。返回这次对账列到的会话清单。
    */
   private async reconcile(prepared: Prepared, alive: () => boolean): Promise<HostSessionEntry[] | undefined> {
     const { store } = this.deps
     const gen = prepared.state.write.gen
     const isDue = this.reconciledGen !== gen || this.reconciledAt === undefined || this.now() - this.reconciledAt >= RECONCILE_INTERVAL_MS
     if (!isDue) return undefined
-    const [listed, known, marked] = await Promise.all([this.deps.host.listSessions(), this.deps.knownWorkspaces(), this.deps.noReview.sessionIds()])
-    if (listed === null) return undefined
+    const [listed, known, marked] = await Promise.all([this.bounded('list', () => this.deps.host.listSessions()), this.deps.knownWorkspaces(), this.deps.noReview.sessionIds()])
+    if (listed === null || listed === TIMED_OUT) return undefined
     const scope = new Set([...known, ...this.currentWorkspaces])
     const workspaces = new Map<string | undefined, Promise<string | undefined>>()
     const workspaceOf = (cwd: string | undefined) => {
@@ -453,7 +468,7 @@ export class DialogueCatchup {
       if (outcome === 'partial') this.keep(kept, alive)
       return outcome === 'done' ? 'partial' : outcome
     }
-    const log = await this.deps.host.readSessionLog(entry.id)
+    const log = await this.readLog(entry.id)
     if (!alive()) return 'stopped'
     if (log === null) return 'unreadable'
     const intake = intakeOf(log, session.watermark)
@@ -481,6 +496,39 @@ export class DialogueCatchup {
     // 开着的会话留在队里的事由对账管：这里追完就出队，下次对账见它还开着会再排进来
     store.dequeue(gen, entry.id)
     return 'done'
+  }
+
+  /** 读一个会话的日志，最多等 CATCHUP_LOG_READ_TIMEOUT_MS；超时、或上一次超时的读取还没结束，按读不到返回 null。 */
+  private async readLog(sessionId: string): Promise<SessionLog | null> {
+    const log = await this.bounded(`log:${sessionId}`, () => this.deps.host.readSessionLog(sessionId))
+    if (log !== TIMED_OUT) return log
+    const reason = `read-timeout:${sessionId}`
+    if (!this.warned.has(reason)) {
+      this.warned.add(reason)
+      this.deps.log.warn(`[plastic-memory] 读会话 ${sessionId} 的日志超过 ${CATCHUP_LOG_READ_TIMEOUT_MS / 1000} 秒没有返回，先跳过它，读完之后再收`)
+    }
+    return null
+  }
+
+  /**
+   * 宿主调用最多等 CATCHUP_LOG_READ_TIMEOUT_MS，超时返回 TIMED_OUT；同一个键上次超时的调用还没结束时不发起，直接返回 TIMED_OUT。
+   * 决议之后调用方只往下走一次，迟到的结果没有任何后续。
+   */
+  private async bounded<T>(key: string, start: () => Promise<T>): Promise<T | typeof TIMED_OUT> {
+    if (this.hung.has(key)) return TIMED_OUT
+    const call = start()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const result = await Promise.race([call, new Promise<typeof TIMED_OUT>(resolve => { timer = setTimeout(resolve, CATCHUP_LOG_READ_TIMEOUT_MS, TIMED_OUT) })])
+      .finally(() => clearTimeout(timer))
+    if (result !== TIMED_OUT) return result
+    this.hung.set(key, (this.hung.get(key) ?? 0) + 1)
+    const release = () => {
+      const left = this.hung.get(key)! - 1
+      if (left === 0) this.hung.delete(key)
+      else this.hung.set(key, left)
+    }
+    call.then(release, release)
+    return TIMED_OUT
   }
 
   /** 槽里是这个会话的批就丢掉：本进程移出它时调。 */
@@ -540,6 +588,8 @@ export class DialogueCatchup {
     return 'done'
   }
 }
+
+const TIMED_OUT = Symbol('timed out')
 
 /** 这个分词器算整词列用的词典；降级时没有，给空串。 */
 const dictionaryOf = (tokenizer: DialogueTokenizer) => tokenizer.degraded ? '' : tokenizer.dictionaryVersion ?? ''
