@@ -137,8 +137,15 @@ function confident(user: string) {
     change: 'state-change', uncertain: false, evidence: [Number(number[1])], reason: '用户明确改用 pnpm' }
 }
 
+/** 宿主替身：会话清单就是 sessions 里的会话，没有存档的。 */
+const hostOf = (readSessionLog: ResolveFindingsDeps['host']['readSessionLog']): ResolveFindingsDeps['host'] => ({
+  readSessionLog,
+  listSessions: async () => [...sessions.keys()].map(id => ({ id, cwd: undefined, isSubagent: false, isLive: false })),
+  archivedSessionIds: async () => new Set<string>(),
+})
+
 async function run(scope: Scope = GLOBAL, overrides: Partial<ResolveFindingsDeps> = {}) {
-  const step = resolveFindingsStep({ store, decisions, dreams, readSessionLog: async id => sessions.get(id) ?? null,
+  const step = resolveFindingsStep({ store, decisions, dreams, host: hostOf(async id => sessions.get(id) ?? null),
     noReview: { isMarkedNoReview: async () => false }, memoryRoot: root, tier: () => 'gatekeep',
     focusTypes: () => ['preference', 'profile', 'decision'], now: () => NOW, ...overrides })
   const measured: DreamsStep = { ...step, run: async ctx => {
@@ -348,10 +355,11 @@ describe('读取与写入许可', () => {
     }))
     await report([await get('mem_old'), await get('mem_new')])
     let reads = 0
-    await run(GLOBAL, { readSessionLog: async () => {
+    sessions.set('shared', log)
+    await run(GLOBAL, { host: hostOf(async () => {
       reads++
       return reads === 1 ? log : { ...log, events: log.events.map(e => e.seq === 3 ? messageFrom('assistant', 3, '另一版日志', NEW_AT) : e) }
-    } })
+    }) })
     expect(reads).toBe(1)
     expect((await get('mem_old')).status).toBe('deleted')
     expect(prompts[0]).toContain('从今天起改用 pnpm')

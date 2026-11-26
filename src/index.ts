@@ -674,7 +674,7 @@ export async function apply(ctx: Context, config: Config) {
           merge: { store, dreams },
           drill: { store, decisions, host, noReview, maxDrillDowns: () => config.brewingDreams.maxDrillDowns.get(), now: () => Date.now() },
           resolve: {
-            store, decisions, dreams, readSessionLog: id => host.readSessionLog(id), noReview, memoryRoot, homeDir: homedir(),
+            store, decisions, dreams, host, noReview, memoryRoot, homeDir: homedir(),
             tier: () => config.brewingDreams.tier.get(), focusTypes: () => config.brewingDreams.focusTypes.get(), now: () => Date.now(),
           },
         }),

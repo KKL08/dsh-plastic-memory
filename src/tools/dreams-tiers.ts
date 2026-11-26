@@ -3,6 +3,7 @@ import { isAbsolute, resolve, sep } from 'node:path'
 import type { MemoryStore } from '../store.ts'
 import type { PendingDecisionsStore } from '../governance/decisions.ts'
 import type { DreamsStore } from '../governance/dreams-records.ts'
+import { drillAnchorKey, type DrillAnchor } from '../governance/drill-down.ts'
 import {
   buildTierPrompt, contentAnchorOf, dispositionOf, isImportant, judgeConfidence, olderBoundNote, pairBasis, parseTierReply,
   resolveTier, tierConclusion, tierPlan, TIER_EXCERPT_MAX, TIER_MAX_PER_RUN, TIER_REASON_DEFAULT, TIER_REASON_MAX,
@@ -23,6 +24,8 @@ import { locateCopy } from './workspace-gate.ts'
 import { anchorTimeMatches, excludesPluginEvidence, isOwnEvent, isRealUserMessage, relocateByTime, type SessionLog } from '../session-log.ts'
 import type { NoReviewList } from '../storage/no-review.ts'
 import type { DreamsStep } from './dreams-run.ts'
+import { drillOpen, noteUnreadable, type DrillUnreadableReason } from './dreams-drill.ts'
+import type { HostSession } from './host-session.ts'
 
 /**
  * 记忆梦境处理矛盾、状态变化、纠错：账本里这个范围未决的横向配对发现（冲突、漏记的变化），先读两边出处、交给模型核实，
@@ -146,9 +149,9 @@ export interface ResolveFindingsDeps {
   decisions: Pick<PendingDecisionsStore, 'list' | 'get' | 'hold' | 'reviseFinding'>
   /** 用户撤销过的梦境合并和矛盾处理的结论（合并和矛盾共用一份；用户在「先处理」里不采纳、按原来那种发现裁决的不记）。读不全返回 undefined。 */
   dreams: Pick<DreamsStore, 'undoneMerges'>
-  /** 一个会话的整份日志（宿主读不到为 null）。 */
-  readSessionLog: (sessionId: string) => Promise<SessionLog | null>
-  /** 标了不回看的会话不读；名单读不出（抛错）同样按读不到算。 */
+  /** 读出处经下钻读口（drillOpen）：会话日志、会话清单、存档名单。 */
+  host: Pick<HostSession, 'readSessionLog' | 'listSessions' | 'archivedSessionIds'>
+  /** 标了不回看的会话不读（确认读不到）；名单读不出是这次读不出，下次重试。 */
   noReview: Pick<NoReviewList, 'isMarkedNoReview'>
   memoryRoot: string
   homeDir?: string
@@ -163,6 +166,8 @@ export interface ResolveFindingsDeps {
  * 运行计划里处理矛盾的一步（排在下钻补全之后、逐条整理之前）。每次都做（不看有没有新变化）：账本里的发现可能是这次运行之前的体检挂的。
  * 一次最多调 TIER_MAX_PER_RUN 次模型；模型到第一次要调时才取（ctx.llm）。读条目、读出处、调模型都不占着条目；
  * 写之前短暂认领条目，在认领里重读条目和两条记忆，对不上就放弃这一对。
+ * 出处经下钻读口读（不占这次运行的下钻名额，读到的次数、存档会话照样记进下钻账），先读没存档的一边：
+ * 确认读不到的进下钻报告；这次读不出的（会话清单、存档名单、不回看名单、日志）记一条 resolve-source 跳过，下次重试。
  */
 export const resolveFindingsStep = (deps: ResolveFindingsDeps): DreamsStep => ({
   name: 'resolve-findings',
@@ -248,26 +253,39 @@ export const resolveFindingsStep = (deps: ResolveFindingsDeps): DreamsStep => ({
         ctx.markUnprocessed(entry.memoryIds)
         continue
       }
-      const sources: DialogueSource[] = []
+      const anchors = pair.map(contentAnchorOf)
+      const sources: Array<DialogueSource | undefined> = [undefined, undefined]
       const logs = new Map<string, SessionLog>()
-      for (const record of pair) {
+      let isRead = anchors[0] !== undefined && anchors[1] !== undefined
+      // 放行要求这一对没存档的锚先试过：先读的一边被拒，就先读另一边再回来读它
+      const readOrder = [0, 1]
+      for (let k = 0; isRead && k < readOrder.length; k++) {
         if (ctx.shouldStop()) return
-        const anchor = contentAnchorOf(record)
-        if (anchor === undefined) break
-        let isNoReview: boolean
-        try { isNoReview = await deps.noReview.isMarkedNoReview(anchor.sessionId) } catch { break }
-        if (isNoReview) break
-        if (ctx.shouldStop()) return
-        const log = logs.get(anchor.sessionId) ?? await deps.readSessionLog(anchor.sessionId)
-        if (log === null) break
-        const source = sourceWindow(log, anchor)
-        if (source === undefined || numberDialogue([source], 1, { numberSpeakers: ['user', 'tool'] }).refs.size === 0) break
-        sources.push(source)
-        logs.set(anchor.sessionId, log)
+        const i = readOrder[k]!
+        const anchor: DrillAnchor = anchors[i]!
+        const memoryId = pair[i].id
+        const cached = logs.get(anchor.sessionId)
+        const opened = cached !== undefined ? { kind: 'opened' as const, log: cached } : await drillOpen(
+          { memoryId, purpose: 'verify-conflict', anchor, pairAnchors: anchors as DrillAnchor[] },
+          // 核实矛盾的读取不占这次运行的下钻名额
+          ctx.drillLog, { host: deps.host, noReview: deps.noReview, limit: Infinity },
+        )
+        if (opened.kind === 'refused' && opened.reason === 'archived-too-early' && k === 0) { readOrder.push(i); continue }
+        if (opened.kind === 'retry') ctx.skip({ kind: 'resolve-source', target: memoryId, reason: opened.reason })
+        if (opened.kind !== 'opened') { isRead = false; break }
+        const source = sourceWindow(opened.log, anchors[i]!)
+        if (typeof source === 'string') {
+          noteUnreadable(ctx.drillLog, memoryId, anchor, source)
+          isRead = false
+          break
+        }
+        ctx.drillLog.attempted.add(drillAnchorKey(anchor))
+        sources[i] = source
+        logs.set(anchor.sessionId, opened.log)
       }
       if (ctx.shouldStop()) return
-      if (sources.length !== 2) { skip('source-unreadable'); continue }
-      const dialogue = numberDialogue(sources, 1, { numberSpeakers: ['user', 'tool'] })
+      if (!isRead) { skip('source-unreadable'); continue }
+      const dialogue = numberDialogue(sources as DialogueSource[], 1, { numberSpeakers: ['user', 'tool'] })
       const evidence = new Map<number, EvidenceKind>()
       for (const [number, ref] of dialogue.refs) {
         if (ctx.shouldStop()) return
@@ -370,17 +388,20 @@ function cleanText(text: string, max: number): string {
   return oneLine(maskSecrets(text, { severity: 'suspected' })).slice(0, max)
 }
 
-/** 先定完整轮次，再按保存点挑消息；区间内用户原话优先，所有消息共用同一份上限。 */
-function sourceWindow(log: SessionLog, anchor: SourceAnchor): DialogueSource | undefined {
+/**
+ * 先定完整轮次，再按保存点挑消息；区间内用户原话优先，所有消息共用同一份上限。
+ * 找不到锚那一轮（旧锚序号不在、按时间也找不回）为 anchor-lost；那一轮没有消息、或挑出的消息里没有用户和工具的为 empty。
+ */
+function sourceWindow(log: SessionLog, anchor: SourceAnchor): DialogueSource | Extract<DrillUnreadableReason, 'anchor-lost' | 'empty'> {
   const events = log.events
   let [start, end] = anchor.eventRange
   let relocated = false
   const first = events.find(e => e.seq === start)
   if (isLegacyAnchor(anchor)) {
-    if (first === undefined) return undefined
+    if (first === undefined) return 'anchor-lost'
   } else if (!anchorTimeMatches(anchor.at, first?.time, events.find(e => e.seq !== undefined && e.seq > end && e.time !== undefined)?.time)) {
     const found = relocateByTime(anchor, events)
-    if (found === null) return undefined
+    if (found === null) return 'anchor-lost'
     start = end = found
     relocated = true
   }
@@ -389,7 +410,7 @@ function sourceWindow(log: SessionLog, anchor: SourceAnchor): DialogueSource | u
   const turn = events.slice(Math.max(0, from), next < 0 ? undefined : next)
   // 和最终渲染共用消息筛选，结构事件、注入文本不会挤占窗口。
   const messages = [...numberDialogue([{ sessionId: anchor.sessionId, events: turn }]).refs.values()]
-  if (messages.length === 0) return undefined
+  if (messages.length === 0) return 'empty'
   if (relocated) { start = messages[0]!.seq; end = messages.at(-1)!.seq }
   const size = (text: string) => Math.min(text.length, TIER_WINDOW_MESSAGE_MAX_CHARS)
   let selected = messages
@@ -408,10 +429,11 @@ function sourceWindow(log: SessionLog, anchor: SourceAnchor): DialogueSource | u
   }
   const kept = new Set(selected.map(m => m.seq))
   const positions = selected.map(m => messages.findIndex(all => all.seq === m.seq))
-  return {
+  const source: DialogueSource = {
     sessionId: anchor.sessionId, events: turn.filter(e => e.seq !== undefined && kept.has(e.seq)),
     clipped: new Map(selected.filter(m => m.text.length > TIER_WINDOW_MESSAGE_MAX_CHARS).map(m => [m.seq, TIER_WINDOW_MESSAGE_MAX_CHARS])),
     omitted: { before: positions[0]! > 0, after: positions.at(-1)! < messages.length - 1,
       gapBefore: selected.filter((_, i) => i > 0 && positions[i]! > positions[i - 1]! + 1).map(m => m.seq) },
   }
+  return numberDialogue([source], 1, { numberSpeakers: ['user', 'tool'] }).refs.size === 0 ? 'empty' : source
 }
