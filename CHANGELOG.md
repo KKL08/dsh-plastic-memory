@@ -330,6 +330,12 @@ All notable changes to this project are documented here. The format follows
   matching memories and moves the turns they were saved from up the results.
 
 ### Changed
+- Testing: `pnpm host:contract` checks how model errors are reported by
+  answering requests to the model API with fixed responses instead of using
+  a real invalid key, so the check also runs without a model key. A 401 must
+  come out as an authentication error with the response text kept out of
+  scan results and the checkup view; a 550 must count as a server error,
+  unless its body says it is an authentication error.
 - The memories loaded at the start of a chat now follow the topic index.
   After the memories given in full, each topic gets one line with its
   description, how many memories it holds and how many have not been
