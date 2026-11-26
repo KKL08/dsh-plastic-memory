@@ -234,9 +234,14 @@ export interface MemoryTable {
   /** 锁内 locate（from 是现有那份所在的目标；跨 scope 搬家时调用方传原记录的作用域，定位到的才是要搬的那份；写到哪里由 value 自己的作用域决定）→ 写；
    *  scope / workspacePath 变化时搬家删旧；status 离开 active 时文件进 .archive/，回到 active 搬回顶层。清副本见 LocateTarget。
    *  skipIf：对锁内定位到的当前记录求值（按位置看，同 byPosition；定位不到时传 undefined），为真就不写、返回 undefined
-   *  （调用方锁外预读过的条件在这里按最新内容再判一次）。返回实际写出的记录（召回统计取现有那份的，deleted 缺 deletedAt 时已补）。 */
+   *  （调用方锁外预读过的条件在这里按最新内容再判一次）。返回实际写出的记录（召回统计取现有那份的，deleted 缺 deletedAt 时已补）。
+   *  有没有变和定位到的当前那份按位置归一后比（同 update）：没变就不写、不补 deletedAt，返回 value。
+   *  skipIf 不看 status 时，.archive/ 里写着 active、内容相同的那份会按 value 的 status 写回顶层；不想恢复它就在 skipIf 里判。 */
   put(value: MemoryRecord, from: LocateTarget, skipIf?: (current: MemoryRecord | undefined) => boolean, op?: WriteOp): Promise<MemoryRecord | undefined>
-  /** 锁内 locate（同 id 多副本时与调用方读到的那份一致）→ fn(当前) → 写（同 put 的搬家、归档与清副本规则）；返回实际写出的记录（deleted 缺 deletedAt 时已补）。 */
+  /** 锁内 locate（同 id 多副本时与调用方读到的那份一致）→ fn(当前) → 写（同 put 的搬家、归档与清副本规则）；返回实际写出的记录（deleted 缺 deletedAt 时已补）。
+   *  fn 拿到的当前记录按位置看（同 byPosition、MemoryStore.get）：.archive/ 里 status 仍写着 active 的交给 fn 时是 deleted。
+   *  有没有变都和这一份比（put 同）：稳定字段、召回统计都相同就不写文件、不记操作日志、不补 deletedAt，返回 fn 的返回值；
+   *  只有召回统计变了只写召回统计。op.topic 只在这一份在用时生效（内容没变也照样挪主题），归档的不挪。 */
   update(id: string, from: LocateTarget, fn: (current: MemoryRecord) => MemoryRecord, op?: WriteOp): Promise<MemoryRecord>
   /** 物理删除（含 .archive/ 里的文件）；at 同 update，清副本见 LocateTarget。
    *  召回统计行只在哪个作用域都没有这个 id 了才清。skipIf：对锁内定位到的当前文件求值，为真就不删、返回 false。 */
