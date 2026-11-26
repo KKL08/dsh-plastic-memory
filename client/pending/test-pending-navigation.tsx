@@ -72,7 +72,7 @@ describe('待处理：确认收起后的键盘焦点', () => {
   // 裁决 → 视图去掉这条 → 撤销（本地原样画回）→ 视图带回：画回的卡和视图带回的是同一张，不重挂，焦点不动、位置不变
   it.each([
     { kind: '横向冲突', item: horizontal, action: '保留 A', confirm: '保留 A', landsOn: '保留 A' },
-    { kind: '垂直冲突', item: vertical, action: '都保留，不算冲突', confirm: '都保留', landsOn: undefined },
+    { kind: '垂直冲突', item: vertical, action: '确实不冲突', confirm: '确实不冲突', landsOn: undefined },
     { kind: '提升候选', item: promote, action: '提升为全局', confirm: undefined, landsOn: undefined },
     { kind: '超限', item: overflow, action: '不再提醒', confirm: undefined, landsOn: undefined },
     { kind: '可以整理', item: tidy, action: '不再提醒', confirm: undefined, landsOn: undefined },
@@ -293,7 +293,7 @@ describe('待处理：定位到组', () => {
 describe('键盘', () => {
   it('裁决 / 提升 / 删除控件都是原生 button，不在 Tab 序列外', () => {
     setup([secret, horizontal, vertical, promote])
-    const names = ['保留 A', '保留 B', '都保留，不算冲突', '以文件为准，删除这条', '提升为全局', '留在本项目', '彻底删除…']
+    const names = ['保留 A', '保留 B', '并成版本', '确实不冲突', '记成例外', '以文件为准，删除这条', '提升为全局', '留在本项目', '彻底删除…']
     for (const button of names.flatMap(name => screen.getAllByRole('button', { name }))) {
       expect(button.tagName).toBe('BUTTON')
       expect(button).not.toBeDisabled()

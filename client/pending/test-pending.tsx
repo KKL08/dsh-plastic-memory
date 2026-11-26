@@ -41,14 +41,14 @@ function setup(items: PendingItem[], init: FakeGatewayInit = {}, nav: NavStore =
 }
 
 /** Select a horizontal conflict action, then confirm it inline. */
-const CONFIRM_OF = { '保留 A': '保留 A', '保留 B': '保留 B', '都保留，不算冲突': '都保留' } as const
+const CONFIRM_OF = { '保留 A': '保留 A', '保留 B': '保留 B', '确实不冲突': '确实不冲突', '记成例外': '记成例外' } as const
 function ruleConflict(label: keyof typeof CONFIRM_OF) {
   fireEvent.click(screen.getByRole('button', { name: label }))
   fireEvent.click(within(document.querySelector('.pm-soft-confirm') as HTMLElement).getByRole('button', { name: CONFIRM_OF[label] }))
 }
 
 /** Select a vertical conflict action, then confirm it inline. */
-const VERTICAL_CONFIRM_OF = { '以文件为准，删除这条': '删除这条', '都保留，不算冲突': '都保留' } as const
+const VERTICAL_CONFIRM_OF = { '以文件为准，删除这条': '删除这条', '确实不冲突': '确实不冲突', '记成例外': '记成例外' } as const
 function ruleVertical(label: keyof typeof VERTICAL_CONFIRM_OF) {
   fireEvent.click(screen.getByRole('button', { name: label }))
   fireEvent.click(within(document.querySelector('.pm-soft-confirm') as HTMLElement).getByRole('button', { name: VERTICAL_CONFIRM_OF[label] }))

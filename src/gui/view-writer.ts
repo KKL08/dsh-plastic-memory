@@ -20,7 +20,7 @@ import {
   GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, SCOPE_KEYS, checkupKey, sessionViewFile, workspaceMapViewSchema,
   type CheckupView, type GlobalViewName, type ModelSelectionKey, type SessionView, type WorkspaceMapView,
 } from './contract.ts'
-import { GLOBAL_VIEW_NAMES, buildCheckupView, buildGlobalViews, type GlobalViews } from './views.ts'
+import { GLOBAL_VIEW_NAMES, buildCheckupView, buildGlobalViews, copyKey, type GlobalViews } from './views.ts'
 import { scopeCacheKey, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
 import { isCopyOf } from '../tools/workspace-gate.ts'
 
@@ -88,6 +88,18 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
     const own = label === undefined ? undefined : scopeOfLedger(label)
     if (kindOf(e) === 'promote-candidate' && own?.kind === 'workspace' && data.byId.has(e.memoryIds[0] ?? '')) await readCopy(e.id, e.memoryIds[0]!, own)
   }
+  // 跨项目重复的各成员同理：各取它记下的那个作用域里的那一份（预读每个 id 只留一份，可能是别处同 id 的副本）
+  const memberCopies = new Map<string, LocatedRecord>()
+  for (const e of open.filter(e => kindOf(e) === 'cross-duplicate')) {
+    for (const [i, memoryId] of e.memoryIds.entries()) {
+      const label = e.workspaces?.[i]
+      const at = label === undefined ? undefined : scopeOfLedger(label)
+      const r = data.byId.get(memoryId)
+      if (at === undefined || (r !== undefined && isCopyOf(r, at)) || memberCopies.has(copyKey(at, memoryId))) continue
+      const hit = await deps.store.locate(memoryId, at)
+      if (hit !== undefined && isCopyOf(hit.record, at)) memberCopies.set(copyKey(at, memoryId), { record: byPosition(hit), filePath: hit.filePath, dir: hit.dir })
+    }
+  }
   for (const e of settled.filter(isModelChange)) {
     const memoryId = e.memoryIds[0] ?? ''
     const before = modelChangeSnapshots?.get(e.settled?.snapshotId ?? '')?.data.find(r => r.id === memoryId)
@@ -129,6 +141,7 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
     ...(deps.bootedAt !== undefined ? { bootedAt: deps.bootedAt } : {}),
     ...(modelChangeSnapshots !== undefined ? { modelChangeSnapshots } : {}),
     entryCopies,
+    memberCopies,
     ...(deps.generatingSuggestions !== undefined ? { generatingSuggestions: deps.generatingSuggestions() } : {}),
   })
 }

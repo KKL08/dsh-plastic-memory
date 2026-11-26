@@ -68,10 +68,10 @@ describe('待处理：裁决后结果留原位、撤销', () => {
     expect(screen.getAllByRole('heading', { level: 3 })).toHaveLength(3)
   })
 
-  it('都保留：结果写「以后体检不再把它们当冲突」，可撤销', async () => {
+  it('确实不冲突：结果写「两条都留着；它们都不变时，体检不再报这一对」，可撤销', async () => {
     const { commands } = setup([horizontal])
-    ruleConflict('都保留，不算冲突')
-    await screen.findByText('按你的选择处理。以后体检不再把它们当冲突。')
+    ruleConflict('确实不冲突')
+    await screen.findByText('按你的选择处理。两条都留着；它们都不变时，体检不再报这一对。')
     fireEvent.click(screen.getByRole('button', { name: '撤销' }))
     await waitFor(() => { expect(commands().at(-1)).toEqual({ cmd: 'undo', decisionId: 'd-h' }) })
   })
@@ -88,10 +88,10 @@ describe('待处理：裁决后结果留原位、撤销', () => {
 
   it('结论没记下（isUnrecorded，升级前导入、缺基线的冲突）：结果写下次体检可能还会报，不给撤销', async () => {
     setup([vertical], { respond: command => ({ ok: true, cmd: command.cmd, decisionId: 'd-v', isUnrecorded: true }) })
-    ruleVertical('都保留，不算冲突')
-    await screen.findByText('已保留这条记忆')
+    ruleVertical('确实不冲突')
+    await screen.findByText('已标为不冲突')
     expect(screen.getByText('这次的决定没能记下，下次体检可能还会报。')).toBeInTheDocument()
-    expect(screen.queryByText('基线和记忆都不变时不再报。')).toBeNull()
+    expect(screen.queryByText('这条记忆和指令文件都留着；它们都不变时，体检不再报。')).toBeNull()
     expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
   })
 })

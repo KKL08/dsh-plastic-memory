@@ -26,7 +26,7 @@ export { detectSecrets } from '../secrets.ts'
  */
 
 /** 视图 schema 的版本号：视图是派生缓存，形状变了就换号，客户端读到不认识的号按「需要刷新」处理。 */
-export const GUI_VIEW_VERSION = 16
+export const GUI_VIEW_VERSION = 17
 
 /** 视图文件所在目录（相对记忆根目录，POSIX 分隔）。 */
 export const GUI_VIEW_DIR = '.state/gui'
@@ -142,8 +142,14 @@ export function relaxedCap(budget: number, tier: number): number {
 export const PENDING_LEVELS = ['must-fix', 'your-call', 'advice'] as const
 export type PendingLevel = (typeof PENDING_LEVELS)[number]
 
-/** 按级别排：同一级内的先后即视图里的先后。 */
-export const PENDING_ITEM_KINDS = ['secret', 'unreadable-file', 'conflict-horizontal', 'conflict-vertical', 'promote-candidate', 'overflow', 'advice'] as const
+/**
+ * 按级别排：同一级内的先后即视图里的先后。体检挂账的四种新发现：依据已变（premise-changed）、跨项目重复（cross-duplicate）等你决定，
+ * 漏记的变化（missed-change）、例外提示（exception）可以整理。
+ */
+export const PENDING_ITEM_KINDS = [
+  'secret', 'unreadable-file', 'conflict-horizontal', 'conflict-vertical', 'premise-changed', 'cross-duplicate', 'promote-candidate', 'overflow',
+  'missed-change', 'exception', 'advice',
+] as const
 export type PendingItemKind = (typeof PENDING_ITEM_KINDS)[number]
 
 /** 每类待处理项归哪一级（写死，客户端不另行推导）。 */
@@ -152,8 +158,12 @@ export const PENDING_LEVEL_OF_KIND = {
   'unreadable-file': 'must-fix',
   'conflict-horizontal': 'your-call',
   'conflict-vertical': 'your-call',
+  'premise-changed': 'your-call',
+  'cross-duplicate': 'your-call',
   'promote-candidate': 'your-call',
   'overflow': 'your-call',
+  'missed-change': 'advice',
+  'exception': 'advice',
   'advice': 'advice',
 } as const satisfies Record<PendingItemKind, PendingLevel>
 
@@ -251,7 +261,11 @@ export type NoSuggestionCode = (typeof NO_SUGGESTION_CODES)[number]
 export const noSuggestionSchema = z.object({ code: z.enum(NO_SUGGESTION_CODES), cause: suggestionFailureCauseSchema.optional(), reason: z.string().optional() })
 export type NoSuggestion = z.infer<typeof noSuggestionSchema>
 
-/** 待处理项。冲突、提升候选、超限来自待决账本（带 decisionId）；密钥、读不出的文件与建议整理从预读数据派生，不入账本。
+/** 回查出处的结果：checked 两边都读到、核实过；unreadable 有一边读不到；unchecked 这次没读（超出回查上限，或核实没做成）。 */
+export const SOURCE_CHECKS = ['checked', 'unreadable', 'unchecked'] as const
+export type SourceCheck = (typeof SOURCE_CHECKS)[number]
+
+/** 待处理项。冲突、体检的四种新发现、提升候选、超限来自待决账本（带 decisionId）；密钥、读不出的文件与建议整理从预读数据派生，不入账本。
  *  冲突一方定位不到时为 null（账本悬空引用，裁决会报错）。 */
 export const pendingItemSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('secret'), level: levelOf('secret'), memory: memoryCardSchema }),
@@ -266,6 +280,8 @@ export const pendingItemSchema = z.discriminatedUnion('kind', [
     noSuggestion: noSuggestionSchema.optional(),
     /** 体检之后正在给它生成建议（排队或生成中）：写视图的那个进程的进程内状态，别的进程写的视图里没有。和 noSuggestion 并存。 */
     isGeneratingSuggestion: z.literal(true).optional(),
+    /** 报出前回查两边出处的结果（见 SOURCE_CHECKS）；没回查过的（旧条目、没接回查的入口）缺省。 */
+    sourceCheck: z.enum(SOURCE_CHECKS).optional(),
   }),
   z.object({
     kind: z.literal('conflict-vertical'), level: levelOf('conflict-vertical'), decisionId: z.string(), firstSeenAt: z.number(), summary: z.string(),
@@ -275,6 +291,20 @@ export const pendingItemSchema = z.discriminatedUnion('kind', [
     noSuggestion: noSuggestionSchema.optional(),
     isGeneratingSuggestion: z.literal(true).optional(),
   }),
+  /** 依据已变：decision 记下的前提 premise 改过了，复查这个决定还成不成立。一方定位不到时为 null。 */
+  z.object({
+    kind: z.literal('premise-changed'), level: levelOf('premise-changed'), decisionId: z.string(), firstSeenAt: z.number(), summary: z.string(),
+    decision: memoryCardSchema.nullable(), premise: memoryCardSchema.nullable(),
+  }),
+  /**
+   * 跨项目重复：几个项目各记了同一件事，memories 按条目顺序、各在它记下的项目里（卡片的 workspacePath）。
+   * promoteId：体检建议升为全局的那条（这一组里的一条），没有建议时缺省。有一条已不在它记下的项目时不出这一项（等下次体检清掉）；
+   * 那个项目这次没读全、没读到它时照常出，那一条为 null（读不全不下「不在了」的结论）。
+   */
+  z.object({
+    kind: z.literal('cross-duplicate'), level: levelOf('cross-duplicate'), decisionId: z.string(), firstSeenAt: z.number(), summary: z.string(),
+    memories: z.array(memoryCardSchema.nullable()).min(2), promoteId: z.string().optional(),
+  }),
   z.object({
     kind: z.literal('promote-candidate'), level: levelOf('promote-candidate'), decisionId: z.string(), firstSeenAt: z.number(),
     memory: memoryCardSchema.nullable(),
@@ -283,6 +313,22 @@ export const pendingItemSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('overflow'), level: levelOf('overflow'), decisionId: z.string(), firstSeenAt: z.number(),
     mode: z.enum(OVERFLOW_MODES), tier: z.number().int().nonnegative(), workspacePath: z.string().optional(),
+  }),
+  /**
+   * 漏记的变化：两条说的是同一件事的新旧状态。current 是体检建议留作当前状态的那条（这一对里的一条），没有建议时缺省。
+   * 一方定位不到时为 null。
+   */
+  z.object({
+    kind: z.literal('missed-change'), level: levelOf('missed-change'), decisionId: z.string(), firstSeenAt: z.number(), summary: z.string(),
+    left: memoryCardSchema.nullable(), right: memoryCardSchema.nullable(), current: z.string().optional(),
+  }),
+  /**
+   * 例外提示：范围更窄的一条另有做法。横向是两条记忆；纵向是一条记忆加指令文件里的出处 baselineRef。
+   * 定位不到的记忆为 null。
+   */
+  z.object({
+    kind: z.literal('exception'), level: levelOf('exception'), decisionId: z.string(), firstSeenAt: z.number(), summary: z.string(),
+    memories: z.array(memoryCardSchema.nullable()).min(1), baselineRef: z.string().optional(),
   }),
   z.object({
     kind: z.literal('unreadable-file'), level: levelOf('unreadable-file'), layer: scopeSchema,
@@ -324,7 +370,11 @@ export function pendingItemScopes(item: PendingItem): Scope[] {
     switch (item.kind) {
       case 'unreadable-file': return [item.layer]
       case 'overflow': return [item.workspacePath === undefined ? { kind: 'global' } : { kind: 'workspace', workspacePath: item.workspacePath }]
-      case 'conflict-horizontal': return [item.left, item.right].map(m => m === null ? undefined : scopeOfMemory(m))
+      case 'conflict-horizontal':
+      case 'missed-change': return [item.left, item.right].map(m => m === null ? undefined : scopeOfMemory(m))
+      case 'premise-changed': return [item.decision, item.premise].map(m => m === null ? undefined : scopeOfMemory(m))
+      case 'exception':
+      case 'cross-duplicate': return item.memories.map(m => m === null ? undefined : scopeOfMemory(m))
       case 'advice': return item.memories.map(scopeOfMemory)
       default: return [item.memory === null ? undefined : scopeOfMemory(item.memory)]
     }
@@ -352,13 +402,22 @@ export type PendingView = z.infer<typeof pendingViewSchema>
 
 /**
  * 冲突裁决按钮到 verdict 的映射（写死，客户端不另行推导）。横向：A = memoryIds[0]、B = memoryIds[1]；
- * 垂直：「以基线为准」删记忆，「保留这条记忆」两边都留。dismiss 不从界面发出。
+ * 「确实不冲突」「记成例外」两边都留、记下结论；「并成版本」带 current（留作当前状态的那条），另一条并进它的历史版本。
+ * keepBoth（两条都留）是旧取值，界面不再给这个按钮，只用来认采纳建议和旧的结论。
+ * 垂直：「以基线为准」删记忆；「确实不冲突」「记成例外」同横向，没有「并成版本」（只有一条记忆）。
+ * keepMemory（保留这条记忆）是旧取值，界面不再给这个按钮，只用来认采纳建议和旧的结论。
  */
 export const CONFLICT_ACTION_VERDICTS = {
-  horizontal: { keepA: 'keep-left', keepB: 'keep-right', keepBoth: 'keep-both' },
-  vertical: { keepBaseline: 'keep-right', keepMemory: 'keep-left' },
+  horizontal: { keepA: 'keep-left', keepB: 'keep-right', keepBoth: 'keep-both', notConflict: 'not-conflict', exception: 'exception', asVersions: 'as-versions' },
+  vertical: { keepBaseline: 'keep-right', keepMemory: 'keep-left', notConflict: 'not-conflict', exception: 'exception' },
 } as const
-export const RESOLVE_VERDICTS = ['keep-left', 'keep-right', 'keep-both'] as const
+/**
+ * resolve 命令收的裁决值：冲突的全部取值，加体检新发现的忽略（dismiss）。每种待处理项能用哪几个由服务端按种类核对，
+ * 表外的组合回 invalid-args；as-versions 要带 current。
+ */
+export const RESOLVE_VERDICTS = ['keep-left', 'keep-right', 'keep-both', 'dismiss', 'not-conflict', 'exception', 'as-versions'] as const
+export type ResolveVerdict = (typeof RESOLVE_VERDICTS)[number]
+
 
 // —— 体检覆盖 ——
 
@@ -553,10 +612,11 @@ export const deletedItemSchema = z.object({
   /**
    * 裁决时删掉的：哪条冲突、什么裁决、对方是谁（横向为对方记忆 id，垂直为基线出处）。plan-applied 是融合时并入了另一条，
    * 对方是写进融合稿的那条；恢复它只恢复这一条，融合稿不退回，这次融合随之不能整条撤销（结果不带 decisionId）。
+   * as-versions 是并成版本时删掉的旧状态那条，对方是留作当前的那条；恢复它等于撤销整次并成版本，这一对回到待处理。
    */
   cause: z.object({
     decisionId: z.string(),
-    verdict: z.enum(['keep-left', 'keep-right', 'plan-applied']),
+    verdict: z.enum(['keep-left', 'keep-right', 'plan-applied', 'as-versions']),
     counterpartId: z.string().optional(),
     baselineRef: z.string().optional(),
     snapshotId: z.string().optional(),
@@ -920,7 +980,8 @@ export const MEMORY_RPC_PING = 'ping'
  */
 export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   z.object({ cmd: z.literal('info') }),
-  z.object({ cmd: z.literal('resolve'), decisionId: z.string(), verdict: z.enum(RESOLVE_VERDICTS), allowCrossWorkspace }),
+  /** 裁决一条体检挂的待处理项（冲突、四种新发现）。current 只配 as-versions：留作当前状态的那条，必须是这一对里的一条。 */
+  z.object({ cmd: z.literal('resolve'), decisionId: z.string(), verdict: z.enum(RESOLVE_VERDICTS), current: z.string().optional(), allowCrossWorkspace }),
   /**
    * 「采纳建议」：按条目上 id 为 suggestionId 的处理建议落盘，界面不回传建议内容。收横向、垂直冲突。保留 A、保留 B、都保留
    * 记法同 resolve 的 keep-left / keep-right / keep-both（另记依据和结论代码），撤销、最近删除、败方含高危密钥时的物理删除都同 resolve。

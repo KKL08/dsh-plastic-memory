@@ -33,7 +33,7 @@ import {
 } from '../tools/workspace-gate.ts'
 import {
   GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, VIEW_BEHIND_CODES, mergeKeeperIndex, parseMemoryCommand, sessionViewFile, verdictOfAction,
-  type ApplyEditOp, type DraftPlanOp, type DroppedLinksEntry, type GuiErrorCode, type MemoryCommand, type MemoryCommandResult, type ProposalSource, type RequestedProposal,
+  type ApplyEditOp, type DraftPlanOp, type DroppedLinksEntry, type GuiErrorCode, type MemoryCommand, type MemoryCommandResult, type ProposalSource, type RequestedProposal, type ResolveVerdict,
 } from './contract.ts'
 import type { ViewWriter } from './view-writer.ts'
 import { generateDraft } from './model-draft.ts'
@@ -581,16 +581,18 @@ async function dispatch(
   }
 
   /**
-   * 裁决一条冲突（直接选，或采纳建议 adopt）。结果同一种形状：败方含高危密钥已物理删除时 isHardDeleted，结论没记下时 isUnrecorded，
+   * 裁决一条体检挂的待处理项（冲突直接选、采纳建议 adopt；四种新发现按种类能用的裁决，服务端核对）。as-versions 带 current（留作当前的那条）。
+   * 结果同一种形状：败方含高危密钥已物理删除时 isHardDeleted，结论没记下时 isUnrecorded，
    * 记了快照的带 snapshotId 供撤销。
    */
   const resolveConflict = async (
-    decisionId: string, verdict: 'keep-left' | 'keep-right' | 'keep-both', allowCrossWorkspace: boolean | undefined,
+    decisionId: string, verdict: ResolveVerdict, allowCrossWorkspace: boolean | undefined,
     adopt?: { basis: NonNullable<ConfirmOptions['adopt']>; memoryIds: string[] },
+    current?: string,
   ): Promise<MemoryCommandResult> => {
     // 垂直冲突：采纳时核对依据里的基线；升级前导入的没有指纹，两边都留时要按这条记忆对应的指令文件现算
     const r = await executeConfirm(
-      { action: 'resolve', decisionId, verdict, allowCrossWorkspace },
+      { action: 'resolve', decisionId, verdict, ...(current !== undefined ? { current } : {}), allowCrossWorkspace },
       gov, executorDeps, adopt !== undefined ? { adopt: adopt.basis } : {},
     )
     if (r.kind === 'error') {
@@ -762,7 +764,7 @@ async function dispatch(
   switch (command.cmd) {
     case 'resolve': {
       if (!(await deps.decisions.get(command.decisionId))) return notFound(command.decisionId)
-      return await resolveConflict(command.decisionId, command.verdict, command.allowCrossWorkspace)
+      return await resolveConflict(command.decisionId, command.verdict, command.allowCrossWorkspace, undefined, command.current)
     }
 
     case 'apply-proposal': {

@@ -259,6 +259,29 @@ All notable changes to this project are documented here. The format follows
   `offset` as optional parameters of `memory_search`. The scale check also
   reports how long listing a topic and searching within it take at 5,000
   memories, without a pass/fail threshold.
+- Checkups now tell apart three cases that used to be reported as conflicts:
+  a narrower exception to a general rule, a change that was never recorded as
+  a new version, and a real conflict. A missed change comes with a plan to
+  merge the two memories into versions of one, with the one the checkup judges
+  current kept as the current version; applying it can be undone. When a
+  later checkup judges a pending pair differently, its entry changes kind
+  instead of a second one being added.
+- Before a conflict between two memories is reported, the checkup reads the
+  conversations each one was saved from and judges the pair again, up to five
+  pairs per checkup. A conflict whose sources cannot be read is still reported
+  and says so.
+- Checkups report when a memory that another memory lists as a premise has
+  changed, without a model call. Duplicates across projects now name the
+  memories in each project and can come with a plan to promote one to global.
+- `memory_confirm` can resolve a pair as not a conflict or as an exception.
+  The pair is not reported again as a conflict, exception or missed change
+  until the content of either memory changes.
+- The memory page has a card for each new kind. Merge as versions asks which
+  memory is current, with the suggested one selected; a changed premise links
+  to the decision to review; a cross-project duplicate offers to promote one
+  to global. On conflict cards, Keep both is replaced by Not a conflict and
+  Mark as exception, and conflicts between two memories also offer Merge as
+  versions. Each result can be undone.
 
 ### Changed
 - The memories loaded at the start of a chat now follow the topic index.
