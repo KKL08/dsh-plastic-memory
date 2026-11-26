@@ -6,7 +6,7 @@ import type { MemoryRecord } from '../record-schema.ts'
 import type { OverflowLevel } from '../contract-codes.ts'
 import {
   PAIR_FINDING_KINDS, PAIR_EXCLUDING_VERDICTS, TIER_FINDING_KINDS, genId, kindOf, snapshotIdFor, verdictLoser, type BatchReceipt, type DreamsResult, type IndexReceipt, type IndexRun, type LinkIds, type PendingDecision, type PendingKind, type SettledProposal, type SettledVerdict, type StoredSuggestion, type TierFindingKind,
-  type SuggestionBasis, type SuggestionFailure,
+  type SuggestionBasis, type SuggestionFailure, type RecoveredVersionReceipt, type DrillDownReport,
 } from './schema.ts'
 import { isUndoExpired } from './undo-rules.ts'
 import type { ChangeReceipt } from './changeset.ts'
@@ -806,6 +806,34 @@ export class PendingDecisionsStore {
     return true
   }
 
+  /**
+   * 记忆梦境补回一个历史版本：写版本文件之前先在批次条目上记下回执（同一个 op 只记一次）。条目已不在、不是 brewing-dreams-run 返回 false。
+   * 在写入段里调用。
+   */
+  async appendRecoveredVersion(id: string, receipt: RecoveredVersionReceipt): Promise<boolean> {
+    const entry = await this.table.get(id)
+    if (entry === undefined || entry.kind !== 'brewing-dreams-run') return false
+    const list = entry.recoveredVersions ?? []
+    if (list.some(r => r.op === receipt.op)) return true
+    await this.table.put(id, { ...entry, recoveredVersions: [...list, receipt] })
+    return true
+  }
+
+  /** 补回的那一版撤掉了（或确认已不在）：拿掉这条回执。条目或回执已不在时什么都不做。在写入段里调用。 */
+  async dropRecoveredVersion(id: string, op: string): Promise<void> {
+    const entry = await this.table.get(id)
+    if (entry?.recoveredVersions === undefined || !entry.recoveredVersions.some(r => r.op === op)) return
+    await this.table.put(id, { ...entry, recoveredVersions: entry.recoveredVersions.filter(r => r.op !== op) })
+  }
+
+  /** 记下这次运行的下钻报告（整份换掉 drillDown）。条目已不在、不是 brewing-dreams-run 返回 false。在写入段里调用。 */
+  async recordDrillReport(id: string, report: DrillDownReport): Promise<boolean> {
+    const entry = await this.table.get(id)
+    if (entry === undefined || entry.kind !== 'brewing-dreams-run') return false
+    await this.table.put(id, { ...entry, drillDown: report })
+    return true
+  }
+
   /** 一条回执对应的操作撤掉了：拿掉这条回执。在写入段里调用。 */
   async dropChange(id: string, op: string): Promise<void> {
     const entry = await this.table.get(id)
@@ -842,7 +870,7 @@ export class PendingDecisionsStore {
   async removeEmptyRun(id: string, hasPendingChanges: () => boolean = () => false): Promise<void> {
     const entry = await this.table.get(id)
     if (entry?.settled === undefined || entry.changes === undefined || entry.changes.length > 0 || (entry.openGroups?.length ?? 0) > 0) return
-    if ((entry.indexRun?.receipts.length ?? 0) > 0 || hasPendingChanges()) return
+    if ((entry.indexRun?.receipts.length ?? 0) > 0 || (entry.recoveredVersions?.length ?? 0) > 0 || entry.drillDown !== undefined || hasPendingChanges()) return
     await this.table.delete(id)
   }
 
@@ -865,7 +893,7 @@ export class PendingDecisionsStore {
     if (hasPendingChanges()) throw new RunReceiptsPending(id)
     const { changes } = stored
     const entry = stored.indexRun === undefined ? stored : { ...stored, indexRun: { receipts: stored.indexRun.receipts.filter(r => r.isConfirmed === true || isPending(r.op)) } }
-    if (changes.length === 0 && (entry.indexRun?.receipts.length ?? 0) > 0) {
+    if (changes.length === 0 && ((entry.indexRun?.receipts.length ?? 0) > 0 || (entry.recoveredVersions?.length ?? 0) > 0 || entry.drillDown !== undefined)) {
       const done: PendingDecision = { ...entry, receipts: [], ...(input.summary !== undefined ? { summary: input.summary } : {}) }
       await this.table.put(id, done)
       return done

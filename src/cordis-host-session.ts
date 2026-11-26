@@ -245,5 +245,15 @@ export function createCordisHostSession(deps: CordisHostSessionDeps): HostSessio
     }
   }
 
-  return { listSessions, sessionTitleOf, contextOf, saveContextOf, llmOf, defaultLlm, llmForRoute, modelCatalog, modeOf, hasEarlierTurns, remember, ownSessionIdOf, workspaceOf, readSessionLog }
+  // 存档状态在宿主的 workspaceRegistry 服务上（archivedSessionIds，字符串数组）
+  const archivedSessionIds = async (): Promise<ReadonlySet<string> | null> => {
+    try {
+      const ids = probe<{ archivedSessionIds?: unknown }>('workspaceRegistry')?.archivedSessionIds
+      return Array.isArray(ids) && ids.every(id => typeof id === 'string') ? new Set(ids as string[]) : null
+    } catch {
+      return null
+    }
+  }
+
+  return { archivedSessionIds, listSessions, sessionTitleOf, contextOf, saveContextOf, llmOf, defaultLlm, llmForRoute, modelCatalog, modeOf, hasEarlierTurns, remember, ownSessionIdOf, workspaceOf, readSessionLog }
 }

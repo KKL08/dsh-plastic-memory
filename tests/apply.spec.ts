@@ -648,6 +648,30 @@ describe('自动体检接线', () => {
     expect(timer.timers.filter(t => t.isLive)).toEqual([])
   })
 
+  it('记忆梦境的下钻上限写坏了：梦境查一轮时坏配置告警点名这个键；写对了不点名', async () => {
+    const DREAMS_BAD_CONFIG = '记忆梦境的配置有不能用的值'
+    const badConfigWarning = async (brewingDreams: Record<string, number>) => {
+      const memoryRoot = await seedMemory(await makeTmpRoot())
+      await new AutoCheckupSettingStore(sidecarAt(memoryRoot).autoCheckups).set({ kind: 'all' }, 1)
+      const warnings: string[] = []
+      const timer = fakeTimer()
+      const ctx = mockCtx({ timer, agentDefaultModel: { currentSelection: () => DEFAULT_ROUTE } })
+      await apply({ ...ctx, logger: { info() {}, warn: (msg: string) => { warnings.push(msg) }, error() {} } } as never, new Config({ memoryRoot, brewingDreams } as never))
+      // 自动体检的第一轮做完后，梦境调度查一轮（onRoundDone），配置有坏值时记一条告警
+      const first = timer.timers.find(t => !t.every)!
+      first.isLive = false
+      first.callback()
+      await vi.waitFor(() => expect(warnings.some(w => w.includes(DREAMS_BAD_CONFIG))).toBe(true))
+      await ctx.dispose()
+      return warnings.find(w => w.includes(DREAMS_BAD_CONFIG))!
+    }
+    expect(await badConfigWarning({ maxDrillDowns: -1 })).toContain('maxDrillDowns')
+    // 另一个键写坏了，告警照样出，但不点名写对了的下钻上限
+    const other = await badConfigWarning({ maxDrillDowns: 3, minIntervalDays: -1 })
+    expect(other).toContain('minIntervalDays')
+    expect(other).not.toContain('maxDrillDowns')
+  })
+
   it('没有计时服务的宿主：不创建调度器，插件照常挂载', async () => {
     const memoryRoot = await seedMemory(await makeTmpRoot())
     await new AutoCheckupSettingStore(sidecarAt(memoryRoot).autoCheckups).set({ kind: 'all' }, 1)

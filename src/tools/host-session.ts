@@ -72,4 +72,9 @@ export interface HostSession {
   readSessionLog(sessionId: string): Promise<SessionLog | null>
   /** 宿主登记的全部会话（含已存档的）；服务缺席或读取抛错为 null，调用方按「这一次列不出来」处理，不当成一个会话都没有。 */
   listSessions(): Promise<HostSessionEntry[] | null>
+  /**
+   * 宿主登记为已存档的会话 id（宿主的工作区登记表，各进程共用），每次现读。服务缺席、字段不是字符串数组、读取抛错为 null：
+   * 调用方按「这一次不知道」处理，不当成没有存档的会话。
+   */
+  archivedSessionIds(): Promise<ReadonlySet<string> | null>
 }
