@@ -345,8 +345,8 @@ export async function apply(ctx: Context, config: Config) {
   const scanCache = sidecar.scanCache
   // 建议忽略表：健康分、体检、GUI 视图同一份剔除口径
   const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
-  // 体检记录表：体检做完写完成记录（上次体检），健康分、GUI 视图从它读
-  const checkups = new CheckupRecordStore(sidecar.checkups)
+  // 体检记录表：体检做完写完成记录（上次体检），健康分、GUI 视图从它读；写体检状态前在同一把写锁里核对视图
+  const checkups = new CheckupRecordStore(sidecar.checkups, { views: scanCache, lock: sidecar.lock, log: ctx.logger })
   // 自动体检设置表：记忆页经 /memory set-auto-checkup 改，几个宿主进程共用一份
   const autoCheckups = new AutoCheckupSettingStore(sidecar.autoCheckups)
   // 记忆梦境的侧表：范围开关、每个范围的运行记录、变化基线、七天用量，几个宿主进程共用一份

@@ -23,7 +23,7 @@ export interface AutoCheckupSchedulerDeps {
   /** 体检核心里和会话无关的依赖（含按范围取指令文件）；模型、所属项目由调度器按无会话给。 */
   scan: CheckupRunDeps['scan']
   /** 体检记录表：一次体检认领、写完成记录、最近一次结果和失败；调度器自己只读状态、记「模型用不了」。 */
-  checkups: CheckupRunDeps['checkups'] & Pick<CheckupRecordStore, 'recordModelUnavailable' | 'recordRoundFailure'>
+  checkups: CheckupRunDeps['checkups'] & Pick<CheckupRecordStore, 'recordRoundModelUnavailable' | 'recordRoundFailure'>
   /** 体检前收集待处理、体检后立刻重写视图（比出这次的新增）。 */
   views: CheckupRunDeps['views']
   /** 每个范围此刻的情况（体检视图的内容：有效频率、是否到期，全局在前、项目按路径排序）。每次检查现读，别的进程改的设置也能读到。 */
@@ -184,7 +184,7 @@ export class AutoCheckupScheduler {
 
   private async recordModelUnavailable(scopes: readonly Scope[], cause: ModelUnavailableCause, since: number): Promise<void> {
     try {
-      for (const scope of scopes) await this.deps.checkups.recordModelUnavailable(scope, cause, since)
+      for (const scope of scopes) await this.deps.checkups.recordRoundModelUnavailable(scope, cause, since)
     } catch (err) {
       this.log.warn('[plastic-memory] 记不下「模型用不了」，下次检查再试', err)
     }

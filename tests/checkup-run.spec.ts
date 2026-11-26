@@ -8,8 +8,11 @@ import { SidecarStore } from '../src/storage/sidecar.ts'
 import { STATE_DIR } from '../src/storage/paths.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
+import { runScan } from '../src/tools/scan.ts'
+import { scopeCacheKey } from '../src/scope.ts'
 import { RETENTION_MS } from '../src/retention.ts'
 import { ViewWriter, collectCheckupView, collectGlobalViews } from '../src/gui/view-writer.ts'
+import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
 import { runCheckup, type CheckupRunDeps, type CheckupRunInput } from '../src/gui/checkup-run.ts'
 import { GUI_VIEW_DIR, GUI_VIEW_FILES, checkupKey, pendingItemKey, pendingViewSchema, type PendingItem } from '../src/gui/contract.ts'
 import type { Scope } from '../src/scope.ts'
@@ -63,8 +66,10 @@ function env(opts: {
   const clock = { now: NOW }
   const lock = opts.lock !== undefined ? { lock: opts.lock } : {}
   const sidecar = new SidecarStore({ root, schemas, now: () => clock.now, log: quietLog, ...lock })
-  const { store, decisions, snapshots, ignores, checkups, autoCheckups } = createPluginEnv(sidecar, { root, stats: sidecar.recallStats, now: () => clock.now, ...lock }, { log: quietLog })
+  const { store, decisions, snapshots, ignores, autoCheckups } = createPluginEnv(sidecar, { root, stats: sidecar.recallStats, now: () => clock.now, ...lock }, { log: quietLog })
   const cache = sidecar.scanCache
+  // 体检记录同接线层：写体检状态前在写锁里核对视图
+  const checkups = new CheckupRecordStore(sidecar.checkups, { views: cache, lock: sidecar.lock, log: quietLog })
   const checkupView = () => collectCheckupView({ store, checkups, autoCheckups, cache, now: () => clock.now })
   const writer = new ViewWriter({
     memoryRoot: root, log: quietLog,
@@ -519,6 +524,65 @@ describe('没做成', () => {
     expect(await e.run({ target: SESSION, llm, by: 'auto' })).toMatchObject({ kind: 'failed' })
     const rec = (await e.recordOf(checkupKey(SESSION)))!
     expect([rec.completed?.by, rec.failure]).toEqual(['agent', undefined])
+  })
+
+  /**
+   * 两条长记忆各成一批：第一批查成（isFirstFailed 时第一批就由 failing 回），之后的批由 failing 决定怎么失败。第一批查的时候停住，
+   * 期间一次更新的语义扫描（agent 的 memory_scan layers=semantic，不写完成记录）查完并发布了视图。
+   */
+  async function supersededAuto(e: Env, failing: SemanticLlm, opts: { isFirstFailed?: boolean } = {}) {
+    for (const [id, createdAt] of [['mem_b1', 1], ['mem_b2', 2]] as const) {
+      await e.store.create(record({ id, createdAt, content: `${id}：${'记'.repeat(27_000)}` }))
+    }
+    let onFirst!: () => void
+    const first = new Promise<void>(resolve => { onFirst = resolve })
+    let release!: () => void
+    const released = new Promise<void>(resolve => { release = resolve })
+    let calls = 0
+    const llm: SemanticLlm = {
+      complete: async (input, signal, onUsage) => {
+        if (++calls > 1) return failing.complete(input, signal, onUsage)
+        onFirst()
+        await released
+        return opts.isFirstFailed === true ? failing.complete(input, signal, onUsage) : '{"findings":[]}'
+      },
+    }
+    const run = e.run({ target: GLOBAL, llm, by: 'auto' })
+    await first
+    e.clock.now += 1000
+    const newer = await runScan({ target: { kind: 'scope', scope: GLOBAL }, layers: 'semantic', llm: quiet, startedAt: e.clock.now },
+      { store: e.store, registry, decisions: e.decisions, cache: e.cache, instructions: noInstructions, checkups: e.checkups, now: () => e.clock.now })
+    expect(newer.kind).toBe('single')
+    expect((await e.cache.get(scopeCacheKey(GLOBAL)))?.scannedAt).toBe(e.clock.now)
+    release()
+    return run
+  }
+
+  it('自动：部分失败，但更新的语义扫描先发布了、没有完成记录：不加失败计数、不改重试时间', async () => {
+    const e = env()
+    const earlier = { kind: 'model-error' as const, hostCode: 'RATE_LIMIT', message: '上一次' }
+    await e.checkups.recordFailure(GLOBAL, earlier, NOW - 1, NOW - 1)
+    const before = (await e.recordOf(checkupKey(GLOBAL)))!.failure
+    const r = await supersededAuto(e, hostError('RATE_LIMIT'))
+    expect(r).toMatchObject({ kind: 'failed', cause: { hostCode: 'RATE_LIMIT' } })
+    const rec = (await e.recordOf(checkupKey(GLOBAL)))!
+    expect([rec.failure, rec.completed]).toEqual([before, undefined])
+  })
+
+  it('自动：模型中途用不了，但更新的语义扫描先发布了：不记「模型用不了」，收尾码照常返回', async () => {
+    const e = env()
+    const r = await supersededAuto(e, hostError('ACCOUNT_SIGN_IN_REQUIRED'))
+    expect(r).toMatchObject({ kind: 'model-unavailable', cause: { hostCode: 'ACCOUNT_SIGN_IN_REQUIRED' } })
+    const rec = (await e.recordOf(checkupKey(GLOBAL)))!
+    expect([rec.modelUnavailable, rec.failure, rec.completed]).toEqual([undefined, undefined, undefined])
+  })
+
+  it.each([['RATE_LIMIT', 'failed'], ['ACCOUNT_SIGN_IN_REQUIRED', 'model-unavailable']])('自动：第一批就没做成（%s）、没有可发布的结果，更新的语义扫描先发布了：不加失败计数、不记「模型用不了」', async (code, kind) => {
+    const e = env()
+    const r = await supersededAuto(e, hostError(code), { isFirstFailed: true })
+    expect(r.kind).toBe(kind)
+    const rec = await e.recordOf(checkupKey(GLOBAL))
+    expect([rec?.failure, rec?.modelUnavailable, rec?.completed]).toEqual([undefined, undefined, undefined])
   })
 
   it('PA-57 自动：宿主报模型用不了，返回原因；一次体检只写最近一次结果，不写完成记录和失败', async () => {

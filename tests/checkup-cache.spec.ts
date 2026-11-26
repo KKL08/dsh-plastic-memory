@@ -77,6 +77,23 @@ describe('体检结果库', () => {
     expect(cache.readRound('cross-ws')!.recheckBefore).toBe(200)
   })
 
+  it('清理以这次扫描的开始时刻为界：晚于它查的行留着（别处更新的扫描写的），不晚于它的照旧按键和全部重查时刻删；检查时刻坏了、为空的照旧删', () => {
+    const { cache } = open()
+    cache.write('global', row('old-other-key', 300))
+    cache.write('global', row('at-start', 500))
+    cache.write('global', row('newer', 501))
+    cache.write('global', row('newer-stale', 600))
+    cache.markRecheck(['global'], 550)
+    const raw = new DatabaseSync(cachePath())
+    raw.prepare('INSERT INTO checks(round, key, checked_at, members_json, result_json) VALUES (?, ?, ?, ?, ?)').run('global', 'time-null', null, '[]', '[]')
+    raw.prepare('INSERT INTO checks(round, key, checked_at, members_json, result_json) VALUES (?, ?, ?, ?, ?)').run('global', 'time-real', 900.5, '[]', '[]')
+    raw.prepare('INSERT INTO checks(round, key, checked_at, members_json, result_json) VALUES (?, ?, ?, ?, ?)').run('global', 'time-text', 'x', '[]', '[]')
+    cache.prune('global', new Set(['at-start']), 550, 500)
+    const left = (raw.prepare('SELECT key FROM checks WHERE round = ? ORDER BY key').all('global') as Array<{ key: string }>).map(r => r.key)
+    raw.close()
+    expect(left).toEqual(['newer', 'newer-stale'])
+  })
+
   it('全部重查的时刻只往后挪：再记一个更早的不改；库里这一轮有不早于它查的行时，记在最晚那一行之后', () => {
     const { cache } = open()
     cache.markRecheck(['global'], 500)

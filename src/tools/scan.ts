@@ -301,6 +301,11 @@ interface RoundCommit {
   isCommitted: boolean
   /** 这次查成的批都写进了库。 */
   isDbWritten: boolean
+  /**
+   * 视图没写成：别处开始得更晚的扫描已经发布了。这一轮读到的内容更旧，不据它清库、清遗留垂直条目。
+   * 体检记录里的状态不看它，写的时候在写锁里另行核对视图（governance/checkup-records.ts）。
+   */
+  isSuperseded: boolean
 }
 
 /**
@@ -846,6 +851,7 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
       unresolved: unresolvedOf(round),
     })
     let storageFailure: CheckupCause | undefined
+    let isSuperseded = false
     // 先挂账（只挂有有效结果的批里的冲突；沿用的不重新挂账），再写视图：视图写成是这一轮的提交点
     let ledger: RoundLedger = { findings: [], decisionItems: [], created: 0, existing: 0, settled: 0 }
     try {
@@ -858,7 +864,7 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
         const published = publishedFindings(valid, carried).filter(f => !(LEDGER_ONLY_FINDING_TYPES as readonly string[]).includes(f.type))
         const entry = { id: cacheId, scannedAt: now, scope: scopeKey(scope), findings: published, fingerprints: findingFingerprints(published, data.byId), isTrackedByCheckups: true }
         // 不回退：别的扫描开始得比这次晚、已经写过的，留着它的
-        await deps.cache.update(cacheId, cur => (cur !== undefined && cur.scannedAt > now ? undefined : entry))
+        isSuperseded = !(await deps.cache.update(cacheId, cur => (cur !== undefined && cur.scannedAt > now ? undefined : entry)))
       }
       // 返回里的沿用发现同读侧口径：冲突只留账本里仍未决的（裁决过的照旧进视图，读的时候按账本核对）
       ledger = { ...ledger, findings: publishedFindings([ledger.findings], carried.filter(isConflictOpen(pendingFindings))) }
@@ -875,19 +881,21 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
     const closing = closingRow(coverage, storageFailure !== undefined)
     const cause = storageFailure ?? (closing === 'failed' || closing === 'model-unavailable' ? round.failure ?? runFailure : undefined)
     results.set(scopeKey(scope), { scope, coverage, closing, ...(cause !== undefined ? { cause } : {}) })
-    commits.set(round.round, { isCommitted: storageFailure === undefined, isDbWritten: round.isDbWriteFailed !== true })
+    commits.set(round.round, { isCommitted: storageFailure === undefined, isDbWritten: round.isDbWriteFailed !== true, isSuperseded })
   }
   // 没有内容检查的范围（只有规则层）没有要提交的，算提交了；有内容检查的范围至少一轮提交成了才报
   if (scopes.some(scope => commits.get(scopeKey(scope))?.isCommitted ?? true)) run.onCommitted?.()
 
   // —— 提交之后：清库、清遗留垂直条目、提升候选、完成记录 ——
-  const isSettledFully = (round: SemanticRound) => {
+  // 被更新的扫描取代的轮不算：库里可能有那次写的新行，清理以这次读到的为准会删掉它们，留给更新的那次清
+  const isPublished = (round: SemanticRound) => {
     const commit = commits.get(round.round)
-    return commit !== undefined && commit.isCommitted && isFullyCovered(results.get(round.round)!.coverage)
+    return commit !== undefined && commit.isCommitted && !commit.isSuperseded
   }
+  const isSettledFully = (round: SemanticRound) => isPublished(round) && isFullyCovered(results.get(round.round)!.coverage)
   for (const round of rounds) {
     if (round.history === undefined || !isSettledFully(round) || !commits.get(round.round)!.isDbWritten) continue
-    resultsDb?.prune(round.round, new Set(round.batches.map(b => b.key)), round.recheckBefore)
+    resultsDb?.prune(round.round, new Set(round.batches.map(b => b.key)), round.recheckBefore, now)
   }
   const globalRound = roundByKey.get(GLOBAL_SCOPE_KEY)
   if (globalRound !== undefined && isSettledFully(globalRound)) {
@@ -951,7 +959,9 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
       } else {
         isCrossWsSkipped = true
       }
-      if (cross?.hit !== undefined && isCrossDbWritten && rounds.every(r => r.isReadComplete)) resultsDb?.prune(CROSS_WS_ROUND, new Set([cross.key]), cross.recheckBefore)
+      if (cross?.hit !== undefined && isCrossDbWritten && rounds.every(r => r.isReadComplete && isPublished(r))) {
+        resultsDb?.prune(CROSS_WS_ROUND, new Set([cross.key]), cross.recheckBefore, now)
+      }
     }
 
     for (const item of duplicates.items) {

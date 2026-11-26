@@ -1,8 +1,10 @@
 import { isAbsolute } from 'node:path'
-import type { CasKvTable, RefreshableClaim, RefreshableClaimKvTable } from '../kv-table.ts'
+import type { CasKvTable, CheckedGetKvTable, RefreshableClaim, RefreshableClaimKvTable } from '../kv-table.ts'
 import type { CheckupCompletion, CheckupRecord } from '../storage/schema.ts'
 import type { ScanCacheEntry } from './schema.ts'
-import type { Scope } from '../scope.ts'
+import { scopeCacheKey, type Scope } from '../scope.ts'
+import type { RootLock } from '../root-lock.ts'
+import type { MemoryLogger } from '../store.ts'
 import { checkupKey, type CheckupCause, type CheckupResult, type ModelUnavailableCause } from '../gui/contract.ts'
 
 /**
@@ -13,13 +15,28 @@ import { checkupKey, type CheckupCause, type CheckupResult, type ModelUnavailabl
  *
  * 按范围认领：界面手动体检和自动体检开跑前认领这些范围（认领文件在记录旁边，跨进程互斥），同一个范围同时只体检一次；
  * 「进行中」不存进记录，就是认领还在、没过期。agent 的 memory_scan 不认领，靠完成记录和缓存的「不回退」兜底。
+ *
+ * 体检核心和执行器写的四类状态（完成记录、续查时间、失败、模型用不了）都经 writeState：在记忆根写锁里先核对这个范围
+ * 现在发布的视图不比这次体检新，再写。发布视图也在这把锁里，核对和写入之间插不进更新的发布。
+ * 调度器的兜底补记（recordRoundFailure、recordRoundModelUnavailable）不经它，见那两个方法。
  */
+
+/** 写四类状态之前的视图核对（接线层注入）；不给就不核对。 */
+export interface CheckupStateGuard {
+  /** 体检视图（storage/sidecar.ts 的 scanCache），按范围的视图键读。 */
+  views: CheckedGetKvTable<ScanCacheEntry>
+  /** 记忆根写锁：视图缓存、体检记录表的写入都在它里面。 */
+  lock: Pick<RootLock, 'run'>
+  log: MemoryLogger
+}
 
 export class CheckupRecordStore {
   private readonly table: CasKvTable<CheckupRecord> & RefreshableClaimKvTable<CheckupRecord>
+  private readonly guard: CheckupStateGuard | undefined
 
-  constructor(table: CasKvTable<CheckupRecord> & RefreshableClaimKvTable<CheckupRecord>) {
+  constructor(table: CasKvTable<CheckupRecord> & RefreshableClaimKvTable<CheckupRecord>, guard?: CheckupStateGuard) {
     this.table = table
+    this.guard = guard
   }
 
   /**
@@ -51,16 +68,21 @@ export class CheckupRecordStore {
 
   /**
    * 提交点：给这些范围各写一条完成记录；已有记录开始得更晚的范围不写。这个范围查完了，自动体检的连续失败和「模型用不了」
-   * 一并清掉（手动体检成功后失败计数清零，下次按新的完成记录计时），记录里的其他内容不动。
+   * 一并清掉（手动体检成功后失败计数清零，下次按新的完成记录计时），记录里的其他内容不动；
+   * 这次开始之后才记下的失败留着（更新的一次没查完、也没发布，视图核对拦不住它）。
    * continueAt：到了上限停下、还有没查到的，约下次自动体检的时间（见 storage/schema.ts）；不给就清掉旧的。
    */
   async complete(scopes: readonly Scope[], completion: CheckupCompletion, continueAt?: number): Promise<void> {
     for (const scope of scopes) {
       const key = checkupKey(scope)
-      await this.table.update(key, (cur) => {
+      await this.writeState(scope, completion.startedAt, 'skip', (cur) => {
         if (cur?.completed !== undefined && cur.completed.startedAt > completion.startedAt) return undefined
-        const { failure: _failure, modelUnavailable: _modelUnavailable, continueAt: _continueAt, ...rest } = cur ?? { id: key }
-        return { ...rest, id: key, completed: completion, ...(continueAt !== undefined ? { continueAt } : {}) }
+        const { failure, modelUnavailable: _modelUnavailable, continueAt: _continueAt, ...rest } = cur ?? { id: key }
+        return {
+          ...rest, id: key, completed: completion,
+          ...(failure !== undefined && failure.failedAt > completion.startedAt ? { failure } : {}),
+          ...(continueAt !== undefined ? { continueAt } : {}),
+        }
       })
     }
   }
@@ -71,7 +93,7 @@ export class CheckupRecordStore {
    */
   async recordContinue(scope: Scope, continueAt: number, startedAt: number): Promise<void> {
     const key = checkupKey(scope)
-    await this.table.update(key, cur => (cur?.completed !== undefined && cur.completed.startedAt > startedAt ? undefined : { ...cur, id: key, continueAt }))
+    await this.writeState(scope, startedAt, 'skip', cur => (cur?.completed !== undefined && cur.completed.startedAt > startedAt ? undefined : { ...cur, id: key, continueAt }))
   }
 
   /**
@@ -81,7 +103,7 @@ export class CheckupRecordStore {
    */
   async recordFailure(scope: Scope, cause: CheckupCause, failedAt: number, startedAt = failedAt): Promise<void> {
     const key = checkupKey(scope)
-    await this.table.update(key, cur => (cur?.completed !== undefined && cur.completed.startedAt > startedAt ? undefined : withFailure(cur, key, cause, failedAt)))
+    await this.writeState(scope, startedAt, 'write', cur => (cur?.completed !== undefined && cur.completed.startedAt > startedAt ? undefined : withFailure(cur, key, cause, failedAt)))
   }
 
   /**
@@ -91,6 +113,7 @@ export class CheckupRecordStore {
    */
   async recordRoundFailure(scope: Scope, cause: CheckupCause, failedAt: number, since: number): Promise<void> {
     const key = checkupKey(scope)
+    // 不核对视图：since 早于这一轮体检自己发布的视图，核对会把自己挡住
     await this.table.update(key, cur => ((cur?.completed?.completedAt ?? -Infinity) >= since || (cur?.failure?.failedAt ?? -Infinity) >= since
       ? undefined
       : withFailure(cur, key, cause, failedAt)))
@@ -98,11 +121,18 @@ export class CheckupRecordStore {
 
   /**
    * 自动体检这次碰上模型用不了（没有默认模型、未登录、缺凭据）：记下原因。不算失败：失败次数和重试时间不动，下一次调度检查再试。
-   * since 是这轮检查的开始时间：要记的范围是那时读出来的，之后已经有体检做完（完成时间不早于它）的不记，免得给刚查完的范围记上。
+   * since 是这次体检开始的时刻：之后已经有体检做完（完成时间不早于它）的不记，免得给刚查完的范围记上。
    */
   async recordModelUnavailable(scope: Scope, cause: ModelUnavailableCause, since: number): Promise<void> {
-    const key = checkupKey(scope)
-    await this.table.update(key, cur => (cur?.completed !== undefined && cur.completed.completedAt >= since ? undefined : { ...cur, id: key, modelUnavailable: cause }))
+    await this.writeState(scope, since, 'write', withModelUnavailable(checkupKey(scope), cause, since))
+  }
+
+  /**
+   * 调度器一轮检查碰上模型用不了：给这轮读到的到期范围补记，同 recordModelUnavailable（since 是这轮检查的开始时间）。
+   */
+  async recordRoundModelUnavailable(scope: Scope, cause: ModelUnavailableCause, since: number): Promise<void> {
+    // 不核对视图：since 早于这一轮体检自己发布的视图，核对会把自己挡住
+    await this.table.update(checkupKey(scope), withModelUnavailable(checkupKey(scope), cause, since))
   }
 
   /**
@@ -137,6 +167,28 @@ export class CheckupRecordStore {
       if (isAbsolute(r.id) && await isGone(r.id)) await this.table.delete(r.id)
     }
   }
+
+  /**
+   * 体检核心和执行器写四类状态的入口：在记忆根写锁里读这个范围现在发布的视图，比 startedAt（这次体检开始的时刻）新就不写，
+   * 再在同一段里读改写这条记录。视图读不出时记一条日志，whenUnreadable 定写不写：完成记录、续查时间不写（证明不了这次是最新的），
+   * 失败、模型用不了照写（多记一次最坏只是多退避一次）。
+   */
+  private async writeState(scope: Scope, startedAt: number, whenUnreadable: 'skip' | 'write', fn: (current: CheckupRecord | undefined) => CheckupRecord | undefined): Promise<void> {
+    const key = checkupKey(scope)
+    const guard = this.guard
+    if (guard === undefined) {
+      await this.table.update(key, fn)
+      return
+    }
+    await guard.lock.run(async () => {
+      const view = await guard.views.getChecked(scopeCacheKey(scope))
+      if (!view.isReadable) {
+        guard.log.warn(`[plastic-memory] 读不出 ${key} 的体检视图，${whenUnreadable === 'skip' ? '这次体检的完成记录、续查时间不记' : '照记这次体检的失败、模型用不了'}，下次体检照常`)
+        if (whenUnreadable === 'skip') return
+      } else if (view.value !== undefined && view.value.scannedAt > startedAt) return
+      await this.table.update(key, fn)
+    })
+  }
 }
 
 /**
@@ -146,6 +198,11 @@ export class CheckupRecordStore {
 export function lastCheckupAt(record: CheckupRecord | undefined, cached: Pick<ScanCacheEntry, 'scannedAt' | 'isTrackedByCheckups'> | undefined): number | null {
   const fallback = cached !== undefined && cached.isTrackedByCheckups !== true ? cached.scannedAt : null
   return record?.completed?.completedAt ?? fallback
+}
+
+/** 记「模型用不了」的读改写：since 之后这个范围已有体检做完（完成时间不早于它）就不记。 */
+function withModelUnavailable(key: string, cause: ModelUnavailableCause, since: number): (cur: CheckupRecord | undefined) => CheckupRecord | undefined {
+  return cur => (cur?.completed !== undefined && cur.completed.completedAt >= since ? undefined : { ...cur, id: key, modelUnavailable: cause })
 }
 
 /** 记一次失败之后的记录：连续失败次数加一，最近一次尝试不再是「模型用不了」。 */

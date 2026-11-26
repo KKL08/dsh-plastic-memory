@@ -832,7 +832,7 @@ describe('上限、沿用', () => {
   it('这一轮有一批写不进库：全覆盖也不清库里过时的行', async () => {
     const e = await env()
     await staleRowAndVertical(e)
-    e.deps.checkupCache = { ...e.db, readRound: r => e.db.readRound(r), write: () => false, prune: (r, k, t) => e.db.prune(r, k, t), dropRound: r => e.db.dropRound(r), rounds: () => e.db.rounds(), markRecheck: (r, t) => e.db.markRecheck(r, t), retryOpen: () => { e.db.retryOpen() } }
+    e.deps.checkupCache = { ...e.db, readRound: r => e.db.readRound(r), write: () => false, prune: (r, k, t, s) => e.db.prune(r, k, t, s), dropRound: r => e.db.dropRound(r), rounds: () => e.db.rounds(), markRecheck: (r, t) => e.db.markRecheck(r, t), retryOpen: () => { e.db.retryOpen() } }
     let isCommitted = false
     const r = await runScan({ target: { kind: 'scope', scope: GLOBAL }, llm: stubModel(), startedAt: e.clock.now }, e.deps, { onCommitted: () => { isCommitted = true } })
     expect(isFullyCovered(coverageOf(r))).toBe(true)
@@ -941,7 +941,7 @@ describe('全部重查', () => {
     await threeBatches(e)
     const m = stubModel()
     await e.scan({ llm: m })
-    e.deps.checkupCache = { ...e.db, readRound: r => e.db.readRound(r), write: (r, row) => e.db.write(r, row), prune: (r, k, t) => e.db.prune(r, k, t), dropRound: r => e.db.dropRound(r), rounds: () => e.db.rounds(), markRecheck: () => false, retryOpen: () => { e.db.retryOpen() } }
+    e.deps.checkupCache = { ...e.db, readRound: r => e.db.readRound(r), write: (r, row) => e.db.write(r, row), prune: (r, k, t, s) => e.db.prune(r, k, t, s), dropRound: r => e.db.dropRound(r), rounds: () => e.db.rounds(), markRecheck: () => false, retryOpen: () => { e.db.retryOpen() } }
     e.clock.now += 1000
     await e.scan({ llm: m, isFullRecheck: true })
     expect(m.calls).toHaveLength(6)

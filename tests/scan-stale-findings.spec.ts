@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import fc from 'fast-check'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, rename, rm, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
-import { checkupEnv, stubModel, type CheckupEnv } from './helpers/checkup-env.ts'
+import { bigRecord, checkupEnv, stubModel, CHECKUP_NOW, DAY_MS, type CheckupEnv } from './helpers/checkup-env.ts'
 import { record } from './helpers/record.ts'
 import { instructionsOf, noInstructions } from './helpers/instructions.ts'
 import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
@@ -17,6 +18,15 @@ import { premiseDigest } from '../src/links.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { depthLock } from './helpers/depth-lock.ts'
+import { CROSS_WS_ROUND } from '../src/governance/checkup-plan.ts'
+import { SidecarStore } from '../src/storage/sidecar.ts'
+import { sidecarSchemas } from './helpers/plugin-env.ts'
+import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
+import { runCheckup, type CheckupRunDeps, type CheckupRunInput } from '../src/gui/checkup-run.ts'
+import { STATE_DIR } from '../src/storage/paths.ts'
+import { scopeCacheKey, type Scope } from '../src/scope.ts'
+import type { CheckupRecord } from '../src/storage/schema.ts'
+import type { ScanCacheEntry } from '../src/governance/schema.ts'
 
 // 体检挂账、清库与别处的写入交错（测试切入点：体检核心 runScan）。记忆是真文件、体检结果库是真的 SQLite；
 // 交错靠屏障：把体检停在某个调用之前，插入用户的改动或另一次扫描，再放行。开始时刻固定，不 sleep。
@@ -65,6 +75,12 @@ const PAIR = [{ type: 'conflict' as const, ids: ['mem_x', 'mem_y'] }]
 async function seedPair(e: CheckupEnv): Promise<void> {
   await e.store.put(record({ id: 'mem_x', name: 'x', content: '用 pnpm' }))
   await e.store.put(record({ id: 'mem_y', name: 'y', content: '用 npm' }))
+}
+
+/** 体检记录按接线层的样子带上视图核对（视图是环境里的内存表，写锁用记深度的替身）。 */
+function guardStates(e: CheckupEnv): void {
+  e.checkups = new CheckupRecordStore(new InMemoryKvTable<CheckupRecord>(), { views: e.views, lock: depthLock(), log: e.deps.log! })
+  e.deps.checkups = e.checkups
 }
 
 /** 改一条记忆（用户在记忆页改了正文）。 */
@@ -421,5 +437,529 @@ describe('挂账按预读到的那份副本复核', () => {
     expect(first.kind === 'single' && first.pendingDecisions).toMatchObject({ created: 1, existing: 0 })
     expect(second.kind === 'single' && second.pendingDecisions).toMatchObject({ created: 0, existing: 1 })
     expect((await e.decisions.list()).map(d => d.workspaces)).toEqual([[P, P]])
+  })
+})
+
+/** 拦下模型的第一次调用（扫描已经读完记忆和结果库、正在查没命中的那一批）。 */
+function pauseFirstCall(m: SemanticLlm) {
+  const b = barrier()
+  let isPaused = false
+  const llm: SemanticLlm = {
+    ...m,
+    complete: async (...args) => {
+      if (!isPaused) {
+        isPaused = true
+        b.arrive()
+        await b.opened
+      }
+      return m.complete(...args)
+    },
+  }
+  return { ...b, llm }
+}
+
+const keysOf = (e: CheckupEnv, round: string) => e.db.readRound(round)!.rows.map(r => r.key).sort()
+
+describe('随机交错：旧扫描与别处的新扫描', () => {
+  it('别处在旧扫描途中改了记忆并做完一次新扫描：新扫描写的批缓存都还在，下一次扫描全部命中、不调模型（种子 102，60 轮）', async () => {
+    const SEED = 102
+    const ROUNDS = 60
+    const cases = fc.sample(fc.record({
+      isOtherModel: fc.boolean(),
+      target: fc.constantFrom('mem_x', 'mem_y'),
+      at: fc.nat(),
+    }), { seed: SEED, numRuns: ROUNDS })
+    /** 起点：上一次扫描查过这一对，之后 mem_x 改过；A 用同一个模型或换个模型重查这一批。 */
+    const prepare = (isOtherModel: boolean) => async (e: CheckupEnv, il: Interleaver) => {
+      await seedPair(e)
+      const m = stubModel({ findings: PAIR })
+      await e.scan({ llm: m })
+      await edit(e, 'mem_x', { content: '用 pnpm 8' })
+      e.clock.now += 1000
+      const a = il.llm(isOtherModel ? stubModel({ model: 'model-b', findings: PAIR }) : m)
+      return { m, start: () => e.scan({ llm: a }) }
+    }
+    const points = new Map<boolean, number>()
+    for (const isOtherModel of [true, false]) {
+      points.set(isOtherModel, await countPoints(async (e, il) => (await prepare(isOtherModel)(e, il)).start))
+    }
+    expect(Math.min(...points.values())).toBeGreaterThan(2)
+
+    await eachRound(SEED, cases, async (e, c, check) => {
+      const il = interleaver(e, c.at % (points.get(c.isOtherModel)! + 1))
+      const { m, start } = await prepare(c.isOtherModel)(e, il)
+      await il.run(start, async () => {
+        await edit(e, c.target, { content: `${c.target} 后来又改了` })
+        e.clock.now += 1000
+        await e.scan({ llm: m })
+      })
+      check(il.written.length > 0, '新扫描没写结果库')
+      const left = new Set(keysOf(e, 'global'))
+      check(il.written.every(key => left.has(key)), '新扫描写的批缓存被清掉了')
+      const from = m.calls.length
+      e.clock.now += 1000
+      await e.scan({ llm: m })
+      check(m.calls.length === from, '下一次扫描又调了模型')
+      return il
+    })
+  }, 60_000)
+})
+
+describe('旧扫描不再清掉新缓存、不覆盖失败状态', () => {
+  it('旧扫描和别处的新扫描并发、新扫描先发布：旧扫描结束后新扫描写的批缓存都在，下一次扫描命中、不调模型', async () => {
+    const e = await env()
+    await seedPair(e)
+    const m = stubModel({ findings: PAIR })
+    await e.scan({ llm: m })
+    await edit(e, 'mem_x', { content: '用 pnpm 8' })
+    e.clock.now += 1000
+    const slow = pauseFirstCall(m)
+    const stale = e.scan({ llm: slow.llm })
+    await slow.reached
+    await edit(e, 'mem_x', { content: '用 pnpm 9' })
+    e.clock.now += 1000
+    await e.scan({ llm: m })
+    const fresh = keysOf(e, 'global')
+    const view = await e.view({ kind: 'global' })
+    slow.open()
+    await stale
+
+    expect(keysOf(e, 'global')).toEqual(expect.arrayContaining(fresh))
+    expect(await e.view({ kind: 'global' })).toEqual(view)
+    const from = m.calls.length
+    e.clock.now += 1000
+    await e.scan({ llm: m })
+    expect(m.calls.length).toBe(from)
+  })
+
+  it('旧扫描全部查成、发布被拒（更新的扫描已发布部分结果并记了失败）：不写完成记录、不清库，失败、模型用不了、约好的接着查都原样', async () => {
+    const e = await env()
+    guardStates(e)
+    for (const [id, createdAt] of [['mem_b1', 1], ['mem_b2', 2]] as const) await e.store.put(bigRecord({ id, createdAt }))
+    const m = stubModel()
+    await e.scan({ llm: m })
+    await edit(e, 'mem_b1', { content: `mem_b1：${'改'.repeat(27_000)}` })
+    e.clock.now += 1000
+    const slow = pauseFirstCall(m)
+    const stale = e.scan({ llm: slow.llm })
+    await slow.reached
+
+    // 更新的一次：两批（两条长记忆各成一批）都要重查，第二批没做成；结果发布了一部分，体检执行器给这个范围记了失败等
+    await edit(e, 'mem_b1', { content: `mem_b1：${'又'.repeat(27_000)}` })
+    await edit(e, 'mem_b2', { content: `mem_b2：${'也'.repeat(27_000)}` })
+    e.clock.now += 1000
+    const newer = e.clock.now
+    const failing = stubModel()
+    failing.fail = (_ids, call) => (call >= 2 ? new Error('模型出错') : undefined)
+    const partial = await e.scan({ llm: failing })
+    expect(partial.kind === 'single' && partial.rounds![0]!.closing).toBe('failed')
+    expect((await e.view({ kind: 'global' }))?.scannedAt).toBe(newer)
+    await e.checkups.recordFailure({ kind: 'global' }, { kind: 'model-error', message: '模型出错' }, newer, newer)
+    await e.checkups.recordModelUnavailable({ kind: 'global' }, { kind: 'no-default-model' }, newer)
+    await e.checkups.recordContinue({ kind: 'global' }, newer + DAY_MS, newer)
+    const record = await e.checkups.list()
+    const rows = keysOf(e, 'global')
+    slow.open()
+    const r = await stale
+
+    expect(r.kind === 'single' && r.rounds![0]!.closing).toBe('complete')
+    expect(await e.checkups.list()).toEqual(record)
+    expect(keysOf(e, 'global')).toEqual(expect.arrayContaining(rows))
+  })
+
+  it('旧扫描发布之后、清库之前，别处改了记忆并做完一次新扫描：旧扫描清库时留着新扫描写的批缓存，下一次扫描命中、不调模型', async () => {
+    const e = await env()
+    await seedPair(e)
+    const m = stubModel({ findings: PAIR })
+    await e.scan({ llm: m })
+    await edit(e, 'mem_x', { content: '用 pnpm 8' })
+    e.clock.now += 1000
+    const gate = barrier()
+    const update = e.views.update.bind(e.views)
+    let isPaused = false
+    e.views.update = async (...args) => {
+      const isWritten = await update(...args)
+      if (isWritten && !isPaused) {
+        isPaused = true
+        gate.arrive()
+        await gate.opened
+      }
+      return isWritten
+    }
+    const stale = e.scan({ llm: m })
+    await gate.reached
+    expect((await e.view({ kind: 'global' }))?.scannedAt).toBe(e.clock.now)
+    await edit(e, 'mem_x', { content: '用 pnpm 9' })
+    e.clock.now += 1000
+    await e.scan({ llm: m })
+    const fresh = keysOf(e, 'global')
+    gate.open()
+    await stale
+
+    expect(keysOf(e, 'global')).toEqual(expect.arrayContaining(fresh))
+    const from = m.calls.length
+    e.clock.now += 1000
+    await e.scan({ llm: m })
+    expect(m.calls.length).toBe(from)
+  })
+
+  it('全库体检：旧的一次发布被拒（别处更新的全库体检先发布了）：各项目、全局的轮和跨项目比较都不清库', async () => {
+    const e = await env()
+    const P1 = '/work/one'
+    const P2 = '/work/two'
+    await e.store.put(record({ id: 'mem_g', name: '全局' }))
+    await e.store.put(record({ id: 'mem_p1', name: '一', summary: '用 pnpm', scope: 'workspace', workspacePath: P1 }))
+    await e.store.put(record({ id: 'mem_p2', name: '二', summary: '用 pnpm', scope: 'workspace', workspacePath: P2 }))
+    const all = { kind: 'checkup' as const, workspaces: [P1, P2] }
+    const m = stubModel()
+    m.crossReply = JSON.stringify({ duplicates: [{ topic: '包管理器', workspaces: [P1, P2], suggestion: '提一条全局' }] })
+    await e.scan({ llm: m, target: all })
+    await edit(e, 'mem_p1', { summary: '用 pnpm 8' })
+    e.clock.now += 1000
+    const slow = pauseFirstCall(m)
+    const stale = e.scan({ llm: slow.llm, target: all })
+    await slow.reached
+    await edit(e, 'mem_p1', { summary: '用 pnpm 9' })
+    e.clock.now += 1000
+    await e.scan({ llm: m, target: all })
+    const newer = e.clock.now
+    const pruned: string[] = []
+    const prune = e.db.prune.bind(e.db)
+    e.db.prune = (...args) => {
+      pruned.push(args[0])
+      return prune(...args)
+    }
+    slow.open()
+    await stale
+
+    const scopes: Scope[] = [{ kind: 'global' }, { kind: 'workspace', workspacePath: P1 }, { kind: 'workspace', workspacePath: P2 }]
+    expect(await Promise.all(scopes.map(async scope => (await e.view(scope))?.scannedAt))).toEqual([newer, newer, newer])
+    expect(m.crossCalls).toBeGreaterThan(0)
+    expect(pruned).toEqual([])
+  })
+
+  /** 旧扫描发布之后、写完成记录之前停住。 */
+  function pauseBeforeComplete(e: CheckupEnv) {
+    const b = barrier()
+    const complete = e.checkups.complete.bind(e.checkups)
+    let isPaused = false
+    e.checkups.complete = async (...args) => {
+      if (!isPaused) {
+        isPaused = true
+        b.arrive()
+        await b.opened
+      }
+      return complete(...args)
+    }
+    return b
+  }
+
+  it('旧扫描发布之后、写完成记录之前，更新的扫描发布了部分结果并记了失败：旧扫描不写完成记录，失败、模型用不了、约好的接着查都原样', async () => {
+    const e = await env()
+    guardStates(e)
+    for (const [id, createdAt] of [['mem_b1', 1], ['mem_b2', 2]] as const) await e.store.put(bigRecord({ id, createdAt }))
+    const paused = pauseBeforeComplete(e)
+    const stale = e.scan({ llm: stubModel() })
+    await paused.reached
+    expect((await e.view({ kind: 'global' }))?.scannedAt).toBe(CHECKUP_NOW)
+    expect(await e.checkups.list()).toEqual([])
+
+    await edit(e, 'mem_b1', { content: `mem_b1：${'又'.repeat(27_000)}` })
+    await edit(e, 'mem_b2', { content: `mem_b2：${'也'.repeat(27_000)}` })
+    e.clock.now += 1000
+    const newer = e.clock.now
+    const failing = stubModel()
+    failing.fail = (_ids, call) => (call >= 2 ? new Error('模型出错') : undefined)
+    const partial = await e.scan({ llm: failing })
+    expect(partial.kind === 'single' && partial.rounds![0]!.closing).toBe('failed')
+    expect((await e.view({ kind: 'global' }))?.scannedAt).toBe(newer)
+    await e.checkups.recordFailure({ kind: 'global' }, { kind: 'model-error', message: '模型出错' }, newer, newer)
+    await e.checkups.recordModelUnavailable({ kind: 'global' }, { kind: 'no-default-model' }, newer)
+    await e.checkups.recordContinue({ kind: 'global' }, newer + DAY_MS, newer)
+    const record = await e.checkups.list()
+    paused.open()
+    const r = await stale
+
+    expect(r.kind === 'single' && r.rounds![0]!.closing).toBe('complete')
+    expect(await e.checkups.list()).toEqual(record)
+  })
+
+  it('全库体检：旧的一次在别处更新的全库体检先发布之后才做完，新体检写的跨项目比较结论还在，下一次不再比', async () => {
+    const e = await env()
+    const P1 = '/work/one'
+    const P2 = '/work/two'
+    await e.store.put(record({ id: 'mem_g', name: '全局' }))
+    await e.store.put(record({ id: 'mem_p1', name: '一', summary: '用 pnpm', scope: 'workspace', workspacePath: P1 }))
+    await e.store.put(record({ id: 'mem_p2', name: '二', summary: '用 pnpm', scope: 'workspace', workspacePath: P2 }))
+    const all = { kind: 'checkup' as const, workspaces: [P1, P2] }
+    const m = stubModel()
+    m.crossReply = JSON.stringify({ duplicates: [{ topic: '包管理器', workspaces: [P1, P2], suggestion: '提一条全局' }] })
+    await e.scan({ llm: m, target: all })
+    await edit(e, 'mem_p1', { summary: '用 pnpm 8' })
+    e.clock.now += 1000
+    const slow = pauseFirstCall(m)
+    const stale = e.scan({ llm: slow.llm, target: all })
+    await slow.reached
+    await edit(e, 'mem_p1', { summary: '用 pnpm 9' })
+    e.clock.now += 1000
+    await e.scan({ llm: m, target: all })
+    const cross = keysOf(e, CROSS_WS_ROUND)
+    const rounds = keysOf(e, P1)
+    slow.open()
+    await stale
+
+    expect(keysOf(e, CROSS_WS_ROUND)).toEqual(expect.arrayContaining(cross))
+    expect(keysOf(e, P1)).toEqual(expect.arrayContaining(rounds))
+    const [calls, crossCalls] = [m.calls.length, m.crossCalls]
+    e.clock.now += 1000
+    await e.scan({ llm: m, target: all })
+    expect([m.calls.length, m.crossCalls]).toEqual([calls, crossCalls])
+  })
+})
+
+describe('体检状态在写锁里核对视图之后才写', () => {
+  const GLOBAL = { kind: 'global' as const }
+
+  /** 换上真实侧表：视图和体检记录都在记忆根的 .state 下、同一把记忆根写锁，体检记录按接线层的样子带上视图核对。 */
+  function sidecars(e: CheckupEnv) {
+    const sidecar = new SidecarStore({ root: e.memoryRoot, schemas: sidecarSchemas, now: () => e.clock.now, log: e.deps.log })
+    e.deps.cache = sidecar.scanCache
+    e.checkups = new CheckupRecordStore(sidecar.checkups, { views: sidecar.scanCache, lock: sidecar.lock, log: e.deps.log! })
+    e.deps.checkups = e.checkups
+    const viewPath = (scope: Scope) => join(e.memoryRoot, STATE_DIR, 'scan-cache', `${createHash('sha1').update(scopeCacheKey(scope)).digest('hex')}.json`)
+    return {
+      sidecar,
+      viewOf: (scope: Scope) => sidecar.scanCache.get(scopeCacheKey(scope)),
+      /** 让这个范围的视图读不出（同名路径换成目录，读的时候报错），返回恢复的函数。 */
+      breakView: async (scope: Scope) => {
+        const path = viewPath(scope)
+        await rename(path, `${path}.saved`)
+        await mkdir(path)
+        return async () => {
+          await rm(path, { recursive: true })
+          await rename(`${path}.saved`, path)
+        }
+      },
+    }
+  }
+
+  /** 界面手动体检、自动体检的执行器；rewriteAll 是体检核心返回之后重写视图那一步（在记失败、模型用不了之前）。 */
+  function checkupRun(e: CheckupEnv, input: Pick<CheckupRunInput, 'target' | 'by' | 'llm'>, rewriteAll: () => Promise<void> = async () => {}) {
+    return runCheckup(input, {
+      scan: e.deps, checkups: e.checkups, now: () => e.clock.now,
+      views: { collectViews: async () => { throw new Error('测试不收集界面视图') }, rewriteAll: async () => { await rewriteAll() } } as unknown as CheckupRunDeps['views'],
+      interval: () => () => {}, log: e.deps.log!,
+    })
+  }
+
+  const hostError = (code: string): SemanticLlm => ({ complete: async () => { throw Object.assign(new Error(code), { code }) } })
+
+  it.each(['RATE_LIMIT', 'ACCOUNT_SIGN_IN_REQUIRED'])('自动体检的核心已经返回、还没记失败（%s）时，更新的语义扫描发布了：失败、模型用不了都不记', async code => {
+    const e = await env()
+    const { viewOf } = sidecars(e)
+    await seedPair(e)
+    const gate = barrier()
+    let isPaused = false
+    const run = checkupRun(e, { target: GLOBAL, by: 'auto', llm: hostError(code) }, async () => {
+      if (isPaused) return
+      isPaused = true
+      gate.arrive()
+      await gate.opened
+    })
+    await gate.reached
+    e.clock.now += 1000
+    await e.scan({ llm: stubModel(), layers: 'semantic' })
+    expect((await viewOf(GLOBAL))?.scannedAt).toBe(e.clock.now)
+    gate.open()
+    await run
+
+    const [rec] = await e.checkups.list()
+    expect([rec?.failure, rec?.modelUnavailable, rec?.completed]).toEqual([undefined, undefined, undefined])
+  })
+
+  it('旧体检发布之后、写完成记录之前，更新的一次第一批就失败、没有可发布的结果，只记了失败：旧体检照写完成记录，但不清掉这条失败', async () => {
+    const e = await env()
+    sidecars(e)
+    await seedPair(e)
+    const gate = barrier()
+    const complete = e.checkups.complete.bind(e.checkups)
+    let isPaused = false
+    e.checkups.complete = async (...args) => {
+      if (!isPaused) {
+        isPaused = true
+        gate.arrive()
+        await gate.opened
+      }
+      return complete(...args)
+    }
+    const stale = e.scan({ llm: stubModel() }, { by: 'agent' })
+    await gate.reached
+    e.clock.now += 1000
+    await edit(e, 'mem_x', { content: '用 pnpm 9' })
+    const failed = await checkupRun(e, { target: GLOBAL, by: 'auto', llm: hostError('RATE_LIMIT') })
+    expect(failed.kind).toBe('failed')
+    const [before] = await e.checkups.list()
+    expect(before?.failure?.failedAt).toBe(e.clock.now)
+    gate.open()
+    await stale
+
+    const [after] = await e.checkups.list()
+    expect(after?.completed?.startedAt).toBe(CHECKUP_NOW)
+    expect(after?.failure).toEqual(before?.failure)
+  })
+
+  it('旧体检核对视图之后、写完成记录之前，又一次扫描要发布：等旧体检写完才发布；更新的那次记下的失败仍不被清掉', async () => {
+    const e = await env()
+    const { sidecar, viewOf } = sidecars(e)
+    await seedPair(e)
+    const beforeComplete = barrier()
+    const complete = e.checkups.complete.bind(e.checkups)
+    let isCompletePaused = false
+    e.checkups.complete = async (...args) => {
+      if (!isCompletePaused) {
+        isCompletePaused = true
+        beforeComplete.arrive()
+        await beforeComplete.opened
+      }
+      return complete(...args)
+    }
+    const stale = e.scan({ llm: stubModel() }, { by: 'agent' })
+    await beforeComplete.reached
+    e.clock.now += 1000
+    await edit(e, 'mem_x', { content: '用 pnpm 9' })
+    await checkupRun(e, { target: GLOBAL, by: 'auto', llm: hostError('RATE_LIMIT') })
+    const [before] = await e.checkups.list()
+    expect(before?.failure).toBeDefined()
+
+    // 下一次读视图就是旧体检写完成记录前的核对：核对完停住
+    const afterCheck = barrier()
+    const getChecked = sidecar.scanCache.getChecked.bind(sidecar.scanCache)
+    let isCheckPaused = false
+    sidecar.scanCache.getChecked = async (...args) => {
+      const read = await getChecked(...args)
+      if (!isCheckPaused) {
+        isCheckPaused = true
+        afterCheck.arrive()
+        await afterCheck.opened
+      }
+      return read
+    }
+    beforeComplete.open()
+    await afterCheck.reached
+    e.clock.now += 1000
+    const newer = e.clock.now
+    const semantic = e.scan({ llm: stubModel(), layers: 'semantic' })
+    afterCheck.open()
+    await Promise.all([stale, semantic])
+
+    const [after] = await e.checkups.list()
+    expect(after?.completed?.startedAt).toBe(CHECKUP_NOW)
+    expect(after?.failure).toEqual(before?.failure)
+    expect((await viewOf(GLOBAL))?.scannedAt).toBe(newer)
+  })
+
+  it('视图读不出时完成记录、续查时间不写，失败、模型用不了照写，都记日志；视图恢复后下一次体检照常写完成记录', async () => {
+    const e = await env()
+    const { breakView } = sidecars(e)
+    await seedPair(e)
+    await e.scan({ llm: stubModel() })
+    const record = await e.checkups.list()
+    expect(record[0]?.completed?.startedAt).toBe(CHECKUP_NOW)
+    const restore = await breakView(GLOBAL)
+    e.clock.now += 1000
+    const at = e.clock.now
+    const logged = e.logs.length
+
+    await e.checkups.complete([GLOBAL], { startedAt: at, completedAt: at, by: 'agent' })
+    await e.checkups.recordContinue(GLOBAL, at + DAY_MS, at)
+    expect(await e.checkups.list()).toEqual(record)
+    await e.checkups.recordFailure(GLOBAL, { kind: 'model-error', message: '模型出错' }, at, at)
+    await e.checkups.recordModelUnavailable(GLOBAL, { kind: 'no-default-model' }, at)
+    expect(await e.checkups.list()).toEqual([{
+      ...record[0],
+      failure: { count: 1, failedAt: at, cause: { kind: 'model-error', message: '模型出错' } },
+      modelUnavailable: { kind: 'no-default-model' },
+    }])
+    expect(e.logs.slice(logged).filter(line => line.includes('读不出 global 的体检视图'))).toHaveLength(4)
+
+    await restore()
+    e.clock.now += 1000
+    await e.scan({ llm: stubModel() })
+    expect((await e.checkups.list())[0]?.completed?.startedAt).toBe(e.clock.now)
+  })
+
+  it('全库体检的认领过期、被别的体检接手：旧的那次停在约「接着查」之前，恢复后不改接手那次约的时间', async () => {
+    const e = await env()
+    const { viewOf } = sidecars(e)
+    const P = '/work/app'
+    const project = { kind: 'workspace' as const, workspacePath: P }
+    await e.store.put(bigRecord({ id: 'mem_g' }))
+    await e.store.put(bigRecord({ id: 'mem_p', scope: 'workspace', workspacePath: P }))
+    await e.scan({ target: { kind: 'scope', scope: project }, layers: 'semantic', llm: stubModel({ model: 'seed', findings: [{ type: 'unclear', ids: ['mem_p'] }] }) })
+    e.clock.now += 1000
+    // 上限只够一批：全局那批用完，项目这一轮一批都没轮到
+    e.tokenCap.value = 1
+    const gate = barrier()
+    const recordContinue = e.checkups.recordContinue.bind(e.checkups)
+    let isPaused = false
+    e.checkups.recordContinue = async (...args) => {
+      if (!isPaused && args[0].kind === 'workspace') {
+        isPaused = true
+        gate.arrive()
+        await gate.opened
+      }
+      return recordContinue(...args)
+    }
+    const stale = checkupRun(e, { target: { kind: 'all' }, by: 'manual', llm: stubModel() })
+    await gate.reached
+    // 旧的那次停住期间没有心跳：认领过期，下一次全库体检接手
+    e.clock.now += 61_000
+    await edit(e, 'mem_g', { content: `改过 ${'记'.repeat(27_000)}` })
+    const newer = await checkupRun(e, { target: { kind: 'all' }, by: 'manual', llm: stubModel() })
+    expect(newer.kind).not.toBe('busy')
+    expect((await viewOf(project))?.scannedAt).toBe(e.clock.now)
+    const before = (await e.checkups.list()).find(r => r.id === P)
+    expect(before?.continueAt).toBe(e.clock.now + DAY_MS)
+    gate.open()
+    await stale
+
+    expect((await e.checkups.list()).find(r => r.id === P)?.continueAt).toBe(before?.continueAt)
+  })
+
+  it('体检核心和执行器写四类状态时，核对和写入在同一个写锁段里：读视图时已持锁，写入是同一段', async () => {
+    let entered = 0
+    let section: number | undefined
+    const seen: Array<[string, number | undefined]> = []
+    const lock = {
+      run: async <T>(fn: () => Promise<T>): Promise<T> => {
+        if (section !== undefined) return fn()
+        section = ++entered
+        try {
+          return await fn()
+        } finally {
+          section = undefined
+        }
+      },
+    }
+    const views = new InMemoryKvTable<ScanCacheEntry>()
+    const getChecked = views.getChecked.bind(views)
+    views.getChecked = async key => {
+      seen.push(['核对', section])
+      return getChecked(key)
+    }
+    const table = new InMemoryKvTable<CheckupRecord>()
+    const update = table.update.bind(table)
+    table.update = async (key, fn) => {
+      seen.push(['写', section])
+      return update(key, fn)
+    }
+    const checkups = new CheckupRecordStore(table, { views, lock, log: { info() {}, warn() {}, error() {} } })
+    const at = CHECKUP_NOW
+    await checkups.complete([GLOBAL], { startedAt: at, completedAt: at, by: 'agent' })
+    await checkups.recordContinue(GLOBAL, at + DAY_MS, at)
+    await checkups.recordFailure(GLOBAL, { kind: 'model-error', message: '模型出错' }, at, at)
+    await checkups.recordModelUnavailable(GLOBAL, { kind: 'no-default-model' }, at)
+
+    expect(seen).toEqual([1, 2, 3, 4].flatMap(n => [['核对', n], ['写', n]]))
   })
 })

@@ -98,13 +98,16 @@ export class CheckupCache {
   /**
    * 一轮查全了之后清理：删掉键不在 keep 里的行和早于 recheckBefore 查的行，再删掉不晚于 recheckBefore 的全部重查时刻
    * （这之后别处又点了全部重查的，留着它的）。删不掉记日志。
+   * startedAt：清理的扫描开始的时刻。检查时刻是整数且晚于它的行不删：那是这次扫描开始之后别处写的，不在这次读到的范围里，
+   * 按这次的键清会把别处刚写的新结论删掉。不给时不按时刻留行。
    */
-  prune(round: string, keep: ReadonlySet<string>, recheckBefore: number): void {
+  prune(round: string, keep: ReadonlySet<string>, recheckBefore: number, startedAt?: number): void {
     this.exec('清理', (db) => {
       inTransaction(db, () => {
         const rows = db.prepare('SELECT key, checked_at FROM checks WHERE round = ?').all(round) as Array<{ key: string; checked_at: unknown }>
         const drop = db.prepare('DELETE FROM checks WHERE round = ? AND key = ?')
         for (const row of rows) {
+          if (startedAt !== undefined && Number.isSafeInteger(row.checked_at) && (row.checked_at as number) > startedAt) continue
           const isOld = typeof row.checked_at !== 'number' || row.checked_at < recheckBefore
           if (!keep.has(row.key) || isOld) drop.run(round, row.key)
         }
