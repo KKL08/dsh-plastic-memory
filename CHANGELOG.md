@@ -282,6 +282,14 @@ All notable changes to this project are documented here. The format follows
   to global. On conflict cards, Keep both is replaced by Not a conflict and
   Mark as exception, and conflicts between two memories also offer Merge as
   versions. Each result can be undone.
+- When the exchange quoted under a memory has little in common with the
+  memory, `memory_search` checks the five turns before it. If one matches the
+  memory clearly better, that turn is quoted too, marked as a guessed source;
+  otherwise the quote notes that the memory may come from earlier turns.
+  A memory saved with the whole conversation as its source, rather than one
+  exchange, can likewise get the closest of the last 20 turns before it was
+  saved, marked as guessed, instead of only a note that the exchange cannot be
+  found.
 
 ### Changed
 - The memories loaded at the start of a chat now follow the topic index.

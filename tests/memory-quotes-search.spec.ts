@@ -183,8 +183,8 @@ describe('三种锚', () => {
     expect(block.indexOf('读锁也要处理')).toBeLessThan(block.indexOf('写锁的长消息看过了'))
   })
 
-  it('起点是 0 的整会话兜底锚：如实写定位不到轮', async () => {
-    const r = withAnchors([anchor('s1', [0, 14], { at: at(0) })], { id: 'mem_z', content: '写锁在提交前拿' })
+  it('起点是 0 的整会话兜底锚：覆盖范围里也找不到像的轮时，如实写定位不到轮', async () => {
+    const r = withAnchors([anchor('s1', [0, 14], { at: at(0) })], { id: 'mem_z', name: '写锁', content: '苍穹碧海群鹭翱翔' })
     const { deps } = await setup([r])
     const block = quoteOf((await run(deps)).result, 'mem_z')
     expect(block).toContain(QUOTE_UNLOCATED); expect(block).not.toContain(DIALOGUE_QUOTE_TAG)
@@ -313,9 +313,9 @@ describe('取不到', () => {
     expect(block).toContain(QUOTE_UNLOCATED); expect(block).not.toContain('别的话题')
   })
 
-  it('锚区间写坏或是整会话兜底：写定位不到出处是哪一轮，一段都不读', async () => {
-    const ranges: Array<[number, number]> = [[0, 25], [25, 20], [Number.NaN, 20], [-1, 20], [1.5, 3], [10, Number.POSITIVE_INFINITY]]
-    const words = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot']
+  it('锚区间写坏：写定位不到出处是哪一轮，一段都不读', async () => {
+    const ranges: Array<[number, number]> = [[25, 20], [Number.NaN, 20], [-1, 20], [1.5, 3], [10, Number.POSITIVE_INFINITY]]
+    const words = ['bravo', 'charlie', 'delta', 'echo', 'foxtrot']
     const records = ranges.map((range, i) => withAnchors([anchor('s1', range, { at: SOURCE_TIME })], { id: `mem_bad${i}`, content: `写锁 ${words[i]}` }))
     const { deps } = await setup(records)
     const segments = vi.spyOn(db, 'segmentsOf'); const session = vi.spyOn(db, 'session')

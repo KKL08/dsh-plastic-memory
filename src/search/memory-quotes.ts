@@ -6,7 +6,7 @@ import { rankSegments, type DialogueSegment } from './dialogue-rank.ts'
 import type { DialogueTokenizer } from './dialogue-tokenizer.ts'
 import type { DialogueSpeaker } from '../contract-codes.ts'
 import {
-  DIALOGUE_SEGMENT_GAP, SAME_AS_MEMORY_NOTE, excerptByMemoryNote, excerptNote, foldToLine, formatMessageRef, memoryQuoteStatus, messageReferenceNote,
+  ANCHOR_TURN_MISMATCH_NOTE, DIALOGUE_SEGMENT_GAP, GUESSED_SOURCE_MARK, SAME_AS_MEMORY_NOTE, excerptByMemoryNote, excerptNote, foldToLine, formatMessageRef, memoryQuoteStatus, messageReferenceNote,
   renderDialogueLine, sameSourceNote, wrapDialogueQuote,
 } from './dialogue-format.ts'
 
@@ -203,8 +203,108 @@ export function memoryLabelOf(record: Pick<MemoryRecord, 'id' | 'name' | 'conten
   return maskSecretSurface(record).name === record.name ? foldToLine(record.name) : record.id
 }
 
-/** 渲染用的一轮。isInProject：出处会话在当前项目里，消息引用用得上。messages 是这一轮给出的各段，同一条消息的几段渲染时拼成一条。 */
-export interface QuoteTurnView { sessionId: string; isInProject: boolean; messages: ReadonlyArray<QuotedMessage & { isSameAsMemory: boolean }> }
+/**
+ * 渲染用的一轮。isInProject：出处会话在当前项目里，消息引用用得上。messages 是这一轮给出的各段，同一条消息的几段渲染时拼成一条。
+ * provenance：guessed 是查询时补找给的推测出处；anchor-mismatch 是锚所在轮和记忆正文对不上、这条记忆下面又没给出推测出处。缺省是锚所在的轮，照常渲染。
+ */
+export interface QuoteTurnView {
+  sessionId: string
+  isInProject: boolean
+  messages: ReadonlyArray<QuotedMessage & { isSameAsMemory: boolean }>
+  provenance?: 'guessed' | 'anchor-mismatch'
+}
+
+// 查询时补找出处：锚所在轮和记忆正文比字二元组重合，对不上时在同一会话往前找最相关的一轮。三处用同一把尺子（记忆侧覆盖率）。
+// 下面五个数都是暂定值，等中文原话评测集复核。
+/** 锚所在轮和记忆正文「对得上」的最低重合。 */
+export const GUESS_MATCH_MIN_COVERAGE = 0.3
+/** 候选轮自身的重合至少这么多才给推测出处。 */
+export const GUESS_CANDIDATE_MIN_COVERAGE = 0.4
+/** 候选轮的重合至少比锚所在轮高这么多才给推测出处（「明显好于」）。 */
+export const GUESS_MIN_MARGIN = 0.15
+/** 锚所在轮往前看几轮：轮次边界表里开始序号更小的最近几轮，没有原话的空轮也算一轮。 */
+export const GUESS_LOOKBACK_TURNS = 5
+/** 定位不到轮的锚：只看锚覆盖到的轮里最近的这么多轮。 */
+export const GUESS_UNLOCATED_MAX_TURNS = 20
+
+/** 补找的三道门槛；缺省用上面的常量，评测脚本换值对照时传。 */
+export interface GuessThresholds { matchMin: number; candidateMin: number; marginMin: number }
+export const GUESS_THRESHOLDS: GuessThresholds = { matchMin: GUESS_MATCH_MIN_COVERAGE, candidateMin: GUESS_CANDIDATE_MIN_COVERAGE, marginMin: GUESS_MIN_MARGIN }
+
+/** 一段文字的字二元组集合：切法同对话记录库分词的 b 列（columns(text).b 按空格拆开）。 */
+export function bigramSet(text: string, tokenizer: Pick<DialogueTokenizer, 'columns'>): Set<string> {
+  return new Set(tokenizer.columns(text).b.split(' ').filter(word => word !== ''))
+}
+
+/** 记忆侧覆盖率 |M∩T| / |M|，M 是记忆正文的字二元组集合，T 是一轮原话的。M 为空（记忆正文切不出二元组）时返回 undefined。 */
+export function memoryCoverage(memory: ReadonlySet<string>, turn: ReadonlySet<string>): number | undefined {
+  if (memory.size === 0) return undefined
+  let shared = 0
+  for (const word of memory) if (turn.has(word)) shared++
+  return shared / memory.size
+}
+
+/** 拿来比的一轮：库里这一轮的段，只看用户和助手的段（和附出去的原话一致），工具结果不算。 */
+export interface GuessTurn { turnSeq: number; segments: readonly DialogueSegment[] }
+
+/** 补找的结论。keep：不补、不说明；guessed：给这一轮当推测出处；mismatch：锚所在轮对不上，候选也没过两道门槛。 */
+export type GuessVerdict = { kind: 'keep' } | { kind: 'guessed'; turnSeq: number } | { kind: 'mismatch' }
+
+/**
+ * 判断要不要补推测出处。memory 是记忆正文。
+ * anchorTurns 是锚定位到的轮（取各轮重合的最大值作锚所在轮的重合）；不低于 matchMin 就是对得上：keep。
+ * 对不上时在 candidates 里取重合最高的一轮（并列取开始序号大的），重合不低于 candidateMin、且比锚所在轮至少高 marginMin 才给，否则 mismatch。
+ * anchorTurns 为 undefined 是定位不到轮：没有锚所在轮可比，只过 candidateMin 一道。
+ * 记忆正文切不出二元组：比不了，keep。
+ */
+export function judgeGuess(input: {
+  memory: string
+  anchorTurns: readonly GuessTurn[] | undefined
+  candidates: readonly GuessTurn[]
+  tokenizer: Pick<DialogueTokenizer, 'columns'>
+  thresholds?: GuessThresholds
+}): GuessVerdict {
+  const memory = bigramSet(input.memory, input.tokenizer)
+  if (memory.size === 0) return { kind: 'keep' }
+  const thresholds = input.thresholds ?? GUESS_THRESHOLDS
+  const coverage = (turn: GuessTurn) => memoryCoverage(memory, bigramSet(
+    turn.segments.filter(s => s.speaker === 'user' || s.speaker === 'assistant').map(s => s.text).join(' '), input.tokenizer,
+  ))!
+  const anchorCoverage = input.anchorTurns === undefined ? undefined : Math.max(0, ...input.anchorTurns.map(coverage))
+  if (anchorCoverage !== undefined && anchorCoverage >= thresholds.matchMin) return { kind: 'keep' }
+  let best: { turnSeq: number; coverage: number } | undefined
+  for (const turn of input.candidates) {
+    const score = coverage(turn)
+    if (best === undefined || score > best.coverage || (score === best.coverage && turn.turnSeq > best.turnSeq)) {
+      best = { turnSeq: turn.turnSeq, coverage: score }
+    }
+  }
+  // 覆盖率相减会有浮点舍入误差，容许一个机器精度以保留恰好等于门槛的结果。
+  if (best !== undefined && best.coverage >= thresholds.candidateMin
+    && (anchorCoverage === undefined || best.coverage - anchorCoverage + Number.EPSILON >= thresholds.marginMin)) {
+    return { kind: 'guessed', turnSeq: best.turnSeq }
+  }
+  return { kind: 'mismatch' }
+}
+
+/** 往前补找的候选：轮次边界表里开始序号小于 firstTurnSeq 的最近 count 轮（空轮也算），按先后排。 */
+export function lookbackTurns(turns: readonly TurnRow[], firstTurnSeq: number, count: number = GUESS_LOOKBACK_TURNS): number[] {
+  if (count <= 0) return []
+  return turns.filter(t => t.turnSeq < firstTurnSeq).slice(-count).map(t => t.turnSeq)
+}
+
+/**
+ * 定位不到轮的锚覆盖到的轮：区间两端是不小于 0 的安全整数、终点不小于起点，且起点是 0（整会话兜底）或早于第一轮时，
+ * 取开始序号不大于终点的各轮里最近的 count 轮，按先后排（可能为空）。
+ * 其余返回 undefined、不补找：区间写坏，或起点落在某一轮里、只是按时间找不回那一轮（序号已经对不上，按序号圈的范围不可信）。
+ */
+export function unlocatedTurns(range: SourceAnchor['eventRange'], turns: readonly TurnRow[], count: number = GUESS_UNLOCATED_MAX_TURNS): number[] | undefined {
+  const [start, end] = range
+  if (!isSeq(start) || !isSeq(end) || end < start) return undefined
+  if (start !== 0 && turns.length > 0 && start >= turns[0]!.turnSeq) return undefined
+  if (count <= 0) return []
+  return turns.filter(t => t.turnSeq <= end).slice(-count).map(t => t.turnSeq)
+}
 
 /** 按原文顺序把各段归到各自的消息下。 */
 function groupBySeq<T extends { seq: number; segment: number }>(parts: readonly T[]): T[][] {
@@ -226,15 +326,21 @@ function groupBySeq<T extends { seq: number; segment: number }>(parts: readonly 
 export function renderMemoryQuote(input: { memoryId: string; turns: readonly QuoteTurnView[]; sameSource: readonly string[]; status?: string }): string | undefined {
   const lines = input.sameSource.map(sameSourceNote)
   if (input.status !== undefined) lines.push(memoryQuoteStatus(input.status))
-  const body = input.turns.map(turn => groupBySeq(turn.messages).map(parts => {
-    const m = parts[0]!
-    const text = parts.map((p, i) => (i > 0 && p.segment !== parts[i - 1]!.segment + 1 ? DIALOGUE_SEGMENT_GAP : '') + (p.isSameAsMemory ? SAME_AS_MEMORY_NOTE : p.text)).join('')
-    const line = renderDialogueLine({ speaker: m.speaker, at: m.at, text })
-    const isExcerpt = parts.length < m.segmentCount
-    if (!turn.isInProject) return line + (isExcerpt ? excerptByMemoryNote(m.segmentCount, input.memoryId) : '')
-    const ref = formatMessageRef({ sessionId: turn.sessionId, seq: m.seq })
-    return line + (isExcerpt ? excerptNote(m.segmentCount, ref) : messageReferenceNote(ref))
-  }).join('\n')).filter(t => t !== '').join('\n\n')
+  const body = input.turns.map(turn => {
+    const body = groupBySeq(turn.messages).map(parts => {
+      const m = parts[0]!
+      const text = parts.map((p, i) => (i > 0 && p.segment !== parts[i - 1]!.segment + 1 ? DIALOGUE_SEGMENT_GAP : '') + (p.isSameAsMemory ? SAME_AS_MEMORY_NOTE : p.text)).join('')
+      const line = renderDialogueLine({ speaker: m.speaker, at: m.at, text })
+      const isExcerpt = parts.length < m.segmentCount
+      if (!turn.isInProject) return line + (isExcerpt ? excerptByMemoryNote(m.segmentCount, input.memoryId) : '')
+      const ref = formatMessageRef({ sessionId: turn.sessionId, seq: m.seq })
+      return line + (isExcerpt ? excerptNote(m.segmentCount, ref) : messageReferenceNote(ref))
+    }).join('\n')
+    if (body === '') return body
+    if (turn.provenance === 'guessed') return GUESSED_SOURCE_MARK + '\n' + body
+    if (turn.provenance === 'anchor-mismatch') return body + '\n' + ANCHOR_TURN_MISMATCH_NOTE
+    return body
+  }).filter(t => t !== '').join('\n\n')
   if (body !== '') lines.push(wrapDialogueQuote(body))
   return lines.length === 0 ? undefined : lines.join('\n')
 }

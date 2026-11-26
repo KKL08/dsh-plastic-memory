@@ -4,8 +4,8 @@ import type { DialogueTokenizer } from '../search/dialogue-tokenizer.ts'
 import type { DialogueSpeaker } from '../contract-codes.ts'
 import type { DialogueSegment, FusionLane } from '../search/dialogue-rank.ts'
 import {
-  MEMORY_QUOTE_BUDGET_TOKENS, MEMORY_QUOTE_LIMIT, fillMemoryQuotes, isLocatableRange, isSameAsMemory, keywordRanker, memoryLabelOf, orderTurnsByRelevance,
-  pickTurnMessages, quoteCoverage, quoteTurnKey, renderMemoryQuote, resolveAnchorTurns, type QuoteTurnView, type SegmentRanker,
+  MEMORY_QUOTE_BUDGET_TOKENS, MEMORY_QUOTE_LIMIT, fillMemoryQuotes, isLocatableRange, isSameAsMemory, judgeGuess, keywordRanker, lookbackTurns, memoryLabelOf, orderTurnsByRelevance,
+  pickTurnMessages, quoteCoverage, quoteTurnKey, renderMemoryQuote, resolveAnchorTurns, unlocatedTurns, type GuessTurn, type QuoteTurnView, type SegmentRanker,
 } from '../search/memory-quotes.ts'
 import {
   QUOTE_NOT_COLLECTED, QUOTE_NO_REVIEW, QUOTE_PENDING, QUOTE_SESSIONS_UNAVAILABLE, QUOTE_SESSION_GONE, QUOTE_UNLOCATED, TURN_NOT_INDEXED_NOTE,
@@ -101,9 +101,9 @@ function locateTurns(anchor: SourceAnchor, store: MemoryQuoteDeps['store'], gen:
   const turnRows = store.turnsOf(gen, sessionId)
   const nextTurnAfter = (seq: number) => turnRows.find(t => t.turnSeq > seq)?.turnSeq
   const segmentsUntilNextTurn = (from: number, after: number) => store.segmentsOf(gen, sessionId, from, (nextTurnAfter(after) ?? LAST_SEQ) - 1)
-  // 判断时间对不对得上要用锚起点和锚区间之后的位置；只有带改动性质的锚才判
-  const points = anchor.change !== undefined ? segmentsUntilNextTurn(start, end).map(s => ({ seq: s.seq, at: s.at })) : []
-  return { located: resolveAnchorTurns(anchor, turnRows, points), segmentsUntilNextTurn }
+  // 判断时间对不对得上要用锚起点和锚区间之后的位置；只有带改动性质且起点能落在轮内的锚才判
+  const points = anchor.change !== undefined && isLocatableRange(anchor.eventRange) && turnRows.length > 0 && start >= turnRows[0]!.turnSeq ? segmentsUntilNextTurn(start, end).map(s => ({ seq: s.seq, at: s.at })) : []
+  return { located: resolveAnchorTurns(anchor, turnRows, points), segmentsUntilNextTurn, turnRows }
 }
 
 /** 锚定位到的几轮按和记忆正文、这次查询的相关程度排：带原话附哪几轮、记忆一路记到哪一轮都按这个顺序。 */
@@ -114,9 +114,12 @@ function relevantTurns(
   return { rankers, turns: orderTurnsByRelevance(turnSeqs.map(turnSeq => ({ turnSeq, segments: segmentsUntilNextTurn(turnSeq, turnSeq) })), rankers) }
 }
 
+/** 装填后按轮键核对：推测出处没给出时，在这组锚装填后仍留下的首轮补说明。 */
+interface AnchorMismatch { anchorKeys: string[]; guessedKey?: string }
+
 /** 一个锚取到的结果：几轮原话，或一句说明；skip 是不该给这条记忆附任何东西（不属于当前项目的记忆）。 */
 type AnchorOutcome =
-  | { kind: 'turns'; turns: Array<{ key: string; cost: number; view: QuoteTurnView }> }
+  | { kind: 'turns'; turns: Array<{ key: string; cost: number; view: QuoteTurnView }>; mismatch?: AnchorMismatch }
   | { kind: 'status'; note: string }
   | { kind: 'skip' }
 
@@ -141,26 +144,43 @@ export async function quoteMemories(
   const reader: Reader = { table, read, tokenizer }
   const plans: Array<Array<{ key: string; cost: number; view: QuoteTurnView }>> = []
   const statuses: Array<string | undefined> = []
+  const mismatches: AnchorMismatch[][] = []
   for (const [i, { record, isExcerpt }] of top.entries()) {
     const turns: Array<{ key: string; cost: number; view: QuoteTurnView }> = []
+    const checks: AnchorMismatch[] = []
     let status: string | undefined
     for (const anchor of anchors[i]!) {
       const outcome = quoteAnchor(record, isExcerpt === true, anchor, query, context, deps, reader)
       if (outcome.kind === 'turns') {
-        for (const t of outcome.turns) if (!turns.some(x => x.key === t.key)) turns.push(t)
+        if (outcome.mismatch !== undefined) checks.push(outcome.mismatch)
+        for (const t of outcome.turns) {
+          const existing = turns.find(x => x.key === t.key)
+          if (existing === undefined) turns.push(t)
+          // 同一轮有实际记录的锚时，出处以实际记录为准，与锚的遍历顺序无关。
+          else if (existing.view.provenance === 'guessed' && t.view.provenance === undefined) existing.view = t.view
+        }
       } else if (outcome.kind === 'status') status ??= outcome.note
     }
+    mismatches.push(checks)
     plans.push(turns)
     statuses.push(status)
   }
   const items = fillMemoryQuotes(plans.map(turns => ({ turns })), MEMORY_QUOTE_BUDGET_TOKENS)
   return {
-    quotes: items.map((list, i) => ({
-      memoryId: top[i]!.record.id,
-      turns: list.flatMap(item => item.kind === 'quote' ? [{ key: plans[i]![item.turn]!.key, view: plans[i]![item.turn]!.view }] : []),
-      sameSource: list.flatMap(item => item.kind === 'same-source' ? [memoryLabelOf(top[item.owner]!.record)] : []),
-      ...(plans[i]!.length === 0 && statuses[i] !== undefined ? { status: statuses[i] } : {}),
-    })),
+    quotes: items.map((list, i) => {
+      const turns = list.flatMap(item => item.kind === 'quote' ? [{ key: plans[i]![item.turn]!.key, view: plans[i]![item.turn]!.view }] : [])
+      for (const check of mismatches[i]!) {
+        if (check.guessedKey !== undefined && turns.some(t => t.key === check.guessedKey)) continue
+        const first = check.anchorKeys.map(key => turns.find(t => t.key === key)).find(t => t !== undefined)
+        if (first !== undefined) first.view = { ...first.view, provenance: 'anchor-mismatch' }
+      }
+      return {
+        memoryId: top[i]!.record.id,
+        turns,
+        sameSource: list.flatMap(item => item.kind === 'same-source' ? [memoryLabelOf(top[item.owner]!.record)] : []),
+        ...(plans[i]!.length === 0 && statuses[i] !== undefined ? { status: statuses[i] } : {}),
+      }
+    }),
   }
 }
 
@@ -177,8 +197,8 @@ function quoteAnchor(record: MemoryRecord, isExcerpt: boolean, anchor: SourceAnc
   if (!checked.ok) return checked.kind === 'rejected' ? status(checked.reason) : { kind: 'skip' }
   const policy = quoteReadPolicy(checked.anchor, reader.table)
   if (!policy.ok) return status(policy.kind === 'gone' ? QUOTE_SESSION_GONE : policy.kind === 'no-review' ? QUOTE_NO_REVIEW : QUOTE_SESSIONS_UNAVAILABLE)
-  // 区间写坏、整会话兜底的锚：先回定位不到，不去判收录、不读段
-  if (!isLocatableRange(anchor.eventRange)) return status(QUOTE_UNLOCATED)
+  // 区间写坏：先回定位不到，不去判收录、不读段
+  if (!isLocatableRange(anchor.eventRange) && unlocatedTurns(anchor.eventRange, []) === undefined) return status(QUOTE_UNLOCATED)
   const { read } = reader
   const sessionId = anchor.sessionId
   const end = anchor.eventRange[1]
@@ -187,16 +207,38 @@ function quoteAnchor(record: MemoryRecord, isExcerpt: boolean, anchor: SourceAnc
   }, end)
   if (coverage === 'pending') return status(QUOTE_PENDING)
   if (coverage === 'not-collected') return status(QUOTE_NOT_COLLECTED)
-  const { located, segmentsUntilNextTurn } = locateTurns(anchor, deps.store, read!.gen)
-  if (located.kind === 'unlocated') return status(QUOTE_UNLOCATED)
-  const { rankers, turns } = relevantTurns(record, query, reader.tokenizer, located.turnSeqs, segmentsUntilNextTurn)
+  const { located, segmentsUntilNextTurn, turnRows } = locateTurns(anchor, deps.store, read!.gen)
   const isInProject = context.workspacePath !== undefined && reader.table.get(sessionId)?.workspacePath === context.workspacePath
-  const quoted = turns.flatMap(turn => {
-    const messages = pickTurnMessages(turn.segments, rankers).map(m => ({ ...m, isSameAsMemory: isSameAsMemory(m.text, isExcerpt ? undefined : record.content) }))
+  const readTurns = (seqs: readonly number[]) => seqs.map(turnSeq => ({ turnSeq, segments: segmentsUntilNextTurn(turnSeq, turnSeq) }))
+  const ranked = located.kind === 'turns'
+    ? relevantTurns(record, query, reader.tokenizer, located.turnSeqs, segmentsUntilNextTurn)
+    : { rankers: [keywordRanker(`${record.content} ${query}`, reader.tokenizer)], turns: [] }
+  const quote = (turn: GuessTurn, provenance?: 'guessed') => {
+    const messages = pickTurnMessages(turn.segments, ranked.rankers).map(m => ({ ...m, isSameAsMemory: isSameAsMemory(m.text, isExcerpt ? undefined : record.content) }))
     if (messages.length === 0) return []
     const cost = messages.reduce((n, m) => n + (m.isSameAsMemory ? 0 : estimateTokens(m.text)), 0)
-    return [{ key: quoteTurnKey(sessionId, turn.turnSeq), cost, view: { sessionId, isInProject, messages } }]
-  })
+    return [{ key: quoteTurnKey(sessionId, turn.turnSeq), cost, view: { sessionId, isInProject, messages, ...(provenance === undefined ? {} : { provenance }) } }]
+  }
+  if (located.kind === 'unlocated') {
+    const scope = unlocatedTurns(anchor.eventRange, turnRows)
+    if (scope === undefined || scope.length === 0) return status(QUOTE_UNLOCATED)
+    if (judgeGuess({ memory: record.content, anchorTurns: undefined, candidates: [], tokenizer: reader.tokenizer }).kind === 'keep') return status(QUOTE_UNLOCATED)
+    const candidates = readTurns(scope)
+    const verdict = judgeGuess({ memory: record.content, anchorTurns: undefined, candidates, tokenizer: reader.tokenizer })
+    if (verdict.kind !== 'guessed') return status(QUOTE_UNLOCATED)
+    const quoted = quote(candidates.find(t => t.turnSeq === verdict.turnSeq)!, 'guessed')
+    return quoted.length === 0 ? status(QUOTE_UNLOCATED) : { kind: 'turns', turns: quoted }
+  }
+  const quoted = ranked.turns.flatMap(turn => quote(turn))
   // 锚所在的轮都还没有可展示的内容：如实说，不落到上一轮去
-  return quoted.length === 0 ? status(TURN_NOT_INDEXED_NOTE) : { kind: 'turns', turns: quoted }
+  if (quoted.length === 0) return status(TURN_NOT_INDEXED_NOTE)
+  if (judgeGuess({ memory: record.content, anchorTurns: ranked.turns, candidates: [], tokenizer: reader.tokenizer }).kind === 'keep') return { kind: 'turns', turns: quoted }
+  const candidates = readTurns(lookbackTurns(turnRows, Math.min(...located.turnSeqs)))
+  const verdict = judgeGuess({ memory: record.content, anchorTurns: ranked.turns, candidates, tokenizer: reader.tokenizer })
+  const mismatch: AnchorMismatch = { anchorKeys: quoted.map(t => t.key) }
+  if (verdict.kind === 'guessed') {
+    mismatch.guessedKey = quoteTurnKey(sessionId, verdict.turnSeq)
+    quoted.push(...quote(candidates.find(t => t.turnSeq === verdict.turnSeq)!, 'guessed'))
+  }
+  return { kind: 'turns', turns: quoted, mismatch }
 }
