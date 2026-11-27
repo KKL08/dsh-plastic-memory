@@ -163,8 +163,10 @@ async function dreamOnce() {
   const plan = dreamsPlan({
     tidy: { store, maxTopics: () => 30, now: () => NOW, typeRecall: () => 'search' },
     merge: { store, dreams },
+    // 体检一步下面过滤掉了，不会跑
+    checkup: { scan: {} as never, resolveLlm: async () => ({ llm: null, isSelected: false, fellBack: false }) },
     drill: { store, decisions, host, noReview, maxDrillDowns: () => 5, now: () => NOW },
-    resolve: { store, decisions, dreams, readSessionLog: host.readSessionLog, noReview, memoryRoot: root, tier: () => 'trust', focusTypes: () => [], now: () => NOW },
+    resolve: { store, decisions, dreams, host, noReview, memoryRoot: root, tier: () => 'trust', focusTypes: () => [], now: () => NOW },
   }).filter(step => ['maintain', 'drill-down', 'resolve-findings'].includes(step.name))
   const claims = new InMemoryKvTable<{ id: string }>()
   const deps: DreamsRunDeps = {

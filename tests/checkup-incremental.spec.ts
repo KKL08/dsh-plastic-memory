@@ -11,12 +11,16 @@ import { CROSS_WS_ROUND, REFRESH_AFTER_MS, SCAN_TOKEN_CAP_DEFAULT } from '../src
 import { renderScanResult, runScan, type CheckupScanResult, type ScanToolResult, type SingleScanResult } from '../src/tools/scan.ts'
 import { checkupKey, isFullyCovered } from '../src/gui/contract.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
-import type { Scope } from '../src/scope.ts'
+import { scopeCacheKey, type Scope } from '../src/scope.ts'
 import { executeConfirm } from '../src/tools/confirm.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import type { MemorySnapshot } from '../src/governance/schema.ts'
 import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
 import { instructionsOf, noInstructions } from './helpers/instructions.ts'
+import { SidecarStore } from '../src/storage/sidecar.ts'
+import { sidecarSchemas } from './helpers/plugin-env.ts'
+import { PendingDecisionsStore } from '../src/governance/decisions.ts'
+import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 
 const GLOBAL: Scope = { kind: 'global' }
 const envs: CheckupEnv[] = []
@@ -1120,5 +1124,163 @@ describe('跨项目', () => {
     e.clock.now += 1000
     await e.scan({ llm: m, target: all })
     expect(m.crossCalls).toBe(2)
+  })
+})
+
+describe('调用方叫停、不做到期刷新', () => {
+  /** 一批里两对冲突（四条短记忆）。 */
+  async function twoPairs(e: CheckupEnv): Promise<StubModel> {
+    for (const id of ['mem_a', 'mem_b', 'mem_c', 'mem_d']) await e.store.put(record({ id, name: id, content: `${id} 的正文` }))
+    return stubModel({ findings: [{ type: 'conflict', ids: ['mem_a', 'mem_b'] }, { type: 'conflict', ids: ['mem_c', 'mem_d'] }] })
+  }
+  const pairsOf = async (e: CheckupEnv) => (await e.decisions.list()).map(d => [...d.memoryIds].sort().join('+')).sort()
+  const isAbortError = (err: unknown) => err instanceof Error && err.name === 'AbortError'
+
+  /** 叫停之后的下一次扫描（不叫停）：成员没变，命中库里这次写下的结论、不调模型，把挂账和视图补齐。 */
+  async function completesNextTime(e: CheckupEnv, m: StubModel) {
+    const calls = m.calls.length
+    e.clock.now += 1000
+    await e.scan({ llm: m })
+    expect(m.calls.length).toBe(calls)
+    expect(await pairsOf(e)).toEqual(['mem_a+mem_b', 'mem_c+mem_d'])
+    expect(findingKeys(await e.view(GLOBAL))).toEqual(['conflict:mem_a+mem_b', 'conflict:mem_c+mem_d'])
+  }
+
+  it('不做到期刷新：过了刷新时间、全部命中时一次模型都不调；不传时照常刷新', async () => {
+    const e = await env()
+    await threeBatches(e)
+    const m = stubModel()
+    await e.scan({ llm: m })
+    e.clock.now += REFRESH_AFTER_MS + DAY_MS
+    await e.scan({ llm: m, isRefreshSkipped: true })
+    expect(m.calls).toHaveLength(3)
+    await e.scan({ llm: m })
+    expect(m.calls).toHaveLength(6)
+  })
+
+  it('每次模型调用的实际用量交给调用方，叫停抛出时已用的也交过了', async () => {
+    const e = await env()
+    await threeBatches(e)
+    const m = stubModel()
+    const llm: SemanticLlm = { ...m, complete: async (input, signal, onUsage) => { onUsage?.(7); return m.complete(input, signal) } }
+    const used: number[] = []
+    const r = await e.scan({ llm, onUsage: tokens => { used.push(tokens) } })
+    expect(used).toEqual([7, 7, 7])
+    expect(r.kind === 'single' && r.usageTokens).toBe(21)
+    used.length = 0
+    await threeBatches(e, { summary: '改过' })
+    const stopped = e.scan({ llm, onUsage: tokens => { used.push(tokens) }, shouldStop: () => m.calls.length >= 4 })
+    await expect(stopped).rejects.toSatisfy(isAbortError)
+    expect(used).toEqual([7])
+  })
+
+  it('一批的模型调用返回之后叫停：这一批的结论不写进库，后面的批不再发，不挂账、不写视图', async () => {
+    const e = await env()
+    await threeBatches(e)
+    const m = stubModel()
+    await expect(e.scan({ llm: m, shouldStop: () => m.calls.length >= 1 })).rejects.toSatisfy(isAbortError)
+    expect(m.calls).toHaveLength(1)
+    expect(e.db.readRound('global')?.rows ?? []).toEqual([])
+    expect(await e.view(GLOBAL)).toBeUndefined()
+  })
+
+  it('一批的结论写进库之后叫停：下一批不再发模型请求，写进库的那批下一次命中', async () => {
+    const e = await env()
+    await threeBatches(e)
+    const m = stubModel()
+    let isStopped = false
+    const write = e.db.write.bind(e.db)
+    e.db.write = (...args) => { isStopped = true; return write(...args) }
+    await expect(e.scan({ llm: m, shouldStop: () => isStopped })).rejects.toSatisfy(isAbortError)
+    expect(m.calls).toHaveLength(1)
+    expect(e.db.readRound('global')?.rows).toHaveLength(1)
+    e.db.write = write
+    e.clock.now += 1000
+    await e.scan({ llm: m })
+    expect(m.calls).toHaveLength(3)
+  })
+
+  it('结论写进库之后、挂账之前叫停：不挂账、不写视图；下一次扫描命中、补齐', async () => {
+    const e = await env()
+    const m = await twoPairs(e)
+    let isStopped = false
+    const write = e.db.write.bind(e.db)
+    e.db.write = (...args) => { isStopped = true; return write(...args) }
+    await expect(e.scan({ llm: m, shouldStop: () => isStopped })).rejects.toSatisfy(isAbortError)
+    expect(e.db.readRound('global')?.rows).toHaveLength(1)
+    expect(await pairsOf(e)).toEqual([])
+    expect(await e.view(GLOBAL)).toBeUndefined()
+    e.db.write = write
+    await completesNextTime(e, m)
+  })
+
+  it('挂账重读成员期间叫停：这一条不挂，之后都不挂、不写视图；下一次扫描补齐', async () => {
+    const e = await env()
+    const m = await twoPairs(e)
+    let isStopped = false
+    let isArmed = false
+    const complete = m.complete
+    m.complete = async (...args) => { const r = await complete(...args); isArmed = true; return r }
+    const get = e.store.get.bind(e.store)
+    e.store.get = async (...args) => { if (isArmed) isStopped = true; return get(...args) }
+    await expect(e.scan({ llm: m, shouldStop: () => isStopped })).rejects.toSatisfy(isAbortError)
+    expect(await pairsOf(e)).toEqual([])
+    expect(await e.view(GLOBAL)).toBeUndefined()
+    e.store.get = get
+    await completesNextTime(e, m)
+  })
+
+  it('两条挂账之间叫停：已挂的那条留着，不再开始新的挂账、不写视图；下一次扫描补齐', async () => {
+    const e = await env()
+    const m = await twoPairs(e)
+    let isStopped = false
+    const upsert = e.decisions.upsert.bind(e.decisions)
+    e.decisions.upsert = async (...args) => { const r = await upsert(...args); isStopped = true; return r }
+    await expect(e.scan({ llm: m, shouldStop: () => isStopped })).rejects.toSatisfy(isAbortError)
+    expect(await pairsOf(e)).toHaveLength(1)
+    expect(await e.view(GLOBAL)).toBeUndefined()
+    e.decisions.upsert = upsert
+    await completesNextTime(e, m)
+  })
+
+  it('写视图等写锁期间叫停：拿到锁、读到当前视图之后不写，挂好的账留着；下一次扫描补齐', async () => {
+    const e = await env()
+    // 真实侧表：视图和账本都在记忆根的 .state 下，同一把记忆根写锁
+    const sidecar = new SidecarStore({ root: e.memoryRoot, schemas: sidecarSchemas, now: () => e.clock.now, log: e.deps.log })
+    e.deps.cache = sidecar.scanCache
+    e.decisions = new PendingDecisionsStore(sidecar.pending, sidecar.lock)
+    e.deps.decisions = e.decisions
+    const m = await twoPairs(e)
+    let isStopped = false
+    let releaseLock!: () => void
+    const held = new Promise<void>(resolve => { releaseLock = resolve })
+    let onWaiting!: () => void
+    const waiting = new Promise<void>(resolve => { onWaiting = resolve })
+    let holding: Promise<void> | undefined
+    const update = sidecar.scanCache.update.bind(sidecar.scanCache)
+    sidecar.scanCache.update = async (key, fn) => {
+      // 别处先占着写锁，体检排在它后面等
+      let onLocked!: () => void
+      const locked = new Promise<void>(resolve => { onLocked = resolve })
+      holding ??= sidecar.lock.run(async () => { onLocked(); await held })
+      await locked
+      const pending = update(key, fn)
+      onWaiting()
+      return pending
+    }
+    const scan = e.scan({ llm: m, shouldStop: () => isStopped })
+    await waiting
+    isStopped = true
+    releaseLock()
+    await expect(scan).rejects.toSatisfy(isAbortError)
+    await holding
+    expect(await pairsOf(e)).toEqual(['mem_a+mem_b', 'mem_c+mem_d'])
+    expect(await sidecar.scanCache.get(scopeCacheKey(GLOBAL))).toBeUndefined()
+    sidecar.scanCache.update = update
+    const calls = m.calls.length
+    e.clock.now += 1000
+    await e.scan({ llm: m })
+    expect(m.calls.length).toBe(calls)
+    expect(findingKeys(await sidecar.scanCache.get(scopeCacheKey(GLOBAL)))).toEqual(['conflict:mem_a+mem_b', 'conflict:mem_c+mem_d'])
   })
 })

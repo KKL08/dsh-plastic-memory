@@ -234,6 +234,27 @@ describe('上限与失败', () => {
   })
 })
 
+describe('调用方叫停', () => {
+  it('一批的来源回查返回之后叫停：这一批的结论不写进库，下一批不再问模型，不挂账、不写视图；下一次扫描补齐', async () => {
+    const e = await env()
+    await seedPair(e)
+    // 另一类型的长记忆单成一批，排在这一对之后
+    await e.store.put(mem('mem_c', { type: 'preference', content: '长'.repeat(60000) }))
+    e.deps.sources = fakeHost().sources
+    const m = findingModel({ findings: [CONFLICT_AB] })
+    let isStopped = false
+    m.verify = () => { isStopped = true; return verifyReply('conflict') }
+    await expect(e.scan({ llm: m, shouldStop: () => isStopped })).rejects.toMatchObject({ name: 'AbortError' })
+    expect(m.batchCalls).toEqual([['mem_a', 'mem_b']])
+    expect(e.db.readRound('global')?.rows ?? []).toEqual([])
+    expect(await e.decisions.list()).toEqual([])
+    expect(await e.view({ kind: 'global' })).toBeUndefined()
+    m.verify = () => verifyReply('conflict')
+    await e.scan({ llm: m })
+    expect((await only(e)).sourceCheck).toBe('checked')
+  })
+})
+
 describe('回查回复的处理', () => {
   it('回查给的文字遮密钥、id 换名称、换行和保留结构折成一行', async () => {
     const e = await env()

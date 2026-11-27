@@ -2,10 +2,11 @@ import { realpath } from 'node:fs/promises'
 import { isAbsolute, resolve, sep } from 'node:path'
 import type { MemoryStore } from '../store.ts'
 import type { PendingDecisionsStore } from '../governance/decisions.ts'
-import type { DreamsStore } from '../governance/dreams-records.ts'
+import type { DreamsStore, ResolveCursor } from '../governance/dreams-records.ts'
+import { drillAnchorKey, type DrillAnchor } from '../governance/drill-down.ts'
 import {
   buildTierPrompt, contentAnchorOf, dispositionOf, isImportant, judgeConfidence, olderBoundNote, pairBasis, parseTierReply,
-  resolveTier, tierConclusion, tierPlan, TIER_EXCERPT_MAX, TIER_MAX_PER_RUN, TIER_REASON_DEFAULT, TIER_REASON_MAX,
+  resolveTier, tierConclusion, tierPlan, TIER_ATTEMPTS_MAX, TIER_EXCERPT_MAX, TIER_MAX_PER_RUN, TIER_REASON_DEFAULT, TIER_REASON_MAX,
   TIER_WINDOW_MAX_CHARS, TIER_WINDOW_MAX_MESSAGES, TIER_WINDOW_MESSAGE_MAX_CHARS, type EvidenceKind,
 } from '../governance/dreams-tiers.ts'
 import { isDeepStrictEqual } from 'node:util'
@@ -23,6 +24,8 @@ import { locateCopy } from './workspace-gate.ts'
 import { anchorTimeMatches, excludesPluginEvidence, isOwnEvent, isRealUserMessage, relocateByTime, type SessionLog } from '../session-log.ts'
 import type { NoReviewList } from '../storage/no-review.ts'
 import type { DreamsStep } from './dreams-run.ts'
+import { drillOpen, noteUnreadable, type DrillUnreadableReason } from './dreams-drill.ts'
+import type { HostSession } from './host-session.ts'
 
 /**
  * 记忆梦境处理矛盾、状态变化、纠错：账本里这个范围未决的横向配对发现（冲突、漏记的变化），先读两边出处、交给模型核实，
@@ -144,11 +147,14 @@ function collectPaths(value: unknown, paths: unknown[]): void {
 export interface ResolveFindingsDeps {
   store: MemoryStore
   decisions: Pick<PendingDecisionsStore, 'list' | 'get' | 'hold' | 'reviseFinding'>
-  /** 用户撤销过的梦境合并和矛盾处理的结论（合并和矛盾共用一份；用户在「先处理」里不采纳、按原来那种发现裁决的不记）。读不全返回 undefined。 */
-  dreams: Pick<DreamsStore, 'undoneMerges'>
-  /** 一个会话的整份日志（宿主读不到为 null）。 */
-  readSessionLog: (sessionId: string) => Promise<SessionLog | null>
-  /** 标了不回看的会话不读；名单读不出（抛错）同样按读不到算。 */
+  /**
+   * 用户撤销过的梦境合并和矛盾处理的结论（合并和矛盾共用一份；用户在「先处理」里不采纳、按原来那种发现裁决的不记），读不全返回 undefined；
+   * 这一步的续读位置。
+   */
+  dreams: Pick<DreamsStore, 'undoneMerges' | 'resolveCursor' | 'saveResolveCursor'>
+  /** 读出处经下钻读口（drillOpen）：会话日志、会话清单、存档名单。 */
+  host: Pick<HostSession, 'readSessionLog' | 'listSessions' | 'archivedSessionIds'>
+  /** 标了不回看的会话不读（确认读不到）；名单读不出是这次读不出，下次重试。 */
   noReview: Pick<NoReviewList, 'isMarkedNoReview'>
   memoryRoot: string
   homeDir?: string
@@ -161,8 +167,12 @@ export interface ResolveFindingsDeps {
 
 /**
  * 运行计划里处理矛盾的一步（排在下钻补全之后、逐条整理之前）。每次都做（不看有没有新变化）：账本里的发现可能是这次运行之前的体检挂的。
- * 一次最多调 TIER_MAX_PER_RUN 次模型；模型到第一次要调时才取（ctx.llm）。读条目、读出处、调模型都不占着条目；
+ * 一次最多调 TIER_MAX_PER_RUN 次模型、最多开始读 TIER_ATTEMPTS_MAX 对的出处；模型到第一次要调时才取（ctx.llm）。读条目、读出处、调模型都不占着条目；
  * 写之前短暂认领条目，在认领里重读条目和两条记忆，对不上就放弃这一对。
+ * 账本条目按（挂账时刻，条目 id）排，从运行记录里续读位置的严格后继开始、到末尾绕回；最后开始读出处的那一对在这一步结束时
+ * 记成续读位置（正常结束、让路返回、出错抛出都记，一对都没开始读就不写）。
+ * 出处经下钻读口读（不占这次运行的下钻名额，读到的次数、存档会话照样记进下钻账），先读没存档的一边：
+ * 确认读不到的进下钻报告；这次读不出的（会话清单、存档名单、不回看名单、日志）记一条 resolve-source 跳过，下次重试。
  */
 export const resolveFindingsStep = (deps: ResolveFindingsDeps): DreamsStep => ({
   name: 'resolve-findings',
@@ -171,181 +181,211 @@ export const resolveFindingsStep = (deps: ResolveFindingsDeps): DreamsStep => ({
     if (ctx.shouldStop()) return
     const undone = await deps.dreams.undoneMerges(ctx.scope)
     if (undone === undefined) throw new Error('撤销过的梦境结论读不全，这一步没有处理')
-    const entries = (await deps.decisions.list()).sort((a, b) => a.firstSeenAt - b.firstSeenAt)
+    const sorted = (await deps.decisions.list()).sort(compareCursor)
+    const resumeAt = await deps.dreams.resolveCursor(ctx.scope)
+    const start = resumeAt === undefined ? 0 : Math.max(0, sorted.findIndex(e => compareCursor(e, resumeAt) > 0))
+    const entries = [...sorted.slice(start), ...sorted.slice(0, start)]
     const all = await activeMembers(deps.store, ctx)
     const read = (id: string) => locateCopy(deps.store, id, ctx.scope)
     const scopeLabel = ledgerLabel(ctx.scope)
     let calls = 0
+    let attempts = 0
     let unread = 0
     let llm: Awaited<ReturnType<typeof ctx.llm>> | undefined
-    for (let entry of entries) {
-      if (ctx.shouldStop()) return
-      const kind = kindOf(entry)
-      const unlock = kind === 'important-pending' && entry.dreamsHold?.cause === 'locked'
-      if ((!TIER_FINDING_KINDS.some(k => k === kind) && !unlock) || entry.baselineRef !== undefined
-        || entry.memoryIds.length !== 2 || entry.memoryIds[0] === entry.memoryIds[1]) continue
-      if (entry.memoryIds.some(id => !all.has(id) || ctx.isHeldForNextRun(id))) continue
-      const members = await Promise.all(entry.memoryIds.map(read))
-      if (ctx.shouldStop()) return
-      const initial = checkFinding(entry, members, entry, scopeLabel, undefined)
-      if ('reason' in initial) continue
-      const { pair, basis } = initial
-      const locked = (records: readonly MemoryRecord[]) => records.some(r => isLocked(r, deps.now()))
-      if (unlock && locked(pair)) continue
-      const skip = (reason: string) => ctx.skip({ kind: 'resolve', target: entry.id, reason })
-      const reviseResult = (result: 'written' | 'stale' | 'gone' | 'claimed') => {
-        if (result !== 'written') skip(result === 'stale' ? 'basis-changed' : result === 'gone' ? 'entry-changed' : 'busy')
-      }
-      const recheckPair = (current: PendingDecision, live: ReadonlyArray<MemoryRecord | undefined>) =>
-        checkFinding(current, live, entry, scopeLabel, basis)
-      if (unlock) {
-        let reopened: PendingDecision | undefined
-        const result = await deps.decisions.reviseFinding(entry.id, (current, live) => {
-          const checked = recheckPair(current, live)
-          if ('reason' in checked || locked(checked.pair) || current.dreamsHold?.cause !== 'locked') return undefined
-          const { dreamsHold, change: _change, evidence: _evidence, ...rest } = current
-          reopened = { ...rest, kind: dreamsHold.fromKind }
-          return reopened
-        }, read)
-        reviseResult(result)
-        if (result !== 'written') continue
-        entry = reopened!
-      }
-      if (entry.dreamsReview?.basis === basis) continue
-      const fromKind = kindOf(entry) as TierFindingKind
-      const conclusion = tierConclusion(pair)
-      const notify = (current: PendingDecision, proposal?: DreamsHold['proposal']): PendingDecision => {
-        const { suggestion: _suggestion, suggestionFailure: _failure, suggestionAttempts: _attempts, plan: _plan,
-          sourceCheck: _sourceCheck, dreamsReview: _review, change: _change, evidence: _evidence, ...rest } = current
-        return { ...rest, kind: 'important-pending', dreamsHold: {
-          runId: ctx.runId, at: deps.now(), cause: proposal === undefined ? 'locked' : 'important', fromKind, conclusion,
-          ...(proposal === undefined ? {} : { proposal }),
-        } }
-      }
-      const handOver = async (outcome: TierOutcome) => {
+    let lastAttempted: ResolveCursor | undefined
+    try {
+      for (let entry of entries) {
         if (ctx.shouldStop()) return
-        reviseResult(await deps.decisions.reviseFinding(entry.id, (current, live) => {
-          const checked = recheckPair(current, live)
-          if ('reason' in checked) return undefined
-          if (locked(checked.pair)) return notify(current)
-          return { ...current, dreamsReview: { runId: ctx.runId, at: deps.now(), outcome, basis } }
-        }, read))
-      }
-      if (undone.has(conclusion)) { await handOver('undone-before'); continue }
-      if (ctx.shouldStop()) return
-      if (locked(pair)) {
-        reviseResult(await deps.decisions.reviseFinding(entry.id, (current, live) => {
-          const checked = recheckPair(current, live)
-          return !('reason' in checked) && locked(checked.pair) ? notify(current) : undefined
-        }, read))
-        continue
-      }
-      if (ctx.shouldStop()) return
-      if (pair.some(hasSecret)) { await handOver('has-secret'); continue }
-      if (ctx.shouldStop()) return
-      if (calls >= TIER_MAX_PER_RUN || ctx.quotaLeft() === 0) {
-        skip(calls >= TIER_MAX_PER_RUN ? 'run-limit' : 'quota')
-        ctx.markUnprocessed(entry.memoryIds)
-        continue
-      }
-      const sources: DialogueSource[] = []
-      const logs = new Map<string, SessionLog>()
-      for (const record of pair) {
+        const kind = kindOf(entry)
+        const unlock = kind === 'important-pending' && entry.dreamsHold?.cause === 'locked'
+        if ((!TIER_FINDING_KINDS.some(k => k === kind) && !unlock) || entry.baselineRef !== undefined
+          || entry.memoryIds.length !== 2 || entry.memoryIds[0] === entry.memoryIds[1]) continue
+        if (entry.memoryIds.some(id => !all.has(id) || ctx.isHeldForNextRun(id))) continue
+        const members = await Promise.all(entry.memoryIds.map(read))
         if (ctx.shouldStop()) return
-        const anchor = contentAnchorOf(record)
-        if (anchor === undefined) break
-        let isNoReview: boolean
-        try { isNoReview = await deps.noReview.isMarkedNoReview(anchor.sessionId) } catch { break }
-        if (isNoReview) break
+        const initial = checkFinding(entry, members, entry, scopeLabel, undefined)
+        if ('reason' in initial) continue
+        const { pair, basis } = initial
+        const locked = (records: readonly MemoryRecord[]) => records.some(r => isLocked(r, deps.now()))
+        if (unlock && locked(pair)) continue
+        const skip = (reason: string) => ctx.skip({ kind: 'resolve', target: entry.id, reason })
+        const reviseResult = (result: 'written' | 'stale' | 'gone' | 'claimed') => {
+          if (result !== 'written') skip(result === 'stale' ? 'basis-changed' : result === 'gone' ? 'entry-changed' : 'busy')
+        }
+        const recheckPair = (current: PendingDecision, live: ReadonlyArray<MemoryRecord | undefined>) =>
+          checkFinding(current, live, entry, scopeLabel, basis)
+        if (unlock) {
+          let reopened: PendingDecision | undefined
+          const result = await deps.decisions.reviseFinding(entry.id, (current, live) => {
+            const checked = recheckPair(current, live)
+            if ('reason' in checked || locked(checked.pair) || current.dreamsHold?.cause !== 'locked') return undefined
+            const { dreamsHold, change: _change, evidence: _evidence, ...rest } = current
+            reopened = { ...rest, kind: dreamsHold.fromKind }
+            return reopened
+          }, read)
+          reviseResult(result)
+          if (result !== 'written') continue
+          entry = reopened!
+        }
+        if (entry.dreamsReview?.basis === basis) continue
+        const fromKind = kindOf(entry) as TierFindingKind
+        const conclusion = tierConclusion(pair)
+        const notify = (current: PendingDecision, proposal?: DreamsHold['proposal']): PendingDecision => {
+          const { suggestion: _suggestion, suggestionFailure: _failure, suggestionAttempts: _attempts, plan: _plan,
+            sourceCheck: _sourceCheck, dreamsReview: _review, change: _change, evidence: _evidence, ...rest } = current
+          return { ...rest, kind: 'important-pending', dreamsHold: {
+            runId: ctx.runId, at: deps.now(), cause: proposal === undefined ? 'locked' : 'important', fromKind, conclusion,
+            ...(proposal === undefined ? {} : { proposal }),
+          } }
+        }
+        const handOver = async (outcome: TierOutcome) => {
+          if (ctx.shouldStop()) return
+          reviseResult(await deps.decisions.reviseFinding(entry.id, (current, live) => {
+            const checked = recheckPair(current, live)
+            if ('reason' in checked) return undefined
+            if (locked(checked.pair)) return notify(current)
+            return { ...current, dreamsReview: { runId: ctx.runId, at: deps.now(), outcome, basis } }
+          }, read))
+        }
+        if (undone.has(conclusion)) { await handOver('undone-before'); continue }
         if (ctx.shouldStop()) return
-        const log = logs.get(anchor.sessionId) ?? await deps.readSessionLog(anchor.sessionId)
-        if (log === null) break
-        const source = sourceWindow(log, anchor)
-        if (source === undefined || numberDialogue([source], 1, { numberSpeakers: ['user', 'tool'] }).refs.size === 0) break
-        sources.push(source)
-        logs.set(anchor.sessionId, log)
-      }
-      if (ctx.shouldStop()) return
-      if (sources.length !== 2) { skip('source-unreadable'); continue }
-      const dialogue = numberDialogue(sources, 1, { numberSpeakers: ['user', 'tool'] })
-      const evidence = new Map<number, EvidenceKind>()
-      for (const [number, ref] of dialogue.refs) {
-        if (ctx.shouldStop()) return
-        evidence.set(number, await evidenceKindOf(logs.get(ref.sessionId)!, ref.seq, {
-          memoryRoot: deps.memoryRoot, homeDir: deps.homeDir, pluginTools: MEMORY_TOOL_NAMES,
-        }))
-      }
-      if (ctx.shouldStop()) return
-      llm ??= await ctx.llm()
-      if (ctx.shouldStop()) return
-      calls++
-      const reply = await ask(llm, buildTierPrompt({ fromKind, pair, dialogue }), parseTierReply, ctx)
-      if (ctx.shouldStop()) return
-      if (reply === undefined) { unread++; continue }
-      const judged = judgeConfidence({ reply, pair, evidence, canChange: id => ctx.canChange(id) })
-      if (!judged.isConfident) {
-        if (judged.doubt === 'quota') { skip('quota'); ctx.markUnprocessed(entry.memoryIds) }
-        else await handOver(judged.doubt)
-        continue
-      }
-      if (ctx.shouldStop()) return
-      const { newer, older, change, order } = judged
-      const important = isImportant(older, deps.focusTypes())
-      const ops = tierPlan({ runId: ctx.runId, conclusion, change, newer, older, draft: reply.draft })
-      if (ops === undefined) { await handOver('draft-unusable'); continue }
-      if (change === 'correct' && hasSecret({ ...older, ...ops[0]!.patch } as MemoryRecord)) { await handOver('has-secret'); continue }
-      // 调模型在锁外，期间写进的密钥（如标签）不改依据，写前要在现读的两条上再查一遍，和入口查的一致。
-      const hasSecretNow = (live: readonly MemoryRecord[]) => live.some(hasSecret)
-        || (change === 'correct' && hasSecret({ ...live.find(r => r.id === older.id)!, ...ops[0]!.patch } as MemoryRecord))
-      const reason = cleanText(reply.reason ?? '', TIER_REASON_MAX) || TIER_REASON_DEFAULT
-      const excerpts = judged.evidence.map((number): DreamsExcerpt => {
-        const ref = dialogue.refs.get(number)!
-        return { sessionId: ref.sessionId, seq: ref.seq, speaker: ref.speaker as 'user' | 'tool', text: cleanText(ref.text, TIER_EXCERPT_MAX) }
-      })
-      const bound = order.olderBoundAt === undefined ? {} : { olderBoundNote: olderBoundNote(order.olderBoundAt) }
-      if (ctx.shouldStop()) return
-      if (dispositionOf({ isLocked: false, isConfident: true, isImportant: important, tier: resolveTier(deps.tier()) }) === 'hold') {
-        reviseResult(await deps.decisions.reviseFinding(entry.id, (current, live) => {
-          const checked = recheckPair(current, live)
-          if ('reason' in checked) return undefined
-          if (locked(checked.pair)) return notify(current)
-          if (hasSecretNow(checked.pair)) return undefined
-          return { ...notify(current, { ops, newer: newer.id, reason, excerpts, ...bound }), change,
-            evidence: excerpts.map(({ sessionId, seq }) => ({ sessionId, seq })) }
-        }, read))
-        continue
-      }
-      const release = await deps.decisions.hold(entry.id)
-      if (release === undefined) { skip('busy'); continue }
-      try {
-        if (ctx.shouldStop()) return
-        const current = await deps.decisions.get(entry.id)
-        const live = await Promise.all((current?.memoryIds ?? []).map(read))
-        if (ctx.shouldStop()) return
-        const checked = checkFinding(current, live, entry, scopeLabel, basis)
-        if ('reason' in checked) {
-          // 依据和锁同时变化时，沿用先报锁定的顺序；依据不符的返回已保证两条都在用。
-          skip(checked.reason === 'basis-changed' && locked(live as MemoryRecord[]) ? 'locked' : checked.reason)
+        if (locked(pair)) {
+          reviseResult(await deps.decisions.reviseFinding(entry.id, (current, live) => {
+            const checked = recheckPair(current, live)
+            return !('reason' in checked) && locked(checked.pair) ? notify(current) : undefined
+          }, read))
           continue
         }
-        if (locked(checked.pair)) { skip('locked'); continue }
-        if (hasSecretNow(checked.pair)) { skip('basis-changed'); continue }
         if (ctx.shouldStop()) return
-        const result = await ctx.apply(ops, { afterCommit: () => [resolvedFindingStep({
-          entryId: entry.id, ...(change === 'state-change' ? { olderId: older.id } : {}),
-        })] })
-        if (result.outcomes.some(o => o.kind === 'skipped' && o.reason === 'quota')) ctx.markUnprocessed(entry.memoryIds)
-        const group = resolveGroupId(ctx.runId, conclusion)
-        if (result.groups?.find(g => g.group === group)?.state !== 'applied') continue
-        if (!result.outcomes.some(o => o.kind === 'applied')) { skip('no-change'); continue }
-        await ctx.recordResult({ group, fromKind, change, newer: newer.id, older: older.id, at: deps.now(),
-          ...(important ? { isImportant: true } : {}), reason, excerpts, ...bound })
-        if (change === 'correct') ctx.holdForNextRun([older.id])
-      } finally { await release() }
+        if (pair.some(hasSecret)) { await handOver('has-secret'); continue }
+        if (ctx.shouldStop()) return
+        const isRunLimit = calls >= TIER_MAX_PER_RUN || attempts >= TIER_ATTEMPTS_MAX
+        if (isRunLimit || ctx.quotaLeft() === 0) {
+          skip(isRunLimit ? 'run-limit' : 'quota')
+          ctx.markUnprocessed(entry.memoryIds)
+          continue
+        }
+        attempts++
+        lastAttempted = { firstSeenAt: entry.firstSeenAt, id: entry.id }
+        const anchors = pair.map(contentAnchorOf)
+        const sources: Array<DialogueSource | undefined> = [undefined, undefined]
+        const logs = new Map<string, SessionLog>()
+        let isRead = anchors[0] !== undefined && anchors[1] !== undefined
+        // 放行要求这一对没存档的锚先试过：先读的一边被拒，就先读另一边再回来读它
+        const readOrder = [0, 1]
+        for (let k = 0; isRead && k < readOrder.length; k++) {
+          if (ctx.shouldStop()) return
+          const i = readOrder[k]!
+          const anchor: DrillAnchor = anchors[i]!
+          const memoryId = pair[i].id
+          const cached = logs.get(anchor.sessionId)
+          const opened = cached !== undefined ? { kind: 'opened' as const, log: cached } : await drillOpen(
+            { memoryId, purpose: 'verify-conflict', anchor, pairAnchors: anchors as DrillAnchor[] },
+            // 核实矛盾的读取不占这次运行的下钻名额
+            ctx.drillLog, { host: deps.host, noReview: deps.noReview, limit: Infinity },
+          )
+          if (opened.kind === 'refused' && opened.reason === 'archived-too-early' && k === 0) { readOrder.push(i); continue }
+          if (opened.kind === 'retry') ctx.skip({ kind: 'resolve-source', target: memoryId, reason: opened.reason })
+          if (opened.kind !== 'opened') { isRead = false; break }
+          const source = sourceWindow(opened.log, anchors[i]!)
+          if (typeof source === 'string') {
+            noteUnreadable(ctx.drillLog, memoryId, anchor, source)
+            isRead = false
+            break
+          }
+          ctx.drillLog.attempted.add(drillAnchorKey(anchor))
+          sources[i] = source
+          logs.set(anchor.sessionId, opened.log)
+        }
+        if (ctx.shouldStop()) return
+        if (!isRead) { skip('source-unreadable'); continue }
+        const dialogue = numberDialogue(sources as DialogueSource[], 1, { numberSpeakers: ['user', 'tool'] })
+        const evidence = new Map<number, EvidenceKind>()
+        for (const [number, ref] of dialogue.refs) {
+          if (ctx.shouldStop()) return
+          evidence.set(number, await evidenceKindOf(logs.get(ref.sessionId)!, ref.seq, {
+            memoryRoot: deps.memoryRoot, homeDir: deps.homeDir, pluginTools: MEMORY_TOOL_NAMES,
+          }))
+        }
+        if (ctx.shouldStop()) return
+        llm ??= await ctx.llm()
+        if (ctx.shouldStop()) return
+        calls++
+        const reply = await ask(llm, buildTierPrompt({ fromKind, pair, dialogue }), parseTierReply, ctx)
+        if (ctx.shouldStop()) return
+        if (reply === undefined) { unread++; continue }
+        const judged = judgeConfidence({ reply, pair, evidence, canChange: id => ctx.canChange(id) })
+        if (!judged.isConfident) {
+          if (judged.doubt === 'quota') { skip('quota'); ctx.markUnprocessed(entry.memoryIds) }
+          else await handOver(judged.doubt)
+          continue
+        }
+        if (ctx.shouldStop()) return
+        const { newer, older, change, order } = judged
+        const important = isImportant(older, deps.focusTypes())
+        const ops = tierPlan({ runId: ctx.runId, conclusion, change, newer, older, draft: reply.draft })
+        if (ops === undefined) { await handOver('draft-unusable'); continue }
+        if (change === 'correct' && hasSecret({ ...older, ...ops[0]!.patch } as MemoryRecord)) { await handOver('has-secret'); continue }
+        // 调模型在锁外，期间写进的密钥（如标签）不改依据，写前要在现读的两条上再查一遍，和入口查的一致。
+        const hasSecretNow = (live: readonly MemoryRecord[]) => live.some(hasSecret)
+          || (change === 'correct' && hasSecret({ ...live.find(r => r.id === older.id)!, ...ops[0]!.patch } as MemoryRecord))
+        const reason = cleanText(reply.reason ?? '', TIER_REASON_MAX) || TIER_REASON_DEFAULT
+        const excerpts = judged.evidence.map((number): DreamsExcerpt => {
+          const ref = dialogue.refs.get(number)!
+          return { sessionId: ref.sessionId, seq: ref.seq, speaker: ref.speaker as 'user' | 'tool', text: cleanText(ref.text, TIER_EXCERPT_MAX) }
+        })
+        const bound = order.olderBoundAt === undefined ? {} : { olderBoundNote: olderBoundNote(order.olderBoundAt) }
+        if (ctx.shouldStop()) return
+        if (dispositionOf({ isLocked: false, isConfident: true, isImportant: important, tier: resolveTier(deps.tier()) }) === 'hold') {
+          reviseResult(await deps.decisions.reviseFinding(entry.id, (current, live) => {
+            const checked = recheckPair(current, live)
+            if ('reason' in checked) return undefined
+            if (locked(checked.pair)) return notify(current)
+            if (hasSecretNow(checked.pair)) return undefined
+            return { ...notify(current, { ops, newer: newer.id, reason, excerpts, ...bound }), change,
+              evidence: excerpts.map(({ sessionId, seq }) => ({ sessionId, seq })) }
+          }, read))
+          continue
+        }
+        const release = await deps.decisions.hold(entry.id)
+        if (release === undefined) { skip('busy'); continue }
+        try {
+          if (ctx.shouldStop()) return
+          const current = await deps.decisions.get(entry.id)
+          const live = await Promise.all((current?.memoryIds ?? []).map(read))
+          if (ctx.shouldStop()) return
+          const checked = checkFinding(current, live, entry, scopeLabel, basis)
+          if ('reason' in checked) {
+            // 依据和锁同时变化时，沿用先报锁定的顺序；依据不符的返回已保证两条都在用。
+            skip(checked.reason === 'basis-changed' && locked(live as MemoryRecord[]) ? 'locked' : checked.reason)
+            continue
+          }
+          if (locked(checked.pair)) { skip('locked'); continue }
+          if (hasSecretNow(checked.pair)) { skip('basis-changed'); continue }
+          if (ctx.shouldStop()) return
+          const result = await ctx.apply(ops, { afterCommit: () => [resolvedFindingStep({
+            entryId: entry.id, ...(change === 'state-change' ? { olderId: older.id } : {}),
+          })] })
+          if (result.outcomes.some(o => o.kind === 'skipped' && o.reason === 'quota')) ctx.markUnprocessed(entry.memoryIds)
+          const group = resolveGroupId(ctx.runId, conclusion)
+          if (result.groups?.find(g => g.group === group)?.state !== 'applied') continue
+          if (!result.outcomes.some(o => o.kind === 'applied')) { skip('no-change'); continue }
+          await ctx.recordResult({ group, fromKind, change, newer: newer.id, older: older.id, at: deps.now(),
+            ...(important ? { isImportant: true } : {}), reason, excerpts, ...bound })
+          if (change === 'correct') ctx.holdForNextRun([older.id])
+        } finally { await release() }
+      }
+      if (unread > 0) throw unreadError(unread)
+    } finally {
+      if (lastAttempted !== undefined) await deps.dreams.saveResolveCursor(ctx.scope, ctx.runId, lastAttempted)
     }
-    if (unread > 0) throw unreadError(unread)
   },
 })
+
+/** 续读位置的先后：先比挂账时刻，再比条目 id。 */
+function compareCursor(a: ResolveCursor, b: ResolveCursor): number {
+  return a.firstSeenAt - b.firstSeenAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+}
 
 /**
  * 入口与各写入分支共用资格核对；入口尚无依据，返回现读两条的依据供后续复核。
@@ -370,17 +410,20 @@ function cleanText(text: string, max: number): string {
   return oneLine(maskSecrets(text, { severity: 'suspected' })).slice(0, max)
 }
 
-/** 先定完整轮次，再按保存点挑消息；区间内用户原话优先，所有消息共用同一份上限。 */
-function sourceWindow(log: SessionLog, anchor: SourceAnchor): DialogueSource | undefined {
+/**
+ * 先定完整轮次，再按保存点挑消息；区间内用户原话优先，所有消息共用同一份上限。
+ * 找不到锚那一轮（旧锚序号不在、按时间也找不回）为 anchor-lost；那一轮没有消息、或挑出的消息里没有用户和工具的为 empty。
+ */
+function sourceWindow(log: SessionLog, anchor: SourceAnchor): DialogueSource | Extract<DrillUnreadableReason, 'anchor-lost' | 'empty'> {
   const events = log.events
   let [start, end] = anchor.eventRange
   let relocated = false
   const first = events.find(e => e.seq === start)
   if (isLegacyAnchor(anchor)) {
-    if (first === undefined) return undefined
+    if (first === undefined) return 'anchor-lost'
   } else if (!anchorTimeMatches(anchor.at, first?.time, events.find(e => e.seq !== undefined && e.seq > end && e.time !== undefined)?.time)) {
     const found = relocateByTime(anchor, events)
-    if (found === null) return undefined
+    if (found === null) return 'anchor-lost'
     start = end = found
     relocated = true
   }
@@ -389,7 +432,7 @@ function sourceWindow(log: SessionLog, anchor: SourceAnchor): DialogueSource | u
   const turn = events.slice(Math.max(0, from), next < 0 ? undefined : next)
   // 和最终渲染共用消息筛选，结构事件、注入文本不会挤占窗口。
   const messages = [...numberDialogue([{ sessionId: anchor.sessionId, events: turn }]).refs.values()]
-  if (messages.length === 0) return undefined
+  if (messages.length === 0) return 'empty'
   if (relocated) { start = messages[0]!.seq; end = messages.at(-1)!.seq }
   const size = (text: string) => Math.min(text.length, TIER_WINDOW_MESSAGE_MAX_CHARS)
   let selected = messages
@@ -408,10 +451,11 @@ function sourceWindow(log: SessionLog, anchor: SourceAnchor): DialogueSource | u
   }
   const kept = new Set(selected.map(m => m.seq))
   const positions = selected.map(m => messages.findIndex(all => all.seq === m.seq))
-  return {
+  const source: DialogueSource = {
     sessionId: anchor.sessionId, events: turn.filter(e => e.seq !== undefined && kept.has(e.seq)),
     clipped: new Map(selected.filter(m => m.text.length > TIER_WINDOW_MESSAGE_MAX_CHARS).map(m => [m.seq, TIER_WINDOW_MESSAGE_MAX_CHARS])),
     omitted: { before: positions[0]! > 0, after: positions.at(-1)! < messages.length - 1,
       gapBefore: selected.filter((_, i) => i > 0 && positions[i]! > positions[i - 1]! + 1).map(m => m.seq) },
   }
+  return numberDialogue([source], 1, { numberSpeakers: ['user', 'tool'] }).refs.size === 0 ? 'empty' : source
 }

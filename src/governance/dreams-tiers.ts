@@ -27,6 +27,12 @@ export const FOCUS_TYPES_DEFAULT: readonly string[] = ['preference', 'profile', 
  * 只数模型调用（读不出重问的那一次不另算）：不调模型的锁定通知、含密钥、撤过的结论到了上限照常处理。超出的列进跳过（run-limit），下次运行再核实。
  */
 export const TIER_MAX_PER_RUN = 10
+/**
+ * 一次运行最多开始读多少对的出处（暂定）：开始读一对的出处算一次尝试，读不到、读到后没调模型都算。账本里排在前面的配对出处一直读不到时，
+ * 只按模型调用数（TIER_MAX_PER_RUN）限不住这一步的读取量；配上运行记录里的续读位置（resolveCursor），后面的配对在有限次运行内一定轮到。
+ * 超出的列进跳过（run-limit），下次运行接着读。
+ */
+export const TIER_ATTEMPTS_MAX = 20
 /** 理由存盘前截到这么多字（同摘要上限的量级，报告里一行放得下）。 */
 export const TIER_REASON_MAX = 200
 /** 每条依据节选截到这么多字。 */

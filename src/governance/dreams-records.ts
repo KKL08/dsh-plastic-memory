@@ -18,6 +18,7 @@ const DAY_MS = 86_400_000
 
 export type DreamsUnfinished = NonNullable<DreamsRecord['unfinished']>
 export type DreamsLastResult = NonNullable<DreamsRecord['lastResult']>
+export type ResolveCursor = NonNullable<DreamsRecord['resolveCursor']>
 
 export interface DreamsState {
   /** 为假：有条目读不出，开关和运行记录都不能当真。 */
@@ -132,6 +133,22 @@ export class DreamsStore {
     await this.records.update(key, (cur) => {
       const kept = (cur?.undoneMerges ?? []).filter(m => !keys.includes(m.key))
       return { ...cur, id: key, undoneMerges: [...kept, ...[...new Set(keys)].map(k => ({ key: k, at }))].slice(-UNDONE_MERGES_MAX) }
+    })
+  }
+
+  /** 处理矛盾那一步的续读位置（见 dreamsRecordSchema 的 resolveCursor）；没有为 undefined。 */
+  async resolveCursor(scope: Scope): Promise<ResolveCursor | undefined> {
+    return (await this.records.get(scopeKey(scope)))?.resolveCursor
+  }
+
+  /**
+   * 记下处理矛盾那一步的续读位置。核对运行 id（同 stop）：认领被别的进程接手、那边已经开始了新的一次时不写，返回 false。
+   * 认领过期但没人接手时照写，这时写进去的仍是这次真实的进度。
+   */
+  async saveResolveCursor(scope: Scope, runId: string, cursor: ResolveCursor): Promise<boolean> {
+    return this.records.update(scopeKey(scope), (cur) => {
+      if (cur?.unfinished?.runId !== runId) return undefined
+      return { ...cur, resolveCursor: cursor }
     })
   }
 

@@ -454,6 +454,8 @@ async function recordConflicts(
   now: number,
   /** 现读这一轮的指令文件（不走这次扫描的缓存）：垂直冲突的入口复核拿它对照发现生成时的那份。 */
   readBaseline: () => Promise<readonly string[] | null>,
+  /** 调用方叫停（见 ScanInput.shouldStop）：每条挂账之前查。 */
+  shouldStop: () => boolean,
 ): Promise<RoundLedger> {
   const findings = [...semantic]
   let created = 0
@@ -471,6 +473,7 @@ async function recordConflicts(
     // 语义层跑的这几十秒里用户可能已经裁决（败方软删、条目 settled 记了快照）：按预读数据挂账会把那条裁决
     // 当成「败方回来了」反撤。挂账前重读成员，任一方已不是 active 就跳过这条发现。
     const live = await Promise.all(f.memoryIds.map(readCopy))
+    if (shouldStop()) throw stopped()
     if (live.some(r => r === undefined || r.status !== 'active')) {
       findings.splice(findings.indexOf(f), 1)
       continue
@@ -592,6 +595,25 @@ export interface ScanInput {
    * 被上限打断后普通体检接着查，直到查完。记不下来时这次在内存里照样按全没命中跑，记日志（续不上）。
    */
   isFullRecheck?: boolean
+  /** 不做到期刷新（命中但查得早的批不重发，只发没命中的）。记忆梦境里的体检给：全部命中时一次模型都不调。 */
+  isRefreshSkipped?: boolean
+  /**
+   * 调用方叫停（记忆梦境让路、认领被接手）：为真时抛 ScanStopped（一种 AbortError），同取消。查的地方是：
+   * 每批发出模型请求之前、每批模型调用返回之后、这一批来源回查返回之后（这两处这一批的结论都还没写进库）、
+   * 提交段开始之前、每条挂账之前（重读成员之后）、写视图时拿到写锁读到当前值之后。
+   * 已经开始的那条挂账会做完；提交之后的清库、同步提升候选、跨项目比较不查它。
+   */
+  shouldStop?: () => boolean
+  /** 每次模型调用的实际用量（宿主报了才有），调用方要逐次记账时给；返回里的 usageTokens 照常合计。 */
+  onUsage?: (tokens: number) => void
+}
+
+/** 调用方叫停时体检核心抛的取消：调用方据此区分自己叫停和别处来的 AbortError。 */
+export class ScanStopped extends DOMException {
+  constructor() { super('scan stopped by caller', 'AbortError') }
+}
+function stopped(): ScanStopped {
+  return new ScanStopped()
 }
 
 /**
@@ -633,6 +655,7 @@ export async function executeScan(args: ScanArgs, deps: ScanToolDeps, exec: Tool
  */
 export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<ScanRun, 'by' | 'onScopeNotes' | 'onCommitted'> = {}): Promise<ScanToolResult> {
   const { llm, signal, currentWorkspace: currentWs } = input
+  const shouldStop = input.shouldStop ?? (() => false)
   const layers = input.layers ?? 'full'
   const instructions = cacheInstructions(deps.instructions)
   const now = input.startedAt ?? deps.now?.() ?? Date.now()
@@ -640,7 +663,10 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
   const log = deps.log ?? console
   // 本次扫描各次模型调用的实际用量合计；宿主一次都没报时保持 undefined，不拿估算顶替
   let usageTokens: number | undefined
-  const onUsage = (tokens: number) => { usageTokens = (usageTokens ?? 0) + tokens }
+  const onUsage = (tokens: number) => {
+    usageTokens = (usageTokens ?? 0) + tokens
+    input.onUsage?.(tokens)
+  }
   const extras = (semanticBatches: number) => ({
     ...(semanticBatches > 0 ? { semanticBatches } : {}),
     ...(usageTokens !== undefined ? { usageTokens } : {}),
@@ -769,14 +795,16 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
   const checkSources = deps.sources !== undefined && semanticLlm !== null
     ? createFindingSourceCheck(deps.sources, semanticLlm, signal, onUsage) : undefined
   for (const step of plan.steps) {
-    if (step.kind === 'cross-ws' || semanticLlm === null || (step.isRefresh && isRefreshStopped)) continue
+    if (step.kind === 'cross-ws' || semanticLlm === null || (step.isRefresh && (isRefreshStopped || input.isRefreshSkipped === true))) continue
     signal?.throwIfAborted()
+    if (shouldStop()) throw stopped()
     const round = roundByKey.get(step.round)!
     const batch = round.batches[step.index]!
     const versions = new Map<string, number | 'unknown'>(await Promise.all(batch.records.map(async r => {
       return [r.id, await deps.store.history.countVersions(dirname(data.filePaths.get(r.id)!), r.id) ?? 'unknown'] as const
     })))
     let found = await scanBatch(batch.records, round.baseline, semanticLlm, signal, onUsage, projectOf(round.scope), versions)
+    if (shouldStop()) throw stopped()
     // 刷新是顺带做的：这一批的旧结论照常有效，没做成（不管什么原因）只记日志，不算这次体检停下；
     // 模型用不了时剩下的刷新也做不成，不再试，别的原因接着试下一批
     if (!Array.isArray(found) && step.isRefresh) {
@@ -791,7 +819,10 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
       runStop = found.kind === 'model-error' && isModelUnavailableCode(found.hostCode) ? 'model-unavailable' : 'batch-failed'
       break
     }
-    if (checkSources !== undefined) found = await checkSources(found, batch.records)
+    if (checkSources !== undefined) {
+      found = await checkSources(found, batch.records)
+      if (shouldStop()) throw stopped()
+    }
     // 项目这一轮的可见集合含全局记忆：全局记忆对指令文件的冲突只在全局这一轮查（对全局层），这里报出的丢掉
     const findings = round.scope.kind === 'workspace'
       ? found.filter(f => f.baselineRef === undefined || data.byId.get(f.memoryIds[0]!)?.scope === 'workspace')
@@ -806,6 +837,7 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
 
   // —— 每一轮：覆盖、挂账、写视图（提交点） ——
   signal?.throwIfAborted()
+  if (shouldStop()) throw stopped()
   const ledgers = new Map<string, RoundLedger>()
   const results = new Map<string, ScanRoundResult>()
   const commits = new Map<string, RoundCommit>()
@@ -822,7 +854,7 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
         return r?.status === 'active' && isReachableFrom(owner)(r) ? r : undefined
       }) : []
     const readBaseline = async () => instructionTexts(await deps.instructions(scope))
-    const premiseLedger = await recordConflicts(deps, premiseFindings, data.byId, null, now, readBaseline)
+    const premiseLedger = await recordConflicts(deps, premiseFindings, data.byId, null, now, readBaseline, shouldStop)
     if (round === undefined) {
       ledgers.set(scopeKey(scope), { ...premiseLedger, findings: [...ruleFindings, ...premiseLedger.findings] })
       continue
@@ -855,7 +887,7 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
     // 先挂账（只挂有有效结果的批里的冲突；沿用的不重新挂账），再写视图：视图写成是这一轮的提交点
     let ledger: RoundLedger = { findings: [], decisionItems: [], created: 0, existing: 0, settled: 0 }
     try {
-      ledger = await recordConflicts(deps, publishedFindings(valid, []), data.byId, round.baseline, now, readBaseline)
+      ledger = await recordConflicts(deps, publishedFindings(valid, []), data.byId, round.baseline, now, readBaseline, shouldStop)
       // 挂账期间收到取消（插件卸载、认领被接手）：还没到提交点，视图、完成记录都不写；已挂的账留着，同中途退出
       signal?.throwIfAborted()
       // 一批有效结果都没有、也没有沿用的：留着上次的视图（读的时候按记忆现在的样子核对）；本来就没有要查的批照写空视图
@@ -863,8 +895,11 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
         const cacheId = scopeCacheKey(scope)
         const published = publishedFindings(valid, carried).filter(f => !(LEDGER_ONLY_FINDING_TYPES as readonly string[]).includes(f.type))
         const entry = { id: cacheId, scannedAt: now, scope: scopeKey(scope), findings: published, fingerprints: findingFingerprints(published, data.byId), isTrackedByCheckups: true }
-        // 不回退：别的扫描开始得比这次晚、已经写过的，留着它的
-        isSuperseded = !(await deps.cache.update(cacheId, cur => (cur !== undefined && cur.scannedAt > now ? undefined : entry)))
+        // 不回退：别的扫描开始得比这次晚、已经写过的，留着它的；等写锁期间被叫停的不写
+        isSuperseded = !(await deps.cache.update(cacheId, (cur) => {
+          if (shouldStop()) throw stopped()
+          return cur !== undefined && cur.scannedAt > now ? undefined : entry
+        }))
       }
       // 返回里的沿用发现同读侧口径：冲突只留账本里仍未决的（裁决过的照旧进视图，读的时候按账本核对）
       ledger = { ...ledger, findings: publishedFindings([ledger.findings], carried.filter(isConflictOpen(pendingFindings))) }

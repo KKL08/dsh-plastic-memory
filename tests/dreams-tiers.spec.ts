@@ -17,7 +17,7 @@ import { DREAMS_DEFAULTS } from '../src/governance/dreams-gate.ts'
 import { DreamsStore } from '../src/governance/dreams-records.ts'
 import { resolveGroupId } from '../src/governance/dreams-merge.ts'
 import {
-  OLDER_BOUND_NOTE_HEAD, OLDER_BOUND_NOTE_TAIL, TIER_EXCERPT_MAX, TIER_MAX_PER_RUN, TIER_REASON_DEFAULT, TIER_REASON_MAX, TIER_SYSTEM_PROMPT,
+  OLDER_BOUND_NOTE_HEAD, OLDER_BOUND_NOTE_TAIL, TIER_ATTEMPTS_MAX, TIER_EXCERPT_MAX, TIER_MAX_PER_RUN, TIER_REASON_DEFAULT, TIER_REASON_MAX, TIER_SYSTEM_PROMPT,
   TIER_WINDOW_MAX_CHARS, TIER_WINDOW_MAX_MESSAGES, TIER_WINDOW_MESSAGE_MAX_CHARS, tierConclusion,
 } from '../src/governance/dreams-tiers.ts'
 import { DIALOGUE_CLIPPED_MARK, DIALOGUE_OMITTED_AFTER, DIALOGUE_OMITTED_BEFORE, DIALOGUE_OMITTED_BETWEEN } from '../src/governance/session-excerpt.ts'
@@ -85,6 +85,20 @@ let focus: string[]
 let sessions: Map<string, SessionLog>
 let marked: Set<string>
 let isNoReviewBroken: boolean
+/** 宿主登记为已存档的会话；为 null 时存档名单读不出。 */
+let archived: Set<string> | null
+/** 宿主的会话清单列不出。 */
+let isListBroken: boolean
+/** 宿主读过哪些会话的日志（按先后）。 */
+let logReads: string[]
+/** 读日志时的替身行为：返回 null 是这次读不出，抛错是宿主出错；缺省照 sessions 给。 */
+let onLogRead: (id: string) => SessionLog | null | undefined
+/** 活动表这次读不全（按有会话在跑算，梦境让路）。 */
+let isBusy: boolean
+/** 运行期间定时查让路的回调（deps.interval 收下的）。 */
+let poll: (() => void) | undefined
+/** 查不回看名单之前先做的事（插入别处的动作）。 */
+let beforeNoReview: (sessionId: string) => Promise<void>
 let warnings: unknown[]
 let prompts: Array<{ system: string; user: string }>
 let tidyPrompts: string[]
@@ -126,6 +140,13 @@ async function setup() {
   sessions = new Map()
   marked = new Set()
   isNoReviewBroken = false
+  archived = new Set()
+  isListBroken = false
+  logReads = []
+  onLogRead = () => undefined
+  isBusy = false
+  poll = undefined
+  beforeNoReview = async () => {}
   warnings = []
   prompts = []
   tidyPrompts = []
@@ -246,7 +267,7 @@ function deps(plan: DreamsStep[]): DreamsRunDeps {
       const release = await claims.claim(scope.kind === 'global' ? 'global' : scope.workspacePath)
       return release === undefined ? { busy: scope } : { release }
     },
-    activity: async () => ({ isComplete: true, workspaces: new Map() }),
+    activity: async () => ({ isComplete: !isBusy, workspaces: new Map() }),
     resolveLlm: async () => {
       llmResolves++
       return { llm, isSelected: true, fellBack: false }
@@ -254,15 +275,23 @@ function deps(plan: DreamsStep[]): DreamsRunDeps {
     config: () => ({ ...DREAMS_DEFAULTS, minChanges: 0, maxChangeRatio: ratio }),
     isGovernanceEnabled: () => true,
     plan,
-    interval: () => () => {},
+    interval: (callback) => { poll = callback; return () => {} },
     now: () => clock,
     newRunId: () => `run_${++runSeq}`,
   }
 }
 const tierDeps = (): ResolveFindingsDeps => ({
   store, decisions, dreams,
-  readSessionLog: async id => sessions.get(id) ?? null,
-  noReview: { isMarkedNoReview: async (id) => { if (isNoReviewBroken) throw new Error('名单读不出'); return marked.has(id) } },
+  host: {
+    readSessionLog: async (id) => {
+      logReads.push(id)
+      const read = onLogRead(id)
+      return read !== undefined ? read : sessions.get(id) ?? null
+    },
+    listSessions: async () => (isListBroken ? null : [...sessions.keys()].map(id => ({ id, cwd: undefined, isSubagent: false, isLive: false }))),
+    archivedSessionIds: async () => archived,
+  },
+  noReview: { isMarkedNoReview: async (id) => { await beforeNoReview(id); if (isNoReviewBroken) throw new Error('名单读不出'); return marked.has(id) } },
   memoryRoot: root,
   tier: () => tier,
   focusTypes: () => focus,
@@ -1650,12 +1679,13 @@ describe('体检输出里的「重要、等你定」', () => {
 })
 
 describe('运行计划和配置', () => {
-  it('计划按顺序：维护、整理主题索引、合并零碎记忆、下钻补全、处理矛盾、逐条整理', () => {
+  it('计划按顺序：维护、整理主题索引、合并零碎记忆、增量体检、下钻补全、处理矛盾、逐条整理', () => {
     const tidy = { store, maxTopics: () => 30, now: () => NOW, typeRecall: () => 'search' as const }
-    const { readSessionLog, noReview } = tierDeps()
+    const { host: { readSessionLog }, noReview } = tierDeps()
     const drill = { store, decisions, host: { readSessionLog, listSessions: async () => [], archivedSessionIds: async () => new Set<string>() }, noReview, maxDrillDowns: () => 5, now: () => NOW }
-    const plan = dreamsPlan({ tidy, merge: { store, dreams }, drill, resolve: tierDeps() })
-    expect(plan.map(s => s.name)).toEqual(['maintain', 'organize-index', 'merge-fragments', 'drill-down', 'resolve-findings', 'tidy-memories'])
+    const checkup = { scan: {} as never, resolveLlm: async () => ({ llm: null, isSelected: false, fellBack: false }) }
+    const plan = dreamsPlan({ tidy, merge: { store, dreams }, checkup, drill, resolve: tierDeps() })
+    expect(plan.map(s => s.name)).toEqual(['maintain', 'organize-index', 'merge-fragments', 'checkup', 'drill-down', 'resolve-findings', 'tidy-memories'])
   })
 
   it('档位和重点类型的缺省值；写了的值原样读出', () => {
@@ -1769,4 +1799,181 @@ describe('用户操作落在随机时刻', () => {
       await setup()
     }
   }, Math.max(60_000, RUNS * 2_000))
+})
+
+describe('核实矛盾读出处走下钻读口', () => {
+  const drillReport = async () => (await settledEntry('run_1'))?.drillDown
+
+  it('存档的会话也能读：先读没存档的一边，读到几次、读了几个存档会话记进下钻报告，这一对照常处理', async () => {
+    const [old, neu] = await npmPair()
+    await report([old, neu])
+    archived!.add('s_mem_old')
+    reply = confident()
+    await run()
+    expect(logReads).toEqual(['s_mem_new', 's_mem_old'])
+    expect(prompts).toHaveLength(1)
+    expect((await get('mem_old')).status).toBe('deleted')
+    expect(await drillReport()).toMatchObject({ drills: 2, archivedSessionsRead: 1, unreadable: [] })
+  })
+
+  it('两边都在存档会话里：照常读，存档会话数是 2', async () => {
+    const [old, neu] = await npmPair()
+    await report([old, neu])
+    archived = new Set(['s_mem_old', 's_mem_new'])
+    reply = confident()
+    await run()
+    expect(prompts).toHaveLength(1)
+    expect(await drillReport()).toMatchObject({ drills: 2, archivedSessionsRead: 2 })
+  })
+
+  it('没存档的一边确认读不到：存档的那一边不读', async () => {
+    const [old, neu] = await npmPair()
+    const entry = await report([old, neu])
+    archived!.add('s_mem_old')
+    marked.add('s_mem_new')
+    reply = confident()
+    await run()
+    expect(logReads).toEqual([])
+    expect(prompts).toHaveLength(0)
+    expect(await skippedItems()).toContainEqual({ step: 'resolve-findings', kind: 'resolve', target: entry.id, reason: 'source-unreadable' })
+    expect((await drillReport())?.unreadable.map(u => [u.memoryId, u.reason])).toEqual([['mem_new', 'no-review']])
+  })
+
+  it.each([
+    ['会话不在宿主的清单里', 'mem_new', 'session-gone', () => { sessions.delete('s_mem_new') }],
+    ['用户标了不回看', 'mem_old', 'no-review', () => { marked.add('s_mem_old') }],
+    ['锚失效（序号和时间都对不上）', 'mem_new', 'anchor-lost', () => {
+      const s = sessions.get('s_mem_new')!
+      sessions.set('s_mem_new', { ...s, events: s.events.map(e => ({ ...e, seq: (e.seq ?? 0) + 50, time: NEW_AT + 3_600_000 })) })
+    }],
+    ['锚那一段没有用户和工具的消息', 'mem_new', 'empty', () => {
+      const s = sessions.get('s_mem_new')!
+      sessions.set('s_mem_new', { ...s, events: s.events.map(e => (e.seq === 1 ? assistantSays(1, '我来看看', NEW_AT) : e)) })
+    }],
+  ])('确认读不到（%s）：进下钻报告，这一对交给用户，不调模型', async (_name, memoryId, reason, breakIt) => {
+    const [old, neu] = await npmPair()
+    const entry = await report([old, neu])
+    reply = confident()
+    breakIt()
+    await run()
+    expect(prompts).toHaveLength(0)
+    expect(await skippedItems()).toContainEqual({ step: 'resolve-findings', kind: 'resolve', target: entry.id, reason: 'source-unreadable' })
+    expect((await drillReport())?.unreadable).toEqual([expect.objectContaining({ memoryId, sessionId: `s_${memoryId}`, reason })])
+    expect(kindOf((await openEntry(entry.id))!)).toBe('conflict')
+  })
+
+  it.each([
+    ['会话清单列不出', 'mem_old', 'sessions-unlisted', () => { isListBroken = true }, () => { isListBroken = false }],
+    ['存档名单读不出', 'mem_old', 'archive-unknown', () => { archived = null }, () => { archived = new Set() }],
+    ['不回看名单读不出', 'mem_old', 'no-review-unknown', () => { isNoReviewBroken = true }, () => { isNoReviewBroken = false }],
+    ['会话在清单里但日志读不出', 'mem_new', 'log-unreadable', () => { onLogRead = id => (id === 's_mem_new' ? null : undefined) }, () => { onLogRead = () => undefined }],
+  ])('这次读不出（%s）：跳过，记下具体原因，不进报告；好了之后下一次运行照常处理', async (_name, memoryId, reason, breakIt, fixIt) => {
+    const [old, neu] = await npmPair()
+    const entry = await report([old, neu])
+    reply = confident()
+    breakIt()
+    await run()
+    expect(prompts).toHaveLength(0)
+    const skipped = await skippedItems()
+    expect(skipped).toContainEqual({ step: 'resolve-findings', kind: 'resolve-source', target: memoryId, reason })
+    expect(skipped).toContainEqual({ step: 'resolve-findings', kind: 'resolve', target: entry.id, reason: 'source-unreadable' })
+    expect((await drillReport())?.unreadable ?? []).toEqual([])
+    fixIt()
+    await run()
+    expect(prompts).toHaveLength(1)
+    expect(await openEntry(entry.id)).toBeUndefined()
+  })
+
+  it('这次运行的下钻名额已经用完：核实矛盾照样读出处', async () => {
+    const [old, neu] = await npmPair()
+    await report([old, neu])
+    reply = confident()
+    const used: DreamsStep = { name: 'used-up', needsChanges: false, run: async (ctx) => { ctx.drillLog.used = 1_000 } }
+    const r = await runRaw(GLOBAL, [], [used])
+    expect(r.kind).toBe('completed')
+    expect(prompts).toHaveLength(1)
+    expect((await get('mem_old')).status).toBe('deleted')
+  })
+})
+
+describe('一次运行开始读出处的配对数有上限，下一次从上次停下的后面接着读', () => {
+  /** n 对出处都读不到（会话都标了不回看）的发现，按挂账时刻从早到晚。 */
+  async function unreadablePairs(n: number): Promise<PendingDecision[]> {
+    const entries: PendingDecision[] = []
+    for (let i = 0; i < n; i++) {
+      const pair = await npmPair({ prefix: `p${i}` })
+      entries.push(await report(pair, { at: NOW + i }))
+      for (const r of pair) marked.add(`s_${r.id}`)
+    }
+    return entries
+  }
+  const resolveSkips = async () => (await skippedItems()).filter(i => i.kind === 'resolve').map(i => [i.target, i.reason])
+
+  it(`前 ${TIER_ATTEMPTS_MAX} 对一直读不到：第 ${TIER_ATTEMPTS_MAX + 1} 对记 run-limit，下一次运行先读它，再绕回开头`, async () => {
+    const entries = await unreadablePairs(TIER_ATTEMPTS_MAX + 1)
+    await run()
+    expect(await resolveSkips()).toEqual([
+      ...entries.slice(0, TIER_ATTEMPTS_MAX).map(e => [e.id, 'source-unreadable']),
+      [entries[TIER_ATTEMPTS_MAX]!.id, 'run-limit'],
+    ])
+    await run()
+    expect(await resolveSkips()).toEqual([
+      [entries[TIER_ATTEMPTS_MAX]!.id, 'source-unreadable'],
+      ...entries.slice(0, TIER_ATTEMPTS_MAX - 1).map(e => [e.id, 'source-unreadable']),
+      [entries[TIER_ATTEMPTS_MAX - 1]!.id, 'run-limit'],
+    ])
+  })
+
+  it('上次停下的那一对已经不在账本里：从它的后继接着读，不回到开头', async () => {
+    const [a, b, c] = await unreadablePairs(3)
+    await dreamsRecords.put('global', { id: 'global', resolveCursor: { firstSeenAt: b!.firstSeenAt, id: b!.id } })
+    await decisions.remove(b!.id)
+    await run()
+    expect(await resolveSkips()).toEqual([[c!.id, 'source-unreadable'], [a!.id, 'source-unreadable']])
+  })
+
+  it('挂账时刻相同的按条目 id 排先后', async () => {
+    const entries: PendingDecision[] = []
+    for (let i = 0; i < 3; i++) {
+      const pair = await npmPair({ prefix: `p${i}` })
+      entries.push(await report(pair, { at: NOW }))
+      for (const r of pair) marked.add(`s_${r.id}`)
+    }
+    const byId = [...entries].sort((x, y) => (x.id < y.id ? -1 : 1))
+    await dreamsRecords.put('global', { id: 'global', resolveCursor: { firstSeenAt: NOW, id: byId[0]!.id } })
+    await run()
+    expect(await resolveSkips()).toEqual([byId[1]!, byId[2]!, byId[0]!].map(e => [e.id, 'source-unreadable']))
+  })
+
+  it('中途让路：游标记的是最后开始读的那一对，下一次从它后面接着读', async () => {
+    const [, b, c] = await unreadablePairs(3)
+    // 读到 b 那一对的不回看名单时，活动表转成有会话在跑，定时的让路检查跑一遍
+    beforeNoReview = async (id) => {
+      if (isBusy || !b!.memoryIds.some(m => `s_${m}` === id)) return
+      isBusy = true
+      poll!()
+      await new Promise<void>(resolve => setImmediate(resolve))
+    }
+    const r = await runRaw()
+    expect(r.kind).toBe('yielded')
+    expect(await dreams.resolveCursor(GLOBAL)).toEqual({ firstSeenAt: b!.firstSeenAt, id: b!.id })
+    isBusy = false
+    beforeNoReview = async () => {}
+    await run()
+    expect((await resolveSkips())[0]).toEqual([c!.id, 'source-unreadable'])
+  })
+
+  it('步骤中途出错：游标记的是出错时正在读的那一对', async () => {
+    const [, b] = await unreadablePairs(3)
+    for (const id of b!.memoryIds) marked.delete(`s_${id}`)
+    onLogRead = (id) => { if (b!.memoryIds.some(m => `s_${m}` === id)) throw new Error('宿主读日志出错'); return undefined }
+    const r = await runRaw()
+    expect(r.kind).toBe('failed')
+    expect(await dreams.resolveCursor(GLOBAL)).toEqual({ firstSeenAt: b!.firstSeenAt, id: b!.id })
+  })
+
+  it('一对都没开始读（账本里没有这一步处理的发现）：不写游标', async () => {
+    await run()
+    expect(await dreams.resolveCursor(GLOBAL)).toBeUndefined()
+  })
 })
