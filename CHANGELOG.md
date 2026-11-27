@@ -12,6 +12,11 @@ All notable changes to this project are documented here. The format follows
   suggesting a larger `limit`, and `limit` takes a positive integer up to 50.
   Past conversations are not paged; when both are searched, later pages list
   memories only.
+- When DeepSeek Harness's tool-result pruning threshold leaves `memory_search`
+  less than 6,000 characters per search, `memory_health` lists the threshold
+  and suggests raising `thresholdChars` of
+  `@deepseek-ai/dsh-compaction-tool-result-pruner` to at least 6,316. It does
+  not affect the score.
 - Experimental: when the assistant saves a memory as a state change or a
   correction, active decisions that list it under `related` are added to the
   To do tab on the Memory page for review; the decisions themselves are not

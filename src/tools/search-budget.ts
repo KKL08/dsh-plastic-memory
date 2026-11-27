@@ -47,6 +47,17 @@ export function searchBudgetOf(threshold: PrunerThreshold): number {
 
 /** 预算低于它时，降级说明里提一句上限偏低：放不下三条 2000 字左右的全文。 */
 const LOW_BUDGET_CHARS = 6000
+/** 健康报告建议的阈值下限：预算按它算正好是低预算线。 */
+export const SUGGESTED_THRESHOLD_CHARS = 6316
+/** 宿主裁剪时换进中间的标记有多少码点；建议配置时头尾保留量加上它不能超过阈值。 */
+export const PRUNE_MARKER_CHARS = 39
+/** 阈值已知、算出的检索输出上限低于低预算线时给健康报告的那一条；其余情况（含没有服务、读不出）为 undefined。 */
+export function lowSearchBudgetOf(threshold: PrunerThreshold): { thresholdChars: number; budgetChars: number } | undefined {
+  if (threshold.kind !== 'known') return undefined
+  const budgetChars = searchBudgetOf(threshold)
+  return budgetChars < LOW_BUDGET_CHARS ? { thresholdChars: threshold.chars, budgetChars } : undefined
+}
+
 /** 头行里的摘要、主题浏览里的名称和摘要、无命中说明缩短到这么多码点。 */
 const SHORTENED_TEXT_CHARS = 60
 /** 零条结果时说明最多留这么多码点：外部可写的主题名、类型名可能很长。 */

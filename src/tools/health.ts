@@ -1,5 +1,6 @@
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { ContextHost } from './host-session.ts'
+import { lowSearchBudgetOf, readPrunerThreshold, PRUNE_MARKER_CHARS, SUGGESTED_THRESHOLD_CHARS, type PrunerSource } from './search-budget.ts'
 import type { MemoryStore } from '../store.ts'
 import type { HealthRecommendationKind } from '../contract-codes.ts'
 import type { TypeRegistry } from '../type-registry.ts'
@@ -37,8 +38,8 @@ export interface HealthToolDeps {
   autoCheckups?: Pick<AutoCheckupSettingStore, 'read'>
   /** 触发阈值（由 index.ts 从 sensitivity 预设解析后注入）。 */
   thresholds: HealthThresholds
-  /** 当前会话的 workspace（默认口径"当前项目"的来源）。 */
-  host: ContextHost<{ workspacePath: string | undefined }>
+  /** 当前会话的 workspace（默认口径"当前项目"的来源）；带裁剪服务读取入口时报告检索输出上限是否偏低。 */
+  host: ContextHost<{ workspacePath: string | undefined }> & Partial<PrunerSource>
   now?: () => number
 }
 
@@ -83,8 +84,13 @@ export interface SingleHealthResult {
   recommendationKinds: HealthRecommendationKind[]
   /** 本次读取的目录级说明：缺标记 / 不可读目录、含保留键的文件、同 id 副本。 */
   directoryNotes: DirectoryNote[]
+  /** 检索输出上限偏低（宿主裁剪阈值已知、上限低于 6000）时的阈值和上限；不计分。 */
+  lowSearchBudget?: LowSearchBudget
   message: string
 }
+
+/** 宿主工具结果裁剪阈值，以及按它算出的检索输出上限（码点）。 */
+export interface LowSearchBudget { thresholdChars: number; budgetChars: number }
 
 export interface CheckupRow {
   layer: 'workspace' | 'global'
@@ -115,6 +121,8 @@ export interface CheckupHealthResult {
   pendingTotal: number
   /** 全库目录级说明：缺标记 / 不可读 / 只剩归档的目录、含保留键的文件、同 id 副本（含跨项目副本）。 */
   directoryNotes: DirectoryNote[]
+  /** 同单个范围的 lowSearchBudget。 */
+  lowSearchBudget?: LowSearchBudget
   message: string
 }
 
@@ -125,6 +133,12 @@ export interface HealthErrorResult {
 }
 
 export type HealthToolResult = SingleHealthResult | CheckupHealthResult | HealthErrorResult
+
+/** 检索输出上限偏低的那一条：现在的阈值和上限、建议的阈值、配置写在哪个键上。 */
+function lowSearchBudgetLine({ thresholdChars, budgetChars }: LowSearchBudget): string {
+  return `检索输出上限偏低（不扣分）：DeepSeek Harness 的工具结果裁剪阈值是 ${thresholdChars} 字，memory_search 每次最多输出 ${budgetChars} 字，命中多时只给节选或头行。`
+    + `建议把 @deepseek-ai/dsh-compaction-tool-result-pruner 的 thresholdChars 调到 ${SUGGESTED_THRESHOLD_CHARS} 或以上，同时让 headChars + tailChars + ${PRUNE_MARKER_CHARS} 不超过 thresholdChars。`
+}
 
 /** 把健康检查结果渲染成给模型看的一段文本。纯函数。 */
 export function renderHealthResult(result: HealthToolResult): string {
@@ -155,6 +169,7 @@ export function renderHealthResult(result: HealthToolResult): string {
       const detail = result.promoteCandidates.byWorkspace.map(w => `${w.workspacePath} ${w.count} 条`).join('、')
       lines.push(`提升候选合计 ${result.promoteCandidates.total} 条（${detail}），经用户确认后用 memory_promote 提升；用户拒绝的用 dismiss 清除标记。`)
     }
+    if (result.lowSearchBudget !== undefined) lines.push(lowSearchBudgetLine(result.lowSearchBudget))
     lines.push(...renderDirectoryNotes(result.directoryNotes))
     return lines.join('\n')
   }
@@ -170,6 +185,7 @@ export function renderHealthResult(result: HealthToolResult): string {
   const ignored = ignoredNote(result.ignoredCount)
   if (ignored !== undefined) lines.push(ignored)
   if (result.overflow !== null) lines.push(`超出上限（不扣分）：${result.overflow.summary}`)
+  if (result.lowSearchBudget !== undefined) lines.push(lowSearchBudgetLine(result.lowSearchBudget))
   if (result.pendingDecisions.items.length > 0) {
     lines.push('待裁决冲突（memory_confirm resolve）：')
     for (const item of result.pendingDecisions.items) {
@@ -191,6 +207,9 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
   const now = deps.now?.() ?? Date.now()
   const th = deps.thresholds
   const overdueMs = th.pendingOverdueDays * DAY
+  const readPruner = deps.host.toolResultPrunerOf
+  const low = readPruner === undefined ? undefined : lowSearchBudgetOf(readPrunerThreshold(() => readPruner.call(deps.host, exec)))
+  const lowSearchBudget = low === undefined ? {} : { lowSearchBudget: low }
   // 预读范围：与 memory_scan 共用 prereadScopes——目标作用域（含 .archive/）的全部状态记录、作用域外引用按 id 定位、
   // 待决账本、语义缓存、按作用域归档的隔离文件；之后的评分与聚合都是同步纯计算。
   // 目录枚举只读标记与文件名：体检清单、scope 校验、缺标记 / 不可读目录的说明都出自它
@@ -223,6 +242,7 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
       promoteCandidates,
       pendingTotal: data.pending.length,
       directoryNotes: [...listingNotes(listing, { includeEmpty: true }), ...data.directoryNotes],
+      ...lowSearchBudget,
       message: `全库健康体检：global + ${wsCount} 个 workspace，各层独立计分（分母为该层自身规模）。`,
     }
   }
@@ -362,6 +382,7 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
     recommendation,
     recommendationKinds,
     directoryNotes: [...listingNotes(listing, { includeEmpty: false }), ...data.directoryNotes],
+    ...lowSearchBudget,
     message: `${scopeLabel}健康分 ${Math.floor(health.score)}/100（${TIER_LABEL[health.tier]}）${gateNote}${semanticNote}。${recommendation}。`,
   }
 }
