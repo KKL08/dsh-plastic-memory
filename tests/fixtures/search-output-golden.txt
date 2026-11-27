@@ -2598,7 +2598,7 @@ Use vitest for unit tests; playwright covers the login flow.
    "id": "mem_db_mock",
    "type": "preference",
    "summary": "mem_db_mock 摘要",
-   "content": "16 字符",
+   "content": "35 字符",
    "sourceNote": "",
    "stalenessNote": "",
    "matchNote": "",
@@ -2712,7 +2712,7 @@ Use vitest for unit tests; playwright covers the login flow.
 下面头行标「节选」的条目只给出正文的一段（有命中词时取它附近）。要全文，用 memory_search 按 id 查，或读头行末尾路径指向的文件。更新记忆会替换整条正文，更新前先确认已读过它的全文。
 
 [mem_db_mock] preference｜mem_db_mock 摘要 · /in-memory/global/mem_db_mock.md
-全文已在本会话带入的长期记忆里。
+测试里不要 mock 数据库，集成测试连真实的 PostgreSQL。
 
 [mem_db_naming] knowledge｜mem_db_naming 摘要 · 部分命中，没有可列出的完整关键词 · /in-memory/global/mem_db_naming.md
 数据库表名用复数，字段用 snake_case。

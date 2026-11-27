@@ -196,14 +196,14 @@ describe('按 id 查与注入快照', () => {
     expect(shapes(hits)).toEqual([...times(6, 'full'), 'excerpt'])
   })
 
-  it('按 id 查、目标全文已在注入快照里：仍是那句说明', async () => {
+  it('按 id 查、目标全文已在注入快照里：按 id 要的那条照给全文', async () => {
     const { store, search, freeze } = setup()
     await store.put(record({ id: 'mem_core', type: 'preference', name: 'mem_core', content: filler(2500) }))
     const session = {}
     await freeze(session)
     const { hits } = await search({ query: 'mem_core' }, session)
     expect(hits[0].id).toBe('mem_core')
-    expect(hits[0].content).toBe(IN_SNAPSHOT_NOTE)
+    expect(hits[0].content).toBe(filler(2500))
     expect(hits[0]).not.toHaveProperty('isExcerpt')
   })
 

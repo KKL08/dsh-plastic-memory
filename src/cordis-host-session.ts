@@ -255,5 +255,13 @@ export function createCordisHostSession(deps: CordisHostSessionDeps): HostSessio
     }
   }
 
-  return { archivedSessionIds, listSessions, sessionTitleOf, contextOf, saveContextOf, llmOf, defaultLlm, llmForRoute, modelCatalog, modeOf, hasEarlierTurns, remember, ownSessionIdOf, workspaceOf, readSessionLog }
+  // 宿主把裁剪服务挂在 agent 预设的隔离分组里，插件根上的 ctx.get 看不到，要经预设登记表按 agent 取；
+  // 不经预设装配的 profile 里它在根上。查找抛错照常抛出：调用方按「阈值读不出」处理，和「没有裁剪服务」区分开
+  const toolResultPrunerOf = (exec: ToolRunContext): unknown => {
+    const presets = deps.lookup('agentPresets') as { serviceFor?(agent: unknown, name: string): unknown } | undefined
+    const scoped = exec.agent === undefined ? undefined : presets?.serviceFor?.(exec.agent, 'toolResultPruner')
+    return scoped ?? deps.lookup('toolResultPruner')
+  }
+
+  return { toolResultPrunerOf, archivedSessionIds, listSessions, sessionTitleOf, contextOf, saveContextOf, llmOf, defaultLlm, llmForRoute, modelCatalog, modeOf, hasEarlierTurns, remember, ownSessionIdOf, workspaceOf, readSessionLog }
 }

@@ -5,7 +5,7 @@ import { rankSegments, groupHitsByTurn, orderCandidates, fillBudget, fuseLanes, 
 import type { DialogueSegment, DialogueFill, DialogueTurnCandidate, FusionLane } from '../search/dialogue-rank.ts'
 import { isSameAsMemory, quoteTurnKey } from '../search/memory-quotes.ts'
 import { groupQueryTerms, judgeTopHit, termHitCounts, type TermHitCount } from '../search/coverage.ts'
-import { dialogueBudgetOf, dialogueNote, coverageNote, omittedNote, excerptNote, formatMessageRef, messageReferenceNote, renderDialogueLine, wrapDialogueQuote, dialogueSessionHeading, DIALOGUE_OR_FALLBACK_NOTE, DIALOGUE_LOW_COVERAGE_NOTE, DIALOGUE_SUBSTRING_FALLBACK_NOTE, dialogueTermHitNote, relatedMemoryNote, SAME_AS_MEMORY_NOTE, DIALOGUE_SEGMENT_GAP, DIALOGUE_SESSIONS_UNAVAILABLE, DIALOGUE_NO_HIT, DIALOGUE_COVERAGE_PENDING } from '../search/dialogue-format.ts'
+import { dialogueBudgetOf, dialogueNote, coverageNote, omittedNote, droppedSegmentsNote, excerptNote, formatMessageRef, messageReferenceNote, renderDialogueLine, wrapDialogueQuote, dialogueSessionHeading, DIALOGUE_OR_FALLBACK_NOTE, DIALOGUE_LOW_COVERAGE_NOTE, DIALOGUE_SUBSTRING_FALLBACK_NOTE, dialogueTermHitNote, relatedMemoryNote, SAME_AS_MEMORY_NOTE, DIALOGUE_SEGMENT_GAP, DIALOGUE_SESSIONS_UNAVAILABLE, DIALOGUE_NO_HIT, DIALOGUE_COVERAGE_PENDING } from '../search/dialogue-format.ts'
 import type { DialogueSpeaker } from '../contract-codes.ts'
 import { estimateTokens } from '../snapshot.ts'
 import type { SearchContext } from './search.ts'
@@ -133,7 +133,7 @@ function assembleOutput(
   groups: ReturnType<typeof orderCandidates>, segments: readonly DialogueSegment[],
   turnTables: Map<string, ReturnType<DialogueSearchDeps['store']['turnsOf']>>,
   messageOf: (segment: DialogueSegment) => DialogueSegment[],
-  related: ReadonlyMap<string, { label: string; content: string | undefined }>,
+  related: ReadonlyMap<string, Pick<RelatedMemory, 'label' | 'content'>>,
 ): DialogueSearchResult['groups'] {
   const output: DialogueSearchResult['groups'] = []
   for (const group of groups) {
@@ -157,7 +157,7 @@ function assembleOutput(
 }
 
 /** 这一段和它那一轮对应的记忆正文相同：输出时从略，不占预算。 */
-function isSameAsRelated(s: DialogueSegment, related: ReadonlyMap<string, { content: string | undefined }>): boolean {
+function isSameAsRelated(s: DialogueSegment, related: ReadonlyMap<string, Pick<RelatedMemory, 'content'>>): boolean {
   const memory = related.get(quoteTurnKey(s.sessionId, s.turnSeq))
   return memory !== undefined && isSameAsMemory(s.text, memory.content)
 }
@@ -226,7 +226,26 @@ export interface DialogueFusionInput {
    * 一轮对应的记忆：名称（已遮盖、折成一行）和正文。原话段里写对应记忆用名称；和正文相同的段从略、不占预算。已附在记忆下面的轮对应附它的那条。
    * 记忆这次只给了节选时正文是 undefined，不判从略。
    */
-  related?: ReadonlyMap<string, { label: string; content: string | undefined }>
+  related?: ReadonlyMap<string, RelatedMemory>
+}
+
+/**
+ * 一轮对应的记忆。memory 是这条记忆本身（检索里取的那份记录）：带了它时，最终组装按它这次是否给了全文重判从略，
+ * content 只用于装填时估算费用；没带时按 content 判。
+ */
+export interface RelatedMemory { label: string; content: string | undefined; memory?: { content: string } }
+
+/**
+ * 输出收尾的降级要用的重组：独立原话按装填顺序只留前 keep 段，和记忆正文相同的段按最终给了全文的记忆判从略。
+ * omitted 是按保留的段重算的省略说明，没有要说的为 undefined。
+ */
+export interface DialogueRefit {
+  /** 装填进来、在独立原话里输出的段数。 */
+  segments: number
+  /** notes 里省略说明的位置；原来没有这一句时是它该插入的位置。 */
+  omittedAt: number
+  hasOmitted: boolean
+  reassemble(keep: number, isShownInFull: (memory: { content: string }) => boolean): { groups: DialogueSearchResult['groups']; omitted?: string }
 }
 
 /** 原话一路和别的路按名次融合，给原话命中的轮标上融合后的名次；别的路单独带来的轮没有可给的段，不进来。 */
@@ -240,7 +259,7 @@ export function fusedCandidates(retrieval: DialogueRetrieval, lanes: readonly Fu
 }
 
 /** 原话检索的结果，加上装进来、要并到记忆下面的段。 */
-export type FinishedDialogue = DialogueSearchResult & { merged: Array<DialogueSegment & { segmentCount: number }> }
+export type FinishedDialogue = DialogueSearchResult & { merged: Array<DialogueSegment & { segmentCount: number }>; refit?: DialogueRefit }
 
 /**
  * 先融合排序、再按预算装填，两步分开：融合交出排好的轮，装填只管按这个顺序装。
@@ -270,14 +289,34 @@ export async function finishDialogue(retrieval: DialogueRetrieval, deps: Dialogu
   }, dialogueBudgetOf(deps.budget?.() ?? NaN), {
     pinned: input.pinned, given: input.given, attached: candidates.filter(t => !isOutside(t)), costOf: s => isSameAsRelated(s, related) ? 0 : estimateTokens(s.text),
   })
+  const omittedAt = notes.length
   const omitted = omittedNote(fill.omittedTurns, fill.partialTurns)
   if (omitted) notes.push(omitted)
   if (retrieval.hits.length === 0 && retrieval.isComplete) notes.push(DIALOGUE_NO_HIT)
-  const output = assembleOutput(groups, fill.segments.filter(isOutside), turnTables, messageOf, related)
+  const outside = fill.segments.filter(isOutside)
+  const output = assembleOutput(groups, outside, turnTables, messageOf, related)
   const merged = fill.segments.filter(s => !isOutside(s)).map(s => ({ ...s, segmentCount: messageOf(s).length }))
   await Promise.all(output.map(async group => { group.title = await deps.host.sessionTitleOf(group.sessionId) }))
   if (deps.isEnabled?.() === false) return { kind: 'off', notes: [], groups: [], merged: [] }
-  return { kind: 'ready', notes, groups: output, fill, diagnostics: retrieval.diagnostics, merged }
+  const titles = new Map(output.map(g => [g.sessionId, g.title]))
+  const reassemble: DialogueRefit['reassemble'] = (keep, isShownInFull) => {
+    const kept = outside.slice(0, keep)
+    const finalRelated = new Map([...related].map(([turn, r]) => [turn, r.memory === undefined ? r : { label: r.label, content: isShownInFull(r.memory) ? r.memory.content : undefined }]))
+    const regrouped = assembleOutput(groups, kept, turnTables, messageOf, finalRelated)
+    for (const group of regrouped) group.title = titles.get(group.sessionId)
+    // 省略计数按最终留下的段重算，口径同装填：别处给过的段、并到记忆下面的段、留下的段都算放进来了
+    const selected = new Set([...input.given ?? [], ...merged.map(segmentKey), ...kept.map(segmentKey)])
+    let omittedTurns = 0
+    let partialTurns = 0
+    for (const turn of groups.flatMap(g => g.turns)) {
+      const count = turn.hits.filter(h => selected.has(segmentKey(h))).length
+      if (count === 0) omittedTurns++
+      else if (count < turn.hits.length) partialTurns++
+    }
+    const lines = [omittedNote(omittedTurns, partialTurns), keep < outside.length ? droppedSegmentsNote(outside.length - keep) : undefined].filter(x => x !== undefined)
+    return { groups: regrouped, ...(lines.length > 0 ? { omitted: lines.join('') } : {}) }
+  }
+  return { kind: 'ready', notes, groups: output, fill, diagnostics: retrieval.diagnostics, merged, refit: { segments: outside.length, omittedAt, hasOmitted: omitted !== undefined, reassemble } }
 }
 
 /** 融合里原话这一路的名字。 */

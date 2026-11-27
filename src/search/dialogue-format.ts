@@ -141,6 +141,11 @@ export function omittedNote(omittedTurns: number, partialTurns: number): string 
   return `还有 ${parts.join('、')}。要接着看：换更具体的关键词再搜，或用 memory_source 带上引用看某条消息的更多内容。`
 }
 
+/** 输出长度到了上限、按装填顺序从后往前省掉独立原话段时，接在省略说明后面。原话不按 offset 翻页。 */
+export function droppedSegmentsNote(count: number): string {
+  return `因输出长度另省掉 ${count} 段原话；原话不支持 offset 翻页，可以换更具体的关键词再搜，或用 memory_source 带上引用看某条消息。`
+}
+
 const DIALOGUE_NOTES: Record<Exclude<DialogueNoteCode, 'dialogue-index-building'>, string> = {
   'dialogue-source-off': '当前设置是只查记忆，这次没有查过往对话的原话。',
   'dialogue-unavailable': '过往对话的原话暂时查不了，这次只查了记忆。',

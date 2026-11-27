@@ -27,6 +27,8 @@ export interface HistoryEntry {
   reason: string
   /** 并进来的版本才有：原来那条记忆的 id，渲染成「并入自」。 */
   mergedFrom?: string
+  /** 输出长度到了上限、这一行只留版本标识时才有。 */
+  isIdOnly?: boolean
 }
 
 /** 按 id 列历史版本的结果。 */

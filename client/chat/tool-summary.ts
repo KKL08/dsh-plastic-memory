@@ -82,12 +82,13 @@ export function countSearchHits(text: string): number {
     const dialogueAt = text.lastIndexOf('\n\n【其他原话】\n')
     memories = text.slice('【记忆条目】\n'.length, dialogueAt === -1 ? undefined : dialogueAt)
   }
-  return memories.split('\n\n').filter(block => /^\[[^\]\s]+\] [^\n]*｜/.test(block)).length
+  // 正文以换行结尾时块之间多出空行：按连续空行切，下一条的头行仍在块首
+  return memories.split(/\n{2,}/).filter(block => /^\[[^\]\s]+\] [^\n]*｜/.test(block)).length
 }
 
-/** 按主题浏览的结果：每条一行「- [id] 名称（摘要）…」。 */
+/** 按主题浏览的结果：每条一行「- [id] 名称（摘要）…」，输出放不下时缩到只剩「- [id]」。 */
 function countBrowseRows(text: string): number {
-  return text.match(/^- \[[^\]\s]+\] /gm)?.length ?? 0
+  return text.match(/^- \[[^\]\s]+\](?: |$)/gm)?.length ?? 0
 }
 
 /** 列历史的头行「记忆 <id> 的历史：共读到 N 版，给出 M 版。」→ 给出的版数；参数错、找不到这条记忆时没有这行。 */
