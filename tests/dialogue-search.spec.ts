@@ -123,7 +123,7 @@ it('无参数跟随两路配置，记忆筛选不限制原话', async () => {
   deps.searchSource = () => 'dialogue'
   const dialogueOnly = await search(deps)
   expect(dialogueOnly).toContain('会话标题'); expect(dialogueOnly).not.toContain('部署记忆')
-  const result = await executeSearch({ query: '部署', source: 'dialogue', types: ['absent'], scope: 'global', match: 'all', limit: 0 }, fakeExec(), deps)
+  const result = await executeSearch({ query: '部署', source: 'dialogue', types: ['absent'], scope: 'global', match: 'all', limit: 1 }, fakeExec(), deps)
   expect(renderSearchResult(result)).toContain('会话标题')
 })
 it('子会话只搜自身，跨项目、不回看和消失会话不给引用', async () => {

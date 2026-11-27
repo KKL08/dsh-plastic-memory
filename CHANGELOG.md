@@ -7,6 +7,11 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- `memory_search` keyword results and type listings page with `offset`, as
+  topic browsing does: the result gives the next page's offset instead of
+  suggesting a larger `limit`, and `limit` takes a positive integer up to 50.
+  Past conversations are not paged; when both are searched, later pages list
+  memories only.
 - Experimental: when the assistant saves a memory as a state change or a
   correction, active decisions that list it under `related` are added to the
   To do tab on the Memory page for review; the decisions themselves are not

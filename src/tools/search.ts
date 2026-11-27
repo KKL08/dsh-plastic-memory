@@ -96,7 +96,7 @@ export interface SearchArgs {
   version?: string
   /** 主题名（曾用名也算）：只给它时按索引顺序列出这个主题的成员行；配 query 时在这个主题的成员里按关键词查。只查记忆。 */
   topic?: string
-  /** 配 topic 翻页：跳过前面多少条，缺省 0。只收不小于 0 的整数。 */
+  /** 翻页：跳过前面多少条，缺省 0。只收不小于 0 的整数；配 topic、关键词检索、只填 types 的列表都能用，原话不翻页。 */
   offset?: number
 }
 
@@ -182,6 +182,7 @@ export function versionCountNote(count: number): string {
  */
 export function searchArgsError(args: SearchArgs): string | undefined {
   if (args.id === '') return '请在 id 中填写记忆 id。'
+  if (args.limit !== undefined && !(Number.isInteger(args.limit) && args.limit > 0)) return `limit 请填写正整数，最大 ${MAX_SEARCH_LIMIT}。`
   if (args.history === true && args.version !== undefined) return 'history 和 version 对应两种操作，请选择 history: true 列历史，或 version 读一版。'
   if (args.history === true && args.id === undefined) return '使用 history: true 时请同时填写 id。'
   if (args.version !== undefined && args.id === undefined) return '使用 version 时请同时填写 id。'
@@ -190,15 +191,15 @@ export function searchArgsError(args: SearchArgs): string | undefined {
     if (args.query !== undefined) return 'id 和 query 对应历史与当前内容两种查询，请选择其中一种。'
     if (args.types?.length) return 'id 已指定记忆，请去掉 types 后查询历史。'
     if (args.topic !== undefined) return 'id 和 topic 对应历史与按主题浏览两种查询，请选择其中一种。'
-    if (args.offset !== undefined) return 'id 和 offset 不能一起用：offset 只用于配 topic 翻页。'
+    if (args.offset !== undefined) return 'id 和 offset 不能一起用：offset 用于检索结果和主题列表翻页，历史列表用 limit 控制条数。'
     if (args.match !== undefined) return 'id 已指定记忆，请去掉 match 后查询历史。'
     if (args.source !== undefined && args.source !== 'memory') return '按 id 查历史时，source 请设为 memory 或不传。'
     if (args.version !== undefined && args.limit !== undefined) return 'version 每次读取一版全文，请去掉 limit；limit 用于 history 列表。'
     if (args.history !== true && args.version === undefined) return '给 id 后，列历史请配 history: true，读一版请配 version；要这条当前的内容，请把 id 填进 query。'
   } else {
     if (args.topic !== undefined && args.topic.trim() === '') return '请在 topic 中填写主题名。'
-    if (args.offset !== undefined && args.topic === undefined) return '使用 offset 翻页时请同时填写 topic；关键词检索用 limit 控制条数。'
     if (args.offset !== undefined && !(Number.isInteger(args.offset) && args.offset >= 0)) return 'offset 请填写不小于 0 的整数。'
+    if (args.offset !== undefined && args.source === 'dialogue') return '原话检索不翻页，请去掉 offset；要看更多原话，换更具体的关键词再搜。'
     if (args.topic !== undefined && args.source !== undefined && args.source !== 'memory') return 'topic 只查记忆，source 请设为 memory 或不传。'
     if (args.query === undefined && !args.types?.length && args.topic === undefined) return '请填写 query、非空 types 或 topic，或用 id 配 history: true 或 version 查历史。'
   }
@@ -304,15 +305,18 @@ export const DEFAULT_SEARCH_LIMIT = 10
 export const MAX_SEARCH_LIMIT = 50
 
 /**
- * 命中多于返回条数时附在开头：不说的话模型以为结果就这么多。两条路都摆出来，由模型按需要选——
- * 要更全就调大 limit，结果太杂就换更具体的词缩小范围；limit 已到上限时只剩后一条。
+ * 关键词检索、只填 types 的列表的翻页说明：后面还有候选时给下一页的 offset，并提醒可以换更具体的词缩小范围；
+ * 翻到最后一页只说这是第几条到第几条；offset 越过末尾时说后面没有了。第一页就全列完时没有这一句。
  */
-export function truncationNote(total: number, shown: number, atCap: boolean): string {
-  const head = `共命中 ${total} 条，只列出前 ${shown} 条。`
-  return atCap
-    ? `${head}limit 已是上限 ${MAX_SEARCH_LIMIT}，想缩小范围可以换更具体的关键词。`
-    : `${head}要看更多可以调大 limit（最多 ${MAX_SEARCH_LIMIT}），想缩小范围可以换更具体的关键词。`
+export function truncationNote(total: number, offset: number, shown: number): string | undefined {
+  if (offset === 0 && shown >= total) return undefined
+  if (shown === 0) return `共命中 ${total} 条，offset ${offset} 之后没有了。`
+  const range = `共命中 ${total} 条，这次列出第 ${offset + 1}${shown > 1 ? `–${offset + shown}` : ''} 条。`
+  return offset + shown < total ? `${range}下一页用 offset: ${offset + shown}，想缩小范围可以换更具体的关键词。` : range
 }
+
+/** 两者都查、翻到第二页及以后时接在翻页说明后面：其他原话只在第一页给出。 */
+const MEMORY_PAGE_ONLY_NOTE = '翻页只翻记忆条目，其他原话只在第一页给出。'
 
 /**
  * 把命中结果渲染成给模型看的一段文本：有说明先写说明，再列命中（头行末尾带文件绝对路径）。纯函数。
@@ -485,9 +489,9 @@ async function executeMemorySearch(
     ...note,
     ...(hasTopics && !isTopic && tokens.length > 0 ? { matchedTopics: topics.matched.map(g => groupInfo.get(g)!.ref) } : {}),
     ...(topicNote !== '' ? { topicNote } : {}),
-    ...(isTopic ? (listed.length > 0 ? { moreNote: pageNote(listed.length, offset, top.length) } : {}) : listed.length > top.length
-      ? { moreNote: truncationNote(listed.length, top.length, limit === MAX_SEARCH_LIMIT) + (listed.length > allOnly.length && allOnly.some(e => e.tier === 'all') ? MATCH_ALL_HINT : '') }
-      : {}),
+    ...(isTopic ? (listed.length > 0 ? { moreNote: pageNote(listed.length, offset, top.length) } : {}) : offset + top.length < listed.length
+      ? { moreNote: truncationNote(listed.length, offset, top.length)! + (listed.length > allOnly.length && allOnly.some(e => e.tier === 'all') ? MATCH_ALL_HINT : '') }
+      : offset > 0 ? { moreNote: truncationNote(listed.length, offset, top.length)! } : {}),
     // 与注入同口径：只遮明确密钥（疑似级写入时用户已确认）；文件路径同注入，name 被遮的不给，其余遮一遍
     hits: top.map(({ record: h, tier: rankedTier, tokenHits, filePath }, i): SearchHit => {
       const masked = maskSecretSurface(h)
@@ -606,8 +610,8 @@ function withQuoteBlocks(outcome: SearchOutcome, quotes: MemoryQuotes, merged: F
  * 解析来源、分路检索。开头定一个截止时间，原话检索和附原话都用它剩下的部分；追库和会话表各路共用、各只做一次。
  */
 export async function executeSearch(args: SearchArgs, exec: ToolRunContext, deps: SearchToolDeps): Promise<SearchOutcome> {
-  // 不合法的组合都落在这几种参数上：只给 query（以及 source、types、scope、limit、match）的老用法不经校验
-  if (args.query === undefined || args.id !== undefined || args.history !== undefined || args.version !== undefined || args.topic !== undefined || args.offset !== undefined) {
+  // 不合法的组合都落在这几种参数上：只给 query（以及 source、types、scope、match）的老用法不经校验
+  if (args.query === undefined || args.id !== undefined || args.history !== undefined || args.version !== undefined || args.topic !== undefined || args.offset !== undefined || args.limit !== undefined) {
     const reason = searchArgsError(args)
     if (reason !== undefined) return { hits: [], noteCode: 'invalid-args', note: reason }
     if (args.id !== undefined) return executeHistorySearch({ ...args, id: args.id }, exec, deps)
@@ -623,14 +627,19 @@ export async function executeSearch(args: SearchArgs, exec: ToolRunContext, deps
 async function searchSources(args: SearchArgs, exec: ToolRunContext, deps: SearchToolDeps, deadline: number): Promise<SearchOutcome> {
   const now = deps.now ?? Date.now
   const configured = deps.searchSource?.() ?? 'memory'
-  const source = args.source ?? configured
+  const asked = args.source ?? configured
   const query = args.query ?? ''
   const hasQuery = query.trim() !== ''
+  // 原话不翻页：两者都查翻到后面几页时只翻记忆，其他原话只在第一页给出。设置只查记忆、或没有关键词时第一页本来就不查原话
+  const isLaterPage = (args.offset ?? 0) > 0 && asked === 'both' && configured !== 'memory' && hasQuery
+  const source = isLaterPage ? 'memory' : asked
+  if (asked === 'dialogue' && configured !== 'memory' && args.offset !== undefined) return { hits: [], noteCode: 'invalid-args', note: '原话检索不翻页，请去掉 offset；要看更多原话，换更具体的关键词再搜。' }
   // 带原话开不开只在开头读一次：检索中途改了设置，下次检索才生效
   const isQuoting = deps.memoryQuotes?.() === true && deps.dialogue !== undefined && hasQuery
   if (configured === 'memory' || source === 'memory') {
     let listing: MemoryListing | undefined
-    const memories = await executeMemorySearch(args, exec, deps, isQuoting ? listed => { listing = listed } : undefined)
+    const found = await executeMemorySearch(args, exec, deps, isQuoting ? listed => { listing = listed } : undefined)
+    const memories = isLaterPage ? { ...found, moreNote: [found.moreNote, MEMORY_PAGE_ONLY_NOTE].filter(Boolean).join('') } : found
     const outcome = configured === 'memory' && source !== 'memory' ? { ...memories, pathNote: dialogueNote('dialogue-source-off') } : memories
     // 记忆一条都没命中：没有要附原话的，结果照常（含「没有匹配的记忆。」）
     return listing === undefined || listing.top.length === 0 ? outcome : withMemoryQuotes(outcome, listing, query, deps as SearchToolDeps & { dialogue: DialogueSearchDeps }, deadline)

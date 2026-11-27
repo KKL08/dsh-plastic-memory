@@ -256,17 +256,17 @@ describe('匹配模式 match', () => {
       { id: 'mem_p', content: 'alpha' },
     ])
     const anyMixed = await run(mixed, 'alpha beta', { limit: 1 })
-    expect(anyMixed.moreNote).toBe(`${truncationNote(3, 1, false)}${MATCH_ALL_HINT}`)
+    expect(anyMixed.moreNote).toBe(`${truncationNote(3, 0, 1)}${MATCH_ALL_HINT}`)
     expect(anyMixed.moreNote!.endsWith(MATCH_ALL_HINT)).toBe(true)
     // all 模式：只数全命中，不提 all
-    expect((await run(mixed, 'alpha beta', { match: 'all', limit: 1 })).moreNote).toBe(truncationNote(2, 1, false))
+    expect((await run(mixed, 'alpha beta', { match: 'all', limit: 1 })).moreNote).toBe(truncationNote(2, 0, 1))
 
     const allFull = await memStore([
       { id: 'mem_f1', content: 'alpha beta' },
       { id: 'mem_f2', content: 'alpha beta' },
     ])
-    expect((await run(allFull, 'alpha beta', { limit: 1 })).moreNote).toBe(truncationNote(2, 1, false))
-    expect((await run(allFull, 'alpha beta', { match: 'all', limit: 1 })).moreNote).toBe(truncationNote(2, 1, false))
+    expect((await run(allFull, 'alpha beta', { limit: 1 })).moreNote).toBe(truncationNote(2, 0, 1))
+    expect((await run(allFull, 'alpha beta', { match: 'all', limit: 1 })).moreNote).toBe(truncationNote(2, 0, 1))
   })
 
   it('查询没有可打分的词（留空、纯数字、单字母）时 match 不起作用，两种模式结果相同，截断说明不提 all', async () => {
@@ -277,7 +277,7 @@ describe('匹配模式 match', () => {
     for (const query of ['', '2024', 'x']) {
       const any = await run(store, query, { limit: 1 })
       expect(any.hits).toHaveLength(1)
-      expect(any.moreNote).toBe(truncationNote(2, 1, false))
+      expect(any.moreNote).toBe(truncationNote(2, 0, 1))
       expect(await run(store, query, { match: 'all', limit: 1 })).toEqual(any)
     }
     // 没命中时也一样：不出 all-no-hit，是不带码的空结果

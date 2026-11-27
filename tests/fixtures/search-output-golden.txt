@@ -862,7 +862,7 @@
 
 ### {"query":"mem_db"}
 {
- "moreNote": "共命中 26 条，只列出前 10 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。用 match: \"all\" 可以只看同时含全部关键词的记忆。",
+ "moreNote": "共命中 26 条，这次列出第 1–10 条。下一页用 offset: 10，想缩小范围可以换更具体的关键词。用 match: \"all\" 可以只看同时含全部关键词的记忆。",
  "hits": [
   {
    "id": "mem_db_mock",
@@ -977,7 +977,7 @@
  ]
 }
 --- 渲染 ---
-共命中 26 条，只列出前 10 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。用 match: "all" 可以只看同时含全部关键词的记忆。
+共命中 26 条，这次列出第 1–10 条。下一页用 offset: 10，想缩小范围可以换更具体的关键词。用 match: "all" 可以只看同时含全部关键词的记忆。
 下面头行标「节选」的条目只给出正文的一段（有命中词时取它附近）。要全文，用 memory_search 按 id 查，或读头行末尾路径指向的文件。更新记忆会替换整条正文，更新前先确认已读过它的全文。
 
 [mem_db_mock] preference｜mem_db_mock 摘要 · /in-memory/global/mem_db_mock.md
@@ -1013,7 +1013,7 @@
 
 ### {"query":"mem_db_mock"}
 {
- "moreNote": "共命中 26 条，只列出前 10 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。用 match: \"all\" 可以只看同时含全部关键词的记忆。",
+ "moreNote": "共命中 26 条，这次列出第 1–10 条。下一页用 offset: 10，想缩小范围可以换更具体的关键词。用 match: \"all\" 可以只看同时含全部关键词的记忆。",
  "hits": [
   {
    "id": "mem_db_mock",
@@ -1129,7 +1129,7 @@
  ]
 }
 --- 渲染 ---
-共命中 26 条，只列出前 10 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。用 match: "all" 可以只看同时含全部关键词的记忆。
+共命中 26 条，这次列出第 1–10 条。下一页用 offset: 10，想缩小范围可以换更具体的关键词。用 match: "all" 可以只看同时含全部关键词的记忆。
 下面头行标「节选」的条目只给出正文的一段（有命中词时取它附近）。要全文，用 memory_search 按 id 查，或读头行末尾路径指向的文件。更新记忆会替换整条正文，更新前先确认已读过它的全文。
 
 [mem_db_mock] preference｜mem_db_mock 摘要 · /in-memory/global/mem_db_mock.md
@@ -1165,7 +1165,7 @@
 
 ### {"query":"mem_both"}
 {
- "moreNote": "共命中 26 条，只列出前 10 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。用 match: \"all\" 可以只看同时含全部关键词的记忆。",
+ "moreNote": "共命中 26 条，这次列出第 1–10 条。下一页用 offset: 10，想缩小范围可以换更具体的关键词。用 match: \"all\" 可以只看同时含全部关键词的记忆。",
  "hits": [
   {
    "id": "mem_both",
@@ -1281,7 +1281,7 @@
  ]
 }
 --- 渲染 ---
-共命中 26 条，只列出前 10 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。用 match: "all" 可以只看同时含全部关键词的记忆。
+共命中 26 条，这次列出第 1–10 条。下一页用 offset: 10，想缩小范围可以换更具体的关键词。用 match: "all" 可以只看同时含全部关键词的记忆。
 下面头行标「节选」的条目只给出正文的一段（有命中词时取它附近）。要全文，用 memory_search 按 id 查，或读头行末尾路径指向的文件。更新记忆会替换整条正文，更新前先确认已读过它的全文。
 
 [mem_both] knowledge｜mem_both 摘要 · /in-memory/proj-d6f74551/mem_both.md
@@ -1317,7 +1317,7 @@
 
 ### {"query":""}
 {
- "moreNote": "共命中 26 条，只列出前 10 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。",
+ "moreNote": "共命中 26 条，这次列出第 1–10 条。下一页用 offset: 10，想缩小范围可以换更具体的关键词。",
  "hits": [
   {
    "id": "mem_db_mock",
@@ -1428,7 +1428,7 @@
  ]
 }
 --- 渲染 ---
-共命中 26 条，只列出前 10 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。
+共命中 26 条，这次列出第 1–10 条。下一页用 offset: 10，想缩小范围可以换更具体的关键词。
 下面头行标「节选」的条目只给出正文的一段（有命中词时取它附近）。要全文，用 memory_search 按 id 查，或读头行末尾路径指向的文件。更新记忆会替换整条正文，更新前先确认已读过它的全文。
 
 [mem_db_mock] preference｜mem_db_mock 摘要 · /in-memory/global/mem_db_mock.md
@@ -1466,7 +1466,7 @@ Use vitest for unit tests; playwright covers the login flow.
 
 ### {"query":"接口约定"}
 {
- "moreNote": "共命中 14 条，只列出前 10 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。",
+ "moreNote": "共命中 14 条，这次列出第 1–10 条。下一页用 offset: 10，想缩小范围可以换更具体的关键词。",
  "hits": [
   {
    "id": "mem_api_09",
@@ -1571,7 +1571,7 @@ Use vitest for unit tests; playwright covers the login flow.
  ]
 }
 --- 渲染 ---
-共命中 14 条，只列出前 10 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。
+共命中 14 条，这次列出第 1–10 条。下一页用 offset: 10，想缩小范围可以换更具体的关键词。
 
 [mem_api_09] knowledge｜mem_api_09 摘要 · /in-memory/global/mem_api_09.md
 接口约定第 9 条：返回值统一包一层 data 字段。
@@ -1605,7 +1605,7 @@ Use vitest for unit tests; playwright covers the login flow.
 
 ### {"query":"接口约定","limit":3}
 {
- "moreNote": "共命中 14 条，只列出前 3 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。",
+ "moreNote": "共命中 14 条，这次列出第 1–3 条。下一页用 offset: 3，想缩小范围可以换更具体的关键词。",
  "hits": [
   {
    "id": "mem_api_09",
@@ -1640,7 +1640,7 @@ Use vitest for unit tests; playwright covers the login flow.
  ]
 }
 --- 渲染 ---
-共命中 14 条，只列出前 3 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。
+共命中 14 条，这次列出第 1–3 条。下一页用 offset: 3，想缩小范围可以换更具体的关键词。
 
 [mem_api_09] knowledge｜mem_api_09 摘要 · /in-memory/global/mem_api_09.md
 接口约定第 9 条：返回值统一包一层 data 字段。
@@ -1936,7 +1936,7 @@ Use vitest for unit tests; playwright covers the login flow.
 
 ### {"query":"缓存","limit":2}
 {
- "moreNote": "共命中 3 条，只列出前 2 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。",
+ "moreNote": "共命中 3 条，这次列出第 1–2 条。下一页用 offset: 2，想缩小范围可以换更具体的关键词。",
  "hits": [
   {
    "id": "mem_long",
@@ -1965,7 +1965,7 @@ Use vitest for unit tests; playwright covers the login flow.
  ]
 }
 --- 渲染 ---
-共命中 3 条，只列出前 2 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。
+共命中 3 条，这次列出第 1–2 条。下一页用 offset: 2，想缩小范围可以换更具体的关键词。
 下面头行标「节选」的条目只给出正文的一段（有命中词时取它附近）。要全文，用 memory_search 按 id 查，或读头行末尾路径指向的文件。更新记忆会替换整条正文，更新前先确认已读过它的全文。
 
 [mem_long] knowledge｜mem_long 摘要 · 节选，正文共 3499 字符 · /in-memory/proj-d6f74551/mem_long.md
@@ -2018,7 +2018,7 @@ Use vitest for unit tests; playwright covers the login flow.
 {
  "noteCode": "substring-fallback",
  "note": "没有命中关键词的记忆，以下只是关键词以子串出现的结果。命中弱，可以换同义词、换成另一种语言的写法、减少词数或换个角度再搜一次。",
- "moreNote": "共命中 21 条，只列出前 10 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。",
+ "moreNote": "共命中 21 条，这次列出第 1–10 条。下一页用 offset: 10，想缩小范围可以换更具体的关键词。",
  "hits": [
   {
    "id": "mem_secret",
@@ -2126,7 +2126,7 @@ Use vitest for unit tests; playwright covers the login flow.
 }
 --- 渲染 ---
 没有命中关键词的记忆，以下只是关键词以子串出现的结果。命中弱，可以换同义词、换成另一种语言的写法、减少词数或换个角度再搜一次。
-共命中 21 条，只列出前 10 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。
+共命中 21 条，这次列出第 1–10 条。下一页用 offset: 10，想缩小范围可以换更具体的关键词。
 下面头行标「节选」的条目只给出正文的一段（有命中词时取它附近）。要全文，用 memory_search 按 id 查，或读头行末尾路径指向的文件。更新记忆会替换整条正文，更新前先确认已读过它的全文。
 
 [mem_secret] knowledge｜mem_secret 摘要 · 仅子串命中 · /in-memory/global/mem_secret.md
@@ -2592,7 +2592,7 @@ Use vitest for unit tests; playwright covers the login flow.
 
 ### 冻结快照的会话 {"query":"mem_db_mock"}
 {
- "moreNote": "共命中 26 条，只列出前 10 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。用 match: \"all\" 可以只看同时含全部关键词的记忆。",
+ "moreNote": "共命中 26 条，这次列出第 1–10 条。下一页用 offset: 10，想缩小范围可以换更具体的关键词。用 match: \"all\" 可以只看同时含全部关键词的记忆。",
  "hits": [
   {
    "id": "mem_db_mock",
@@ -2708,7 +2708,7 @@ Use vitest for unit tests; playwright covers the login flow.
  ]
 }
 --- 渲染 ---
-共命中 26 条，只列出前 10 条。要看更多可以调大 limit（最多 50），想缩小范围可以换更具体的关键词。用 match: "all" 可以只看同时含全部关键词的记忆。
+共命中 26 条，这次列出第 1–10 条。下一页用 offset: 10，想缩小范围可以换更具体的关键词。用 match: "all" 可以只看同时含全部关键词的记忆。
 下面头行标「节选」的条目只给出正文的一段（有命中词时取它附近）。要全文，用 memory_search 按 id 查，或读头行末尾路径指向的文件。更新记忆会替换整条正文，更新前先确认已读过它的全文。
 
 [mem_db_mock] preference｜mem_db_mock 摘要 · /in-memory/global/mem_db_mock.md
