@@ -77,4 +77,9 @@ export interface HostSession {
    * 调用方按「这一次不知道」处理，不当成没有存档的会话。
    */
   archivedSessionIds(): Promise<ReadonlySet<string> | null>
+  /**
+   * 这次工具调用所在 agent 用的工具结果裁剪服务，每次现取（宿主改配置后实例会换）；没有为 undefined。
+   * 取服务抛错时照常抛出，调用方按「阈值读不出」处理。
+   */
+  toolResultPrunerOf(exec: ToolRunContext): unknown
 }

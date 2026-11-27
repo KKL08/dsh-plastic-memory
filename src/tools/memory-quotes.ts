@@ -64,6 +64,18 @@ export function withDialogueSegments(block: MemoryQuoteBlock, segments: Readonly
   }
 }
 
+/**
+ * 最终输出里一条记忆附的原话：哪段「和记忆正文相同、从略」按这条最终有没有给全文重判（memoryContent 只在给了全文时传），
+ * 「出处同」只留指向的那条附原话还在输出里的（keptLabels 是那些记忆的名称）。
+ */
+export function finalQuoteBlock(block: MemoryQuoteBlock, memoryContent: string | undefined, keptLabels: ReadonlySet<string>): MemoryQuoteBlock {
+  return {
+    ...block,
+    turns: block.turns.map(({ key, view }) => ({ key, view: { ...view, messages: view.messages.map(m => ({ ...m, isSameAsMemory: isSameAsMemory(m.text, memoryContent) })) } })),
+    sameSource: block.sameSource.filter(label => keptLabels.has(label)),
+  }
+}
+
 /** 融合里记忆这一路的名字。 */
 export const MEMORY_LANE = 'memory'
 

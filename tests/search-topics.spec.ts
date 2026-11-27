@@ -540,14 +540,14 @@ describe('参数校验', () => {
 
   it('id 配 offset：参数错误，点出 id 和 offset', async () => {
     await standard()
-    expect(await env().search({ id: 'g_rel1', history: true, offset: 1 })).toMatchObject({ noteCode: 'invalid-args', note: 'id 和 offset 不能一起用：offset 只用于配 topic 翻页。' })
+    expect(await env().search({ id: 'g_rel1', history: true, offset: 1 })).toMatchObject({ noteCode: 'invalid-args', note: 'id 和 offset 不能一起用：offset 用于检索结果和主题列表翻页，历史列表用 limit 控制条数。' })
   })
 
-  it('offset 不带 topic：参数错误（关键词检索不翻页）', async () => {
+  it('offset 不带 topic：关键词检索和只填 types 的列表照常翻页，不是参数错误', async () => {
     await standard()
     const e = env()
-    expect(await e.search({ query: 'zebra', offset: 2 })).toMatchObject({ noteCode: 'invalid-args', note: '使用 offset 翻页时请同时填写 topic；关键词检索用 limit 控制条数。' })
-    expect(await e.search({ types: ['knowledge'], offset: 0 })).toMatchObject({ noteCode: 'invalid-args' })
+    expect(await e.search({ query: 'zebra', offset: 2 })).not.toHaveProperty('noteCode', 'invalid-args')
+    expect(await e.search({ types: ['knowledge'], offset: 0 })).not.toHaveProperty('noteCode', 'invalid-args')
   })
 
   it('offset 不是不小于 0 的整数、topic 是空串或只有空白：参数错误', async () => {

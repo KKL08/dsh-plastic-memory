@@ -7,6 +7,20 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- `memory_search` keyword results and type listings page with `offset`, as
+  topic browsing does: the result gives the next page's offset instead of
+  suggesting a larger `limit`, and `limit` takes a positive integer up to 50.
+  Past conversations are not paged; when both are searched, later pages list
+  memories only.
+- When DeepSeek Harness's tool-result pruning threshold leaves `memory_search`
+  less than 6,000 characters per search, `memory_health` lists the threshold
+  and suggests raising `thresholdChars` of
+  `@deepseek-ai/dsh-compaction-tool-result-pruner` to at least 6,316. It does
+  not affect the score.
+- Testing: `pnpm host:contract` checks that search output stays within the
+  pruning threshold on the default setting, at the 3,000-character floor and
+  with the pruner off, and that a long memory looked up by id comes back in
+  full.
 - Experimental: when the assistant saves a memory as a state change or a
   correction, active decisions that list it under `related` are added to the
   To do tab on the Memory page for review; the decisions themselves are not
@@ -395,6 +409,15 @@ All notable changes to this project are documented here. The format follows
   a tab with unsaved changes shows a dot and the save row names those
   tabs. The chat-start limit is now called Limit (tokens) and the source
   check When to check.
+- `memory_search` output stays under DeepSeek Harness's tool-result pruning
+  threshold (95% of it, at least 3,000 characters), so a long result is no
+  longer cut in the middle once the context fills up. When a result does not
+  fit, excerpts from other conversations and optional notes go first, then
+  later memories become excerpts or header lines and the rest moves to the
+  next page; the result says what was left out and how to get it back.
+- A memory looked up by its id in `query` comes back in full even when it was
+  already loaded at the start of the chat or is longer than the output limit;
+  the result says when it goes over the limit.
 - Testing: `pnpm host:contract` runs the default-model automatic checkup
   without a model key, using a fixed successful HTTP stream through the real
   host adapter and scheduler. It checks the request route and saved findings,

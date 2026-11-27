@@ -134,6 +134,33 @@ if [ ! -f "$RESULTS3" ]; then
   grep -iE "error|fatal" "$LOGS/bad-key.log" | head -n 10 >&2 || true
   exit 1
 fi
+# Fourth and fifth boots, same home: memory_search output must follow the
+# tool-result pruner's threshold. The pruner is reconfigured to its floor case
+# (threshold 2000, so the output budget stays at 3000), then switched off.
+RESULTS4="$TMP/results-search-floor.json"
+RESULTS5="$TMP/results-search-no-pruner.json"
+FLOOR_PATCH="$TMP/search-floor.cordis.patch.yml"
+NO_PRUNER_PATCH="$TMP/search-no-pruner.cordis.patch.yml"
+printf -- '- id: tool-result-pruner\n  config:\n    thresholdChars: 2000\n    headChars: 1000\n    tailChars: 500\n' > "$FLOOR_PATCH"
+printf -- '- id: tool-result-pruner\n  disabled: true\n' > "$NO_PRUNER_PATCH"
+boot_search_phase() {
+  local phase="$1" results="$2" patch="$3"
+  STEP="$phase"
+  set +e
+  "${HOST_ENV[@]}" DSH_HOME="$HOMEDIR" DSH_AGENTS_HOME="$AGENTS_HOME" HOST_CONTRACT_OUT="$results" HOST_CONTRACT_MODEL_STATE="$MODEL_STATE" HOST_CONTRACT_PHASE="$phase" "$DSH" --profile host --patch "$PATCH" --patch "$patch" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} >"$LOGS/$phase.log" 2>&1
+  local exit_code=$?
+  set -e
+  if [ ! -f "$results" ]; then
+    echo "$HOST_TAG: $phase host exited ($exit_code) without results; $phase.log errors:" >&2
+    grep -iE "error|fatal" "$LOGS/$phase.log" | head -n 10 >&2 || true
+    exit 1
+  fi
+  return "$exit_code"
+}
+set +e
+boot_search_phase search-floor "$RESULTS4" "$FLOOR_PATCH"; code4=$?
+boot_search_phase search-no-pruner "$RESULTS5" "$NO_PRUNER_PATCH"; code5=$?
+set -e
 # Each results file comes from one boot; a failed case is reported against the
 # boot that ran it, with that boot's log tail, not against the last boot started.
 # H17 在第三趟计入通过或失败，不再算作第一趟无 key 时的跳过；H18 同趟计数。
@@ -150,7 +177,7 @@ const fails = r.filter(o => !o.ok).length, skips = r.filter(o => o.skipped).leng
 console.log(`host-contract: ${r.length - fails - skips} passed, ${skips} skipped, ${fails} failed`);
 fs.writeFileSync(out, [...new Set(r.filter(o => !o.ok).map(o => o.step))].map(s => `${s}\n`).join(""));
 process.exit(fails ? 1 : 0);
-' "$FAILED_STEPS" "boot=$RESULTS" "restart=$RESULTS2" "bad-key=$RESULTS3"
+' "$FAILED_STEPS" "boot=$RESULTS" "restart=$RESULTS2" "bad-key=$RESULTS3" "search-floor=$RESULTS4" "search-no-pruner=$RESULTS5"
 summary=$?
 set -e
 if [ "$summary" -ne 0 ]; then
@@ -164,9 +191,9 @@ if [ "$summary" -ne 0 ]; then
 fi
 # The verify plugin exits the host with 0 only when every case passed; a host that
 # wrote the results and then died on shutdown must not be reported as PASS.
-if [ "$code" -ne 0 ] || [ "$code2" -ne 0 ] || [ "$code3" -ne 0 ]; then
+if [ "$code" -ne 0 ] || [ "$code2" -ne 0 ] || [ "$code3" -ne 0 ] || [ "$code4" -ne 0 ] || [ "$code5" -ne 0 ]; then
   STEP=host-exit
-  echo "$HOST_TAG: host exited (first=$code restart=$code2 bad-key=$code3) after writing results; log tails:" >&2
+  echo "$HOST_TAG: host exited (first=$code restart=$code2 bad-key=$code3 search-floor=$code4 search-no-pruner=$code5) after writing results; log tails:" >&2
   tail -n 20 "$LOGS/boot.log" "$LOGS/restart.log" >&2
   [ ! -f "$LOGS/bad-key.log" ] || tail -n 20 "$LOGS/bad-key.log" >&2
   exit 1

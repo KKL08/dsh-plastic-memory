@@ -35,7 +35,7 @@ export const SEARCH_TOPIC_DESCRIPTION = '用 topic 按主题看记忆：只给 t
 /** 主题参数只选记忆，兼容曾用名。 */
 export const SEARCH_TOPIC_PARAMETER = { type: 'string', description: '主题名或曾用名；传「未整理」看还没归入任何主题的记忆。只给 topic 时按主题索引的顺序列出成员，同时给 query 时在这个主题里按关键词查，都用 limit、offset 翻页。只查记忆，source 不传或设为 memory' } as const
 /** 分页起点以结果给出的 offset 为准。 */
-export const SEARCH_OFFSET_PARAMETER = { type: 'number', description: '配 topic 翻页：跳过前面多少条，填 0 或正整数，缺省 0；结果里会给下一页的 offset' } as const
+export const SEARCH_OFFSET_PARAMETER = { type: 'number', description: '跳过前面多少条，填 0 或正整数，缺省 0。关键词检索、按类型列出和按主题浏览都可以翻页，结果里会给下一页的 offset；原话不翻页，只查原话时不传，两者都查时第二页起只翻记忆' } as const
 
 /**
  * 把 memory_search 工具接到 dsh 框架上。纯逻辑在 search.ts，不依赖框架包，测试直接测它；
@@ -65,8 +65,9 @@ export function createSearchTool(deps: SearchToolDeps): ToolDefinition {
       '- 没有记忆同时含全部关键词时，开头会说明；排第一的有关键词没完整对上时，还会列出各关键词在范围内命中几条。',
       '- 排第一的对上的查询内容不到一半、或只有子串命中时，开头会提示命中弱，并列出各关键词命中几条。',
       '- 这些说明是参考信号，结果是否已经回答了问题，以你读到的内容为准。',
-      '- 开头说明共命中多少条、返回不全时：要更全就调大 limit，太杂就换更具体的关键词。',
+      '- 开头说明共命中多少条、返回不全时：要更全就按结果里给的 offset 翻下一页，太杂就换更具体的关键词。',
       '- 排在前面的带完整正文；很长的记忆和排在后面的条目可能只给正文的一段（有命中词时取命中词附近），头行会标「节选」和正文总字符数。要全文，用这个工具按 id 查，或读头行末尾的文件。',
+      '- 输出长度跟随 DeepSeek Harness 的工具结果裁剪阈值，一般压在阈值以内。放不下时先省其他原话和可省的说明，再从排在后面的条目起改为节选、只给头行，最后把条目移到下一页；阈值调得越低，越多条目只给节选或头行，结果开头会说明这次省了什么、怎么取回。按 id 查的那条照给全文。阈值偏低时 memory_health 会列出建议的调法。',
     ].join('\n'),
     parameters: {
       source: SEARCH_SOURCE_PARAMETER,
@@ -78,7 +79,7 @@ export function createSearchTool(deps: SearchToolDeps): ToolDefinition {
       query: { type: 'string', description: '空格分隔的关键词，中英文均可；对名称、摘要、标签、内容匹配。不是全命中的结果在头行标出完整对上的关键词；没有记录命中全部关键词时结果开头会说明，排第一的有关键词没完整对上时列出各关键词命中几条；排第一的对上的查询内容不到一半、或只有子串命中时会提示命中弱' },
       types: { type: 'array', items: { type: 'string' }, description: describeTypes(deps.registry) },
       scope: { type: 'string', enum: ['global', 'workspace', 'all-visible'], description: '缺省 all-visible（global + 当前 workspace）' },
-      limit: { type: 'number', description: '返回条数上限，缺省 10，最大 50；命中更多时结果开头会说明总数' },
+      limit: { type: 'number', description: '每页最多返回几条，填正整数，缺省 10，最大 50；命中更多时结果开头会说明总数和下一页的 offset' },
       match: { type: 'string', enum: ['any', 'all'], description: '匹配模式，缺省 any：返回按档位排好的全部命中；all：只返回同时含全部关键词的记忆' },
     },
     output: {

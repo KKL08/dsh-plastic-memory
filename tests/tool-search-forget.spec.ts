@@ -172,15 +172,14 @@ describe('executeSearch：命中多于返回条数时说明总数', () => {
     for (let i = 0; i < n; i++) await seed(store, `发版条目第${i}号`)
   }
 
-  it('截断时说明共命中几条、列了几条，给出调大 limit 与换更具体关键词两条路', async () => {
+  it('截断时说明共命中几条、列了第几条，给出下一页的 offset 与换更具体关键词两条路', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await seedMany(store, 3)
     const r = await executeSearch({ query: '发版条目', limit: 1 }, fakeExec(), makeSearchDeps(store))
     expect(r.hits).toHaveLength(1)
-    expect(r.moreNote).toBe(truncationNote(3, 1, false))
-    expect(r.moreNote).toContain('共命中 3 条')
-    expect(r.moreNote).toContain('limit')
-    expect(r.moreNote).toContain('更具体的关键词')
+    expect(r.moreNote).toBe('共命中 3 条，这次列出第 1 条。下一页用 offset: 1，想缩小范围可以换更具体的关键词。')
+    expect(r.moreNote).toBe(truncationNote(3, 0, 1))
+    expect(r.moreNote).not.toContain('limit')
     const text = renderSearchResult(r)
     expect(text.startsWith(r.moreNote!)).toBe(true)
     expect(countSearchHits(text)).toBe(1)
@@ -194,14 +193,13 @@ describe('executeSearch：命中多于返回条数时说明总数', () => {
     expect(r.moreNote).toBeUndefined()
   })
 
-  it('limit 已到上限 50（含传入更大的值）时，只建议换更具体的关键词', async () => {
+  it('limit 已到上限 50（含传入更大的值）时，给下一页的 offset 和换更具体的关键词，不再建议调大 limit', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await seedMany(store, 52)
     for (const limit of [50, 80]) {
       const r = await executeSearch({ query: '发版条目', limit }, fakeExec(), makeSearchDeps(store))
       expect(r.hits).toHaveLength(50)
-      expect(r.moreNote).toBe(truncationNote(52, 50, true))
-      expect(r.moreNote).toContain('更具体的关键词')
+      expect(r.moreNote).toBe('共命中 52 条，这次列出第 1–50 条。下一页用 offset: 50，想缩小范围可以换更具体的关键词。')
       expect(r.moreNote).not.toContain('调大 limit')
     }
   })
@@ -212,7 +210,7 @@ describe('executeSearch：命中多于返回条数时说明总数', () => {
     const r = await executeSearch({ query: '发版条目 周报', limit: 1 }, fakeExec(), makeSearchDeps(store))
     expect(r.noteCode).toBe('or-fallback')
     // 结果全是部分命中、没有全命中：all 只会搜空，截断说明不提它
-    expect(r.moreNote).toBe(truncationNote(3, 1, false))
+    expect(r.moreNote).toBe(truncationNote(3, 0, 1))
     const head = renderSearchResult(r).split('\n\n')[0]!
     expect(head).toContain(r.note!)
     expect(head).toContain(r.moreNote!)
