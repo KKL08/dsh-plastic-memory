@@ -51,6 +51,11 @@ export type DialogueStoreState =
   | { status: 'none' }
   | { status: 'building' | 'ready' | 'rebuilding'; read: DialogueGeneration; write: DialogueGeneration }
 
+/** 只读看一眼的结果：第一次在建时带上已建好的会话数。 */
+export type DialogueStoreProbe =
+  | { status: 'none' | 'ready' | 'rebuilding' }
+  | { status: 'building'; sessions: number }
+
 /** 一段原话和它的三列索引词。 */
 export interface DialogueSegmentInput {
   turnSeq: number
@@ -178,6 +183,37 @@ export class DialogueRecordStore {
   state(): DialogueStoreState {
     if (this.db === undefined && !existsSync(this.path)) return { status: 'none' }
     return this.run(db => stateOf(db))
+  }
+
+  /**
+   * 只读看一眼库的状态，给设置页显示用：另开一条只读连接，只查不写，用完就关，不用也不留共享连接。
+   * 库文件不存在回 none；打不开、损坏、结构版本不同都不修不删，抛「这一次用不了」。
+   */
+  probe(): DialogueStoreProbe {
+    if (!existsSync(this.path)) return { status: 'none' }
+    let sqlite: SqliteModule | undefined
+    try {
+      sqlite = this.loadSqlite()
+    } catch {
+      sqlite = undefined
+    }
+    if (sqlite === undefined) throw new DialogueStoreUnavailable('node:sqlite 不可用')
+    let db: DatabaseSync | undefined
+    try {
+      db = new sqlite.DatabaseSync(this.path, { readOnly: true })
+      db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`)
+      const version = (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version
+      // 0：文件建了、表还没建成
+      if (version === 0) return { status: 'none' }
+      if (version !== SCHEMA_VERSION) throw new SchemaMismatchError(version)
+      const state = stateOf(db)
+      if (state.status !== 'building') return { status: state.status }
+      return { status: 'building', sessions: coverageOf(db, state.read.gen).sessions }
+    } catch (err) {
+      throw isSqliteBusy(err) ? new DialogueStoreUnavailable('正被别的连接占着', true) : new DialogueStoreUnavailable(describeError(err))
+    } finally {
+      if (db !== undefined) closeQuietly(db)
+    }
   }
 
   /**
@@ -372,13 +408,7 @@ export class DialogueRecordStore {
   }
 
   coverage(gen: number): DialogueCoverage {
-    return this.run(db => {
-      const count = (sql: string) => (db.prepare(sql).get(gen) as { n: number }).n
-      const sessions = count('SELECT COUNT(*) AS n FROM sessions s WHERE s.gen = ? AND s.is_removed = 0 AND NOT EXISTS (SELECT 1 FROM queue q WHERE q.gen = s.gen AND q.session_id = s.session_id)')
-      const queued = count('SELECT COUNT(*) AS n FROM queue WHERE gen = ?')
-      const until = (db.prepare('SELECT MAX(at) AS at FROM segments WHERE gen = ?').get(gen) as { at: number | null }).at
-      return { sessions, queued, coveredUntil: until ?? undefined }
-    })
+    return this.run(db => coverageOf(db, gen))
   }
 
   /** 全文检索：match 是调用方用同一套分词拼好的查询式。按相关度从高到低。 */
@@ -557,6 +587,14 @@ function generations(db: DatabaseSync): GenRow[] {
 
 function hasGeneration(db: DatabaseSync, gen: number): boolean {
   return db.prepare('SELECT 1 FROM generations WHERE gen = ?').get(gen) !== undefined
+}
+
+function coverageOf(db: DatabaseSync, gen: number): DialogueCoverage {
+  const count = (sql: string) => (db.prepare(sql).get(gen) as { n: number }).n
+  const sessions = count('SELECT COUNT(*) AS n FROM sessions s WHERE s.gen = ? AND s.is_removed = 0 AND NOT EXISTS (SELECT 1 FROM queue q WHERE q.gen = s.gen AND q.session_id = s.session_id)')
+  const queued = count('SELECT COUNT(*) AS n FROM queue WHERE gen = ?')
+  const until = (db.prepare('SELECT MAX(at) AS at FROM segments WHERE gen = ?').get(gen) as { at: number | null }).at
+  return { sessions, queued, coveredUntil: until ?? undefined }
 }
 
 function stateOf(db: DatabaseSync): DialogueStoreState {

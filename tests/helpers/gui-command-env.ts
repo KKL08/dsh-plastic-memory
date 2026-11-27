@@ -4,6 +4,7 @@ import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SidecarStore } from '../../src/storage/sidecar.ts'
+import type { DialogueRecordStore } from '../../src/storage/dialogue-records.ts'
 import type { LegacyKvTables } from '../../src/storage/legacy-kv-import.ts'
 import { createAgentsMdWriter } from '../../src/storage/agents-md.ts'
 import { STATE_DIR } from '../../src/storage/paths.ts'
@@ -63,6 +64,8 @@ interface EnvOpts {
   withSuggestions?: boolean
   /** 宿主 llm 服务的列模型部分；缺省当宿主没有。 */
   catalog?: HostModelCatalog
+  /** 对话记录库（dialogue-records-state 读它的状态）；缺省当没接。 */
+  dialogueRecords?: DialogueRecordStore
 }
 
 function env(opts: EnvOpts = {}) {
@@ -104,6 +107,7 @@ function env(opts: EnvOpts = {}) {
     ...(opts.readEvent !== undefined ? { getReadEvent: () => opts.readEvent! } : {}),
     isLegacyImportSettled: () => sidecar.isLegacyImportSettled(),
     ...(suggestions !== undefined ? { suggestions } : {}),
+    ...(opts.dialogueRecords !== undefined ? { dialogueRecords: opts.dialogueRecords } : {}),
     now: () => clock.now,
   })
   /** Pass the raw suffix, including whitespace, as the host parser does. */

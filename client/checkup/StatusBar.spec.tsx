@@ -14,7 +14,7 @@ import { gatewayViaChannel, gatewayViaCommand, levelCountsOf, memory, NOW, PING_
 import { PanelShell } from '../ui/PanelShell.tsx'
 import { FLASH_MS } from '../library/shared.tsx'
 import { useCheckupRuns } from './runs.ts'
-import { StatusBar } from './StatusBar.tsx'
+import { StatusBar, causeText } from './StatusBar.tsx'
 import { summarize } from '../settings/StatusCard.tsx'
 import { coverageParts } from './coverage.ts'
 
@@ -471,6 +471,19 @@ describe('结果行：自动体检没做完、模型用不了', () => {
       gateway.setView('checkups', checkups({ scopes: { '/w/app': { failure: { count: 1, retryAt: NOW + HOUR, isRetryLimitReached: false, cause: { kind: 'unparseable' } } } } }))
     })
     expect(live()).not.toHaveTextContent('自动体检没做完')
+  })
+
+  it('设置里存的模型选择读不出：原因写成界面文案（中英各一版），不只给服务端原话', () => {
+    const failure = { count: 1, retryAt: NOW + HOUR, isRetryLimitReached: false, cause: { kind: 'error' as const, code: 'selection-unreadable' as const, message: '设置里为体检选的模型读不出来' } }
+    open(APP, { views: { checkups: checkups({ all: 7, scopes: { '/w/app': { isDue: true, failure } } }) } })
+    expect(live()).toHaveTextContent('自动体检没做完：设置里保存的模型选择读不出，到设置页重新选一次就能恢复。10 月 17 日 11:00 后再试')
+    const enT = createTranslator(en)
+    expect(causeText(failure.cause, enT)).toBe("the model choice saved in settings couldn't be read; choose again on the Settings page to fix it")
+  })
+
+  it('不认识的原因码（以后版本写的）：当作没有，照 kind 写说明', () => {
+    const t = createTranslator(en)
+    expect(causeText({ kind: 'unparseable', code: 'later-version-cause' }, t)).toBe(causeText({ kind: 'unparseable' }, t))
   })
 
   it('默认模型用不了：写「默认模型现在用不了（原因），自动体检先暂停。」；仅手动的范围不写', () => {

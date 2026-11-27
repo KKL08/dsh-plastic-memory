@@ -8,6 +8,8 @@ import { titleControlsCss } from '../checkup/TitleControls.tsx'
 import { editCss } from '../pending/edit.tsx'
 import { pendingCss } from '../pending/PendingTab.tsx'
 import { controlsCss } from '../settings/controls.tsx'
+import { dialogueRecordsCss } from '../settings/DialogueRecords.tsx'
+import { segmentedCss } from './Segmented.tsx'
 
 /** jsdom 没有 Element.animate：换成记录调用的假实现，测完还原。 */
 function stubAnimate() {
@@ -242,5 +244,22 @@ describe('体检进行中的转圈（CSS）', () => {
   it('一直转；减少动态效果时停下，不只是放慢', () => {
     expect(bodiesOf(titleControlsCss, '.pm-run-spinner', '').some(body => /animation:\s*pm-run-spin\b/.test(body))).toBe(true)
     expect(bodiesOf(titleControlsCss, '.pm-run-spinner', REDUCE).some(body => /(^|;)\s*animation:\s*none\s*(;|$)/.test(body))).toBe(true)
+  })
+})
+
+describe('设置页的分页滑块、开关、对话记录库转圈（CSS）', () => {
+  it('分页标签和记忆页同一个控件：滑块 transform 180ms ease 平移，减少动态效果时去掉过渡', () => {
+    expect(bodiesOf(segmentedCss, '.pm-tabs-indicator', '').some(body => /transition:\s*transform 180ms ease/.test(body))).toBe(true)
+    expect(bodiesOf(segmentedCss, '.pm-tabs-indicator', REDUCE).some(body => /(^|;)\s*transition:\s*none\s*(;|$)/.test(body))).toBe(true)
+  })
+
+  it('开关的滑块 transform 120ms ease，减少动态效果时去掉过渡', () => {
+    expect(bodiesOf(controlsCss, '.pm-switch-thumb', '').some(body => /transition:\s*transform 120ms ease/.test(body))).toBe(true)
+    expect(bodiesOf(controlsCss, '.pm-switch-thumb', REDUCE).some(body => /(^|;)\s*transition:\s*none\s*(;|$)/.test(body))).toBe(true)
+  })
+
+  it('在建、重建、删除中的转圈一直转；减少动态效果时停下', () => {
+    expect(bodiesOf(dialogueRecordsCss, '.pm-store-spinner', '').some(body => /animation:\s*pm-store-spin\b/.test(body))).toBe(true)
+    expect(bodiesOf(dialogueRecordsCss, '.pm-store-spinner', REDUCE).some(body => /(^|;)\s*animation:\s*none\s*(;|$)/.test(body))).toBe(true)
   })
 })

@@ -149,7 +149,7 @@ export class DialogueCatchup {
   private readonly hung = new Map<string, number>()
 
   /** 共享同一个对话记录库，只向读取入口提供查询方法。 */
-  get readStore(): Pick<DialogueRecordStore, 'state' | 'search' | 'segmentsOf' | 'turnsOf' | 'queued' | 'isQueued' | 'session'> {
+  get readStore(): Pick<DialogueRecordStore, 'state' | 'probe' | 'search' | 'segmentsOf' | 'turnsOf' | 'queued' | 'isQueued' | 'session'> {
     return this.deps.store
   }
 

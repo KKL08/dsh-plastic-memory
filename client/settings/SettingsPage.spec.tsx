@@ -1,4 +1,4 @@
-// 插件设置页：三组设置的渲染、revision 冻结与冲突提示、非法值、配置文件关掉体检时置灰、状态卡。场景与类型见 Scenes.spec.tsx。
+// 插件设置页：四个标签页各自的渲染、revision 冻结与冲突提示、非法值、配置文件关掉体检时置灰、状态卡。场景与类型见 Scenes.spec.tsx。
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { GUI_VIEW_VERSION, type CheckupView, type HealthView, type LibraryView, type MemoryCommand, type MemoryCommandResult, type ModelChoices, type ModelSelection, type PendingView } from '../../src/gui/contract.ts'
@@ -37,6 +37,8 @@ const section = (patch: Record<string, unknown>) => ({ ...structuredClone(DEFAUL
 const tab = (group: string, name: string) => within(screen.getByRole('tablist', { name: group })).getByRole('tab', { name })
 const radio = (name: string) => screen.getByRole('radio', { name })
 const save = () => screen.getByRole('button', { name: '保存' })
+/** 点页内顶部的标签换页（标签名后面可能带着未保存的小圆点）。 */
+const open = (name: string) => { fireEvent.click(within(screen.getByRole('tablist', { name: '设置分页' })).getByRole('tab', { name: new RegExp(`^${name}`) })) }
 
 const confirmDialog = () => screen.getByRole('dialog', { name: '保存这些改动？' })
 
@@ -48,10 +50,10 @@ async function clickSave(form: FakeConfigForm) {
   await waitFor(() => { expect(form.calls.length).toBe(before + 1) })
 }
 
-describe('三组设置的渲染', () => {
+describe('四个标签页的渲染', () => {
   it('记什么：场景、记忆类型各一张列表，页面上不写当前场景的说明', () => {
     setup({ value: section({ template: 'office', customTypes: { 'domain-term': { label: '术语', description: 'd', whenToSave: 'w', recall: 'search', decayDays: null, governancePriority: 'medium' } } }) })
-    expect(screen.getByRole('heading', { name: '记什么' })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: '记什么' })).toHaveAttribute('aria-selected', 'true')
     expect(screen.getByRole('heading', { name: '场景' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: '记忆类型' })).toBeInTheDocument()
     expect(radio('办公')).toBeChecked()
@@ -62,35 +64,35 @@ describe('三组设置的渲染', () => {
     expect(screen.queryByText(/^当前：/)).toBeNull()
   })
 
-  it('四组各一张设置卡，组标题在卡外；「记什么」的场景和记忆类型都在它那张卡里', () => {
-    const { container } = setup()
-    const groups = [...container.querySelectorAll('.pm-group')]
-    expect(groups.map(group => group.querySelector('.pm-group-title')!.textContent)).toEqual(['记什么', '怎么用', '怎么管', '外观'])
-    for (const group of groups) {
-      expect(group.querySelectorAll(':scope > .pm-group-card')).toHaveLength(1)
-      expect(group.querySelector('.pm-group-card')!.contains(group.querySelector('.pm-group-title'))).toBe(false)
-    }
-    const what = groups[0]!.querySelector('.pm-group-card') as HTMLElement
-    expect(within(what).getByRole('heading', { name: '场景' })).toBeInTheDocument()
-    expect(within(what).getByRole('heading', { name: '记忆类型' })).toBeInTheDocument()
-    expect(within(what).getByRole('radiogroup', { name: '场景' })).toBeInTheDocument()
+  it('「记什么」一页一张卡，场景和记忆类型都在这张卡里，不再分小节', () => {
+    setup()
+    const what = screen.getByRole('tabpanel', { name: '记什么' })
+    const cards = what.querySelectorAll(':scope > .pm-group-card')
+    expect(cards).toHaveLength(1)
+    expect(what.querySelector('.pm-sec')).toBeNull()
+    const card = cards[0] as HTMLElement
+    expect(within(card).getByRole('heading', { name: '场景' })).toBeInTheDocument()
+    expect(within(card).getByRole('heading', { name: '记忆类型' })).toBeInTheDocument()
+    expect(within(card).getByRole('radiogroup', { name: '场景' })).toBeInTheDocument()
   })
 
   it('怎么用：上限数字、超出上限两种模式的说明、溯源三档', () => {
     setup({ value: section({ snapshotTokenBudget: 6000, snapshotOverflow: 'strict', evidenceLookup: 'active' }) })
-    expect(screen.getByLabelText('对话开始时自动带入的记忆上限（token）')).toHaveValue('6000')
+    open('怎么用')
+    expect(screen.getByLabelText('带入上限（token）')).toHaveValue('6000')
     expect(screen.getByText(/^默认 4,000，/)).toBeInTheDocument()
     expect(tab('超出上限时', '严格按上限')).toHaveAttribute('aria-selected', 'true')
     expect(screen.getByText(/自动放宽：超出的照常带入/)).toBeInTheDocument()
     expect(screen.getByText(/严格按上限：超出的不带入/)).toBeInTheDocument()
-    expect(tab('溯源记忆出处', '主动积极')).toHaveAttribute('aria-selected', 'true')
-    expect(tab('溯源记忆出处', '仅你要求时')).toBeInTheDocument()
-    expect(tab('溯源记忆出处', '遇到矛盾或高风险时')).toBeInTheDocument()
+    expect(tab('什么时候回去核对', '主动积极')).toHaveAttribute('aria-selected', 'true')
+    expect(tab('什么时候回去核对', '仅你要求时')).toBeInTheDocument()
+    expect(tab('什么时候回去核对', '遇到矛盾或高风险时')).toBeInTheDocument()
   })
 
   it('怎么管：没有体检开关和自动体检占位；灵敏度说明带数值、AGENTS.md 说明插件不再管理、最近删除入口、memoryRoot 只读', () => {
     const { onOpen } = setup({ value: section({ governance: { enabled: true, health: { sensitivity: 'conservative' }, globalPromoteTarget: 'agents-md' } }) })
-    expect(screen.queryByRole('switch')).toBeNull()
+    open('怎么管')
+    expect(screen.queryByRole('switch', { name: /体检/ })).toBeNull()
     expect(screen.queryByText('记忆体检')).toBeNull()
     expect(screen.queryByText('规划中')).toBeNull()
     expect(screen.queryByRole('tablist', { name: '自动体检' })).toBeNull()
@@ -107,7 +109,8 @@ describe('三组设置的渲染', () => {
 
   it('外观：主题色两档，默认艾拉主题色；改成大肥鱼主题色确认后写 accent', async () => {
     const { form } = setup()
-    expect(screen.getByRole('heading', { name: '外观' })).toBeInTheDocument()
+    open('外观')
+    expect(screen.getByRole('tabpanel', { name: '外观' })).toBeInTheDocument()
     expect(tab('主题色', '艾拉主题色')).toHaveAttribute('aria-selected', 'true')
     fireEvent.click(tab('主题色', '大肥鱼主题色'))
     fireEvent.click(save())
@@ -141,13 +144,14 @@ describe('保存：revision 冻结、冲突、非法值', () => {
   it('点保存先弹窗列出改了哪几项（名称：旧值 → 新值），取消不提交、草稿保留', () => {
     const { form } = setup()
     fireEvent.click(radio('办公'))
-    fireEvent.change(screen.getByLabelText('对话开始时自动带入的记忆上限（token）'), { target: { value: '5000' } })
+    fireEvent.change(screen.getByLabelText('带入上限（token）'), { target: { value: '5000' } })
+    open('怎么管')
     fireEvent.click(tab('提醒的灵敏度', '积极'))
     fireEvent.click(save())
     const items = within(confirmDialog()).getAllByRole('listitem').map(el => el.textContent)
     expect(items).toEqual([
       '当前场景：编码 → 办公',
-      '对话开始时自动带入的记忆上限（token）：4000 → 5000',
+      '带入上限（token）：4000 → 5000',
       '提醒的灵敏度：标准 → 积极',
     ])
     expect(within(confirmDialog()).getByText('保存后不再新增「可复用流程」类记忆，已有的仍会带入、能搜到。')).toBeInTheDocument()
@@ -155,6 +159,7 @@ describe('保存：revision 冻结、冲突、非法值', () => {
     fireEvent.click(within(confirmDialog()).getByRole('button', { name: '取消' }))
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(form.calls).toHaveLength(0)
+    open('记什么')
     expect(radio('办公')).toBeChecked()
     expect(save()).toBeEnabled()
   })
@@ -183,8 +188,10 @@ describe('保存：revision 冻结、冲突、非法值', () => {
   it('没有改动时保存置灰；多项改动一次 mutate，带开始编辑时的 revision；保存后回到干净状态', async () => {
     const { form } = setup()
     expect(save()).toBeDisabled()
+    open('怎么用')
     fireEvent.click(tab('超出上限时', '严格按上限'))
-    fireEvent.change(screen.getByLabelText('对话开始时自动带入的记忆上限（token）'), { target: { value: '5000' } })
+    fireEvent.change(screen.getByLabelText('带入上限（token）'), { target: { value: '5000' } })
+    open('怎么管')
     fireEvent.click(tab('提醒的灵敏度', '积极'))
     expect(screen.queryByText(/重新带入记忆/)).toBeNull()
     await clickSave(form)
@@ -205,18 +212,20 @@ describe('保存：revision 冻结、冲突、非法值', () => {
     const { form } = setup()
     expect(screen.queryByText(/项改动未保存/)).toBeNull()
     fireEvent.click(radio('办公'))
-    expect(save()).toHaveAccessibleDescription('1 项改动未保存')
+    expect(save()).toHaveAccessibleDescription('1 项改动未保存（记什么）')
+    open('怎么管')
     fireEvent.click(tab('提醒的灵敏度', '积极'))
-    expect(screen.getByText('2 项改动未保存')).toBeInTheDocument()
+    expect(screen.getByText('2 项改动未保存（记什么、怎么管）')).toBeInTheDocument()
     await clickSave(form)
     await waitFor(() => { expect(screen.queryByText(/项改动未保存/)).toBeNull() })
   })
 
   it('编辑中别处改了配置：保存仍带冻结的 revision，被拒后提示冲突、锁住保存；载入最新配置后按新 revision 再改', async () => {
     const { form } = setup()
-    fireEvent.click(tab('溯源记忆出处', '主动积极'))
+    open('怎么用')
+    fireEvent.click(tab('什么时候回去核对', '主动积极'))
     act(() => { form.externalChange([{ op: 'set', path: ['template'], value: 'office' }]) })
-    expect(radio('办公')).toBeChecked()
+    expect(screen.getByRole('radio', { name: '办公', hidden: true })).toBeChecked()
     await clickSave(form)
     expect(form.calls[0]!.expectedRevision).toBe(1)
     expect(await screen.findByRole('alert')).toHaveTextContent('这份配置刚在别处改过，你的改动没有保存。')
@@ -225,8 +234,8 @@ describe('保存：revision 冻结、冲突、非法值', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '载入最新配置' }))
     expect(screen.queryByRole('alert')).toBeNull()
-    expect(tab('溯源记忆出处', '遇到矛盾或高风险时')).toHaveAttribute('aria-selected', 'true')
-    fireEvent.click(tab('溯源记忆出处', '主动积极'))
+    expect(tab('什么时候回去核对', '遇到矛盾或高风险时')).toHaveAttribute('aria-selected', 'true')
+    fireEvent.click(tab('什么时候回去核对', '主动积极'))
     await clickSave(form)
     expect(form.calls[1]!.expectedRevision).toBe(2)
     await waitFor(() => { expect(form.value.evidenceLookup).toBe('active') })
@@ -235,7 +244,7 @@ describe('保存：revision 冻结、冲突、非法值', () => {
 
   it('非法上限就地标红、不提交', () => {
     const { form } = setup()
-    const input = screen.getByLabelText('对话开始时自动带入的记忆上限（token）')
+    const input = screen.getByLabelText('带入上限（token）')
     for (const bad of ['-5', '0', '3.5', 'abc', '']) {
       fireEvent.change(input, { target: { value: bad } })
       expect(input).toHaveAttribute('aria-invalid', 'true')
@@ -264,7 +273,12 @@ describe('保存：revision 冻结、冲突、非法值', () => {
     expect(radio('办公')).toBeDisabled()
     expect(screen.getByRole('button', { name: '新建场景' })).toBeDisabled()
     expect(screen.getByRole('button', { name: '新建类型' })).toBeDisabled()
+    open('怎么用')
+    expect(screen.getByRole('switch', { name: '检索结果附带原话' })).toBeDisabled()
+    expect(within(screen.getByRole('group', { name: '每次检索带的其他原话' })).getByRole('button', { name: '多一段' })).toBeDisabled()
+    open('怎么管')
     expect(tab('提醒的灵敏度', '积极')).toBeDisabled()
+    expect(screen.getByRole('switch', { name: '状态变了时，提醒复查相关的决定' })).toBeDisabled()
   })
 })
 
@@ -273,7 +287,7 @@ describe('上限说明：默认值约合多少字', () => {
 
   it('写明默认 4,000 约合多少字，不展开按字符换算的口径', () => {
     setup()
-    const hint = description(screen.getByLabelText('对话开始时自动带入的记忆上限（token）'))
+    const hint = description(screen.getByLabelText('带入上限（token）'))
     expect(hint).toHaveTextContent('默认 4,000，约合 6,700 个汉字或 13,000 个英文字符。')
     expect(hint).not.toHaveTextContent('0.6 token')
     expect(hint).toHaveTextContent('对话中检索到的记忆不计入。')
@@ -281,7 +295,7 @@ describe('上限说明：默认值约合多少字', () => {
 
   it('英文文案同一口径', () => {
     render(<PanelShell gateway={createFakeGateway()} t={createTranslator(en)}><SettingsPage form={createFakeConfigForm()} onOpenMemoryPage={() => {}} now={NOW} /></PanelShell>)
-    const hint = description(screen.getByLabelText('Limit for memories auto-loaded at chat start (tokens)'))
+    const hint = description(screen.getByLabelText('Limit (tokens)'))
     expect(hint).toHaveTextContent('Default 4,000, about 6,700 Chinese characters or 13,000 English characters.')
     expect(hint).not.toHaveTextContent('0.6 tokens')
     expect(hint).toHaveTextContent("Memories found by search during a chat don't count.")
@@ -292,7 +306,7 @@ describe('用户词典路径', () => {
   it('设置页不再显示这一项；保存别的项时不写回、不清掉配置文件里的路径', async () => {
     const { form } = setup({ value: section({ search: { userDictionaryPath: '/opt/dict/domain.txt' } }) })
     expect(screen.queryByText('用户词典路径')).toBeNull()
-    fireEvent.change(screen.getByLabelText('对话开始时自动带入的记忆上限（token）'), { target: { value: '5000' } })
+    fireEvent.change(screen.getByLabelText('带入上限（token）'), { target: { value: '5000' } })
     await clickSave(form)
     expect(form.calls[0]!.ops).toEqual([{ op: 'set', path: ['snapshotTokenBudget'], value: 5000 }])
     expect(form.value.search).toEqual({ userDictionaryPath: '/opt/dict/domain.txt' })
@@ -304,6 +318,7 @@ describe('配置文件关掉体检时置灰', () => {
 
   it('灵敏度、跨项目去向置灰保留，说明都写「体检已在配置文件里关闭」；界面上没有能打开它的开关', () => {
     setup({ value: off(false) })
+    open('怎么管')
     for (const group of ['提醒的灵敏度', '跨项目的记忆放到']) {
       const list = screen.getByRole('tablist', { name: group })
       for (const button of within(list).getAllByRole('tab')) expect(button).toBeDisabled()
@@ -311,13 +326,15 @@ describe('配置文件关掉体检时置灰', () => {
       expect(item).toHaveClass('pm-setting--disabled')
       expect(item.querySelector('.pm-setting-hint')).toHaveTextContent(/^体检已在配置文件里关闭$/)
     }
-    expect(screen.queryByRole('switch')).toBeNull()
+    expect(screen.queryByRole('switch', { name: /体检/ })).toBeNull()
     // 不依赖体检的项照常可改
+    open('记什么')
     expect(radio('办公')).toBeEnabled()
   })
 
   it('别处在配置文件里打开体检后，两项恢复可用、说明换回原文', () => {
     const { form } = setup({ value: off(false) })
+    open('怎么管')
     act(() => { form.externalChange([{ op: 'set', path: ['governance', 'enabled'], value: true }]) })
     expect(tab('提醒的灵敏度', '积极')).toBeEnabled()
     expect(tab('跨项目的记忆放到', 'AGENTS.md')).toBeEnabled()
@@ -430,6 +447,7 @@ describe('记忆文件位置「在访达中显示」', () => {
   ])('按平台写：%s 上是「%s」', (platform, label) => {
     onPlatform(platform)
     setup()
+    open('怎么管')
     expect(screen.getByRole('button', { name: label })).toBeInTheDocument()
   })
 
@@ -437,6 +455,7 @@ describe('记忆文件位置「在访达中显示」', () => {
     onPlatform('MacIntel')
     const gateway = createFakeGateway({ views: { pending: pending(), health: health(NOW), library: library(3, '/home/me/.dsh/memories') }, openOk: false })
     renderInShell(<SettingsPage form={createFakeConfigForm()} onOpenMemoryPage={() => {}} now={NOW} />, gateway)
+    open('怎么管')
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '在访达中显示' })) })
     expect(gateway.opened).toEqual([{ path: '/home/me/.dsh/memories', action: 'reveal' }])
     expect(screen.getByText('没能打开，DeepSeek Harness 拒绝了这个路径。')).toBeInTheDocument()
@@ -444,6 +463,7 @@ describe('记忆文件位置「在访达中显示」', () => {
 
   it('还不知道路径时没有这个按钮', () => {
     renderInShell(<SettingsPage form={createFakeConfigForm()} onOpenMemoryPage={() => {}} now={NOW} />, createFakeGateway())
+    open('怎么管')
     expect(screen.queryByRole('button', { name: /中显示$/ })).toBeNull()
   })
 })
@@ -453,7 +473,7 @@ describe('体检用的模型', () => {
     { id: 'deepseek-official', name: 'DeepSeek', models: [{ id: 'deepseek-pro', name: 'DeepSeek Pro', efforts: [{ id: 'high', name: '高' }] }] },
     { id: 'provider-x', name: 'Provider X', models: [{ id: 'model-x', name: 'Model X', efforts: [] }] },
   ]
-  const checkups = (model: ModelSelection | null): CheckupView => ({ version: GUI_VIEW_VERSION, governanceEnabled: true, defaultFrequency: 'manual', allResult: null, model, scopes: [] })
+  const checkups = (model: ModelSelection | null): CheckupView => ({ version: GUI_VIEW_VERSION, governanceEnabled: true, defaultFrequency: 'manual', allResult: null, model, selections: { checkup: model, expansion: null }, scopes: [] })
 
   function setupModel(opts: { model?: ModelSelection | null; checkupsView?: ViewState<CheckupView>; value?: Record<string, unknown>; respond?: (command: MemoryCommand) => MemoryCommandResult | Promise<MemoryCommandResult>; session?: 'none' } = {}) {
     const gateway = createFakeGateway({
@@ -461,32 +481,30 @@ describe('体检用的模型', () => {
       respond: opts.respond ?? (command => command.cmd === 'list-models' ? { ok: true, cmd: command.cmd, providers: CHOICES } : { ok: true, cmd: command.cmd }),
       ...(opts.session === 'none' ? { session: { kind: 'none' } as const } : {}),
     })
-    const form = createFakeConfigForm(opts.value ? { value: opts.value } : {})
+    // 检索只查记忆：扩查用的模型置灰、不写列表和保存的提示，这里只看体检用的模型
+    const form = createFakeConfigForm({ value: { ...structuredClone(DEFAULT_SECTION), ...opts.value, search: { source: 'memory' } } })
     renderInShell(<SettingsPage form={form} onOpenMemoryPage={() => {}} now={NOW} />, gateway)
+    open('怎么管')
     return { gateway, form, picker: () => screen.getByRole('combobox', { name: '体检用的模型' }) }
   }
   const sent = (gateway: ReturnType<typeof createFakeGateway>, cmd: MemoryCommand['cmd']) => gateway.executed.filter(e => e.command.cmd === cmd).map(e => e.command)
 
   it('在「怎么管」里，按提供方分组列出 DeepSeek Harness 里能选的模型，当前跟随默认模型', async () => {
     const { gateway, picker } = setupModel()
-    const manage = screen.getAllByRole('heading', { level: 2 }).find(h => h.textContent === '怎么管')!.closest('.pm-group') as HTMLElement
-    expect(within(manage).getByRole('combobox', { name: '体检用的模型' })).toBeInTheDocument()
+    const checkup = within(screen.getByRole('tabpanel', { name: '怎么管' })).getByRole('region', { name: '体检' })
+    expect(within(checkup).getByRole('combobox', { name: '体检用的模型' })).toBeInTheDocument()
     await waitFor(() => { expect(picker().querySelectorAll('optgroup')).toHaveLength(2) })
     expect((picker() as HTMLSelectElement).selectedOptions[0]).toHaveTextContent('跟随默认模型')
     expect(sent(gateway, 'list-models')).toEqual([{ cmd: 'list-models' }])
   })
 
-  it('体检视图里没有所选模型这一项（上一个发布版的进程写的）：按跟随默认模型显示，照常能选', async () => {
-    const { model: _model, ...older } = checkups(null)
-    const gateway = createFakeGateway({
-      views: { pending: pending(), health: health(NOW), library: library(3), checkups: older },
-      respond: command => command.cmd === 'list-models' ? { ok: true, cmd: command.cmd, providers: CHOICES } : { ok: true, cmd: command.cmd },
-    })
-    renderInShell(<SettingsPage form={createFakeConfigForm()} onOpenMemoryPage={() => {}} now={NOW} />, gateway)
-    const picker = screen.getByRole('combobox', { name: '体检用的模型' })
-    await waitFor(() => { expect(picker.querySelectorAll('optgroup')).toHaveLength(2) })
-    expect((picker as HTMLSelectElement).selectedOptions[0]).toHaveTextContent('跟随默认模型')
-    expect(picker).toBeEnabled()
+  it('体检视图里没有 selections（上一个发布版的进程写的）：不知道存的是什么，写「无法确认当前选择」、置灰，不显示成跟随', async () => {
+    const { selections: _selections, ...older } = checkups({ provider: 'provider-x', model: 'model-x' })
+    const { picker } = setupModel({ checkupsView: { status: 'ready', data: older } })
+    await waitFor(() => { expect(picker().querySelectorAll('optgroup')).toHaveLength(2) })
+    expect((picker() as HTMLSelectElement).selectedOptions[0]).toHaveTextContent('无法确认当前选择')
+    expect(picker()).toBeDisabled()
+    expect(screen.getByText('暂时读不到当前的选择，读到之前不能改。')).toBeInTheDocument()
   })
 
   it('当前值取体检视图里存的选择，带推理强度', async () => {
@@ -564,7 +582,7 @@ describe('体检用的模型', () => {
     expect(gateway.executed).toEqual([])
   })
 
-  it('配置文件关掉体检：置灰保留，说明换成原因，不列模型', () => {
+  it('配置文件关掉体检：置灰保留，说明换成原因；扩查也用不上时不列模型', () => {
     const { gateway, picker } = setupModel({ value: section({ governance: { enabled: false, health: { sensitivity: 'normal' }, globalPromoteTarget: 'plugin-global' } }) })
     expect(picker()).toBeDisabled()
     const item = picker().closest('.pm-setting')!
@@ -573,11 +591,35 @@ describe('体检用的模型', () => {
     expect(sent(gateway, 'list-models')).toEqual([])
   })
 
+  it('配置还在读：先不列模型（读到之前不知道体检、扩查用不用得上）', () => {
+    const gateway = createFakeGateway({ views: { pending: pending(), health: health(NOW), library: library(3), checkups: checkups(null) } })
+    const loading = { status: 'loading' as const, value: undefined, revision: undefined, writable: false }
+    const form = { ...createFakeConfigForm(), getSnapshot: () => loading }
+    renderInShell(<SettingsPage form={form} onOpenMemoryPage={() => {}} now={NOW} />, gateway)
+    expect(sent(gateway, 'list-models')).toEqual([])
+  })
+
+  it('切会话前发出的列模型晚回来：不盖掉新会话的列表', async () => {
+    let release: (() => void) | undefined
+    const { gateway, picker } = setupModel({
+      respond: (command) => {
+        if (command.cmd !== 'list-models') return { ok: true, cmd: command.cmd }
+        if (release !== undefined) return { ok: true, cmd: command.cmd, providers: CHOICES }
+        return new Promise((resolve) => { release = () => { resolve({ ok: true, cmd: command.cmd, providers: [CHOICES[0]!] }) } })
+      },
+    })
+    await act(async () => { gateway.setSession({ kind: 'ready', sessionId: 's2', cwd: undefined }) })
+    await waitFor(() => { expect(picker().querySelectorAll('optgroup')).toHaveLength(2) })
+    await act(async () => { release!() })
+    expect(picker().querySelectorAll('optgroup')).toHaveLength(2)
+  })
+
   /** 存选择的命令由测试手动回：每发一次记一个待回的结果，按需要的先后 resolve。 */
   function heldSaves() {
     const held: Array<(result: MemoryCommandResult) => void> = []
     const respond = (command: MemoryCommand): MemoryCommandResult | Promise<MemoryCommandResult> => {
       if (command.cmd === 'list-models') return { ok: true, cmd: command.cmd, providers: CHOICES }
+      if (command.cmd !== 'set-model-selection') return { ok: true, cmd: command.cmd }
       return new Promise<MemoryCommandResult>((resolve) => { held.push(resolve) })
     }
     /** 回第 i 次（从 0 数）存选择的结果。 */
@@ -671,6 +713,29 @@ describe('体检用的模型', () => {
       act(() => { gateway.setView('checkups', checkups(null)) })
       expect(selected(picker())).toHaveTextContent('跟随默认模型')
     })
+
+    it.each([
+      ['还在读', (): ViewState<CheckupView> => ({ status: 'loading' })],
+      ['还没生成', (): ViewState<CheckupView> => ({ status: 'missing' })],
+      ['读出错', (): ViewState<CheckupView> => ({ status: 'error', message: 'boom' })],
+      ['是上一个发布版写的（没有 selections）', (): ViewState<CheckupView> => {
+        const { selections: _selections, ...older } = checkups({ provider: 'provider-x', model: 'model-x' })
+        return { status: 'ready', data: older }
+      }],
+    ])('保存在途时体检视图变成%s：刚选的值不再盖住未知，选择器置灰；再选不发，排着的那次也不补发', async (_label, unknown) => {
+      const saves = heldSaves()
+      const { gateway, picker } = setupModel({ respond: saves.respond })
+      await waitFor(() => { expect(picker().querySelectorAll('optgroup')).toHaveLength(2) })
+      await act(async () => { fireEvent.change(picker(), { target: { value: optionOf(picker(), 'Model X').value } }) })
+      await act(async () => { fireEvent.change(picker(), { target: { value: optionOf(picker(), 'DeepSeek Pro').value } }) })
+      act(() => { gateway.setView('checkups', unknown()) })
+      expect(picker()).toBeDisabled()
+      expect(selected(picker())).not.toHaveTextContent('DeepSeek Pro')
+      await act(async () => { fireEvent.change(picker(), { target: { value: optionOf(picker(), '跟随默认模型').value } }) })
+      await saves.answer(0, false)
+      expect(sent(gateway, 'set-model-selection')).toEqual([{ cmd: 'set-model-selection', key: 'checkup', selection: { provider: 'provider-x', model: 'model-x' } }])
+      expect(picker()).toBeDisabled()
+    })
   })
 
   describe('体检视图没读到、会话没了', () => {
@@ -678,10 +743,11 @@ describe('体检用的模型', () => {
       ['还在读', { status: 'loading' } as const],
       ['读出错', { status: 'error', message: 'boom' } as const],
       ['还没生成', { status: 'missing' } as const],
-    ])('体检视图%s：选择器置灰，不当成「跟随默认模型」让人选', async (_label, view) => {
+    ])('体检视图%s：选择器置灰，不当成「跟随默认模型」让人选', async (label, view) => {
       const { picker } = setupModel({ checkupsView: view })
       await waitFor(() => { expect(picker().querySelectorAll('optgroup')).toHaveLength(2) })
       expect(picker()).toBeDisabled()
+      expect(selected(picker())).toHaveTextContent(label === '还在读' ? '正在读取…' : '无法确认当前选择')
     })
 
     it('体检视图读到后恢复可选，显示存的选择', async () => {

@@ -10,8 +10,9 @@ All notable changes to this project are documented here. The format follows
 - Experimental: when the assistant saves a memory as a state change or a
   correction, active decisions that list it under `related` are added to the
   To do tab on the Memory page for review; the decisions themselves are not
-  changed. Enable `governance.relatedRecheck` in the config file while
-  governance is on (off by default). Turning it off clears the unresolved
+  changed. Turn it on under Checkups on the settings page, or set
+  `governance.relatedRecheck` in the config file; it works while governance
+  is on (off by default). Turning it off clears the unresolved
   entries at the next checkup.
 - `memory_confirm` with `action: accept-subagent` takes `memoryIds` to accept a
   subagent's whole batch of pending memories in one call. The result groups
@@ -37,15 +38,16 @@ All notable changes to this project are documented here. The format follows
   Each message includes a reference for `memory_source` to expand it with the
   preceding and following turns (up to 8,000 characters for the selected message,
   with a truncation note for longer messages). It searches memories and past
-  conversations together by default; set `search.source` in the config file to
-  `memory` to search memories only, or to `dialogue` for conversations only.
+  conversations together by default; choose Search in on the settings page,
+  or set `search.source` in the config file to `memory` to search memories
+  only, or to `dialogue` for conversations only.
 - The top three memories in a `memory_search` result carry the exchange they
   were saved from: your message and the assistant's reply, quoted from the
   local copy of past conversations, up to about 1,000 tokens per search. When
   the exchange cannot be shown, for example because the conversation was
   deleted or marked as not to be reviewed, the result says so. It is on by
-  default; set `search.memoryQuotes` to `false` in the config file to turn it
-  off. While it is on, the guidance loaded into each chat tells the assistant to read these quotes
+  default; turn off Attach source quotes to results on the settings page, or
+  set `search.memoryQuotes` to `false` in the config file. While it is on, the guidance loaded into each chat tells the assistant to read these quotes
   first and to open the conversation with `memory_source` only when they are
   not enough. Whenever results can include quoted messages, from conversation
   search or from these quotes, the guidance also says when to expand an excerpt
@@ -57,6 +59,8 @@ All notable changes to this project are documented here. The format follows
   from, but that is not quoted under it, ranks higher and names that memory.
   Conversation results keep their own limit of about 1,500 tokens
   (`search.dialogueTokenBudget`), separate from the quotes under memories.
+  Other quotes per search on the settings page sets it in passages of about
+  300 tokens, from 2 to 10.
 - Searching past conversations finds an identifier however it is written:
   `getUserName`, `get_user_name` and `GetUserName` find each other,
   and `user name` finds `getUserName`.
@@ -136,9 +140,13 @@ All notable changes to this project are documented here. The format follows
   you and the assistant said, plus short or failed tool results, and stays on
   this machine outside the memory folder, in
   `~/.dsh/plastic-memory/<id>/dialogue-records.sqlite` (under `DSH_HOME` when
-  that is set). To stop keeping it, set `search.source` to `memory` and
-  `search.memoryQuotes` to `false`, then run `/memory delete-dialogue-records`;
-  while either is on, a deleted copy is rebuilt from the logs.
+  that is set). The settings page shows its status under How to manage ›
+  Storage. To stop keeping it, set Search in to Memories only and turn off
+  Attach source quotes to results (`search.source: memory`,
+  `search.memoryQuotes: false`), then delete it there or run
+  `/memory delete-dialogue-records`; while either is on, a deleted copy is
+  rebuilt from the logs. After a save that leaves it unused, the settings
+  page asks whether to delete it; it is never deleted without confirmation.
 - After an update, `memory_save` lists numbers, dates, names and paths that
   are no longer in the memory, and points out a refinement that removed a
   large part of the text. It also suggests combining memories when a single
@@ -192,7 +200,9 @@ All notable changes to this project are documented here. The format follows
   window, to automatic checkups and to Check now on the memory page alike.
   Without a choice, both use the default model. If the chosen model becomes
   unavailable, the checkup runs on the default model and says so in its
-  result.
+  result. If the saved choice cannot be read, the settings page and the
+  automatic checkup menu say so instead of showing the default model, a
+  failed automatic checkup gives that reason, and choosing again fixes it.
 - Memory files can hold new optional keys that upcoming features will use:
   when a fact took effect, which sessions a memory came from and how it last
   changed, related memories, the memories a decision depends on, a
@@ -362,8 +372,9 @@ All notable changes to this project are documented here. The format follows
   current turn, up to three excerpts from the first search and the names and
   tags of up to five related memories; if it fails or takes more than about
   10 seconds, you get the first search's result with a note. It is on by
-  default; set `search.queryExpansion` to `false` in the config file to turn
-  it off.
+  default; turn it off on the settings page or set `search.queryExpansion`
+  to `false` in the config file. The settings page can also pick another
+  model for it; without a choice it uses the chat's model.
 - When `memory_search` searches past conversations only, it also looks for
   matching memories and moves the turns they were saved from up the results.
 - Each memory on the memory page has a Details button. It shows the memory's
@@ -379,6 +390,11 @@ All notable changes to this project are documented here. The format follows
   graph says when links may be incomplete.
 
 ### Changed
+- The settings page is organized into four tabs: What to remember, How
+  to use, How to manage and Appearance. One Save button covers all tabs;
+  a tab with unsaved changes shows a dot and the save row names those
+  tabs. The chat-start limit is now called Limit (tokens) and the source
+  check When to check.
 - Testing: `pnpm host:contract` runs the default-model automatic checkup
   without a model key, using a fixed successful HTTP stream through the real
   host adapter and scheduler. It checks the request route and saved findings,

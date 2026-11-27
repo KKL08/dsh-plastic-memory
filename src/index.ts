@@ -599,6 +599,7 @@ export async function apply(ctx: Context, config: Config) {
       resolveCheckupLlm: () => resolveBackgroundLlm('checkup'),
       onAutoCheckupChanged: () => void scheduler?.recheck(),
       deleteDialogueRecords: () => dialogueCatchup.destroy(),
+      dialogueRecords: dialogueCatchup.readStore,
       suggestions: checkupSuggestions, signal: unload.signal,
       host, log: ctx.logger,
       isGovernanceEnabled: () => config.governance.enabled.get(),

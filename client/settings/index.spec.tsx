@@ -43,7 +43,7 @@ describe('applySettings', () => {
     const Card = registered[0]!.component
     render(<Card {...props} view="page" />)
     expect(configForms.get).toHaveBeenCalledWith('plastic-memory')
-    expect(screen.getByRole('heading', { name: '记什么' })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: '记什么' })).toHaveAttribute('aria-selected', 'true')
   })
 
   it('只渲染 page 视图', () => {
@@ -56,6 +56,7 @@ describe('applySettings', () => {
     const { registered, selectPanel, nav } = setup()
     const Card = registered[0]!.component
     render(<Card {...props} view="page" />)
+    fireEvent.click(screen.getByRole('tab', { name: '怎么管' }))
     fireEvent.click(screen.getByRole('button', { name: '查看最近删除 ›' }))
     expect(nav.get()).toEqual({ view: 'deleted', scope: { kind: 'all' } })
     expect(selectPanel).toHaveBeenCalledWith(PANEL_ID)

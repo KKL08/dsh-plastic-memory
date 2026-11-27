@@ -1,9 +1,9 @@
-// 设置页的居中弹层：aria-modal 弹层把键盘焦点关在里面，Esc 关闭，关闭后焦点回到打开它的按钮。
+// 设置页的居中弹层：aria-modal 弹层把键盘焦点关在里面，Esc 关闭，关闭后焦点回到打开它的按钮。步进器置灰时数值一起降色。
 import { describe, expect, it } from 'vitest'
 import { fireEvent, screen } from '@testing-library/react'
 import { useState } from 'react'
 import { renderInShell } from '../test-utils.tsx'
-import { Dialog } from './controls.tsx'
+import { controlsCss, Dialog, Stepper } from './controls.tsx'
 
 function Harness() {
   const [open, setOpen] = useState(false)
@@ -60,5 +60,18 @@ describe('Dialog', () => {
     fireEvent.keyDown(screen.getByLabelText('名称'), { key: 'Escape' })
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(opener).toHaveFocus()
+  })
+})
+
+describe('Stepper', () => {
+  it('置灰时中间的数值和两侧按钮一起降成次级色', () => {
+    const step = (disabled: boolean) => (
+      <Stepper labelledBy="l" value="5 段" lessLabel="少" moreLabel="多" canLess canMore disabled={disabled} onStep={() => {}} />
+    )
+    const { rerender } = renderInShell(step(true))
+    expect(screen.getByRole('group')).toHaveClass('pm-stepper--disabled')
+    expect(controlsCss).toMatch(/\.pm-stepper--disabled \.pm-stepper-value \{[^}]*color: var\(--pm-text-3\)/)
+    rerender(step(false))
+    expect(screen.getByRole('group')).not.toHaveClass('pm-stepper--disabled')
   })
 })

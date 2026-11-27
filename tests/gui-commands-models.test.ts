@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { HostModelCatalog } from '../src/governance/background-llm.ts'
-import { env, ok, err } from './helpers/gui-command-env.ts'
+import { env, ok, err, root } from './helpers/gui-command-env.ts'
+import { breakModelSelection } from './helpers/model-selection-file.ts'
 
 // 后台模型的两条命令：list-models 列宿主里能选的模型，set-model-selection 写共享的选择表并重写体检视图。
 // 宿主 llm 服务（列提供方、列模型、模型详情）换成假的，选择表与视图文件是真的。
@@ -39,25 +40,25 @@ describe('set-model-selection', () => {
     const e = env()
     const selection = { provider: 'provider-x', model: 'model-a', reasoningEffort: 'high' }
     ok(await e.run({ cmd: 'set-model-selection', key: 'checkup', selection }))
-    expect(await e.selections.get('checkup')).toEqual(selection)
+    expect(await e.selections.read('checkup')).toEqual(selection)
     expect((await e.readCheckupView()).model).toEqual(selection)
     ok(await e.run({ cmd: 'set-model-selection', key: 'checkup', selection: null }))
-    expect(await e.selections.get('checkup')).toBeUndefined()
+    expect(await e.selections.read('checkup')).toBeNull()
     expect((await e.readCheckupView()).model).toBeNull()
   })
 
   it('梦境的键单独存，不改自动体检的选择', async () => {
     const e = env()
     ok(await e.run({ cmd: 'set-model-selection', key: 'dreams', selection: { provider: 'provider-x', model: 'model-a' } }))
-    expect(await e.selections.get('dreams')).toEqual({ provider: 'provider-x', model: 'model-a' })
-    expect(await e.selections.get('checkup')).toBeUndefined()
+    expect(await e.selections.read('dreams')).toEqual({ provider: 'provider-x', model: 'model-a' })
+    expect(await e.selections.read('checkup')).toBeNull()
     expect((await e.readCheckupView()).model).toBeNull()
   })
 
   it('体检关着时也能改（只是自动体检不跑）', async () => {
     const e = env({ governanceEnabled: false })
     ok(await e.run({ cmd: 'set-model-selection', key: 'checkup', selection: { provider: 'provider-x', model: 'model-a' } }))
-    expect(await e.selections.get('checkup')).toEqual({ provider: 'provider-x', model: 'model-a' })
+    expect(await e.selections.read('checkup')).toEqual({ provider: 'provider-x', model: 'model-a' })
   })
 
   it.each([
@@ -67,6 +68,31 @@ describe('set-model-selection', () => {
   ])('%s → invalid-args，选择表不动', async (_label, raw) => {
     const e = env()
     expect(err(await e.runRaw(raw)).code).toBe('invalid-args')
-    expect(await e.selections.get('checkup')).toBeUndefined()
+    expect(await e.selections.read('checkup')).toBeNull()
+  })
+})
+
+describe('体检视图里给设置页的模型选择', () => {
+  it('体检、扩查两个键各写一项：选了为那份选择，没选为 null；扩查的选择不改 model（它只管体检）', async () => {
+    const e = env()
+    ok(await e.run({ cmd: 'set-model-selection', key: 'expansion', selection: { provider: 'provider-x', model: 'model-a' } }))
+    const view = await e.readCheckupView()
+    expect(view.selections).toEqual({ checkup: null, expansion: { provider: 'provider-x', model: 'model-a' } })
+    expect(view.model).toBeNull()
+  })
+
+  it('选择文件在却读不出：那一项写成 unreadable，model 仍写 null（上一个发布版按没选显示）；重新选一次就恢复', async () => {
+    const e = env()
+    await breakModelSelection(root, 'checkup', 'bad-json')
+    await breakModelSelection(root, 'expansion', 'bad-json')
+    ok(await e.run({ cmd: 'refresh-views' }))
+    const broken = await e.readCheckupView()
+    expect(broken.selections).toEqual({ checkup: 'unreadable', expansion: 'unreadable' })
+    expect(broken.model).toBeNull()
+    ok(await e.run({ cmd: 'set-model-selection', key: 'checkup', selection: { provider: 'provider-x', model: 'model-a' } }))
+    ok(await e.run({ cmd: 'set-model-selection', key: 'expansion', selection: null }))
+    const fixed = await e.readCheckupView()
+    expect(fixed.selections).toEqual({ checkup: { provider: 'provider-x', model: 'model-a' }, expansion: null })
+    expect(fixed.model).toEqual({ provider: 'provider-x', model: 'model-a' })
   })
 })

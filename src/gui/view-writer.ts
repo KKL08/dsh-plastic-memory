@@ -18,7 +18,7 @@ import { checkupWorkspaces, listingNotes, prereadScopes } from '../tools/scope-p
 import { scheduledScopes } from '../governance/scope-health.ts'
 import {
   GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, SCOPE_KEYS, checkupKey, sessionViewFile, workspaceMapViewSchema,
-  type CheckupView, type GlobalViewName, type ModelSelectionKey, type SessionView, type WorkspaceMapView,
+  type CheckupView, type GlobalViewName, type SessionView, type WorkspaceMapView,
 } from './contract.ts'
 import { GLOBAL_VIEW_NAMES, buildCheckupView, buildGlobalViews, copyKey, type GlobalViews } from './views.ts'
 import { scopeCacheKey, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
@@ -150,8 +150,8 @@ export interface CheckupSourceDeps {
   store: Pick<MemoryStore, 'listWorkspaceDirs'>
   checkups: Pick<CheckupRecordStore, 'list' | 'isInProgress'>
   autoCheckups: Pick<AutoCheckupSettingStore, 'read'>
-  /** 后台模型的选择表：体检视图写出自动体检选的模型；缺省当没选。 */
-  selections?: Pick<ModelSelectionStore, 'get'>
+  /** 后台模型的选择表：体检视图写出自动体检、扩查选的模型；缺省当没选。 */
+  selections?: Pick<ModelSelectionStore, 'read'>
   /** 语义缓存：还没有完成记录（升级前体检过）的范围，上次体检暂取缓存的时间。 */
   cache: KvTable<ScanCacheEntry>
   /** 体检开关（用时读配置）；缺省视为开启。 */
@@ -168,7 +168,9 @@ export async function collectCheckupView(deps: CheckupSourceDeps): Promise<Check
   const now = deps.now?.() ?? Date.now()
   const listing = await deps.store.listWorkspaceDirs()
   const checkable = new Set(checkupWorkspaces(listing))
-  const [settings, records, model] = await Promise.all([deps.autoCheckups.read(), deps.checkups.list(), deps.selections?.get('checkup' satisfies ModelSelectionKey)])
+  const [settings, records, checkup, expansion] = await Promise.all([
+    deps.autoCheckups.read(), deps.checkups.list(), deps.selections?.read('checkup') ?? null, deps.selections?.read('expansion') ?? null,
+  ])
   const scopes = scheduledScopes(listing.entries.map(e => e.workspacePath), settings.keys())
   const byKey = new Map(records.map(r => [r.id, r]))
   const last = new Map<Scope, number | null>()
@@ -182,7 +184,7 @@ export async function collectCheckupView(deps: CheckupSourceDeps): Promise<Check
     now, governanceEnabled: deps.isGovernanceEnabled?.() ?? true, settings, scopes,
     isCheckable: scope => scope.kind === 'global' || checkable.has(scope.workspacePath),
     lastCheckupAt: scope => last.get(scope) ?? null, isInProgress: scope => inProgress.has(scope), record: scope => byKey.get(checkupKey(scope)),
-    allRecord: byKey.get(SCOPE_KEYS.all), model: model ?? null,
+    allRecord: byKey.get(SCOPE_KEYS.all), selections: { checkup, expansion },
   })
 }
 

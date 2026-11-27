@@ -572,6 +572,13 @@ describe('自动体检按钮与菜单：情况表', () => {
     expect(menu()).not.toHaveTextContent('默认模型')
   })
 
+  it('设置里存的模型选择读不出：底部说明写体检先停下、去设置页重选，不说用默认模型', () => {
+    open({ kind: 'all' }, { views: { checkups: { ...checkups(), selections: { checkup: 'unreadable', expansion: null } } } })
+    fireEvent.click(autoButton())
+    expect(menu()).toHaveTextContent('全局和各项目都按这个频率查，各自计时；新项目也一样。设置里保存的模型选择读不出，自动体检先停下；到设置页重新选一次就能恢复。')
+    expect(menu()).not.toHaveTextContent('默认模型')
+  })
+
   it('体检视图里没有所选模型这一项（上一个发布版的进程写的）：照常打开菜单，按没选写默认模型', () => {
     const { model: _model, ...older } = checkups()
     open({ kind: 'all' }, { views: { checkups: older } })

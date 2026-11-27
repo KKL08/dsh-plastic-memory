@@ -48,5 +48,6 @@ export const SAMPLE_COMMANDS: { [K in MemoryCommand['cmd']]: Extract<MemoryComma
   'set-model-selection': { cmd: 'set-model-selection', key: 'checkup', selection: { provider: 'p1', model: 'm1', reasoningEffort: 'high' } },
   'refresh-views': { cmd: 'refresh-views' },
   'delete-dialogue-records': { cmd: 'delete-dialogue-records' },
+  'dialogue-records-state': { cmd: 'dialogue-records-state' },
   'migrate-type': { cmd: 'migrate-type', from: 'old', action: 'forget' },
 }

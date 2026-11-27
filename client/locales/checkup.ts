@@ -49,6 +49,7 @@ export const checkupZh = {
   'checkup.auto.foot.workspace': '只查 {name} 的记忆。',
   'checkup.auto.foot.model': '用 dsh 当前的默认模型检查内容、给新冲突出处理建议，记忆越多，token 用得越多；dsh 没开时不查，打开后补上。',
   'checkup.auto.foot.modelSelected': '用你在设置里选的模型 {model} 检查内容、给新冲突出处理建议，记忆越多，token 用得越多；DeepSeek Harness 没开时不查，打开后补上。',
+  'checkup.auto.foot.modelUnreadable': '设置里保存的模型选择读不出，自动体检先停下；到设置页重新选一次就能恢复。',
   'checkup.auto.saveFailed': '没有保存成功，再试一次。',
 
   'checkup.status.count': '{n} 条记忆',
@@ -148,6 +149,7 @@ export const checkupZh = {
   'checkup.cause.modelError': '模型调用出错',
   'checkup.cause.unparseable': '模型的回复读不出结果',
   'checkup.cause.error': '体检出错',
+  'checkup.cause.selectionUnreadable': '设置里保存的模型选择读不出，到设置页重新选一次就能恢复',
 } as const
 
 export type CheckupLocaleKey = keyof typeof checkupZh
@@ -201,6 +203,7 @@ export const checkupEn: Record<CheckupLocaleKey, string> = {
   'checkup.auto.foot.workspace': 'Checks the memories of {name} only.',
   'checkup.auto.foot.model': 'The current dsh default model checks the content and suggests how to settle new conflicts; more memories use more tokens. Nothing runs while dsh is closed; it catches up once dsh opens.',
   'checkup.auto.foot.modelSelected': 'The model you chose in settings ({model}) checks the content and suggests how to settle new conflicts; more memories use more tokens. Nothing runs while DeepSeek Harness is closed; it catches up once it opens.',
+  'checkup.auto.foot.modelUnreadable': "The model choice saved in settings couldn't be read, so automatic checkups are paused. Choose again on the Settings page to fix it.",
   'checkup.auto.saveFailed': 'Could not save. Try again.',
 
   'checkup.status.count': '{n} memories',
@@ -300,4 +303,5 @@ export const checkupEn: Record<CheckupLocaleKey, string> = {
   'checkup.cause.modelError': 'the model call failed',
   'checkup.cause.unparseable': 'could not read the model\'s reply',
   'checkup.cause.error': 'the checkup ran into an error',
+  'checkup.cause.selectionUnreadable': "the model choice saved in settings couldn't be read; choose again on the Settings page to fix it",
 }

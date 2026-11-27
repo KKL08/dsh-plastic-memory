@@ -43,8 +43,9 @@ function setup(opts: {
   return { form, ...view }
 }
 
-/** 迁移相关的命令：设置页打开时为自动体检的模型选择列模型（list-models），和迁移无关，不算。 */
-const migrationsOf = (gateway: ReturnType<typeof createFakeGateway>) => gateway.executed.filter(e => e.command.cmd !== 'list-models')
+/** 设置页打开时发的两个查询和迁移无关，不算：列模型（list-models）、取对话记录库的状态（dialogue-records-state）。其余命令照样算进来。 */
+const OPENING_QUERIES: readonly string[] = ['list-models', 'dialogue-records-state']
+const migrationsOf = (gateway: ReturnType<typeof createFakeGateway>) => gateway.executed.filter(e => !OPENING_QUERIES.includes(e.command.cmd))
 const radio = (name: string) => screen.getByRole('radio', { name })
 const button = (name: string, scope: HTMLElement = document.body) => within(scope).getByRole('button', { name })
 const dialog = (name: string) => screen.getByRole('dialog', { name })

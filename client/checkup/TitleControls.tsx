@@ -213,6 +213,12 @@ export function frequencyText(frequency: AutoCheckupFrequency, t: Translate): st
   return frequency === 'manual' ? t('checkup.auto.manual') : frequency === 1 ? t('checkup.auto.daily') : t('checkup.auto.days', { n: formatNumber(frequency) })
 }
 
+/** 自动体检菜单底部说明里用哪个模型：设置里选的、默认模型，或存的选择读不出（体检先停下）。上一个发布版写的视图没有 selections，按 model。 */
+function modelFootText(t: Translate, view: CheckupView): string {
+  if (view.selections?.checkup === 'unreadable') return t('checkup.auto.foot.modelUnreadable')
+  return view.model == null ? t('checkup.auto.foot.model') : t('checkup.auto.foot.modelSelected', { model: view.model.model })
+}
+
 /** 「每 N 天」的输入：只收 1–90 的整数；不合法为 undefined。 */
 function parseDays(text: string): number | undefined {
   const n = parsePositiveInt(text)
@@ -462,7 +468,7 @@ function AutoCheckup({ scope, session, view }: { scope: PageScope; session: Borr
                 </ul>
               )
               : null}
-            <p className="pm-auto-menu-foot">{t('checkup.auto.foot', { scope: foot, model: view.model == null ? t('checkup.auto.foot.model') : t('checkup.auto.foot.modelSelected', { model: view.model.model }) })}</p>
+            <p className="pm-auto-menu-foot">{t('checkup.auto.foot', { scope: foot, model: modelFootText(t, view) })}</p>
           </div>
         )
         : null}

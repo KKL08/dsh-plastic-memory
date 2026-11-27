@@ -1,6 +1,7 @@
 /**
  * 设置页用到的宿主控件对齐版（标记与 CSS 对齐宿主 0.2.1-rc.2 ui-primitives，技能禁止外部插件 require 它）：
- * 文本输入（settings-form/fields 的 .input / .invalid）、Dialog（Modal.tsx 的居中弹层）。
+ * 文本输入（settings-form/fields 的 .input / .invalid）、Dialog（Modal.tsx 的居中弹层）、开关（Switch）。
+ * 步进（Stepper）宿主没有，借分段控件的轨道：两头各一个方按钮，中间是当前值。
  */
 import { useEffect, useRef, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
@@ -34,6 +35,43 @@ export function TextField({ id, value, onChange, error, hint, multiline = false,
         ? <p id={messageId} className="pm-input-invalid" role="status">{error}</p>
         : hint !== undefined ? <p id={messageId} className="pm-setting-hint">{hint}</p> : null}
     </>
+  )
+}
+
+/** 开关：开关状态只看 aria-checked，样子和读屏念的不会对不上。名字由设置项的标签给（id 对上 htmlFor）。 */
+export function Switch({ id, checked, onChange, disabled = false }: {
+  id: string
+  checked: boolean
+  onChange: (next: boolean) => void
+  disabled?: boolean
+}) {
+  return (
+    <button id={id} type="button" role="switch" aria-checked={checked} disabled={disabled} className="pm-switch" onClick={() => { onChange(!checked) }}>
+      <span className="pm-switch-thumb" aria-hidden="true" />
+    </button>
+  )
+}
+
+/**
+ * 步进：一组两个按钮夹着当前值，到两端那一头的按钮置灰。值变了读屏念新值（aria-live）。
+ * @param labelledBy 设置项标签的 id，作这一组的名字。
+ */
+export function Stepper({ labelledBy, value, lessLabel, moreLabel, canLess, canMore, onStep, disabled = false }: {
+  labelledBy: string
+  value: ReactNode
+  lessLabel: string
+  moreLabel: string
+  canLess: boolean
+  canMore: boolean
+  onStep: (direction: 1 | -1) => void
+  disabled?: boolean
+}) {
+  return (
+    <div role="group" aria-labelledby={labelledBy} className={disabled ? 'pm-stepper pm-stepper--disabled' : 'pm-stepper'}>
+      <button type="button" className="pm-stepper-btn" aria-label={lessLabel} disabled={disabled || !canLess} onClick={() => { onStep(-1) }}>−</button>
+      <span className="pm-stepper-value" aria-live="polite">{value}</span>
+      <button type="button" className="pm-stepper-btn" aria-label={moreLabel} disabled={disabled || !canMore} onClick={() => { onStep(1) }}>+</button>
+    </div>
   )
 }
 
@@ -141,4 +179,29 @@ export const controlsCss = `
 .pm-dialog-body { min-height: 0; overflow: auto; scrollbar-gutter: stable; padding: 0 24px; display: flex; flex-direction: column; gap: 14px; }
 .pm-dialog-footer { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 0 24px; }
 .pm-field { display: flex; flex-direction: column; gap: 6px; }
+
+/* 开关：对齐宿主 Switch（36×20，开时品牌色，关时 border-l3；滑块 120ms 平移） */
+.pm-switch {
+  position: relative; flex: 0 0 auto; width: 36px; height: 20px; padding: 2px; border: 0; border-radius: 999px;
+  background: var(--pm-line-card); cursor: pointer;
+}
+.pm-switch[aria-checked='true'] { background: var(--dsw-alias-brand-primary); }
+.pm-switch:disabled { cursor: default; opacity: .5; }
+.pm-switch-thumb {
+  display: block; width: 16px; height: 16px; border-radius: 50%; background: var(--dsw-alias-switch-thumb); transition: transform 120ms ease;
+}
+.pm-switch[aria-checked='true'] .pm-switch-thumb { background: var(--dsw-alias-label-primary-foreground); transform: translateX(16px); }
+/* 步进：分段控件同一条轨道（悬停底色、圆角 12、内边距 4），两头 28px 方按钮 */
+.pm-stepper { display: inline-flex; align-items: center; gap: 2px; padding: 4px; border-radius: var(--dsw-radius-md, 12px); background: var(--pm-hover); }
+.pm-stepper-btn {
+  width: 28px; height: 28px; padding: 0; border: 0; border-radius: var(--dsw-radius-sm, 8px); background: transparent;
+  font: inherit; font-size: 16px; line-height: 1; color: var(--pm-text); cursor: pointer;
+}
+.pm-stepper-btn:hover:not(:disabled) { background: var(--pm-bg); box-shadow: var(--dsw-elevation-soft); }
+.pm-stepper-btn:disabled { opacity: .4; cursor: default; }
+.pm-stepper-value { min-width: 148px; padding: 0 10px; text-align: center; font-size: 13px; font-weight: 500; line-height: 28px; color: var(--pm-text); font-variant-numeric: tabular-nums; }
+.pm-stepper-value small { font-size: 12px; font-weight: 400; color: var(--pm-text-2); }
+.pm-stepper--disabled .pm-stepper-value { color: var(--pm-text-3); }
+.pm-stepper--disabled .pm-stepper-value small { color: var(--pm-text-3); }
+@media (prefers-reduced-motion: reduce) { .pm-switch-thumb { transition: none; } }
 `

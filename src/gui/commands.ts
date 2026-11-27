@@ -54,6 +54,7 @@ import { UNKNOWN_SESSION_ID, type ContextHost, type HostSession } from '../tools
 import { scanOutcome } from './views.ts'
 import { readMemoryDetail, readVersionDetail } from './memory-detail.ts'
 import { VERSION_ID_PATTERN } from '../storage/history.ts'
+import { DialogueStoreUnavailable, type DialogueRecordStore } from '../storage/dialogue-records.ts'
 
 const VERSION_ID_RE = new RegExp(`^${VERSION_ID_PATTERN}$`)
 
@@ -79,6 +80,8 @@ export interface MemoryCommandDeps {
   resolveCheckupLlm: () => Promise<ResolvedLlm>
   /** delete-dialogue-records 调它删对话记录库，删不掉要抛；缺省什么都不做（没接对话记录库）。 */
   deleteDialogueRecords?: () => void
+  /** dialogue-records-state 读它的状态；缺省按还没建（没接对话记录库）。 */
+  dialogueRecords?: Pick<DialogueRecordStore, 'probe'>
   /** set-auto-checkup 写完设置表、重写体检视图后调用：本进程的自动体检调度立刻重算。缺省不通知（没有调度器）。 */
   onAutoCheckupChanged?: () => void
   /** scan 持有范围认领期间的心跳计时；缺省用进程自己的 setInterval。 */
@@ -199,6 +202,7 @@ async function run(deps: MemoryCommandDeps, invocation: MemoryCommandInvocation)
   }
   // 只读，和借来的会话无关：子 agent 会话也能列
   if (command.cmd === 'list-models') return { ok: true, cmd: command.cmd, providers: await listModelChoices(deps.host.modelCatalog?.()) }
+  if (command.cmd === 'dialogue-records-state') return dialogueRecordsState(deps.dialogueRecords)
   // 记忆详情：只读、打开时现取，和借来的会话无关，不受体检开关影响
   if (command.cmd === 'memory-detail') {
     const detail = await readMemoryDetail(deps.store, command.layer, command.memoryId)
@@ -453,6 +457,18 @@ async function settleBatch(
 /** 定位到的记忆都在同一个作用域。 */
 const isOneScope = (records: readonly MemoryRecord[]) => new Set(records.map(r => scopeKey(scopeAt(r.workspacePath)))).size <= 1
 
+/** 对话记录库的状态：只读，库文件还不存在时不建它；库读不出时回 failed，界面显示读不到，不当成没建。 */
+function dialogueRecordsState(store: MemoryCommandDeps['dialogueRecords']): MemoryCommandResult {
+  const cmd = 'dialogue-records-state'
+  if (store === undefined) return { ok: true, cmd, dialogueRecords: { status: 'none' } }
+  try {
+    return { ok: true, cmd, dialogueRecords: store.probe() }
+  } catch (err) {
+    if (err instanceof DialogueStoreUnavailable) return fail(cmd, 'failed', err.message)
+    throw err
+  }
+}
+
 /** 顺手把视图目录建出来：宿主的文件资源对「父目录还不存在」的缺失文件不跟踪之后的创建，客户端是先问 info 再订阅视图的。 */
 async function info(deps: MemoryCommandDeps, sessionId: string): Promise<Ok> {
   const viewDir = join(deps.memoryRoot, GUI_VIEW_DIR)
@@ -476,7 +492,7 @@ async function info(deps: MemoryCommandDeps, sessionId: string): Promise<Ok> {
 
 async function dispatch(
   deps: MemoryCommandDeps,
-  command: Exclude<MemoryCommand, { cmd: 'info' | 'model-info' | 'list-models' | 'memory-detail' | 'read-version' }>,
+  command: Exclude<MemoryCommand, { cmd: 'info' | 'model-info' | 'list-models' | 'dialogue-records-state' | 'memory-detail' | 'read-version' }>,
   gov: GovernanceContext,
   exec: ToolRunContext,
   now: number,
