@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import fc from 'fast-check'
 import { readPrunerThreshold, searchBudgetOf } from '../src/tools/search-budget.ts'
 import { executeSearch, renderSearchResult, IN_SNAPSHOT_NOTE, type SearchArgs, type SearchContext, type SearchHit, type SearchToolDeps } from '../src/tools/search.ts'
+import { createSearchTool } from '../src/tools/search-tool.ts'
 import { SnapshotCache } from '../src/runtime.ts'
 import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
@@ -390,5 +391,25 @@ describe('召回计数', () => {
     const counts = async (env: ReturnType<typeof setup>) => Promise.all(Array.from({ length: 20 }, async (_, i) => (await env.stats.get(`mem_r${String(i).padStart(2, '0')}`))?.recallCount ?? 0))
     expect(await counts(limited)).toEqual(await counts(unlimited))
     expect((await counts(limited)).every(n => n === 1)).toBe(true)
+  })
+})
+
+describe('工具说明', () => {
+  const tool = () => createSearchTool(setup().deps)
+  const parameter = (name: string) => (tool().parameters as { properties: Record<string, { description?: string }> }).properties[name]!.description!
+
+  it('说明讲清输出跟随 DeepSeek Harness 的裁剪阈值、调低后只给节选或头行、按结果里的 offset 翻页，不再让调大 limit', () => {
+    const d = tool().description
+    expect(d).toContain('输出长度跟随 DeepSeek Harness 的工具结果裁剪阈值')
+    expect(d).toContain('阈值调得越低，越多条目只给节选或头行')
+    expect(d).toContain('按结果里给的 offset 翻下一页')
+    expect(d).toContain('memory_health')
+    expect(d).not.toContain('调大 limit')
+  })
+
+  it('offset 参数用于关键词检索、按类型列和主题浏览；limit 参数是正整数', () => {
+    expect(parameter('offset')).toContain('关键词检索、按类型列出和按主题浏览都可以翻页')
+    expect(parameter('offset')).not.toContain('配 topic 翻页')
+    expect(parameter('limit')).toContain('正整数')
   })
 })
