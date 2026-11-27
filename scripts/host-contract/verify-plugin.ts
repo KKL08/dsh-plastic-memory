@@ -209,6 +209,38 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       return path === undefined ? undefined : readFileSync(path, 'utf8')
     }
 
+    // 检索输出预算（SEARCH-BUDGET-*）：输出跟随宿主工具结果裁剪服务的阈值。真 Agent 上调用，裁剪服务按这个 agent 取（和插件同一取法）；
+    // 渲染走工具自己的 output.render，即模型收到的那段文字
+    type PrunerShape = { config: { thresholdChars: number }; pruneContent(blocks: Array<{ type: 'text'; text: string }>): unknown[] | null }
+    const prunerOf = (agent: unknown): PrunerShape | undefined =>
+      ((ctx.get('agentPresets') as { serviceFor?(a: unknown, n: string): unknown } | undefined)?.serviceFor?.(agent, 'toolResultPruner') ?? ctx.get('toolResultPruner')) as PrunerShape | undefined
+    const renderedOf = (tool: string, args: unknown, value: unknown): string => {
+      const def = tools.get(tool) as (ToolDef & { output?: { render?(a: unknown, v: unknown): Array<{ type: string; text?: string }> } }) | undefined
+      return (def?.output?.render?.(args, value) ?? []).map(b => b.text ?? '').join('')
+    }
+    const codePoints = (text: string) => [...text].length
+    /** 建一个项目并在它的记忆目录里直接写 count 条长记忆（绕过保存的相近检查），返回项目路径。正文各 chars 字、带关键词 预算探针。 */
+    const seedLongMemories = async (label: string, count: number, chars: number): Promise<string> => {
+      const ws = mkWs(label)
+      const r = await call('memory_save', { action: 'create', name: `${label}-seed`, summary: '预算探针的目录', content: '预算探针', ...MEMORY_BASE }, mkExec(ws)) as { kind: string }
+      if (r.kind !== 'saved') throw new Error(`建目录失败：${r.kind}`)
+      const dir = readdirSync(memoriesRoot).map(d => join(memoriesRoot, d))
+        .find(d => existsSync(join(d, '.workspace')) && readFileSync(join(d, '.workspace'), 'utf8').trim() === ws)
+      if (dir === undefined) throw new Error(`找不到 ${ws} 的记忆目录`)
+      for (let i = 0; i < count; i++) {
+        const body = `预算探针 第 ${i} 条。${'这是一段用来撑长度的普通说明文字。'.repeat(Math.ceil(chars / 17))}`.slice(0, chars)
+        writeFileSync(join(dir, `budget-${label}-${i}.md`), `---\nname: budget-${label}-${i}\nsummary: 预算探针第 ${i} 条\ntype: knowledge\n---\n\n${body}\n`)
+      }
+      return ws
+    }
+    /** 在 ws 里开一个真 Agent 跑 fn（工具上下文的 agent 就是它），用完销毁。 */
+    const withAgent = async <T>(ws: string, label: string, fn: (exec: Exec) => Promise<T>): Promise<T> => {
+      const agents = ctx.get('agents') as Agents | undefined
+      if (!agents) throw new Error('agents service unavailable')
+      const handle = await agents.create({ sessionId: `${label}-${Math.random().toString(36).slice(2, 8)}`, meta: { cwd: ws } })
+      try { return await fn({ agent: handle.agent, signal: new AbortController().signal } as unknown as Exec) } finally { await handle.dispose() }
+    }
+
     // 语义层用例的前提：凭证 + 宿主可选默认模型（agentDefaultModel，自动体检无会话时也用它）
     const readDefaultModel = (): ModelOpts => {
       try {
@@ -438,6 +470,27 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       return
     }
 
+    if (process.env.HOST_CONTRACT_PHASE === 'search-floor' || process.env.HOST_CONTRACT_PHASE === 'search-no-pruner') {
+      // 第四、五趟：同一个 DSH_HOME，裁剪服务改了配置（阈值 2000、头 1000、尾 500）或关掉，只跑检索输出预算的两条
+      const isFloor = process.env.HOST_CONTRACT_PHASE === 'search-floor'
+      const ws = await seedLongMemories(isFloor ? 'floor' : 'nopruner', 12, 1500)
+      await attempt(isFloor ? 'SEARCH-BUDGET-FLOOR' : 'SEARCH-BUDGET-NO-PRUNER', async () => withAgent(ws, 'budget', async exec => {
+        const pruner = prunerOf(exec.agent)
+        const budget = isFloor ? 3000 : 8000
+        const args = { query: '预算探针', limit: 12 }
+        const text = renderedOf('memory_search', args, await call('memory_search', args, exec))
+        const health = renderedOf('memory_health', {}, await call('memory_health', {}, exec))
+        const hasLowNote = text.includes('当前上限偏低')
+        const hasHealthLine = health.includes('检索输出上限偏低') && health.includes('裁剪阈值是 2000 字')
+        const isServiceOk = isFloor ? pruner?.config.thresholdChars === 2000 : pruner === undefined
+        return {
+          ok: isServiceOk && codePoints(text) <= budget && text.includes(`本次输出上限 ${budget} 字`) && hasLowNote === isFloor && hasHealthLine === isFloor && (isFloor || !health.includes('检索输出上限偏低')),
+          detail: `pruner=${pruner === undefined ? '（没有）' : pruner.config.thresholdChars} length=${codePoints(text)}/${budget} lowNote=${hasLowNote} healthLine=${hasHealthLine}`,
+        }
+      }))
+      finish()
+      return
+    }
     if (process.env.HOST_CONTRACT_PHASE === 'restart') {
       // 第二趟：同一 DSH_HOME 的全新宿主进程。第一趟 H7 恢复过的记录必须从磁盘重新加载出来，
       // 可检索、active，且快照（.state/ 侧表）也过了重启——内存态在这里不存在，只能靠持久化。
@@ -1727,6 +1780,40 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       } finally {
         await handle.dispose()
       }
+    })
+    // 检索输出预算，默认配置（阈值 8192 → 上限 7782）：连搜三次，每次的输出都在上限以内、宿主的裁剪服务不裁它；
+    // 按 id 查一条 9000 字的记忆照给全文，说明超出上限、可能被裁
+    await attempt('SEARCH-BUDGET-DEFAULT', async () => {
+      const ws = await seedLongMemories('budget', 15, 1500)
+      return withAgent(ws, 'budget', async exec => {
+        const pruner = prunerOf(exec.agent)
+        if (pruner === undefined) return { ok: false, detail: '宿主没有工具结果裁剪服务' }
+        const rows: string[] = []
+        let ok = pruner.config.thresholdChars === 8192
+        for (const args of [{ query: '预算探针', limit: 15 }, { query: '预算探针 说明文字', limit: 15 }, { query: '', types: ['knowledge'], limit: 15 }]) {
+          const text = renderedOf('memory_search', args, await call('memory_search', args, exec))
+          const isUnpruned = pruner.pruneContent([{ type: 'text', text }]) === null
+          ok &&= codePoints(text) <= 7782 && isUnpruned && text.includes('本次输出上限 7782 字')
+          rows.push(`${codePoints(text)}${isUnpruned ? '' : '（会被裁）'}`)
+        }
+        return { ok, detail: `threshold=${pruner.config.thresholdChars} lengths=${rows.join(',')}/7782` }
+      })
+    })
+    await attempt('SEARCH-BUDGET-FULL-TEXT', async () => {
+      const ws = mkWs('bigone')
+      const content = `预算探针 长记忆。${'这是一段用来撑长度的普通说明文字。'.repeat(530)}`.slice(0, 9000)
+      const saved = await call('memory_save', { action: 'create', name: '预算探针长记忆', summary: '九千字的长记忆', content, ...MEMORY_BASE }, mkExec(ws)) as { kind: string; record?: { id: string } }
+      if (saved.record === undefined) return { ok: false, detail: `保存失败：${saved.kind}` }
+      const id = saved.record.id
+      return withAgent(ws, 'budget', async exec => {
+        const args = { query: id }
+        const value = await call('memory_search', args, exec) as { hits?: Array<{ id: string; content: string }> }
+        const text = renderedOf('memory_search', args, value)
+        const hit = value.hits?.[0]
+        const isFull = hit?.id === id && hit.content === content
+        const hasNote = text.includes('按 id 查的这条全文照给，超出本次输出上限 7782 字，DeepSeek Harness 压缩上下文时可能被裁掉中间部分。')
+        return { ok: isFull && hasNote, detail: `first=${hit?.id} contentLength=${hit === undefined ? 0 : codePoints(hit.content)} note=${hasNote}` }
+      })
     })
     // 交接给第二趟（重启验证）：恢复过的记录 id、它的 workspace、H7 拍的快照 id
     if (handoffPath) writeFileSync(handoffPath, JSON.stringify({ savedId, wsA, snapshotId, cold, archivedSessionId } satisfies Handoff))

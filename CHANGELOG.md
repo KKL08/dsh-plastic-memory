@@ -17,6 +17,10 @@ All notable changes to this project are documented here. The format follows
   and suggests raising `thresholdChars` of
   `@deepseek-ai/dsh-compaction-tool-result-pruner` to at least 6,316. It does
   not affect the score.
+- Testing: `pnpm host:contract` checks that search output stays within the
+  pruning threshold on the default setting, at the 3,000-character floor and
+  with the pruner off, and that a long memory looked up by id comes back in
+  full.
 - Experimental: when the assistant saves a memory as a state change or a
   correction, active decisions that list it under `related` are added to the
   To do tab on the Memory page for review; the decisions themselves are not
